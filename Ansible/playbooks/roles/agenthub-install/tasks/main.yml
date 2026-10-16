@@ -56,6 +56,13 @@
     success_msg: "Stack d'affichage présente (Xvfb + x11vnc + wine)."
   become: true
 
+# ── Prérequis Flutter (modèle de projet « flutter ») ───────────────────────────
+# Rejouable seul : ./play.sh web3c deploy-agenthub.yml --tags flutter
+- name: Install the Flutter prerequisites for the runner
+  ansible.builtin.import_tasks: flutter.yml
+  when: agenthub_flutter_enabled | default(true)
+  tags: [flutter]
+
 # Le parc utilise un certificat WILDCARD par domaine (cert-install/
 # install-cert, `certbot certonly --dns-cloudflare -d "*.{{ domain_name }}"`,
 # voir Ansible/README.md) : *.web3c.cc couvre déjà agenthub.web3c.cc sans

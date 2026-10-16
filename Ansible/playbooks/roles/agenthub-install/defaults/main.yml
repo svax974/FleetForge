@@ -10,3 +10,21 @@
 # ses defaults pour le pourquoi), le filtrage réseau dans `agenthub-security`.
 
 agenthub_hostname: "agenthub.{{ domain_name }}"
+
+# ── Prérequis Flutter (modèle de projet « flutter » d'AgentHub) ─────────────
+# Le runner crée un projet Flutter avec `flutter create --platforms=macos,windows,linux,ios,android`
+# (runner/templates/flutter/create.sh) puis `flutter pub get`, et l'agent lance ensuite `flutter
+# analyze` / `flutter test` / `flutter build linux`. Ce rôle installe donc le SDK et la chaîne
+# Linux desktop, pour l'utilisateur du runner. Hors périmètre, volontairement : macOS/iOS (Xcode,
+# macOS uniquement) et Windows (build impossible depuis Linux — CI), et le SDK Android (plusieurs Go,
+# émulateur inexploitable sans /dev/kvm, même raisonnement que la display stack ci-dessus) : un
+# projet Flutter y est créé et analysé normalement, ses cibles android/ios/macos/windows se
+# construisent sur la machine de l'opérateur ou en CI (.github/workflows/build.yml du modèle).
+agenthub_flutter_enabled: true
+# Utilisateur du runner (créé par runner/scripts/install.sh, `--user` par défaut) : propriétaire du
+# SDK, car Flutter écrit dans son propre répertoire (cache des artefacts moteur).
+agenthub_flutter_user: agents
+agenthub_flutter_dir: /opt/flutter
+agenthub_flutter_channel: stable
+# Le SDK n'est cloné qu'une fois ; une montée de version est un choix explicite
+# (`runuser -l agents -c 'flutter upgrade'`), jamais un effet de bord d'un rejeu de ce rôle.

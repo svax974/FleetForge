@@ -26,6 +26,7 @@
 # Tags :
 #   --tags proxy-conf   rejoue seulement le vhost (reload, pas les autres sites)
 #   --tags runner        rejoue seulement l'activation du runner
+#   --tags flutter       rejoue seulement les prérequis Flutter du runner (SDK + chaîne Linux desktop, rôle agenthub-install)
 #   --tags monitoring    réarme seulement la sonde
 #
 # Prérequis côté poste de contrôle AVANT de lancer ce playbook (voir

@@ -1,0 +1,111 @@
+---
+# Prérequis Flutter pour le runner AgentHub — voir defaults/main.yml pour le périmètre et ce qui est
+# volontairement laissé de côté. Additif et idempotent : rien ici ne touche aux autres paquets,
+# conteneurs ou services de cette machine partagée.
+
+# Outils de base de Flutter (curl git unzip xz-utils zip libglu1-mesa) + chaîne de build Linux desktop
+# (clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev libstdc++-12-dev), telles que listées
+# par https://docs.flutter.dev/platform-integration/linux/install-linux/install-linux-from-linux.
+- name: Install the Flutter prerequisites and the Linux desktop toolchain
+  ansible.builtin.apt:
+    name:
+      - curl
+      - git
+      - unzip
+      - xz-utils
+      - zip
+      - libglu1-mesa
+      - clang
+      - cmake
+      - ninja-build
+      - pkg-config
+      - libgtk-3-dev
+      - liblzma-dev
+      - libstdc++-12-dev
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  become: true
+
+# Le runner (install.sh) crée `agents` quand il manque, avec un home 0700 ; on reproduit ce même
+# durcissement si ce rôle passe avant lui (premier déploiement), sans jamais toucher à un compte existant.
+- name: Check whether the runner user exists
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ agenthub_flutter_user }}"
+    fail_key: false
+
+- name: Create the runner user when the runner is not installed yet
+  ansible.builtin.user:
+    name: "{{ agenthub_flutter_user }}"
+    shell: /bin/bash
+    create_home: true
+    umask: "077"
+  become: true
+  when: getent_passwd[agenthub_flutter_user] is none
+
+- name: Look for an existing Flutter SDK
+  ansible.builtin.stat:
+    path: "{{ agenthub_flutter_dir }}/bin/flutter"
+  register: agenthub_flutter_bin
+
+# Cloné en root puis donné à `agents` (un `become_user` non privilégié depuis un compte sudo exige le
+# paquet `acl` ou le pipelining) ; une seule fois, voir defaults pour les montées de version.
+- name: Clone the Flutter SDK
+  ansible.builtin.git:
+    repo: https://github.com/flutter/flutter.git
+    dest: "{{ agenthub_flutter_dir }}"
+    version: "{{ agenthub_flutter_channel }}"
+    depth: 1
+  become: true
+  when: not agenthub_flutter_bin.stat.exists
+
+- name: Give the SDK to the runner user
+  ansible.builtin.file:
+    path: "{{ agenthub_flutter_dir }}"
+    owner: "{{ agenthub_flutter_user }}"
+    group: "{{ agenthub_flutter_user }}"
+    recurse: true
+  become: true
+  when: not agenthub_flutter_bin.stat.exists
+
+# Le service du runner a /usr/local/bin dans son PATH (agenthub-runner.service) : deux liens suffisent,
+# sans toucher à l'environnement du service ni le redémarrer (ses sessions tmux en cours restent intactes).
+- name: Expose flutter and dart on the PATH of the runner service
+  ansible.builtin.file:
+    src: "{{ agenthub_flutter_dir }}/bin/{{ item }}"
+    dest: "/usr/local/bin/{{ item }}"
+    state: link
+  loop: [flutter, dart]
+  become: true
+
+# Première utilisation : télécharge Dart + les artefacts moteur Linux en tant que `agents` (sinon le
+# premier `flutter create` d'un utilisateur les télécharge, pendant que « Nouveau projet » attend).
+- name: Warm the Flutter cache for the runner user (Dart SDK + Linux engine artifacts)
+  ansible.builtin.command:
+    argv:
+      - runuser
+      - -l
+      - "{{ agenthub_flutter_user }}"
+      - -c
+      - "{{ agenthub_flutter_dir }}/bin/flutter config --no-analytics && {{ agenthub_flutter_dir }}/bin/flutter precache --linux"
+  become: true
+  register: agenthub_flutter_precache
+  # Le premier passage télécharge, les suivants n'impriment rien de tel.
+  changed_when: "'ownloading' in (agenthub_flutter_precache.stdout ~ agenthub_flutter_precache.stderr)"
+
+- name: Report the Flutter version
+  ansible.builtin.command: runuser -l {{ agenthub_flutter_user }} -c '{{ agenthub_flutter_dir }}/bin/flutter --version --machine'
+  register: agenthub_flutter_version
+  changed_when: false
+  become: true
+
+- name: Fail when Flutter does not answer
+  ansible.builtin.assert:
+    that:
+      - agenthub_flutter_version.rc == 0
+      - "'frameworkVersion' in agenthub_flutter_version.stdout"
+    fail_msg: >-
+      Flutter ne répond pas pour l'utilisateur {{ agenthub_flutter_user }} sur {{ inventory_hostname }} :
+      vérifier `runuser -l {{ agenthub_flutter_user }} -c 'flutter doctor -v'`.
+    success_msg: "Flutter prêt pour {{ agenthub_flutter_user }} ({{ agenthub_flutter_dir }}, canal {{ agenthub_flutter_channel }})."
