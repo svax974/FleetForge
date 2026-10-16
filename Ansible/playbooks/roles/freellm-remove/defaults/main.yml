@@ -1,0 +1,5 @@
+---
+freellm_install_dir: "/home/{{ remote_username }}/freellmapi"
+freellm_container: freellmapi
+freellm_port: "{{ app_port | default(3001) }}"
+freellm_hostname: "freellm.{{ domain_name }}"

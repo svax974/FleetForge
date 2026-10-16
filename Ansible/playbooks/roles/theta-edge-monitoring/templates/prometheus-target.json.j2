@@ -1,0 +1,9 @@
+[
+    {
+        "targets": [ "{{ ansible_host }}:{{ theta_edge_exporter_port }}" ],
+        "labels": {
+            "job": "{{ theta_edge_job }}",
+            "instance": "{{ inventory_hostname }}"
+        }
+    }
+]

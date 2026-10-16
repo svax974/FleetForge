@@ -1,0 +1,70 @@
+[Unit]
+Description=Astar Node ({{ astar_chain }})
+After=network.target
+Wants=network.target
+
+[Service]
+User={{ astar_user }}
+Group={{ astar_user }}
+ExecStart={{ astar_binary }} \
+  --name "{{ astar_node_name }}" \
+  --chain {{ astar_chain }} \
+  --base-path {{ astar_data_dir }} \
+  --pruning archive \
+  --rpc-cors all \
+  --rpc-external \
+  --rpc-methods Safe \
+  --prometheus-external \
+  --prometheus-port {{ astar_prometheus_port }} \
+  --port 30333 \
+{# `--relay-chain-rpc-urls` est un argument DU COLLATOR : il a donc sa place
+   AVANT le `--`, pas après. Ce qui suit le `--` est transmis tel quel au nœud
+   de relais embarqué, qui ne connaît pas ce drapeau et refuse de démarrer :
+     error: unexpected argument '--relay-chain-rpc-urls' found
+     status=2/INVALIDARGUMENT
+   Erreur commise le 15/08/2026 — le `--help` du binaire documente pourtant bien
+   ce drapeau, mais c'est celui du COLLATOR, ce qui indiquait déjà sa position.
+   Tags en colonne 0 : Ansible rend avec trim_blocks=True mais lstrip_blocks=False,
+   donc l'indentation qui PRÉCÈDE une balise est bel et bien émise.
+   Détail du choix et garde-fous : `astar_relay_rpc_urls` dans defaults/main.yml. #}
+{% if astar_relay_rpc_urls | default([]) | length > 0 %}
+  --relay-chain-rpc-urls {{ astar_relay_rpc_urls | join(' ') }} \
+{% endif %}
+{# Argument DU COLLATOR lui aussi : avant le `--`. Voir `astar_pool_type`. #}
+{% if astar_pool_type | default('') | length > 0 %}
+  --pool-type {{ astar_pool_type }} \
+{% endif %}
+  --telemetry-url 'wss://telemetry.polkadot.io/submit/ 0' \
+  -- \
+  {# PAS de `--pruning archive` sur le relais.
+     La base du relais déjà sur disque a été créée en `Constrained(256)` ; lui
+     demander `ArchiveAll` fait échouer le démarrage du nœud ENTIER :
+       Error: StateDatabase("Incompatible pruning modes
+         [stored: Constrained(max_blocks: 256); requested: ArchiveAll]")
+     Le drapeau figurait pourtant ici de longue date — sans effet, parce que le
+     processus en cours d'exécution datait d'avant son ajout et n'avait jamais
+     été redémarré. Le 14/08/2026, un redémarrage pour une tout autre raison a
+     activé cette configuration jamais éprouvée et mis le collator en boucle de
+     crash.
+     Repasser le relais en archive imposerait de resynchroniser Polkadot depuis
+     zéro, pour un bénéfice nul : c'est la PARACHAÎNE qui doit servir l'état
+     historique d'Astar, le relais n'a besoin que de suivre la finalité. #}
+  {# `--prometheus-external` est nécessaire ICI AUSSI : sans lui l'endpoint du
+     relais n'écoute que sur 127.0.0.1, alors que `astar-monitoring` enregistre
+     sa cible sur l'adresse publique de l'hôte. La cible apparaît donc dans
+     Prometheus et reste `down` indéfiniment — ce qui ressemble à un nœud en
+     panne alors que le relais tourne. Constaté le 14/08/2026 : la parachaîne
+     (9615) portait bien le drapeau, le relais non.
+     Ne suffit pas seul sur hub : {{ astar_prometheus_port_relay }} doit aussi
+     être redirigé dans le routeur, comme 9615 et 9101 le sont déjà. #}
+{# Tags en colonne 0 : Ansible rend avec trim_blocks=True mais lstrip_blocks=False,
+   donc l'indentation qui PRÉCÈDE une balise est bel et bien émise. #}
+  --prometheus-external \
+  --prometheus-port {{ astar_prometheus_port_relay }}
+
+Restart=always
+RestartSec=10
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,9 @@
+[
+    {
+        "targets": [ "{{ ansible_host }}:{{ windows_exporter_port }}" ],
+        "labels": {
+            "job": "exporter",
+            "instance": "{{ inventory_hostname }}"
+        }
+    }
+]

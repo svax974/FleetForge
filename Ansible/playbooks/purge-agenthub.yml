@@ -1,0 +1,12 @@
+---
+# Supprime AgentHub ET ses données : conteneurs, volumes nommés (Postgres,
+# Redis, dossier partagé), images, CNAME DNS. Destructif, non reconstructible
+# sans sauvegarde de la base applicative.
+#
+#   ./play.sh web3c purge-agenthub.yml -e confirm=yes
+- name: Purge AgentHub
+  hosts: agenthub
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - agenthub-purge

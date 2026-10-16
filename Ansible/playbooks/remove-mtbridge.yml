@@ -1,0 +1,14 @@
+---
+- name: Remove MTBridge service and Prometheus target
+  hosts: mtbridges
+  gather_facts: false
+
+  roles:
+    - mtbridge-remove
+
+- name: Remove Windows system exporter and its Prometheus target
+  hosts: mtbridges
+  gather_facts: false
+
+  roles:
+    - exporter-sys-windows-remove

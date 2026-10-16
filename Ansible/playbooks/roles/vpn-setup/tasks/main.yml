@@ -1,0 +1,195 @@
+---
+- name: Change Pritunl default port 
+  ansible.builtin.lineinfile:
+    path: /etc/pritunl.conf
+    regexp: '^.*"port".*'
+    line: '    "port": {{ vpn_tcp_port }},'
+
+- name: Change Pritunl MongoDB connection string temporarily to localhost without authentication
+  ansible.builtin.lineinfile:
+    path: /etc/pritunl.conf
+    regexp: '^.*"mongodb_uri".*'
+    line: '    "mongodb_uri": "mongodb://localhost:{{ mongodb_port }}/pritunl"'
+
+- name: Enable and start pritunl service
+  ansible.builtin.systemd_service:
+    name: pritunl
+    enabled: true
+    state: restarted
+
+- name: Remove MONGODB_CONFIG_OVERRIDE_NOFORK=1 from service file if exists
+  ansible.builtin.lineinfile:
+    path: /usr/lib/systemd/system/mongod.service
+    regexp: '^.*MONGODB_CONFIG_OVERRIDE_NOFORK.*'
+    line: ""
+- name: Force systemd to reread configs
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+- name: Change MongoDB default port
+  ansible.builtin.lineinfile:
+    path: /etc/mongod.conf
+    regexp: '.*port:.*'
+    line: "  port: {{ mongodb_port }}"
+- name: Restart MongoDB service
+  ansible.builtin.systemd:
+    name: mongod
+    state: restarted
+    enabled: true
+
+- name: Import Pritunl dump
+  block:
+    - name: Stop pritunl service
+      ansible.builtin.systemd_service:
+        name: pritunl
+        state: stopped
+    - name: Copy Pritunl dump
+      #template: src=pritunl.dump dest=/root/pritunl.dump
+      ansible.builtin.copy:
+        src: ./templates/pritunl.dump
+        dest: /root/pritunl.dump
+    - name: Drop DB if exists
+      ansible.builtin.command:
+        cmd: mongosh mongodb://localhost:{{ mongodb_port }}/pritunl --eval "db.getSiblingDB('pritunl')"
+    - name: Import Pritunl dump
+      ansible.builtin.command:
+        cmd: mongorestore --nsInclude=pritunl.* mongodb://localhost:{{ mongodb_port }}/pritunl --archive=/root/pritunl.dump
+    - name: Start pritunl service
+      ansible.builtin.systemd_service:
+        name: pritunl
+        state: started
+  when: vpn_import_dump
+
+- name: Deacivate Pritunl listening on port 80
+  ansible.builtin.command:
+    cmd: pritunl set app.redirect_server false
+- name: Update Pritunl config to listen on vpn_tcp_port
+  ansible.builtin.command:
+    cmd: pritunl set app.server_port {{ vpn_tcp_port }}
+
+- name: Prepare MongoDB
+  block:
+    - name: Add the admin user
+      community.mongodb.mongodb_user:
+        database: admin
+        name: "{{ mongodb_admin_name }}"
+        password: "{{ mongodb_admin_pass }}"
+        roles: userAdminAnyDatabase
+        login_port: "{{ mongodb_port }}"
+        state: present
+        #ignore_errors: yes
+
+    - name: Enable MongoDB authorization
+      ansible.builtin.lineinfile:
+        path: /etc/mongod.conf
+        regexp: '#security:.*'
+        line: "security:\n    authorization: enabled"
+    - name: Restart MongoDB service
+      ansible.builtin.systemd:
+        name: mongod
+        state: restarted
+
+#    - name: Pause
+#      ansible.builtin.pause:
+#        prompt: "Press Enter to continue"
+    - name: Pause
+      ansible.builtin.pause:
+        seconds: 20
+
+    # Add MongoDB pritunl user
+    - name: Add the pritunl user to the pritunl DB
+      community.mongodb.mongodb_user:
+        database: pritunl
+        name: "{{ mongodb_user_name }}"
+        password: "{{ mongodb_user_pass }}"
+        roles:
+          - dbOwner
+          - read
+        login_port: "{{ mongodb_port }}"
+        login_user: "{{ mongodb_admin_name }}"
+        login_password: "{{ mongodb_admin_pass }}"
+        state: present
+      #ignore_errors: yes
+    # Restart service
+    - name: Restart MongoDB service
+      ansible.builtin.systemd:
+        name: mongod
+        state: restarted
+  rescue:
+    # Remove MongoDB auth and remove users
+    - name: Disable MongoDB authorization 1/2
+      ansible.builtin.lineinfile:
+        path: /etc/mongod.conf
+        regexp: '^security:.*'
+        line: "#security:"
+    - name: Disable MongoDB authorization 2/2
+      ansible.builtin.lineinfile:
+        path: /etc/mongod.conf
+        regexp: '.*authorization:*'
+        line: ""
+    - name: Restart MongoDB service
+      ansible.builtin.systemd:
+        name: mongod
+        state: restarted
+    - name: Delete en-pritunl user
+      community.mongodb.mongodb_user:
+        database: pritunl
+        name: en-pritunl
+        login_port: "{{ mongodb_port }}"
+        login_user: "{{ mongodb_admin_name }}"
+        login_password: "{{ mongodb_admin_pass }}"
+        login_database: pritunl
+        state: absent
+    - name: Delete admin user
+      community.mongodb.mongodb_user:
+        database: pritunl
+        name: "{{ mongodb_admin_name }}"
+        login_port: "{{ mongodb_port }}"
+        state: absent
+    - name: Restart MongoDB service
+      ansible.builtin.systemd:
+        name: mongod
+        state: restarted
+
+- name: Customize Pritunl config with MongoDB config
+  ansible.builtin.lineinfile:
+    path: /etc/pritunl.conf
+    regexp: '.*"mongodb_uri":.*'
+    line: '    "mongodb_uri": "mongodb://{{ mongodb_user_name }}:{{ mongodb_user_pass }}@localhost:{{ mongodb_port }}/pritunl"'
+
+- name: Restart pritunl service
+  ansible.builtin.systemd_service:
+    name: pritunl
+    state: restarted
+
+- name: Set the public address to vpn proxy address
+  community.mongodb.mongodb_shell:
+    login_user: "{{ mongodb_user_name }}"
+    login_password: "{{ mongodb_user_pass }}"
+    login_port: "{{ mongodb_port }}"
+    login_database: pritunl
+    db: pritunl
+    eval: 'db.hosts.updateOne({"status":"online"}, {"$set": {"public_address": "vpn.{{ domain_name }}"}}, {"upsert":false})'
+
+- name: Restart Pritunl service
+  ansible.builtin.systemd:
+    name: pritunl
+    state: restarted
+
+- name: Pause 1 minute to allow pritunl to fully start before cleaning hosts
+  ansible.builtin.pause:
+    seconds: 60
+
+- name: Remove unwanted hosts from dump
+  community.mongodb.mongodb_shell:
+    login_user: "{{ mongodb_user_name }}"
+    login_password: "{{ mongodb_user_pass }}"
+    login_port: "{{ mongodb_port }}"
+    login_database: pritunl
+    db: pritunl
+    eval: 'db.hosts.deleteMany({"status": "offline"})'
+
+- name: Restart Pritunl service
+  ansible.builtin.systemd:
+    name: pritunl
+    state: restarted

@@ -1,0 +1,18 @@
+---
+# Télécharge un modèle sur un hôte où Ollama tourne déjà.
+#
+#   ./play.sh web3c deploy-ollama-model.yml -e ollama_model_name=llama3.1:8b
+#
+# Séparé de `deploy-ollama.yml` volontairement : un `ollama pull` transfère
+# plusieurs gigaoctets et ne doit pas repartir à chaque passage sur le service.
+# Le rôle échoue franchement si `ollama_model_name` n'est pas fourni.
+#
+# Vise l'entrée dédiée `ollama` (machine hub, CLAUDE.md § 2) depuis le
+# 11/10/2026 — plus de `hosts: all` à restreindre par `--limit`.
+
+- name: Téléchargement d'un modèle Ollama
+  hosts: ollama
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - ollama-model-install

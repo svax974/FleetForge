@@ -1,0 +1,7 @@
+---
+- name: Temp
+  hosts: ???
+  remote_user: "{{ remote_username }}"
+
+  roles:
+    - install-scripts

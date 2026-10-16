@@ -1,0 +1,28 @@
+{#- Configuration de fleet-watch.py, entièrement dérivée de l'inventaire. -#}
+{%- set amh = namespace(name='') -%}
+{%- for h in groups['web3c'] | default([]) -%}
+{%- if 'alertmanager' in (hostvars[h].ansible_roles | default([])) and not amh.name -%}{%- set amh.name = h -%}{%- endif -%}
+{%- endfor -%}
+{%- set ns = namespace(ignore=openclaw_fleetwatch_ignore_extra | list, hosts={}) -%}
+{%- for h in groups['web3c'] | default([]) -%}
+{%- if hostvars[h].monitor | default('on') | string | lower == 'off' -%}
+{%- set ns.ignore = ns.ignore + [h] -%}
+{%- else -%}
+{%- set ns.hosts = ns.hosts | combine({h: {'ip': hostvars[h].ansible_host | default(h), 'roles': hostvars[h].ansible_roles | default([])}}) -%}
+{%- endif -%}
+{%- endfor -%}
+{{ {
+  'alertmanager': 'http://' ~ hostvars[amh.name].ansible_host ~ ':' ~ (hostvars[amh.name].alertmanager_port | default(9093)),
+  'ignore': ns.ignore,
+  'hosts': ns.hosts,
+  'renotify_hours': openclaw_fleetwatch_renotify_hours,
+  'state_file': openclaw_home ~ '/.openclaw/state/fleet-watch.json',
+  'binary': openclaw_binary,
+  'channel': openclaw_heartbeat_target,
+  'account': openclaw_heartbeat_account_id,
+  'to': openclaw_heartbeat_to | string,
+  'model': openclaw_fleetwatch_model,
+  'thinking': openclaw_fleetwatch_thinking,
+  'timeout': openclaw_fleetwatch_timeout,
+  'prompt': lookup('ansible.builtin.template', 'fleet-watch-prompt.j2') | trim
+} | to_nice_json }}

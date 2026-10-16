@@ -1,0 +1,49 @@
+[Unit]
+Description=FleetForge — gestion de parc (interface web)
+Documentation=file://{{ ff_dir }}
+After=network-online.target fleetforge-agent.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ ff_user }}
+Group={{ ff_user }}
+WorkingDirectory={{ ff_ansible_dir }}
+EnvironmentFile={{ ff_dir }}/fleetforge.env
+
+# `ansible-playbook` et `ansible-inventory` viennent de pipx ; sans ce PATH le
+# service répond mais ne peut rien lancer, ce que seule la série
+# `fleetforge_ansible_available` signalerait.
+Environment=PATH=/home/{{ ff_user }}/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# Agent SSH portant la clé dédiée au parc. La clé est protégée par une
+# passphrase : sans cette socket, `ansible-playbook` la demanderait, n'aurait
+# personne pour la saisir, et chaque déploiement échouerait sur une
+# authentification refusée — ce qui ne désigne jamais l'agent.
+# Sans `ff_deploy_secrets`, la socket n'existe pas et la variable est inerte.
+Environment=SSH_AUTH_SOCK={{ ff_agent_socket }}
+
+ExecStart={{ ff_dir }}/target/{{ ff_cargo_profile }}/fleetforge-web
+Restart=on-failure
+RestartSec=5
+
+# Garde-fou anti-boucle de crash : la fenêtre reste supérieure à
+# RestartSec × burst (5 s × 5 = 25 s), sinon la limite ne se déclenche jamais.
+# En `failed`, l'unité devient détectable (alerte SystemdUnitFailed).
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# Durcissement. Volontairement MOINS strict que pour les autres services du
+# parc : ce processus lance `ansible-playbook`, qui écrit dans son répertoire de
+# travail, ouvre des connexions SSH et lit ~/.ssh. `ProtectHome` ou
+# `PrivateUsers` le casseraient — et le symptôme serait un playbook qui échoue
+# sans raison apparente.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,7 @@
+---
+- name: restart brk
+  ansible.builtin.systemd:
+    name: brk
+    state: restarted
+    daemon_reload: true
+  become: true

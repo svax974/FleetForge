@@ -1,0 +1,40 @@
+---
+# Arrête et supprime le conteneur Alertmanager.
+# Conserve la configuration et l'état (silences, notifications en cours) —
+# leur suppression relève de `alertmanager-purge`.
+
+- name: Stop and remove Alertmanager container
+  community.docker.docker_container:
+    name: alertmanager
+    state: absent
+  become: true
+  ignore_errors: true
+
+- name: Remove Alertmanager firewall rules
+  community.general.ufw:
+    rule: "{{ item }}"
+    proto: tcp
+    port: "{{ alertmanager_port }}"
+    delete: true
+  loop: [allow, deny]
+  become: true
+  ignore_errors: true
+
+- name: Warn that Prometheus keeps pointing at a dead Alertmanager
+  ansible.builtin.debug:
+    msg: >-
+      Alertmanager supprimé, mais Prometheus le référence toujours dans son bloc
+      `alerting:`. Les alertes ne partiront plus : redéployer prometheus-install
+      avec un autre alertmanager_host, ou accepter la perte des notifications.
+
+# ── Supervision ────────────────────────────────────────────────────────────
+# La cible native est retirée avec le service : une cible orpheline reste
+# `down` pour toujours et fait sonner `TargetDown` sur un service désinstallé.
+- name: Remove the Prometheus target
+  ansible.builtin.file:
+    path: "/home/{{ remote_username }}/prometheus/prometheus-configs/alertmanager/{{ inventory_hostname }}.json"
+    state: absent
+  delegate_to: "{{ prometheus_host }}"
+  become: true
+  when: prometheus_host is defined and prometheus_host in hostvars
+  tags: [monitoring]

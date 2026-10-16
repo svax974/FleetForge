@@ -1,0 +1,135 @@
+---
+# Déploie SearXNG en conteneur. Voir defaults/main.yml pour le choix de
+# l'adresse de publication, qui dépend de la co-localisation avec les proxies.
+
+- name: Fail early when no proxy is allowed to reach the relay
+  ansible.builtin.fail:
+    msg: >-
+      `searxng_allowed_proxies` est vide : le relai serait déployé sans aucun
+      client autorisé, donc inutilisable et invisible. Renseigner le groupe
+      `proxies` de l'inventaire, ou la variable elle-même.
+  when: searxng_allowed_proxies | length == 0
+
+- name: Create the SearXNG directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  become: true
+  loop:
+    - "{{ searxng_home }}"
+    # Monté sur /etc/searxng. Le point d'entrée de l'image y écrit son
+    # uwsgi.ini et s'en approprie le contenu (d'où les capacités CHOWN/SETGID/
+    # SETUID conservées plus bas) : ce répertoire ne peut pas être en lecture
+    # seule, contrairement à ce que la seule présence de settings.yml suggère.
+    - "{{ searxng_home }}/config"
+
+# La clé signe les cookies de préférences et les URL de pagination. La
+# régénérer à chaque exécution invaliderait silencieusement les sessions en
+# cours ; la figer dans le dépôt en ferait un secret versionné. Elle est donc
+# tirée UNE FOIS sur l'hôte, puis relue.
+- name: Generate the SearXNG secret key on first run
+  ansible.builtin.shell:
+    cmd: "openssl rand -hex 32 > {{ searxng_home }}/secret_key"
+    creates: "{{ searxng_home }}/secret_key"
+  become: true
+
+- name: Restrict the secret key file
+  ansible.builtin.file:
+    path: "{{ searxng_home }}/secret_key"
+    owner: root
+    group: root
+    mode: '0600'
+  become: true
+
+- name: Read the secret key
+  ansible.builtin.slurp:
+    src: "{{ searxng_home }}/secret_key"
+  become: true
+  register: searxng_secret_raw
+
+- name: Set the secret key fact
+  ansible.builtin.set_fact:
+    searxng_secret_key: "{{ searxng_secret_raw.content | b64decode | trim }}"
+
+- name: Deploy the SearXNG configuration
+  ansible.builtin.template:
+    src: settings.yml.j2
+    dest: "{{ searxng_home }}/config/settings.yml"
+    # Ni owner ni group : le point d'entrée du conteneur s'approprie le
+    # contenu de /etc/searxng au démarrage. Les réimposer ici ferait basculer
+    # la tâche en `changed` à chaque exécution, donc redémarrer le conteneur
+    # à chaque déploiement pour rien.
+    mode: '0644'
+  become: true
+  notify: restart searxng
+
+- name: Deploy the SearXNG container
+  community.docker.docker_container:
+    name: "{{ searxng_container }}"
+    image: "{{ searxng_image }}"
+    state: started
+    restart_policy: always
+    # L'adresse de publication est la mesure de sécurité principale : sur une
+    # machine qui porte déjà le proxy, 127.0.0.1 rend le port inatteignable
+    # depuis l'extérieur, quel que soit l'état du pare-feu.
+    ports:
+      - "{{ searxng_bind_address }}:{{ searxng_port }}:8080"
+    volumes:
+      - "{{ searxng_home }}/config:/etc/searxng:rw"
+    env:
+      SEARXNG_BASE_URL: "{{ searxng_base_url }}"
+      UWSGI_WORKERS: "{{ searxng_uwsgi_workers | string }}"
+      UWSGI_THREADS: "{{ searxng_uwsgi_threads | string }}"
+    # Réglage amont : le point d'entrée a besoin de CHOWN/SETGID/SETUID pour
+    # s'approprier /etc/searxng puis abandonner les privilèges. Tout le reste
+    # est retiré.
+    capabilities:
+      - CHOWN
+      - SETGID
+      - SETUID
+    cap_drop:
+      - ALL
+    # Un métamoteur journalise une ligne par requête amont : sans plafond, le
+    # journal du conteneur grossit sans fin sur le disque de l'hôte.
+    log_driver: json-file
+    log_options:
+      max-size: "10m"
+      max-file: "3"
+  become: true
+
+# Point d'entrée utilisé par le HEALTHCHECK de l'image elle-même : il répond
+# 200 quand l'application est réellement servie, alors qu'un simple test de
+# port passerait dès l'ouverture du socket uwsgi.
+- name: Wait for SearXNG to answer
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ searxng_port }}/healthz"
+    status_code: [200]
+  register: searxng_ready
+  until: searxng_ready.status | default(0) == 200
+  retries: 12
+  delay: 5
+
+# Le format JSON est la seule raison d'être de ce relai, et son absence est
+# indolore : l'instance répond, l'interface fonctionne, seules les requêtes
+# applicatives repartent en 403. Mieux vaut le voir au déploiement.
+- name: Verify the JSON API is really enabled
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ searxng_port }}/search?q=ansible&format=json"
+    status_code: [200]
+    return_content: false
+  register: searxng_json
+  until: searxng_json.status | default(0) == 200
+  retries: 3
+  delay: 5
+
+- name: Report how the relay is exposed
+  ansible.builtin.debug:
+    msg: >-
+      SearXNG publié sur {{ searxng_bind_address }}:{{ searxng_port }}
+      {{ '— boucle locale uniquement, tous les proxies autorisés sont sur cette machine, aucune règle de pare-feu nécessaire.'
+         if searxng_bind_address == '127.0.0.1'
+         else '— proxies distants : ' ~ (searxng_remote_proxies | join(', ')) ~
+              '. Le port est ouvert sur 0.0.0.0 et DOIT être filtré dans DOCKER-USER par searxng-security.' }}

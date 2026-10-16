@@ -1,0 +1,52 @@
+---
+# Purge complète de la sauvegarde d'une instance : tout ce que fait `-remove`,
+# PLUS les archives sur la destination, la clé SSH dédiée (et son autorisation
+# côté destination) et le journal. DESTRUCTIF et irréversible — ces archives
+# sont, après la purge du serveur, la dernière copie des données.
+
+- name: Refuse to purge without explicit confirmation
+  ansible.builtin.assert:
+    that:
+      - (sync_purge_confirm | default('')) == 'yes'
+    fail_msg: >-
+      Purge refusée. Cette opération SUPPRIME les archives de {{ sync_instance }}
+      sur {{ sync_backup_dest_host }} ({{ sync_backup_dest_dir }}). Relance
+      avec -e sync_purge_confirm=yes en connaissance de cause.
+    quiet: true
+
+- name: Read the backup public key (to revoke it on the destination)
+  ansible.builtin.slurp:
+    src: "{{ sync_backup_ssh_key }}.pub"
+  become: true
+  register: sync_backup_pubkey
+  failed_when: false
+
+- name: Remove the backup cron job, script and metric
+  ansible.builtin.include_role:
+    name: sync-backup-remove
+
+- name: Remove the backup journal and the dedicated SSH key pair
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ sync_backup_log }}"
+    - "{{ sync_backup_ssh_key }}"
+    - "{{ sync_backup_ssh_key }}.pub"
+  become: true
+
+- name: Revoke the key on the destination host
+  ansible.posix.authorized_key:
+    user: "{{ sync_backup_dest_user }}"
+    state: absent
+    key: "{{ sync_backup_pubkey.content | b64decode | trim }}"
+  delegate_to: "{{ sync_backup_dest_host }}"
+  become: true
+  when: sync_backup_pubkey.content is defined
+
+- name: Remove the archives on the destination host
+  ansible.builtin.file:
+    path: "{{ sync_backup_dest_dir }}"
+    state: absent
+  delegate_to: "{{ sync_backup_dest_host }}"
+  become: true

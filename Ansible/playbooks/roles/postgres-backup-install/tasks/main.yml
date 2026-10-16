@@ -1,0 +1,128 @@
+---
+# Installe la sauvegarde de `{{ pgbak_db }}` vers `{{ pgbak_dest_host }}`.
+# Calqué sur `timescaledb-backup-install`, sans branche locale (voir
+# defaults/main.yml) : la destination est toujours une machine distincte.
+
+- name: Fail if the backup destination is not in the inventory
+  ansible.builtin.fail:
+    msg: >-
+      L'hôte de destination `{{ pgbak_dest_host }}` est absent de
+      l'inventaire. Ajoute-le au groupe `backups` avant de jouer ce rôle.
+  when: pgbak_dest_host not in hostvars
+
+- name: Report the resolved backup destination
+  ansible.builtin.debug:
+    msg: >-
+      Sauvegarde de {{ pgbak_db }} → {{ pgbak_dest_user }}@{{ pgbak_dest_addr }}:{{ pgbak_dest_dir }}
+
+# ── Clé, autorisation, pare-feu, known_hosts ───────────────────────────────
+
+- name: Generate the dedicated backup SSH key
+  community.crypto.openssh_keypair:
+    path: "{{ pgbak_ssh_key_path }}"
+    type: ed25519
+    comment: "{{ inventory_hostname }}-{{ pgbak_name }}-backup"
+  register: pgbak_key
+
+- name: Authorize the key on the destination host
+  ansible.posix.authorized_key:
+    user: "{{ pgbak_dest_user }}"
+    state: present
+    key: "{{ pgbak_key.public_key }}"
+    comment: "{{ inventory_hostname }}-{{ pgbak_name }}-backup"
+  delegate_to: "{{ pgbak_dest_host }}"
+  become: true
+  tags: [retarget]
+
+- name: Open SSH on the destination for this host
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ ansible_host }}"
+    port: "{{ pgbak_dest_port }}"
+    comment: "backup source {{ inventory_hostname }} - ssh push"
+  delegate_to: "{{ pgbak_dest_host }}"
+  become: true
+  tags: [retarget]
+
+- name: Refresh the destination host key in known_hosts
+  ansible.builtin.known_hosts:
+    path: "{{ ansible_env.HOME }}/.ssh/known_hosts"
+    name: "[{{ pgbak_dest_addr }}]:{{ pgbak_dest_port }}"
+    key: "{{ lookup('pipe', 'ssh-keyscan -p ' ~ pgbak_dest_port ~ ' -t ed25519 ' ~ pgbak_dest_addr ~ ' 2>/dev/null | grep -v \"^#\"') }}"
+    state: present
+  tags: [retarget]
+
+# ── Répertoire de destination ──────────────────────────────────────────────
+
+- name: Create the destination backup directory
+  ansible.builtin.file:
+    path: "{{ pgbak_dest_dir }}"
+    state: directory
+    owner: "{{ pgbak_dest_user }}"
+    group: "{{ pgbak_dest_user }}"
+    mode: '0750'
+  delegate_to: "{{ pgbak_dest_host }}"
+  become: true
+  tags: [retarget]
+
+# ── Métriques ───────────────────────────────────────────────────────────────
+
+- name: Create the node_exporter textfile directory
+  ansible.builtin.file:
+    path: "{{ node_exporter_textfile_dir }}"
+    state: directory
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: '0755'
+  become: true
+
+# ── Répertoire local des scripts ────────────────────────────────────────────
+
+- name: Create the local backup script directory
+  ansible.builtin.file:
+    path: "{{ pgbak_dir }}"
+    state: directory
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: '0750'
+
+# ── Scripts ─────────────────────────────────────────────────────────────────
+
+- name: Deploy the PostgreSQL backup script
+  ansible.builtin.template:
+    src: postgres-backup.sh.j2
+    dest: "{{ pgbak_dir }}/postgres-backup.sh"
+    mode: '0750'
+  tags: [retarget]
+
+- name: Deploy the PostgreSQL restore script
+  ansible.builtin.template:
+    src: postgres-restore.sh.j2
+    dest: "{{ pgbak_dir }}/postgres-restore.sh"
+    mode: '0750'
+  tags: [retarget]
+
+- name: Schedule the PostgreSQL backup
+  ansible.builtin.cron:
+    name: "{{ pgbak_name }} postgres backup"
+    hour: "{{ pgbak_cron_hour }}"
+    minute: "{{ pgbak_cron_minute | default('0') }}"
+    job: "{{ pgbak_dir }}/postgres-backup.sh >> {{ pgbak_dir }}/backup.log 2>&1"
+
+- name: Rotate the backup log
+  ansible.builtin.copy:
+    dest: "/etc/logrotate.d/postgres-backup-{{ pgbak_name }}"
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      {{ pgbak_dir }}/backup.log {
+          weekly
+          rotate 8
+          compress
+          missingok
+          notifempty
+          copytruncate
+      }
+  become: true

@@ -1,0 +1,7 @@
+{
+  "service": "pgpool",
+  "up": {"kind": "docker", "container": "{{ poolmon_container }}"},
+  "extra_checks": [
+    {"name": "port", "kind": "tcp", "host": "127.0.0.1", "port": {{ poolmon_port }}}
+  ]
+}

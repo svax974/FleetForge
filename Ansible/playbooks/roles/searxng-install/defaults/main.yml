@@ -1,0 +1,71 @@
+---
+# SearXNG — métamoteur de recherche déployé en CONTENEUR et utilisé comme
+# RELAI : ce n'est pas un site public. Les applications l'interrogent en JSON
+# à travers un proxy qui pose l'authentification (en-tête X-Api-Key, cf.
+# sites-enabled/searxng.conf). Une instance ouverte se fait abuser en quelques
+# jours, puis bloquer par les moteurs amont — auquel cas elle répond encore
+# parfaitement et ne rapporte plus rien (cf. searxng-monitoring).
+
+searxng_container: searxng
+searxng_image: "searxng/searxng:latest"
+searxng_home: "/home/{{ remote_username }}/searxng"
+
+# Port publié sur l'HÔTE. Le port interne du conteneur (8080) n'est pas
+# configurable : c'est celui sur lequel uwsgi écoute dans l'image.
+searxng_port: 8888
+
+searxng_hostname: "searxng.{{ domain_name }}"
+# Utilisé pour construire les liens et les redirections. Doit correspondre au
+# `server_name` du vhost, sinon les URL renvoyées pointent ailleurs.
+searxng_base_url: "https://{{ searxng_hostname }}/"
+searxng_instance_name: "SearXNG {{ domain_name }}"
+
+# ── Consommateurs et exposition ────────────────────────────────────────────
+# Le service n'a qu'un type de client : les proxies. Deux situations, et c'est
+# le point de conception de ce rôle :
+#
+#   • TOUS les proxies autorisés sont sur la MÊME machine que SearXNG. Le port
+#     est alors publié sur 127.0.0.1 uniquement : nginx l'atteint par la boucle
+#     locale et RIEN n'est joignable de l'extérieur. Aucune règle de pare-feu
+#     n'est nécessaire — et c'est strictement plus sûr qu'un port ouvert puis
+#     filtré, puisqu'il n'y a rien à filtrer.
+#
+#   • au moins un proxy est sur une AUTRE machine. Le port doit alors être
+#     publié sur 0.0.0.0, et c'est `searxng-security` qui le restreint aux
+#     seules IP de ces proxies — dans la chaîne DOCKER-USER, la seule que
+#     Docker traverse sans la réécrire. Une règle ufw sur un port publié par
+#     Docker n'a AUCUN effet (CLAUDE.md).
+#
+#     Cas concret depuis le 12/09/2026 : l'entrée `station` (NAT domestique,
+#     NAT domestique, même machine que `proxy2`/`vpn1`) porte le service.
+#     `proxy2` est local (127.0.0.1 pour lui) ; `proxy1` (
+#     ancienne machine du relai) est distant et passe par DOCKER-USER.
+#
+# Restreindre cette liste (par exemple à `['proxy1']`) suffit à repasser en
+# publication locale : le vhost n'est alors plus déployé sur les proxies
+# écartés, qui renverraient sinon un 502 vers un port fermé.
+searxng_allowed_proxies: "{{ groups['proxies'] | default([]) }}"
+
+# Proxies autorisés qui ne sont PAS sur cette machine. La comparaison porte sur
+# `ansible_host`, pas sur le nom d'inventaire : sur ce parc plusieurs entrées
+# désignent la même machine, et comparer les noms conclurait à un accès distant
+# là où le trafic ne quitte jamais la boucle locale.
+searxng_remote_proxies: >-
+  {{ searxng_allowed_proxies
+     | map('extract', hostvars, 'ansible_host')
+     | select('defined')
+     | reject('equalto', ansible_host)
+     | unique | list }}
+
+searxng_bind_address: "{{ '0.0.0.0' if (searxng_remote_proxies | length > 0) else '127.0.0.1' }}"
+
+# ── Réglages du moteur ─────────────────────────────────────────────────────
+searxng_safe_search: 0
+searxng_default_lang: "auto"
+# Un métamoteur interroge plusieurs moteurs en parallèle : une requête froide
+# est lente. Au-delà, l'appelant a de toute façon abandonné.
+searxng_request_timeout: 6.0
+searxng_max_request_timeout: 15.0
+# uwsgi. 4/4 est le réglage amont ; un relai interne n'a pas besoin de plus.
+searxng_uwsgi_workers: 4
+searxng_uwsgi_threads: 4

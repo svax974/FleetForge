@@ -1,0 +1,120 @@
+---
+# Sauvegarde du magasin BRK vers un hôte de destination (groupe `backups`).
+#
+# Pourquoi une sauvegarde alors que les données sont recalculables : BRK
+# reconstruit son magasin à partir des fichiers de blocs du nœud, mais cette
+# reconstruction coûte des DIZAINES D'HEURES de CPU (~4-7 h annoncées à l'époque
+# du magasin initial, bien davantage aujourd'hui : 253 Go d'index + 92 Go de
+# calculs au 11/08/2026). Une corruption du magasin — ou la perte du disque —
+# arrête donc l'ingestion des indicateurs pendant plusieurs jours. C'est
+# exactement ce que cette sauvegarde évite.
+
+brk_user: "{{ remote_username }}"
+brk_home: "/home/{{ remote_username }}"
+brk_dir: "/home/{{ remote_username }}/.brk"
+
+# ── Destination ────────────────────────────────────────────────────────────
+# Nom d'INVENTAIRE, pas une IP : c'est ce qui rend le changement de serveur de
+# sauvegarde possible sans toucher au code (voir `retarget-backups.yml`).
+brk_backup_dest_host: backup-brk
+brk_backup_dest_addr: "{{ hostvars[brk_backup_dest_host]['ansible_host'] }}"
+brk_backup_dest_user: "{{ remote_username }}"
+brk_backup_dest_port: "{{ ssh_custom_port }}"
+brk_backup_dest_dir: "{{ backup_root }}/brk"
+
+# Clé dédiée à CETTE sauvegarde, distincte de la clé d'administration : elle
+# vit sur une machine qui tourne du code tiers (BRK, Node) et n'ouvre qu'un
+# accès en écriture au répertoire de sauvegarde.
+brk_backup_ssh_key_path: "{{ brk_home }}/.ssh/id_ed25519_brkbackup"
+
+# ── Fenêtre d'arrêt ────────────────────────────────────────────────────────
+# BRK écrit en continu dans son magasin : une copie prise à chaud n'est pas
+# garantie restaurable (fichiers vecdb réécrits pendant le parcours de rsync).
+# D'où deux passes — une à chaud qui capte l'essentiel sans coupure, une seconde
+# BRK arrêté qui ne traite que le résidu. La coupure réelle se compte alors en
+# minutes, pas en heures.
+#
+# Plafond dur sur la passe 2 : si rsync s'enlise, BRK doit repartir malgré tout.
+# Dépassement = sauvegarde marquée en échec, pas service laissé à terre.
+#
+# Relevé à 3 h le 07/09/2026 : à 1 h, 3 tentatives consécutives (30/08, 06/09,
+# 07/09) ont toutes échoué sur ce garde-fou — le résidu de rattrapage (aucun
+# succès depuis le 23/08) dépassait ce que 8 flux transfèrent en 1 h. Le
+# 4e essai a réussi avec une coupure de 6862 s (~1h54) — encore un rattrapage,
+# pas un delta hebdomadaire normal. On garde 3 h de marge : la cadence est
+# repassée hebdomadaire (cf. Planification) sans avoir observé un cycle
+# hebdo complet sur base fraîche, donc sans certitude sur le résidu réel une
+# fois la dérive normale reprise. Cette marge est ce qui rendra un éventuel
+# nouvel échec au prochain passage (dimanche) informatif plutôt qu'ambigu.
+brk_backup_stop_timeout: 10800      # 3 h
+
+# ── Planification ──────────────────────────────────────────────────────────
+# Hebdomadaire (dimanche 2 h) — revenu à ce rythme le 07/09/2026 après un
+# essai en quotidien pendant la crise du 30/08-07/09 (previous/ saturant le
+# disque + timeout de 1 h trop court, cf. Rétention et ci-dessus). Les deux
+# causes réelles sont corrigées indépendamment de la cadence ; le quotidien
+# n'était qu'un palliatif pendant le rattrapage. Repasse un delta hebdo
+# dans `brk_backup_stop_timeout` (3 h) au premier passage dominical sur base
+# fraîche (07/09) dira si cette marge est correcte en régime normal.
+brk_backup_cron_weekday: "0"
+brk_backup_cron_hour: "2"
+brk_backup_interval_days: 7
+
+# ── Rétention ──────────────────────────────────────────────────────────────
+# Une seule génération. `previous/` protégeait contre une corruption source
+# recopiée telle quelle, mais son coût disque n'est PAS négligeable en
+# pratique sur ce lien : --link-dest ne partage que les fichiers identiques,
+# et le magasin BRK est justement en réécriture permanente — `previous/`
+# pesait 269 Go, contribuant directement à la panne du 06/09/2026
+# (destination pleine, sauvegarde en échec depuis le 23/08, BRK coupé ~1 h
+# pendant la passe froide faute de place pour écrire `incoming/`).
+brk_backup_keep_previous: false
+
+# Marge libre exigée sur la destination avant de lancer une passe incrémentale.
+# Pour la PREMIÈRE sauvegarde, le script exige en plus la taille de la source.
+brk_backup_min_free_gb: 40
+
+# `logs/` est exclu : 3,9 Go de journaux quotidiens au 11/08/2026, sans aucune
+# valeur pour une restauration, et réécrits en permanence donc systématiquement
+# retransférés.
+brk_backup_excludes:
+  - "logs/"
+
+# Bande passante max de rsync, en Ko/s. 0 = illimité. À renseigner si la copie
+# perturbe le service de l'API pendant la passe à chaud.
+brk_backup_bwlimit: 0
+
+# ── Seed initial parallèle ──────────────────────────────────────────────────
+# Nombre de flux rsync concurrents pour la TOUTE PREMIÈRE sauvegarde (le seed de
+# 343 Go). Les incréments suivants restent en flux unique — ils ne transfèrent
+# qu'un petit delta.
+#
+# Pourquoi : la route hôte→hôte (constatée le 2026-08-12) perd ~16-40 % des
+# paquets sous charge (réordonnancement par paquet côté opérateur, RTT 2 ms,
+# uplink au repos, NIC saine — donc panne réseau, pas un cap). Un flux TCP
+# unique y plafonne à ~4 Mbit/s (~40 j pour 343 Go), mais l'agrégat scale
+# (mesuré : 8 flux → ~41 Mbit/s → ~18 h). Ni le pacing (perte présente dès
+# 2 Mbit/s) ni un plus gros MSS/MTU n'y changent rien : seul le parallélisme
+# capte la capacité globale du lien.
+#
+# ⚠️ Contrepartie : à N flux, ~40 % de perte = autant de retransmissions qui
+# MARTÈLENT le lien partagé — le même que le trafic app→TimescaleDB. À lancer
+# sur une fenêtre calme. Baisser cette valeur ménage le lien au prix d'un seed
+# plus long ; 1 désactive le parallélisme (retour au flux unique).
+# Le vrai correctif reste côté fournisseur ; ceci rend le seed faisable en
+# attendant.
+brk_backup_seed_streams: 8
+
+# Reprises d'un flux rsync sur erreur TRANSITOIRE (coupure ssh, code réseau hors
+# 23/24). Le lien perd ~16-40 % des paquets : sur un seed de plusieurs heures, un
+# flux finit presque toujours par tomber une fois. `--partial` reprend d'où il
+# s'est arrêté. C'est ce qui manquait — le seed a échoué à 98 % sur un flux
+# coupé. 5 reprises (15 s d'attente entre chaque) absorbent largement les blips.
+brk_backup_stream_retries: 5
+
+# ── Supervision ────────────────────────────────────────────────────────────
+# Le script dépose ses métriques dans le collecteur `textfile` de node_exporter
+# (activé par `exporter-sys-install`). Une sauvegarde qui cesse silencieusement
+# ressemble trait pour trait à une sauvegarde qui fonctionne — c'est ce fichier,
+# et l'alerte BackupStale qui s'en nourrit, qui font la différence.
+node_exporter_textfile_dir: /var/lib/node_exporter/textfile_collector

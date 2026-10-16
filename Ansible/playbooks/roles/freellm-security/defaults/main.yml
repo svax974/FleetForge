@@ -1,0 +1,29 @@
+---
+# Pare-feu du service FreeLLMAPI.
+#
+# Le port est PUBLIÉ PAR DOCKER (docker compose, cf. freellm-install) : Docker
+# insère ses règles DNAT en amont de tout ce que gère ufw, une règle ufw sur ce
+# port n'a donc AUCUN effet (CLAUDE.md, constats des 06/08 et 09/08/2026). Ce
+# rôle n'en pose aucune : il travaille dans `DOCKER-USER`, la seule chaîne que
+# Docker traverse sans la réécrire — même modèle que searxng-security.
+
+freellm_container: freellmapi
+freellm_port: "{{ app_port | default(3001) }}"
+
+# ── Qui a le droit d'atteindre le service ──────────────────────────────────
+# Doit rester identique à freellm-install : c'est la même décision, prise une
+# fois côté publication du port et une fois côté filtrage.
+freellm_allowed_proxies: "{{ groups['proxies'] | default([]) }}"
+
+freellm_remote_proxies: >-
+  {{ freellm_allowed_proxies
+     | map('extract', hostvars, 'ansible_host')
+     | select('defined')
+     | reject('equalto', ansible_host)
+     | unique | list }}
+
+freellm_bind_address: "{{ '0.0.0.0' if (freellm_remote_proxies | length > 0) else '127.0.0.1' }}"
+
+# IP/CIDR bruts à autoriser en plus (dépannage). À garder vide : chaque entrée
+# est une exception qui survit à celui qui l'a posée.
+freellm_extra_allowed_cidrs: []

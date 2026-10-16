@@ -1,0 +1,31 @@
+---
+# Stop and remove the TimescaleDB container. Keeps data and config on disk.
+
+- name: Check compose project exists
+  ansible.builtin.stat:
+    path: "{{ tsdb_dir }}/docker-compose.yml"
+  register: tsdb_compose
+
+- name: Stop and remove TimescaleDB container
+  community.docker.docker_compose_v2:
+    project_src: "{{ tsdb_dir }}"
+    state: absent
+  when: tsdb_compose.stat.exists
+
+- name: Remove backup cron job
+  ansible.builtin.cron:
+    name: "papangmetrics-timescaledb backup"
+    state: absent
+
+# ── Supervision ────────────────────────────────────────────────────────────
+# Convention `-monitoring` (CLAUDE.md) : c'est le rôle de suppression du
+# service qui retire sa sonde. Une sonde laissée en place publierait
+# `service_up 0` indéfiniment et ferait sonner `ServiceDown` sur un service
+# volontairement désinstallé — l'alerte qu'on apprend à ignorer, et qui finit
+# par masquer les vraies.
+- name: Remove the svcprobe check
+  ansible.builtin.file:
+    path: "/etc/svcprobe/checks.d/timescaledb.json"
+    state: absent
+  become: true
+  tags: [monitoring]

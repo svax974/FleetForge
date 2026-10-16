@@ -1,0 +1,25 @@
+---
+- name: restart postfix
+  ansible.builtin.systemd:
+    name: postfix
+    state: restarted
+
+- name: restart dovecot
+  ansible.builtin.systemd:
+    name: dovecot
+    state: restarted
+
+- name: restart opendkim
+  ansible.builtin.systemd:
+    name: opendkim
+    state: restarted
+
+- name: restart fail2ban
+  ansible.builtin.systemd:
+    name: fail2ban
+    state: restarted
+
+- name: restart nginx
+  ansible.builtin.systemd:
+    name: nginx
+    state: restarted 

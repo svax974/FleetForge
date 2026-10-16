@@ -1,0 +1,44 @@
+---
+# Filtrage des ports PUBLIÉS par Docker.
+#
+# Pourquoi un rôle dédié : Docker insère ses règles DNAT dans la chaîne
+# PREROUTING/FORWARD, en amont de tout ce que gère ufw. Un conteneur lancé avec
+# `-p 6379:6379` écoute donc sur 0.0.0.0 et reste joignable depuis Internet même
+# si `ufw status` affiche un DENY explicite sur le port. Les règles ufw ne sont
+# pas « contournées » : elles ne voient tout simplement jamais ce trafic.
+#
+# Constaté sur `prometheus1` le 06/08/2026 : 15 règles ufw sur 9090/9093,
+# toutes décoratives ; Redis répondait `+PONG` sans authentification depuis
+# Internet et l'API Alertmanager renvoyait 200 — n'importe qui pouvait donc
+# poser un silence et éteindre toute la supervision.
+#
+# `DOCKER-USER` est la seule chaîne que Docker traverse et ne réécrit jamais :
+# c'est le point d'accroche prévu pour ce besoin.
+
+# Plage couvrant les sous-réseaux des bridges Docker. Le trafic entre deux
+# conteneurs traverse FORWARD, donc DOCKER-USER : sans cette autorisation, on
+# coupe aussi les communications internes (Prometheus → Alertmanager,
+# back → Redis…). Le trafic hôte → conteneur passe lui par OUTPUT et n'est pas
+# concerné.
+docker_ports_internal_cidr: "172.16.0.0/12"
+
+# Liste des ports à filtrer. Un port absent de cette liste n'est PAS touché.
+#   - port: 6379
+#     comment: "redis"
+#     allow_internal: true        # conteneurs voisins (défaut: true)
+#     sources: []                 # sources externes explicites
+#     allow_whitelist: false      # ajoute `whitelist` (défaut: false)
+#     published_remap: false      # true si -p <pub>:<autre> : filtre via conntrack --ctorigdstport
+#     allow_vpns: false           # ajoute les hôtes du groupe `vpns`
+#
+# LIMITE CONNUE (constatée le 22/09/2026, rotki-remove) : les tâches de
+# `docker-ports-security` sont toutes gardées par `when: docker_ports_rules |
+# length > 0` (tasks/main.yml) — retirer la DERNIÈRE règle d'un hôte (liste
+# vidée) ne fait donc RIEN à la prochaine exécution : le script/l'unité déjà
+# déployés restent en place, avec la règle DROP/ALLOW toujours active. Le
+# rôle sait AJOUTER et REMPLACER un jeu de règles, jamais le VIDER. Pour
+# retirer la dernière règle d'un hôte : flusher la règle à la main
+# (`iptables -D DOCKER-USER <n°>`, `iptables -S DOCKER-USER` pour la
+# retrouver) ou vider/arrêter `docker-ports-firewall.sh`/l'unité systemd
+# explicitement, en plus de vider `docker_ports_rules` dans le host_vars.
+docker_ports_rules: []

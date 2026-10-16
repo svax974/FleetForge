@@ -1,0 +1,63 @@
+---
+# Clean stuff before installing
+- name: Check if the docker compose file exists
+  ansible.builtin.stat:
+    path: ~/pgpool/docker-compose.yml
+  register: docker_fileinfo
+- name: Stop docker-compose in case it is running
+  community.docker.docker_compose_v2:
+    project_src: ~/pgpool/
+    state: absent
+  when: docker_fileinfo.stat.exists
+- name: Removes container directory if exists
+  ansible.builtin.file:
+    path: "{{ ansible_env.HOME }}/pgpool/"
+    state: absent
+  become: yes
+
+- name: Creates directory for container
+  ansible.builtin.file:
+    path: ~/pgpool
+    state: directory
+
+# Copy configuration files
+- name: Copy pgpool.conf
+  template:
+    src: pgpool.conf
+    dest: ~/pgpool/pgpool.conf
+- name: Copy pool_hba.conf
+  template:
+    src: pool_hba.conf
+    dest: ~/pgpool/pool_hba.conf
+- name: Copy pool_passwd
+  template:
+    src: pool_passwd
+    dest: ~/pgpool/pool_passwd
+- name: Copy pcp.conf
+  template:
+    src: pcp.conf
+    dest: ~/pgpool/pcp.conf
+
+- name: Copy follow_master.sh
+  template:
+    src: follow_master.sh
+    dest: ~/pgpool/follow_master.sh
+- name: Copy failover.sh
+  template:
+    src: failover.sh
+    dest: ~/pgpool/failover.sh
+
+- name: Copy Dockerfile
+  template:
+    src: Dockerfile
+    dest: ~/pgpool/Dockerfile
+- name: Copy docker-compose.yml
+  template:
+    src: docker-compose.yml
+    dest: ~/pgpool/docker-compose.yml
+
+- name: Run docker-compose
+  community.docker.docker_compose_v2:
+    project_src: ~/pgpool/
+    build: always
+    state: present

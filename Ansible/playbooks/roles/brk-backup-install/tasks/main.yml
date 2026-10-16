@@ -1,0 +1,192 @@
+---
+# Installe la sauvegarde du magasin BRK vers l'hôte `{{ brk_backup_dest_host }}`.
+#
+# Le rôle est ENTIÈREMENT dérivé de l'inventaire : adresse de destination, clé,
+# ouverture de pare-feu, known_hosts. Le rejouer après avoir changé l'IP de
+# l'hôte de destination suffit à repointer la sauvegarde — c'est ce que fait
+# `retarget-backups.yml`.
+
+# ── Garde-fous ─────────────────────────────────────────────────────────────
+
+- name: Fail if the backup destination is not in the inventory
+  ansible.builtin.fail:
+    msg: >-
+      L'hôte de destination `{{ brk_backup_dest_host }}` est absent de
+      l'inventaire. Ajoute-le au groupe `backups` avant de jouer ce rôle.
+  when: brk_backup_dest_host not in hostvars
+
+# Une copie locale est structurellement impossible : le magasin pèse 348 Go et
+# le disque de brk1 est à 92 %. Surtout, une sauvegarde sur le même disque que
+# la source ne protège d'aucune des deux pannes visées (perte du disque,
+# indisponibilité de la machine). Mieux vaut refuser que produire une
+# sauvegarde décorative.
+- name: Fail if the destination resolves to the source host itself
+  ansible.builtin.fail:
+    msg: >-
+      `{{ brk_backup_dest_host }}` pointe sur {{ brk_backup_dest_addr }}, soit
+      la machine sauvegardée. Une copie du magasin BRK sur son propre disque ne
+      protège ni d'une panne disque ni d'une indisponibilité de l'hôte — et le
+      disque de {{ inventory_hostname }} n'a pas la place. Corrige `ansible_host`
+      de `{{ brk_backup_dest_host }}` dans l'inventaire.
+  when: brk_backup_dest_addr == ansible_host
+
+- name: Check that the BRK store exists
+  ansible.builtin.stat:
+    path: "{{ brk_dir }}"
+  register: brk_store
+
+- name: Fail if the BRK store is missing
+  ansible.builtin.fail:
+    msg: "Magasin BRK introuvable ({{ brk_dir }}). Déploie BRK d'abord (deploy-brk.yml)."
+  when: not brk_store.stat.exists
+
+# ── Clé SSH dédiée ─────────────────────────────────────────────────────────
+
+- name: Generate the dedicated backup SSH key
+  community.crypto.openssh_keypair:
+    path: "{{ brk_backup_ssh_key_path }}"
+    type: ed25519
+    comment: "{{ inventory_hostname }}-brk-backup-to-{{ brk_backup_dest_host }}"
+    owner: "{{ brk_user }}"
+    group: "{{ brk_user }}"
+  become: true
+  register: brk_backup_key
+
+# Distribuée par Ansible, jamais à la main : c'est la seule façon qu'un
+# changement d'adresse de destination reste une opération d'inventaire.
+- name: Authorize the key on the destination host
+  ansible.posix.authorized_key:
+    user: "{{ brk_backup_dest_user }}"
+    state: present
+    key: "{{ brk_backup_key.public_key }}"
+    comment: "{{ inventory_hostname }}-brk-backup"
+  delegate_to: "{{ brk_backup_dest_host }}"
+  become: true
+  tags: [retarget]
+
+# Écrit ici plutôt que par `include_role: backup-security` : `delegate_to` sur
+# un include se propage aux tâches incluses de façon peu lisible, et une règle
+# de pare-feu posée sur la mauvaise machine est exactement le genre d'erreur
+# qui ne se voit qu'au premier échec de sauvegarde, une semaine plus tard.
+# Le rôle `backup-security` reste la source de vérité rejouable via
+# `update-ufw-all.yml` ; cette tâche en est le strict équivalent pour la source
+# courante, appliquée au moment où la clé vient d'être distribuée.
+- name: Open SSH on the destination for this host
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ ansible_host }}"
+    port: "{{ ssh_custom_port }}"
+    comment: "backup source {{ inventory_hostname }} - ssh push"
+  delegate_to: "{{ brk_backup_dest_host }}"
+  become: true
+  tags: [retarget]
+
+# La destination filtre SSH sur DEUX couches indépendantes : ufw (ci-dessus) et
+# tcpwrappers — `sshd` y est lié à libwrap, `/etc/hosts.deny` porte `sshd: ALL`
+# et `/etc/hosts.allow` ne liste que les IP opérateur du `whitelist`. Ouvrir ufw
+# sans inscrire la source dans hosts.allow laisse sshd refuser la connexion
+# AVANT l'authentification (`refused connect from …`, vu comme un
+# `Connection reset` côté source) : une sauvegarde qui ne part jamais alors que
+# tout paraît configuré. On ajoute donc une ligne `sshd:` DISTINCTE de celle que
+# gère `ssh-security-update` (lineinfile sur sa propre ligne combinée `whitelist`
+# + vpns), pour qu'un rejeu de ce rôle de sécurité ne l'efface pas. La source
+# étant dérivée de l'inventaire, elle n'a pas sa place dans le `whitelist`
+# statique. Sans effet si la destination n'utilise pas libwrap.
+- name: Allow the source through tcpwrappers on the destination (sshd)
+  ansible.builtin.lineinfile:
+    path: /etc/hosts.allow
+    line: "sshd: {{ ansible_host }}"
+    regexp: "^sshd: {{ ansible_host | regex_escape }}$"
+    create: true
+    owner: root
+    group: root
+    mode: '0644'
+  delegate_to: "{{ brk_backup_dest_host }}"
+  become: true
+  tags: [retarget]
+
+- name: Create the destination backup directory
+  ansible.builtin.file:
+    path: "{{ brk_backup_dest_dir }}"
+    state: directory
+    owner: "{{ brk_backup_dest_user }}"
+    group: "{{ brk_backup_dest_user }}"
+    mode: '0750'
+  delegate_to: "{{ brk_backup_dest_host }}"
+  become: true
+  tags: [retarget]
+
+# Sans cette entrée, rsync en mode batch (cron, donc sans terminal) échoue sur
+# la validation de l'empreinte : la sauvegarde ne partirait jamais et rien ne
+# le dirait. `ssh-keyscan` est rejoué à chaque exécution du rôle, ce qui couvre
+# aussi le cas d'un serveur de destination réinstallé.
+- name: Refresh the destination host key in known_hosts
+  ansible.builtin.known_hosts:
+    path: "{{ brk_home }}/.ssh/known_hosts"
+    name: "[{{ brk_backup_dest_addr }}]:{{ brk_backup_dest_port }}"
+    key: "{{ lookup('pipe', 'ssh-keyscan -p ' ~ brk_backup_dest_port ~ ' -t ed25519 ' ~ brk_backup_dest_addr ~ ' 2>/dev/null | grep -v \"^#\"') }}"
+    state: present
+  become: true
+  become_user: "{{ brk_user }}"
+  tags: [retarget]
+
+# ── Répertoire des métriques ───────────────────────────────────────────────
+
+- name: Create the node_exporter textfile directory
+  ansible.builtin.file:
+    path: "{{ node_exporter_textfile_dir }}"
+    state: directory
+    owner: "{{ brk_user }}"
+    group: "{{ brk_user }}"
+    mode: '0755'
+  become: true
+
+# ── Scripts ────────────────────────────────────────────────────────────────
+
+- name: Deploy the BRK backup script
+  ansible.builtin.template:
+    src: brk-backup.sh.j2
+    dest: "{{ brk_home }}/brk-backup.sh"
+    owner: "{{ brk_user }}"
+    group: "{{ brk_user }}"
+    mode: '0750'
+  become: true
+  tags: [retarget]
+
+- name: Deploy the BRK restore script
+  ansible.builtin.template:
+    src: brk-restore.sh.j2
+    dest: "{{ brk_home }}/brk-restore.sh"
+    owner: "{{ brk_user }}"
+    group: "{{ brk_user }}"
+    mode: '0750'
+  become: true
+  tags: [retarget]
+
+- name: Schedule the BRK backup
+  ansible.builtin.cron:
+    name: "brk backup"
+    weekday: "{{ brk_backup_cron_weekday }}"
+    hour: "{{ brk_backup_cron_hour }}"
+    minute: "0"
+    job: "{{ brk_home }}/brk-backup.sh >> {{ brk_home }}/brk-backup.log 2>&1"
+    user: "{{ brk_user }}"
+  become: true
+
+- name: Rotate the backup log
+  ansible.builtin.copy:
+    dest: /etc/logrotate.d/brk-backup
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      {{ brk_home }}/brk-backup.log {
+          weekly
+          rotate 8
+          compress
+          missingok
+          notifempty
+          copytruncate
+      }
+  become: true

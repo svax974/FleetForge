@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+# Restaure la base d'indicateurs depuis {{ tsdb_backup_dest_host }}
+# ({{ tsdb_backup_dest_dir }}{% if not (tsdb_backup_is_local | bool) %} sur {{ tsdb_backup_dest_addr }}{% endif %}).
+# Généré par Ansible (rôle timescaledb-backup-install) — NE PAS ÉDITER À LA MAIN.
+#
+# Usage :
+#   ~/papangmetrics-db/timescaledb-restore.sh --check          # liste, ne restaure rien
+#   ~/papangmetrics-db/timescaledb-restore.sh --yes            # restaure la plus récente
+#   ~/papangmetrics-db/timescaledb-restore.sh --yes --file <nom>
+#
+# ARRÊTE l'ETL AVANT DE LANCER CE SCRIPT. L'ETL écrit en continu dans la base ;
+# le laisser tourner pendant la restauration mélange des données restaurées et
+# des données fraîches sur une base à moitié reconstruite. Utilise
+# `restore-timescale.yml`, qui enchaîne l'arrêt, la restauration et la reprise.
+set -euo pipefail
+
+DB="{{ tsdb_db }}"
+DB_USER="{{ tsdb_user }}"
+CONTAINER="{{ tsdb_container }}"
+DEST_DIR="{{ tsdb_backup_dest_dir }}"
+
+CONFIRMED=no
+CHECK_ONLY=no
+DUMP_NAME=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --yes)   CONFIRMED=yes ;;
+    --check) CHECK_ONLY=yes ;;
+    --file)  shift; DUMP_NAME="$1" ;;
+    *) echo "Option inconnue : $1"; exit 2 ;;
+  esac
+  shift
+done
+
+log() { echo "$(date -Iseconds) $*"; }
+
+{% if tsdb_backup_is_local | bool %}
+dest_sh() { bash -c "$1"; }
+# Destination locale : le dump est lu directement sur le disque.
+dump_stream() { gunzip -c "$1"; }
+{% else %}
+SSH_KEY="{{ tsdb_backup_ssh_key_path }}"
+DEST="{{ tsdb_backup_dest_user }}@{{ tsdb_backup_dest_addr }}"
+DEST_PORT="{{ tsdb_backup_dest_port }}"
+dest_sh() {
+  ssh -p "${DEST_PORT}" -i "${SSH_KEY}" -o BatchMode=yes \
+      -o ServerAliveInterval=60 -o ServerAliveCountMax=10 "${DEST}" "$1"
+}
+# Le dump est décompressé côté destination et streamé : il ne transite jamais
+# par le disque local, qui n'a pas forcément la place de l'accueillir.
+dump_stream() {
+  ssh -p "${DEST_PORT}" -i "${SSH_KEY}" -o BatchMode=yes \
+      -o ServerAliveInterval=60 -o ServerAliveCountMax=10 "${DEST}" "gunzip -c '$1'"
+}
+{% endif %}
+
+# ── État ───────────────────────────────────────────────────────────────────
+echo "Source des sauvegardes : {% if tsdb_backup_is_local | bool %}locale{% else %}{{ tsdb_backup_dest_addr }}{% endif %}:${DEST_DIR}"
+echo "--- générations disponibles (plus récente en tête) ---"
+dest_sh "ls -lh '${DEST_DIR}'/${DB}-*.sql.gz 2>/dev/null | sort -rk9" || echo "(aucune)"
+echo "------------------------------------------------------"
+
+[ "${CHECK_ONLY}" = "yes" ] && exit 0
+
+if [ -z "${DUMP_NAME}" ]; then
+  DUMP_NAME="$(dest_sh "ls -1 '${DEST_DIR}'/${DB}-*.sql.gz 2>/dev/null | sort -r | head -1")"
+  [ -n "${DUMP_NAME}" ] || { echo "ERREUR : aucune sauvegarde disponible." >&2; exit 1; }
+else
+  case "${DUMP_NAME}" in /*) ;; *) DUMP_NAME="${DEST_DIR}/${DUMP_NAME}" ;; esac
+  dest_sh "test -f '${DUMP_NAME}'" || { echo "ERREUR : ${DUMP_NAME} introuvable." >&2; exit 1; }
+fi
+
+echo "Sauvegarde retenue : ${DUMP_NAME}"
+
+if [ "${CONFIRMED}" != "yes" ]; then
+  cat >&2 <<EOF
+
+ERREUR : confirmation requise.
+
+Cette opération SUPPRIME la base '${DB}' et la reconstruit depuis
+${DUMP_NAME}. Toutes les données postérieures à cette sauvegarde sont perdues.
+
+Vérifie que l'ETL est arrêté, puis relance avec --yes.
+EOF
+  exit 1
+fi
+
+# ── Avertissement si l'ETL écrit encore ────────────────────────────────────
+# Sans ce contrôle, une restauration lancée ETL en marche échoue au DROP
+# DATABASE (connexions actives) ou, pire, réussit et se fait immédiatement
+# réécrire par le balayage en cours.
+ACTIVE="$(docker exec "${CONTAINER}" psql -U "${DB_USER}" -d postgres -tAc \
+  "SELECT count(*) FROM pg_stat_activity WHERE datname = '${DB}' AND application_name <> 'psql';")"
+if [ "${ACTIVE}" -gt 0 ]; then
+  log "[WARN] ${ACTIVE} connexion(s) active(s) sur ${DB} — l'ETL ou l'API tourne probablement encore."
+  log "[WARN] Elles seront coupées par le DROP DATABASE ... WITH (FORCE)."
+fi
+
+# ── Restauration ───────────────────────────────────────────────────────────
+log "Suppression et recréation de ${DB}."
+docker exec "${CONTAINER}" psql -U "${DB_USER}" -d postgres -v ON_ERROR_STOP=1 \
+  -c "DROP DATABASE IF EXISTS ${DB} WITH (FORCE);"
+docker exec "${CONTAINER}" psql -U "${DB_USER}" -d postgres -v ON_ERROR_STOP=1 \
+  -c "CREATE DATABASE ${DB};"
+
+# L'extension doit préexister au chargement : init.sql ne s'exécute qu'à la
+# toute première initialisation du conteneur, pas à la création d'une base.
+log "Activation de l'extension timescaledb."
+docker exec "${CONTAINER}" psql -U "${DB_USER}" -d "${DB}" -v ON_ERROR_STOP=1 \
+  -c "CREATE EXTENSION IF NOT EXISTS timescaledb;"
+
+# Procédure imposée par TimescaleDB pour un rechargement logique : sans
+# pre_restore, les déclencheurs internes des hypertables et des agrégats
+# continus interceptent les INSERT du dump et la restauration produit une base
+# structurellement fausse — qui répond aux requêtes, ce qui la rend d'autant
+# plus dangereuse.
+log "timescaledb_pre_restore()."
+docker exec "${CONTAINER}" psql -U "${DB_USER}" -d "${DB}" -v ON_ERROR_STOP=1 \
+  -c "SELECT timescaledb_pre_restore();"
+
+log "Chargement du dump — cela peut durer plusieurs heures."
+# ON_ERROR_STOP=0 volontairement : un dump PostgreSQL rejoué contient toujours
+# quelques ordres qui échouent sans conséquence (droits, extensions déjà
+# présentes). Les erreurs réelles sont dans le journal, et post_restore ci-après
+# échouerait sur une base incohérente.
+if ! dump_stream "${DUMP_NAME}" | docker exec -i "${CONTAINER}" psql -U "${DB_USER}" -d "${DB}" -v ON_ERROR_STOP=0; then
+  log "[ERROR] Le chargement a échoué. La base est dans un état intermédiaire."
+  log "[ERROR] Repasse timescaledb_post_restore() avant toute autre tentative."
+  exit 1
+fi
+
+log "timescaledb_post_restore()."
+docker exec "${CONTAINER}" psql -U "${DB_USER}" -d "${DB}" -v ON_ERROR_STOP=1 \
+  -c "SELECT timescaledb_post_restore();"
+
+log "Contrôle de cohérence."
+docker exec "${CONTAINER}" psql -U "${DB_USER}" -d "${DB}" -c \
+  "SELECT hypertable_name, count(*) AS chunks FROM timescaledb_information.chunks GROUP BY 1;"
+docker exec "${CONTAINER}" psql -U "${DB_USER}" -d "${DB}" -c \
+  "SELECT pg_size_pretty(pg_database_size('${DB}')) AS taille;"
+
+log "Restauration terminée. Relance l'ETL et l'API sur brk1."

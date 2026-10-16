@@ -1,0 +1,26 @@
+---
+- name: Deploy Grafana Docker container
+  docker_container:
+    name: grafana
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+    env:
+      - GF_SECURITY_ADMIN_USER={{ grafana_admin_user }}
+      - GF_SECURITY_ADMIN_PASSWORD={{ grafana_admin_pass }}
+    restart_policy: always
+
+- name: Create a volume for Granafa persistent data
+  docker_volume:
+    name: grafana_data
+
+- name: Wait for Grafana to be available
+  uri:
+    url: http://localhost:3000
+    return_content: yes
+    status_code: 200
+  register: result
+  retries: 10
+  delay: 5

@@ -1,0 +1,12 @@
+---
+# `tags: [monitoring]` comme les tâches du rôle : un handler dont les tags ne
+# correspondent pas au `--tags` de l'exécution est ignoré, et le redémarrage
+# qui prend en compte un svcprobe.py mis à jour ne serait jamais joué sur un
+# rejeu `--tags monitoring`.
+- name: restart svcprobe
+  ansible.builtin.systemd:
+    name: svcprobe
+    state: restarted
+    daemon_reload: true
+  become: true
+  tags: [monitoring]

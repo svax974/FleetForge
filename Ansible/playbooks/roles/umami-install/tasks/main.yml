@@ -1,0 +1,59 @@
+---
+# Deploys self-hosted Umami (app + its own private Postgres) as a two-service docker-compose
+# stack — mirrors theta-edge-install's role skeleton and db-install-master's compose/env-var
+# wiring. Umami owns this Postgres entirely (not the shared dbfmaster/timescale instances):
+# a separate DB keeps its schema/migrations independent from the app's own data stores.
+
+- name: Fail if umami_db_pass is not set
+  ansible.builtin.fail:
+    msg: "umami_db_pass is required. Define it (vault-encrypted) in group_vars/papanglabs.yml."
+  when: umami_db_pass is not defined or umami_db_pass == ""
+
+- name: Fail if umami_hash_salt is not set
+  ansible.builtin.fail:
+    msg: "umami_hash_salt is required. Define it (vault-encrypted) in group_vars/papanglabs.yml."
+  when: umami_hash_salt is not defined or umami_hash_salt == ""
+
+- name: Install Docker (if not already present)
+  ansible.builtin.include_role:
+    name: docker-install
+  when: ansible_facts.services is not defined or 'docker' not in ansible_facts.services
+
+- name: Create Umami data directory
+  ansible.builtin.file:
+    path: "{{ umami_data_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+  become: true
+
+- name: Create Umami Postgres data directory
+  ansible.builtin.file:
+    path: "{{ umami_data_dir }}/db"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  become: true
+
+- name: Deploy docker-compose for Umami
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: "{{ umami_data_dir }}/docker-compose.yml"
+    owner: root
+    group: root
+    mode: "0600"
+  notify: restart umami
+
+- name: Pull Umami Docker image
+  community.docker.docker_image:
+    name: "{{ umami_image }}"
+    source: pull
+    force_source: true
+
+- name: Start Umami stack
+  community.docker.docker_compose_v2:
+    project_name: umami
+    project_src: "{{ umami_data_dir }}"
+    state: present

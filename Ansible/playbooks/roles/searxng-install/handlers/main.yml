@@ -1,0 +1,9 @@
+---
+# settings.yml n'est lu qu'au démarrage : sans ce redémarrage, un changement de
+# configuration serait déployé sans jamais prendre effet.
+- name: restart searxng
+  community.docker.docker_container:
+    name: "{{ searxng_container }}"
+    state: started
+    restart: true
+  become: true

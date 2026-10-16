@@ -1,0 +1,39 @@
+---
+# Ouverture du récepteur remote_write de Prometheus aux hôtes qui lui POUSSENT
+# des métriques.
+#
+# Pourquoi un rôle, et pas une entrée de plus dans
+# `host_vars/prometheus1.yml` : la liste des ports d'une machine décrit la
+# MACHINE, pas ses clients. Un back de prod qui apparaît, se déplace ou
+# disparaît est un événement du cycle de vie du BACK — c'est donc son
+# déploiement qui doit poser et retirer l'autorisation, sinon on maintient à la
+# main, dans un fichier sans rapport, une liste qui se périme en silence.
+#
+# Le port 9090 est PUBLIÉ par Docker : ufw ne le voit pas. L'autorisation est
+# déposée dans le répertoire de drop-in lu à l'exécution par
+# `docker-ports-firewall.sh`, ce qui la fait survivre à tout rejeu de
+# `docker-ports-security` — une fusion faite côté Ansible, elle, disparaîtrait
+# au premier `update-ufw-all.yml` en coupant un flux qui marchait.
+
+prwsec_port: "{{ prometheus_port | default(9090) }}"
+
+# Nom du fichier de drop-in. Un par service pousseur : le retirer suffit à
+# refermer, et `papanglabs-back-remove` le fait.
+prwsec_service: papanglabs-back
+
+# Adresse autorisée. Par défaut celle de l'hôte en cours de déploiement.
+prwsec_source: "{{ ansible_host }}"
+
+# Hôtes de supervision à ouvrir. Renseigné par l'appelant (le rôle
+# `papanglabs-back-monitoring` a déjà résolu la liste) ; à défaut, le groupe.
+prwsec_prometheus_hosts: "{{ groups['prometheus'] | default([]) }}"
+
+# URL réellement utilisées par le pousseur. L'ouverture n'est posée que pour les
+# hôtes dont l'ADRESSE apparaît dans l'une d'elles, c'est-à-dire quand la poussée
+# est DIRECTE sur le port de Prometheus.
+#
+# Quand elle passe par un vhost TLS du proxy (https://prometheus1.…/api/v1/write),
+# c'est le proxy qui joint Prometheus, depuis la même machine : ouvrir 9090 à
+# l'IP du back n'apporterait rien et exposerait le port un peu plus. Liste vide
+# = comportement historique, on ouvre pour tous.
+prwsec_urls: []

@@ -1,0 +1,24 @@
+---
+# Supprime opencode ET tout ce qu'il a écrit dans les comptes visés.
+#
+#   ./play.sh web3c purge-opencode.yml --limit hub -e confirm=yes
+#
+# ATTENTION — partent avec le binaire, pour chaque compte de `opencode_users` :
+#   • `~/.config/opencode`      configuration, agents, commandes, prompts
+#   • `~/.local/share/opencode` `opencode.db` : historique complet des sessions
+#                               (plusieurs gigaoctets après quelques mois) ET
+#                               identifiants des fournisseurs, dans la même base
+#   • `~/.local/state/opencode` modèle sélectionné, favoris, historique de saisie
+#   • `~/.cache/opencode`
+#   • `~/.opencode`             installation personnelle du script officiel
+#
+# Rien de tout cela n'est retéléchargeable, contrairement au binaire : d'où
+# `-e confirm=yes`, sans quoi le rôle refuse.
+#
+# `--limit` est OBLIGATOIRE.
+
+- name: Purge d'opencode (configuration, sessions et identifiants compris)
+  hosts: all
+  remote_user: "{{ remote_username }}"
+  roles:
+    - opencode-purge

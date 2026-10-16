@@ -1,0 +1,12 @@
+---
+# Déploie node_exporter et enregistre la cible auprès de Prometheus.
+# Cibler explicitement les machines PHYSIQUES avec --limit : plusieurs hôtes
+# d'inventaire peuvent partager une même IP, et les déployer tous produirait
+# autant de cibles dupliquées pointant sur le même exporteur.
+#   ./play.sh papanglabs deploy-exporter-sys.yml --limit prometheus1,timescale,brk1
+- name: Deploy system exporter (node_exporter) and register it in Prometheus
+  hosts: all
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - exporter-sys-install

@@ -1,0 +1,12 @@
+---
+# Retire la sonde svcprobe de ctdapi. Ne touche pas à la stack docker-compose
+# (hors Ansible). Utilise purge-ctdapi.yml pour aussi supprimer la sauvegarde
+# PostgreSQL.
+#
+#   ./play.sh web3c remove-ctdapi.yml
+
+- name: Suppression de la supervision
+  hosts: ctdapi
+  remote_user: "{{ remote_username }}"
+  roles:
+    - ctdapi-remove

@@ -1,0 +1,39 @@
+---
+# Configure DB pool firewall rules
+- name: Allow connections on postgresql port from whitelist
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ item }}"
+    port: "{{ postgres_port }}"
+  with_items: "{{ whitelist }}"
+
+- name: Allow connections on pgadmin port from whitelist
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ item }}"
+    port: "{{ pgadmin_port_http }}"
+  with_items: "{{ whitelist }}"
+
+- name: Allow connections on pgadmin port from proxies
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ item }}"
+    port: "{{ pgadmin_port_http }}"
+  with_items: "{{ groups['proxies'] | default([]) | map('extract', hostvars, 'ansible_host') | list }}"
+
+- name: Allow connections on postgresql port from backup to main
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ hostvars['dbbackup'].ansible_host }}"
+    port: "{{ postgres_port }}"
+
+- name: Creates directory for pgadmin and set owner to the docker container user
+  ansible.builtin.file:
+    path: /opt/pgadmin/
+    state: directory
+    mode: '0750'
+    owner: 5050

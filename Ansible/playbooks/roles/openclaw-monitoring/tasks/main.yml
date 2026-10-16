@@ -1,0 +1,47 @@
+---
+# Supervision d'OpenClaw. Convention `<service>-monitoring` (CLAUDE.md) : le
+# rôle dépose une SONDE déclarative pour `svcprobe`, qui expose
+# `service_up{service="openclaw"}`.
+
+# `public: true` est OBLIGATOIRE : sans lui, les defaults du rôle inclus
+# (svcprobe_checks_dir, svcprobe_lib_dir, svcprobe_listen_port) restent confinés à
+# ses propres tâches et les tâches ci-dessous échouent sur une variable
+# indéfinie (comportement documenté d'`include_role`, `public` valant `no`
+# par défaut).
+- name: Ensure the shared probe is installed
+  ansible.builtin.include_role:
+    name: svcprobe-install
+    public: true
+  tags: [monitoring]
+
+- name: Deploy the OpenClaw probe
+  ansible.builtin.template:
+    src: check.json.j2
+    dest: "{{ svcprobe_checks_dir }}/openclaw.json"
+    owner: root
+    group: root
+    mode: '0644'
+  become: true
+  tags: [monitoring]
+
+# Contrôle immédiat : une sonde déposée mais qui répond `service_up 0` alors
+# que le service tourne est une sonde MAL ÉCRITE, et elle ferait sonner une
+# alerte en permanence.
+- name: Verify the probe answers
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ svcprobe_listen_port }}/metrics"
+    return_content: true
+  register: openclaw_probe
+  retries: 6
+  delay: 5
+  until: openclaw_probe.status is defined and openclaw_probe.status == 200
+  changed_when: false
+  tags: [monitoring]
+
+- name: Report the probe result
+  ansible.builtin.debug:
+    msg: >-
+      {{ openclaw_probe.content.split('\n')
+         | select('search', 'openclaw')
+         | list }}
+  tags: [monitoring]

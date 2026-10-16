@@ -1,0 +1,21 @@
+---
+# Install and configure tools
+
+- name: Upgrade all packages
+  ansible.builtin.apt:
+    upgrade: dist
+    update_cache: yes
+
+- name: Update repositories cache and install base stuff
+  ansible.builtin.apt:
+    pkg:
+    - ufw
+    - jq
+    - lsb-release
+    - wget
+    - curl
+    - git
+    - tar
+    - bzip2
+    - lz4
+    update_cache: yes

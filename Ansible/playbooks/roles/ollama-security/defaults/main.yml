@@ -1,0 +1,25 @@
+---
+# `ollama-install` pose un override systemd `OLLAMA_HOST=0.0.0.0:11434` : le
+# démon écoute sur TOUTES les interfaces et l'API n'a aucune authentification.
+# Qui joint le port peut lister les modèles, en télécharger de nouveaux (donc
+# remplir le disque) et consommer le GPU.
+#
+# Service publié par les proxies (ollama.web3c.cc) : le port est ouvert aux
+# proxies + vpns + Prometheus + whitelist, refusé à tout le reste (CLAUDE.md
+# § 1, « Accès réseau »). Le MODE (privé/public) ne joue que sur le vhost.
+
+ollamasec_port: "{{ app_port | default(11434) }}"
+
+# Sources autorisées en plus (dépannage). À garder vide : chaque entrée est une
+# exception qui survit à celui qui l'a posée. L'accès local (127.0.0.1) n'est
+# pas concerné : ufw laisse passer `lo`, la sonde svcprobe fonctionne.
+ollamasec_extra_allowed: []
+
+# Sources, toutes DÉRIVÉES de l'inventaire. Partagé avec `ollama-purge`, qui
+# doit retirer exactement les mêmes règles.
+ollamasec_sources: >-
+  {{ (whitelist | default([]))
+     + (groups['proxies'] | default([]) | map('extract', hostvars, 'ansible_host') | list)
+     + (groups['vpns'] | default([]) | map('extract', hostvars, 'ansible_host') | list)
+     + ([hostvars[prometheus_host].ansible_host] if (prometheus_host is defined and prometheus_host in hostvars) else [])
+     + ollamasec_extra_allowed }}

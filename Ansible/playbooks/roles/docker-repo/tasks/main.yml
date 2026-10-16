@@ -1,0 +1,57 @@
+---
+- name: Create /opt/docker-repo directory and make it owned by "{{ remote_username }}" user
+  file:
+    path: /opt/docker-repo/auth
+    state: directory
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: '0700'
+  become: true
+- name: Copy the htpasswd file to the docker-repo directory
+  template:
+    src: htpasswd
+    dest: /opt/docker-repo/auth/htpasswd
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: '0640'
+
+- name: Create /opt/docker-repo directory and make it owned by "{{ remote_username }}" user
+  file:
+    path: /opt/docker-repo/config
+    state: directory
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: '0700'
+  become: true
+- name: Copy the config.yml file to the docker-repo directory
+  template:
+    src: config.yml
+    dest: /opt/docker-repo/config/config.yml
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: '0640'
+
+- name: Create /opt/docker-repo directory and make it owned by "{{ remote_username }}" user
+  file:
+    path: /opt/docker-repo/data
+    state: directory
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: '0700'
+  become: true
+
+- name: Copy the docker-compose file in the docker-repo directory
+  template:
+    src: docker-compose.yml
+    dest: /opt/docker-repo/docker-compose.yml
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: '0640'
+
+- name: Start the docker-repo service
+  community.docker.docker_compose_v2:
+    project_name: docker-repo
+    state: present
+    project_src: /opt/docker-repo
+    pull: always
+    #build: true

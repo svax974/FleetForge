@@ -1,0 +1,7 @@
+---
+- name: restart esplora
+  ansible.builtin.systemd:
+    name: esplora
+    state: restarted
+    daemon_reload: true
+  become: true

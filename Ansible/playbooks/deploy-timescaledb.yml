@@ -1,0 +1,45 @@
+---
+# Déploiement COMPLET de la base d'indicateurs sur l'hôte `timescale` :
+# moteur, pare-feu, sauvegarde et supervision.
+#
+#   ./play.sh papanglabs deploy-timescaledb.yml
+#   ./play.sh papanglabs deploy-timescaledb.yml --tags monitoring   # supervision seule
+#
+# Suppose la machine DÉJÀ BOOTSTRAPÉE. Pour un VPS neuf, passer par
+# `deploy-timescaledb-standalone.yml` : il enchaîne le bootstrap (root, port 22)
+# puis IMPORTE ce playbook. Le contenu du déploiement n'existe donc qu'ici —
+# les deux fichiers se recouvraient auparavant, et divergeaient déjà : la
+# sauvegarde n'avait été ajoutée que dans la version « standalone ».
+#
+# Ce playbook ciblait `brk1`, l'hôte du nœud Bitcoin, reliquat de l'époque où
+# la base y était co-localisée. Depuis la migration sur un VPS dédié, le
+# rejouer aurait installé un SECOND TimescaleDB sur brk1, dont le disque est à
+# 92 % : le conteneur aurait démarré, écouté sur 5432 en local, et personne
+# n'y aurait jamais écrit.
+
+# ── Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ───────────────────────
+# Échoue immédiatement si le parc n'a pas d'hôte de supervision utilisable,
+# puis vérifie — et répare — le socle de la machine, node_exporter et sa cible
+# Prometheus. Les contrôles bloquants portent le tag `always` : ils
+# s'appliquent même à un rejeu ciblé par `--tags`.
+- name: Contrôle préalable
+  hosts: timescale
+  remote_user: "{{ remote_username }}"
+  roles:
+    - role: host-preflight
+      preflight_require_docker: true
+
+- name: Base d'indicateurs TimescaleDB
+  hosts: timescale
+  remote_user: "{{ remote_username }}"
+  roles:
+    - timescaledb-install
+    - timescaledb-security
+    # La sauvegarde fait partie du déploiement, pas d'une étape ultérieure
+    # qu'on pense à faire : une base déployée sans sauvegarde est une base dont
+    # personne ne saura qu'elle n'en a pas. Destination : l'hôte d'inventaire
+    # `backup-timescale`.
+    - timescaledb-backup-install
+    # Sonde `service_up` + métriques (taille, connexions, chunks compressés,
+    # transaction la plus longue) et enregistrement de la cible Prometheus.
+    - timescaledb-monitoring

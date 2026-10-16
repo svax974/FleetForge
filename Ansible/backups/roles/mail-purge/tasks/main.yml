@@ -1,0 +1,40 @@
+---
+# Purge mail server — removes packages and all mail data, config, and queues.
+# WARNING: all emails and mailboxes will be permanently deleted.
+
+- name: Stop mail services
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: stopped
+    enabled: no
+  loop:
+    - postfix
+    - dovecot
+    - opendkim
+  ignore_errors: true
+
+- name: Remove mail server packages
+  ansible.builtin.apt:
+    pkg:
+      - postfix
+      - dovecot-core
+      - dovecot-imapd
+      - dovecot-pop3d
+      - opendkim
+      - roundcube
+    state: absent
+    purge: yes
+
+- name: Remove mail config and data directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/postfix
+    - /etc/dovecot
+    - /etc/opendkim
+    - /etc/opendkim.conf
+    - /var/mail
+    - /var/spool/postfix
+    - /var/lib/dovecot
+    - /etc/postfix/sqlite

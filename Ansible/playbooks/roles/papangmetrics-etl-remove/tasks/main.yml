@@ -1,0 +1,31 @@
+---
+- name: Stop and disable ETL service
+  ansible.builtin.systemd:
+    name: papangmetrics-etl
+    state: stopped
+    enabled: false
+  become: true
+  ignore_errors: true
+
+- name: Remove ETL systemd unit
+  ansible.builtin.file:
+    path: /etc/systemd/system/papangmetrics-etl.service
+    state: absent
+  become: true
+
+- name: Reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+  become: true
+
+# Contrepartie de l'enregistrement fait par `papangmetrics-etl-install`. Sans
+# elle, la cible survit au retrait du service et `TargetDown` sonne pour
+# toujours sur une machine qui n'héberge plus rien. Pas de redémarrage de
+# Prometheus : `file_sd_configs` surveille le répertoire et retire la cible seul.
+- name: Remove papangmetrics-etl Prometheus target
+  ansible.builtin.file:
+    path: "/home/{{ remote_username }}/prometheus/prometheus-configs/papangmetrics-etl/{{ inventory_hostname }}.json"
+    state: absent
+  delegate_to: "{{ prometheus_host }}"
+  become: true
+  ignore_errors: true

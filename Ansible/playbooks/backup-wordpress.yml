@@ -1,0 +1,13 @@
+---
+- name: Backup WordPress from remote host
+  hosts: all
+  remote_user: "{{ remote_username }}"
+  become: true
+  become_method: sudo
+
+  vars:
+    wp_remote_path: /var/www/html/wordpress
+    wp_local_backup_dir: "{{ playbook_dir }}/../backups/wordpress"
+
+  roles:
+    - wordpress-backup

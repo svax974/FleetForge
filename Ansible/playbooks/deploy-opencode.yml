@@ -1,0 +1,42 @@
+---
+# opencode — agent de codage en ligne de commande.
+#
+#   ./play.sh web3c deploy-opencode.yml --limit hub
+#   ./play.sh web3c deploy-opencode.yml --limit hub -e opencode_version=1.18.18
+#
+# Installe un binaire pour la MACHINE (/usr/local/bin/opencode) et pose la
+# configuration globale de chaque compte de `opencode_users`, pointant sur le
+# modèle gratuit MiMo V2.5 de OpenCode Zen (`opencode/mimo-v2.5-free`).
+#
+# Aucune clé d'API n'est nécessaire : les modèles `-free` de Zen répondent sans
+# authentification (vérifié le 13/08/2026 sur un poste dont les tables
+# `credential` et `account` d'opencode.db sont vides).
+#
+# Le rôle termine par un APPEL RÉEL au modèle : « le binaire est posé » et
+# « l'agent fonctionne » sont deux états distincts, et le second est le seul
+# qui intéresse l'utilisateur. Le contrôle porte son User-Agent, qui est la
+# condition d'entrée du palier gratuit — un `curl` de vérification ordinaire
+# reçoit un 429 et fait conclure à tort à un quota épuisé (cf.
+# `opencode_user_agent` dans opencode-install/defaults).
+#
+# `--limit` est OBLIGATOIRE : `hosts: all` sans restriction installerait
+# opencode sur tout le parc. Les hôtes concernés sont ceux dont l'inventaire
+# porte `opencode` dans `ansible_roles`.
+#
+# ── Pas de play `host-preflight`, et pas de rôle `-monitoring` ─────────────
+# CLAUDE.md § 2 impose les deux pour tout SERVICE. opencode n'en est pas un :
+# aucun démon, aucun port d'écoute, aucun utilisateur système, rien qui puisse
+# tomber entre deux exécutions. Le préflight vérifie la chaîne de supervision
+# d'un service à superviser ; il échouerait ici sur un prérequis qui ne
+# concerne pas cet outil. Ce que le rôle contrôle à la place, c'est ce que
+# l'installation PRODUIT : `opencode --version` doit répondre, et un témoin est
+# déposé dans /var/lib/fleetforge/state/opencode.json.
+#
+# Le modèle par défaut se change ensuite sans réinstaller :
+# `update-opencode-model.yml`.
+
+- name: Installation d'opencode
+  hosts: all
+  remote_user: "{{ remote_username }}"
+  roles:
+    - opencode-install

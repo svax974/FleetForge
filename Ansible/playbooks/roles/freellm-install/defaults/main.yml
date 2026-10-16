@@ -1,0 +1,96 @@
+---
+# FreeLLMAPI (https://freellmapi.co) — proxy unifié multi-fournisseurs LLM,
+# API OpenAI-compatible sous un seul jeton bearer. Installé via l'installeur
+# officiel (curl -fsSL https://freellmapi.co/install.sh | bash), qui déploie
+# un conteneur Docker Compose (ghcr.io/tashfeenahmed/freellmapi:latest) — PAS
+# un binaire natif : « srvc doit pouvoir piloter les services qu'il déploie »
+# (CLAUDE.md § 2) ne s'applique qu'à un service natif hors conteneur, ce n'est
+# pas le cas ici (comme searxng-install).
+#
+# Lu le 18/09/2026 (tashfeenahmed/freellmapi, install.sh) : le script écrit
+# lui-même `.env` (ENCRYPTION_KEY généré une fois, jamais régénéré tant que le
+# fichier existe) et `docker-compose.yml` (RÉÉCRIT à chaque exécution) dans
+# FREELLMAPI_DIR, puis fait `docker compose pull && up -d`. Ce rôle laisse le
+# script gérer ces deux fichiers et se contente d'AJOUTER ce dont il a besoin
+# par-dessus :
+#   - PORT/HOST_BIND dans .env, décidés comme pour searxng (co-localisation
+#     avec les proxies) ;
+#   - un `docker-compose.override.yml` propre à ce rôle (jamais touché par
+#     install.sh, fusionné automatiquement par `docker compose`) pour monter
+#     le fichier de clés fournisseur optionnel.
+
+freellm_install_dir: "/home/{{ remote_username }}/freellmapi"
+freellm_container: freellmapi
+freellm_image: "ghcr.io/tashfeenahmed/freellmapi:latest"
+
+# Port publié sur l'HÔTE. Le port interne du conteneur (3001) n'est pas
+# configurable côté image (`PORT: 3001` est en dur dans le compose écrit par
+# install.sh).
+freellm_port: "{{ app_port | default(3001) }}"
+
+# ── Consommateurs et exposition ────────────────────────────────────────────
+# Même logique que searxng-install (searxng-install/defaults) : si TOUS les
+# proxies autorisés sont sur cette machine, le port n'est publié que sur
+# 127.0.0.1 — rien à filtrer, et strictement plus sûr qu'un port ouvert puis
+# filtré. Sinon 0.0.0.0, restreint dans DOCKER-USER par freellm-security.
+freellm_allowed_proxies: "{{ groups['proxies'] | default([]) }}"
+
+freellm_remote_proxies: >-
+  {{ freellm_allowed_proxies
+     | map('extract', hostvars, 'ansible_host')
+     | select('defined')
+     | reject('equalto', ansible_host)
+     | unique | list }}
+
+freellm_bind_address: "{{ '0.0.0.0' if (freellm_remote_proxies | length > 0) else '127.0.0.1' }}"
+
+freellm_hostname: "freellm.{{ domain_name }}"
+
+# CNAME Cloudflare (freellm_hostname → proxy.<domaine>, déclaré via
+# `proxy_hostname` sur l'entrée d'inventaire `freellm`, publié par
+# cloudflare-dns-update) : le nom canonique du front des proxies, en
+# round-robin entre TOUS les hôtes du groupe `proxies`. Le nom public ne doit
+# JAMAIS pointer directement sur l'IP de cet hôte (voir tasks/main.yml) : le
+# trafic passe toujours par un proxy, colocalisé ou non, et un CNAME vers le
+# nom canonique reste correct même si la composition du groupe change.
+
+# ── Licence (optionnelle) ───────────────────────────────────────────────────
+# install.sh (lu le 18/09/2026) ne définit AUCUNE variable de licence : ni
+# variable d'environnement, ni endpoint. La valeur ci-dessous n'est donc PAS
+# consommée par l'application aujourd'hui — écrite dans `.env` (chargé par
+# `env_file:` du compose) si l'opérateur l'a définie, sans aucun effet sinon :
+# c'est un passage en avant, pas une intégration vérifiée.
+# Nom de variable imposé par l'opérateur. À chiffrer et poser dans
+# group_vars/web3c.yml :
+#   ansible-vault encrypt_string --stdin-name 'fla_CR5KY3EH499F9426QYZ9CVF8D6PQ6N8B'
+freellm_license_var_name: fla_CR5KY3EH499F9426QYZ9CVF8D6PQ6N8B
+
+# ── Clés fournisseur (optionnel) ───────────────────────────────────────────
+# Config déclarative officielle de l'application (`FREEAPI_CONFIG_PATH`,
+# docs/en/install/01-install.md) : dépose un fichier JSON local ici (jamais
+# versionné, voir Ansible/.gitignore) —
+#   {{ role_path }}/files/freellmapi-config/freellmapi.config.json
+# — au format documenté :
+#   {"keys": [{"platform": "groq", "key": "gsk_...", "label": "main"}], ...}
+# Appliqué au démarrage du conteneur, idempotent (met à jour sans dupliquer).
+# Absent : aucun montage, aucune variable posée, comportement inchangé.
+freellm_config_local_path: "{{ role_path }}/files/freellmapi-config/freellmapi.config.json"
+freellm_config_container_path: /app/config/freellmapi.config.json
+
+# ── Clé API unifiée ─────────────────────────────────────────────────────────
+# L'application la génère ELLE-MÊME au tout premier démarrage — rien à créer
+# ni insérer côté Ansible. Source lue le 18/09/2026
+# (server/src/db/migrations/20260101_000000_legacy_baseline.ts,
+# fonction ensureUnifiedKey) :
+#   - stockée en clair dans `settings` (clé `unified_api_key`), format
+#     `freellmapi-<48 hex>` — contrairement aux clés FOURNISSEUR, chiffrées
+#     AES-256-GCM (colonnes iv/auth_tag de la table api_keys) ;
+#   - c'est le jeton Bearer que présentent les clients OpenAI-compatibles ;
+#   - le code amont refuse lui-même de l'écrire dans un flux de logs en
+#     production/CI ("the dashboard is the safe retrieval path") — ce rôle
+#     applique la même prudence : il la LIT et l'écrit dans un fichier LOCAL
+#     protégé, jamais dans la sortie Ansible (que FleetForge peut persister
+#     dans son historique de runs, CLAUDE.md).
+# Chemin hors dépôt (comme vault-pass, CLAUDE.md § Secrets) : rien à
+# gitignorer, structurellement impossible à committer.
+freellm_unified_key_local_path: "{{ lookup('ansible.builtin.env', 'HOME') }}/.config/fleetforge/freellm-unified-api-key"

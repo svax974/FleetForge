@@ -1,0 +1,9 @@
+[
+    {
+        "targets": [ "{{ ansible_host }}:{{ ff_port }}" ],
+        "labels": {
+            "job": "{{ ff_job }}",
+            "instance": "{{ inventory_hostname }}"
+        }
+    }
+]

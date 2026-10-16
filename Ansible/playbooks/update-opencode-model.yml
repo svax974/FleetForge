@@ -1,0 +1,27 @@
+---
+# Change le modèle par défaut d'une installation opencode existante.
+#
+#   ./play.sh web3c update-opencode-model.yml --limit hub \
+#     -e opencode_model=opencode/deepseek-v4-flash-free
+#
+# Ne retélécharge rien et ne touche qu'à la clé `model` : les blocs ajoutés à
+# la main dans `opencode.json` (permissions, greffons, agents, fournisseurs)
+# sont préservés — le rôle relit le fichier au lieu de le régénérer.
+#
+# Raison d'être : `opencode/mimo-v2.5-free`, comme tous les modèles gratuits de
+# OpenCode Zen, est une offre PROMOTIONNELLE. Le jour où elle s'arrête, le
+# modèle sort du catalogue et opencode échoue au premier appel, chez
+# l'utilisateur et non au déploiement. Le rôle contrôle donc le modèle contre
+# le catalogue Zen AVANT d'écrire, et refuse un identifiant qui n'y figure pas.
+#
+# Pour rendre le changement permanent, poser `opencode_model` dans
+# l'inventaire plutôt que de le passer en `-e` : `opencode-install` posera
+# alors la même valeur, sans écart entre l'installation et la mise à jour.
+#
+# `--limit` est OBLIGATOIRE.
+
+- name: Mise à jour du modèle par défaut d'opencode
+  hosts: all
+  remote_user: "{{ remote_username }}"
+  roles:
+    - opencode-model-update

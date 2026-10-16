@@ -1,0 +1,41 @@
+---
+# Supervision du nœud Bitcoin : exporter Prometheus maison + enregistrement de
+# la cible + ouverture du pare-feu.
+#
+# Remplace `exporter-btc` / `exporter-btc-install`, inexploitables : gabarit
+# référençant `proxy_address_rpc_btc` (variable définie nulle part), binaire
+# téléchargé depuis une URL qui répond 403, écoute sur 127.0.0.1 donc
+# inscrapable depuis le monitor distant, et aucune cible enregistrée.
+
+btcexp_user: bitcoin-exporter
+btcexp_dir: /etc/bitcoin-exporter
+btcexp_bin: /usr/local/bin/bitcoin-exporter
+
+# Port réservé au registre du CLAUDE.md sous `prometheus_port_btc`.
+btcexp_port: "{{ prometheus_port_btc | default(9898) }}"
+# 0.0.0.0 et non 127.0.0.1 : Prometheus tourne sur un AUTRE hôte
+# (`prometheus1`). L'ancien exporter écoutait en local et n'aurait donc
+# jamais pu être scrapé, même installé et démarré. Le filtrage est fait par
+# ufw, qui n'ouvre le port qu'à l'IP de Prometheus.
+btcexp_bind: "0.0.0.0"
+
+# Le nœud écoute son RPC sur un port et une authentification personnalisés
+# (group_vars/rpcsbtc.yml). L'exporter parle au nœud en LOCAL : il n'a aucune
+# raison de passer par l'IP publique ni par le proxy.
+btcexp_rpc_host: "127.0.0.1"
+btcexp_rpc_port: "{{ proxy_port_rpc_btc | default(8332) }}"
+btcexp_rpc_user: "{{ rpcbtcuser }}"
+btcexp_rpc_password: "{{ rpcbtcpasswd }}"
+# Généreux : `getblockchaininfo` peut mettre plusieurs secondes à répondre sur
+# un nœud en pleine réindexation. Un délai trop court publierait bitcoin_up=0
+# sur un nœud parfaitement sain mais occupé — la fausse alerte qui apprend à
+# ignorer l'alerte.
+btcexp_rpc_timeout: 20
+
+# Un scrape plus récent que ce délai est resservi depuis le cache.
+btcexp_cache_ttl: 5
+
+# Job Prometheus. Conserve `node-btc`, valeur déjà portée par
+# `exporter_job` dans group_vars/rpcsbtc.yml et déjà matérialisée par le
+# répertoire `prometheus-configs/node-btc/` sur l'hôte Prometheus.
+btcexp_job: "{{ exporter_job | default('node-btc') }}"

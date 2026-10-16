@@ -1,0 +1,88 @@
+# See /usr/share/postfix/main.cf.dist for a commented, more complete version
+
+# Debian specific:  Specifying a file name will cause the first
+# line of that file to be used as the name.  The Debian default
+# is /etc/mailname.
+myorigin = {{ domain_name }}
+myhostname = {{ inventory_hostname }}
+mydestination = localhost
+
+# Network settings
+inet_interfaces = all
+inet_protocols = ipv4
+
+# Mail server settings
+smtpd_banner = $myhostname ESMTP $mail_name
+biff = no
+append_dot_mydomain = no
+readme_directory = no
+compatibility_level = 2
+
+# TLS parameters - Let's Encrypt certificates
+smtpd_tls_cert_file = /etc/letsencrypt/live/{{ domain_name }}/fullchain.pem
+smtpd_tls_key_file = /etc/letsencrypt/live/{{ domain_name }}/privkey.pem
+smtpd_use_tls = yes
+smtpd_tls_session_cache_database = btree:${data_directory}/smtpd_scache
+smtp_tls_session_cache_database = btree:${data_directory}/smtp_scache
+smtpd_tls_security_level = may
+smtp_tls_security_level = may
+smtpd_tls_protocols = !SSLv2, !SSLv3, !TLSv1, !TLSv1.1
+smtp_tls_protocols = !SSLv2, !SSLv3, !TLSv1, !TLSv1.1
+
+# Virtual domains configuration
+virtual_mailbox_domains = sqlite:/etc/postfix/sqlite-virtual-mailbox-domains.cf
+virtual_mailbox_maps = sqlite:/etc/postfix/sqlite-virtual-mailbox-maps.cf
+virtual_alias_maps = sqlite:/etc/postfix/sqlite-virtual-alias-maps.cf
+virtual_mailbox_base = /var/mail
+virtual_uid_maps = static:5000
+virtual_gid_maps = static:5000
+
+# SMTP restrictions
+smtpd_relay_restrictions = permit_mynetworks permit_sasl_authenticated defer_unauth_destination
+smtpd_recipient_restrictions = 
+    permit_mynetworks,
+    permit_sasl_authenticated,
+{% for host in domain_hosts %}
+    check_client_access static:OK hash:/etc/postfix/domain_hosts,
+{% endfor %}
+{% for ip in whitelist | default([]) %}
+    check_client_access static:OK cidr:/etc/postfix/whitelist_ips,
+{% endfor %}
+    reject_unauth_destination,
+    reject_invalid_hostname,
+    reject_non_fqdn_sender,
+    reject_non_fqdn_recipient,
+    reject_unknown_sender_domain,
+    reject_unknown_recipient_domain,
+    reject_rbl_client zen.spamhaus.org,
+    reject_rbl_client bl.spamcop.net,
+    permit
+
+smtpd_sender_restrictions = 
+    permit_mynetworks,
+    permit_sasl_authenticated,
+    reject_non_fqdn_sender,
+    reject_unknown_sender_domain
+
+# Authentication
+smtpd_sasl_type = dovecot
+smtpd_sasl_path = private/auth
+smtpd_sasl_auth_enable = yes
+smtpd_sasl_security_options = noanonymous
+smtpd_sasl_local_domain = $myhostname
+broken_sasl_auth_clients = yes
+
+# Local delivery
+mailbox_size_limit = 0
+recipient_delimiter = +
+
+# DKIM
+milter_protocol = 2
+milter_default_action = accept
+smtpd_milters = inet:localhost:12301
+non_smtpd_milters = inet:localhost:12301
+
+# Anti-spam
+smtpd_helo_required = yes
+disable_vrfy_command = yes
+smtpd_delay_reject = yes 

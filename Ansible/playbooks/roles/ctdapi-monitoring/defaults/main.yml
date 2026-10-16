@@ -1,0 +1,11 @@
+---
+# Sonde principale sur l'endpoint de santé applicatif (confirmé 200 le
+# 2026-08-29 : GET /api/v1/health derrière le répartiteur).
+ctm_health_url: "http://127.0.0.1:{{ back_port }}/api/v1/health"
+
+ctm_front_container: ctdapi_front
+# Nom donné par docker compose au projet de déploiement, qui embarque l'adresse
+# de la machine, points remplacés par des tirets : dérivé, jamais recopié.
+ctm_back_worker_container: "ctdapi-back-{{ ansible_host | replace('.', '-') }}-back-worker-1"
+ctm_redis_container: ctdapi_redis
+ctm_redis_port: 6379

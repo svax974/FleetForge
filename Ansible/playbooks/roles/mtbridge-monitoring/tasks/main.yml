@@ -1,0 +1,34 @@
+---
+# Register MTBridge as a Prometheus scrape target on the monitor host.
+# MTBridge exposes native Prometheus metrics at /metrics on app_port.
+# Also opens the firewall on the Windows host for Prometheus scraping.
+
+- name: Allow Prometheus to scrape MTBridge metrics on port {{ app_port }}
+  community.windows.win_firewall_rule:
+    name: "Prometheus - MTBridge metrics"
+    localport: "{{ app_port }}"
+    action: allow
+    direction: in
+    protocol: tcp
+    remoteip: "{{ hostvars[prometheus_host]['ansible_host'] }}"
+    state: present
+    enabled: yes
+
+- name: Create MTBridge prometheus-configs directory on monitor
+  ansible.builtin.file:
+    path: "{{ prometheus_home }}/prometheus-configs/mtbridge"
+    state: directory
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: "0755"
+  delegate_to: "{{ prometheus_host }}"
+
+- name: Deploy MTBridge Prometheus target file on monitor
+  ansible.builtin.template:
+    src: mtbridge_targets.json.j2
+    dest: "{{ prometheus_home }}/prometheus-configs/mtbridge/{{ inventory_hostname }}.json"
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: "0644"
+  delegate_to: "{{ prometheus_host }}"
+  notify: reload prometheus

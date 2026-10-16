@@ -1,0 +1,40 @@
+---
+# ── Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ───────────────────────
+# Échoue immédiatement si le parc n'a pas d'hôte de supervision utilisable,
+# puis vérifie — et répare — le socle de la machine, node_exporter et sa cible
+# Prometheus. Un service déployé sans supervision est un service dont personne
+# ne saura qu'il est tombé.
+# Les contrôles bloquants portent le tag `always` : ils s'appliquent même à un
+# rejeu ciblé par `--tags`.
+- name: Contrôle préalable
+  hosts: brk1
+  remote_user: "{{ remote_username }}"
+  roles:
+    - role: host-preflight
+      preflight_require_docker: false
+
+# Prérequis bitcoind : `server=1` + ZMQ + `prune=0`. C'est une configuration du
+# NŒUD (bitcoind), donc appliquée à `rpcbtc1` — pas à `brk1`. Aujourd'hui les
+# deux sont la même machine ; le jour où BRK migre, ce play reste sur le nœud.
+- name: Prépare le nœud Bitcoin pour BRK
+  hosts: rpcbtc1
+  remote_user: "{{ remote_username }}"
+  roles:
+    - rpcbtc-setup
+
+- name: Deploy BRK (Bitcoin Research Kit)
+  hosts: brk1
+  remote_user: "{{ remote_username }}"
+  roles:
+    - brk-install
+    - brk-security
+
+# ── Supervision (OBLIGATOIRE, voir CLAUDE.md) ──────────────────────────────
+# Sonde `service_up` + métriques du service, et enregistrement de la cible
+# auprès de Prometheus. Rejouable seule :
+#   ./play.sh papanglabs deploy-brk.yml --tags monitoring
+- name: Supervision du service
+  hosts: brk1
+  remote_user: "{{ remote_username }}"
+  roles:
+    - brk-monitoring

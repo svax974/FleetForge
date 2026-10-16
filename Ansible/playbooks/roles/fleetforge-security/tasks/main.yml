@@ -1,0 +1,42 @@
+---
+# Le port n'est ouvert qu'aux postes d'exploitation et aux proxies. L'ouverture
+# du scrape, elle, vit dans `fleetforge-monitoring` : elle doit pouvoir être
+# rejouée avec `--tags monitoring` sans redéployer le service.
+
+- name: Allow the application port from the whitelist
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ item }}"
+    port: "{{ ff_port }}"
+    comment: "fleetforge - whitelist"
+  loop: "{{ whitelist }}"
+  become: true
+
+# Les proxies terminent le TLS et portent la restriction par whitelist du
+# vhost. Sans cette ouverture, le vhost répond 502 — ce qui ressemble à une
+# application tombée, alors qu'elle tourne.
+- name: Allow the application port from the proxies
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ hostvars[item].ansible_host }}"
+    port: "{{ ff_port }}"
+    comment: "fleetforge - proxy {{ item }}"
+  loop: "{{ groups['proxies'] | default([]) }}"
+  become: true
+
+# Rien d'autre n'a de raison d'y accéder : cette application pilote le parc.
+# La règle finale n'est pas posée ici — la politique par défaut d'ufw est déjà
+# `deny incoming` (rôle firewall-security), et empiler un DENY explicite
+# donnerait l'illusion que c'est LUI qui protège.
+- name: Report the effective rules
+  ansible.builtin.shell: "ufw status numbered | grep -F '{{ ff_port }}' || true"
+  become: true
+  register: ff_ufw
+  changed_when: false
+  check_mode: false
+
+- name: Show them
+  ansible.builtin.debug:
+    var: ff_ufw.stdout_lines

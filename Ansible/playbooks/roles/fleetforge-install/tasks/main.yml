@@ -1,0 +1,327 @@
+---
+# Livre le code, construit le serveur, démarre le service.
+#
+# Deux constructions distinctes : le frontal sur le POSTE (npm, déjà fait), le
+# serveur sur la MACHINE (cargo). Le rôle vérifie donc d'abord que le `dist/`
+# existe côté contrôle — sans lui le serveur refuse de démarrer, et il vaut
+# mieux le dire ici qu'après vingt minutes de compilation.
+
+# ── Contrôles sur le poste de contrôle ─────────────────────────────────────
+- name: Look for the built frontend on the control machine
+  ansible.builtin.stat:
+    path: "{{ ff_src }}/apps/gui/dist/index.html"
+  delegate_to: localhost
+  become: false
+  register: ff_dist
+  tags: [code]
+
+- name: Fail when the frontend has not been built
+  ansible.builtin.fail:
+    msg: >-
+      {{ ff_src }}/apps/gui/dist/index.html introuvable. Construire le frontal
+      avant de déployer : `cd apps/gui && npm install && npm run build`.
+      Le serveur refuse de démarrer sans lui, et il n'a aucun moyen de le
+      construire lui-même — Node n'est pas installé sur les machines du parc.
+  when: not ff_dist.stat.exists
+  tags: [code]
+
+- name: Check the Ansible tree exists on the control machine
+  ansible.builtin.stat:
+    path: "{{ ff_src }}/Ansible/inventories"
+  delegate_to: localhost
+  become: false
+  register: ff_ansible_src
+  tags: [code]
+
+- name: Fail when the Ansible tree is missing
+  ansible.builtin.fail:
+    msg: >-
+      {{ ff_src }}/Ansible/inventories introuvable : `ff_src` ne désigne pas la
+      racine du dépôt. Sans inventaires, l'application démarre sur un parc vide,
+      ce qui ne se distingue pas d'un parc réellement vide.
+  when: not ff_ansible_src.stat.exists
+  tags: [code]
+
+# ── Secrets ────────────────────────────────────────────────────────────────
+# Avant tout le reste : tirage, mise au vault et création de la clé dédiée se
+# font sur le POSTE, et rien de ce qui suit n'a de sens sans eux.
+- name: Settle the service secrets
+  ansible.builtin.include_tasks: secrets.yml
+  tags: [secrets, config, authorize]
+
+# ── Socle de construction ──────────────────────────────────────────────────
+- name: Install build dependencies
+  ansible.builtin.apt:
+    name:
+      - build-essential
+      - pkg-config
+      - libssl-dev
+      - clang
+      - curl
+      - rsync
+    state: present
+    update_cache: true
+  become: true
+  tags: [code]
+
+- name: Take over a deployment made under the former project name
+  ansible.builtin.include_tasks: legacy.yml
+  tags: [code, monitoring]
+
+- name: Create the application directory
+  ansible.builtin.file:
+    path: "{{ ff_dir }}"
+    state: directory
+    owner: "{{ ff_user }}"
+    group: "{{ ff_user }}"
+    mode: '0750'
+  become: true
+  tags: [code]
+
+- name: Install the rust toolchain (as {{ ff_user }})
+  ansible.builtin.shell: |
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain {{ ff_rust_toolchain }}
+  args:
+    creates: "/home/{{ ff_user }}/.rustup"
+  become: true
+  become_user: "{{ ff_user }}"
+  tags: [code]
+
+# ── Livraison du code ──────────────────────────────────────────────────────
+# Le workspace Rust ET le frontal construit. `delete: true` : un module retiré
+# du dépôt doit disparaître de la machine, sinon il continue d'être compilé.
+- name: Sync the Rust workspace
+  ansible.posix.synchronize:
+    src: "{{ ff_src }}/{{ item }}"
+    dest: "{{ ff_dir }}/{{ item }}"
+    delete: true
+    rsync_opts: "{{ ff_rsync_excludes }}"
+  loop:
+    - Cargo.toml
+    - Cargo.lock
+    - crates/
+  become: true
+  become_user: "{{ ff_user }}"
+  notify: restart fleetforge
+  tags: [code]
+
+# `apps/gui/src-tauri` fait partie du workspace : sans lui, `cargo build`
+# échoue sur un membre introuvable avant même de compiler quoi que ce soit.
+# Ses sources sont légères ; c'est le paquetage de bureau qu'on ne construit
+# pas ici, pas le code qu'on exclut.
+- name: Sync the desktop facade (workspace member)
+  ansible.posix.synchronize:
+    src: "{{ ff_src }}/apps/gui/src-tauri/"
+    dest: "{{ ff_dir }}/apps/gui/src-tauri/"
+    delete: true
+    rsync_opts: "{{ ff_rsync_excludes }}"
+  become: true
+  become_user: "{{ ff_user }}"
+  tags: [code]
+
+- name: Sync the built frontend
+  ansible.posix.synchronize:
+    src: "{{ ff_src }}/apps/gui/dist/"
+    dest: "{{ ff_dir }}/apps/gui/dist/"
+    delete: true
+  become: true
+  become_user: "{{ ff_user }}"
+  tags: [code]
+
+# L'arbre Ansible EST la donnée de l'application : inventaires, playbooks,
+# rôles. Sans lui elle démarre sur un parc vide.
+#
+# `delete: false` volontairement, à l'inverse du code : les rôles déposent des
+# fichiers d'état sur le nœud de contrôle (`backups/`, artefacts de run), et
+# une synchronisation destructrice les emporterait à chaque livraison.
+- name: Sync the Ansible tree
+  ansible.posix.synchronize:
+    src: "{{ ff_src }}/Ansible/"
+    dest: "{{ ff_ansible_dir }}/"
+    delete: false
+    rsync_opts: "{{ ff_rsync_excludes }}"
+  become: true
+  become_user: "{{ ff_user }}"
+  tags: [code, ansible]
+
+# ── Construction du serveur ────────────────────────────────────────────────
+- name: "Build fleetforge-web ({{ ff_cargo_profile }}, long ~10-20 min the first time)"
+  ansible.builtin.shell: |
+    source "/home/{{ ff_user }}/.cargo/env"
+    cargo build --{{ ff_cargo_profile }} -p fleetforge-web
+  args:
+    chdir: "{{ ff_dir }}"
+    executable: /bin/bash
+  become: true
+  become_user: "{{ ff_user }}"
+  register: ff_build
+  changed_when: "'Compiling' in ff_build.stderr or 'Compiling' in ff_build.stdout"
+  notify: restart fleetforge
+  tags: [code]
+
+# ── Ansible sur la machine ─────────────────────────────────────────────────
+# Le paquet Debian est trop ancien pour ce dépôt (deb822_repository exige
+# ansible-core >= 2.15). pipx isole l'installation sans toucher au Python
+# système, dont dépend le reste de la machine.
+- name: Install pipx
+  ansible.builtin.apt:
+    name: pipx
+    state: present
+    update_cache: true
+  become: true
+  when: ff_install_ansible
+  tags: [ansible]
+
+- name: Install ansible for the application user
+  community.general.pipx:
+    name: ansible
+    state: present
+  become: true
+  become_user: "{{ ff_user }}"
+  environment:
+    PIPX_HOME: "/home/{{ ff_user }}/.local/pipx"
+    PIPX_BIN_DIR: "/home/{{ ff_user }}/.local/bin"
+  when: ff_install_ansible
+  tags: [ansible]
+
+# ── Authentification du service ────────────────────────────────────────────
+# Le clair vient du vault et n'est JAMAIS écrit sur la machine : le binaire
+# calcule son empreinte argon2, et c'est elle seule qui atterrit dans le
+# fichier d'environnement. Un attaquant qui lit ce fichier n'y trouve rien de
+# rejouable — ni ici, ni ailleurs.
+#
+# `stdin:` et non un argument de commande : `ps` rend les arguments lisibles
+# par tous les comptes de la machine.
+- name: Hash the web password on the machine
+  ansible.builtin.command:
+    cmd: "{{ ff_dir }}/target/{{ ff_cargo_profile }}/fleetforge-web hash-password"
+    stdin: "{{ ff_web_password }}"
+    stdin_add_newline: false
+  become: true
+  become_user: "{{ ff_user }}"
+  register: ff_password_hash
+  changed_when: false
+  no_log: true
+  tags: [config]
+
+# ── Secrets de pilotage ────────────────────────────────────────────────────
+- name: Set up the dedicated key and its agent
+  ansible.builtin.include_tasks: agent.yml
+  when: ff_deploy_secrets
+  tags: [secrets]
+
+- name: Create the vault password directory
+  ansible.builtin.file:
+    path: "/home/{{ ff_user }}/.config/fleetforge"
+    state: directory
+    owner: "{{ ff_user }}"
+    group: "{{ ff_user }}"
+    mode: '0700'
+  become: true
+  when: ff_deploy_secrets
+  tags: [secrets]
+
+# Sans lui, AUCUN playbook ne s'exécute : `ansible_become_hash` est chiffré
+# dans les deux parcs, et l'élévation de privilèges en dépend partout.
+- name: Deploy the vault password
+  ansible.builtin.copy:
+    src: "{{ ff_vault_pass_src }}"
+    dest: "/home/{{ ff_user }}/.config/fleetforge/vault-pass"
+    owner: "{{ ff_user }}"
+    group: "{{ ff_user }}"
+    mode: '0600'
+  become: true
+  when: ff_deploy_secrets
+  tags: [secrets]
+
+- name: Warn when the application is deployed without its driving secrets
+  ansible.builtin.debug:
+    msg: >-
+      ff_deploy_secrets=false : l'application est déployée en LECTURE. Elle
+      montre le parc, la supervision et les diagnostics, mais tout lancement de
+      playbook échouera — ni clé SSH ni mot de passe de vault sur cette
+      machine. Pour l'activer en connaissance de cause :
+      `./play.sh web3c deploy-fleetforge.yml -e ff_deploy_secrets=true`.
+  when: not ff_deploy_secrets
+  tags: [secrets]
+
+# ── Service ────────────────────────────────────────────────────────────────
+- name: Deploy the environment file
+  ansible.builtin.template:
+    src: fleetforge.env.j2
+    dest: "{{ ff_dir }}/fleetforge.env"
+    owner: "{{ ff_user }}"
+    group: "{{ ff_user }}"
+    mode: '0600'
+  become: true
+  no_log: true
+  notify: restart fleetforge
+  tags: [config]
+
+- name: Deploy the systemd unit
+  ansible.builtin.template:
+    src: fleetforge.service
+    dest: /etc/systemd/system/fleetforge.service
+    owner: root
+    group: root
+    mode: '0644'
+  become: true
+  notify: restart fleetforge
+  tags: [config]
+
+- name: Enable and start fleetforge
+  ansible.builtin.systemd:
+    name: fleetforge
+    state: started
+    enabled: true
+    daemon_reload: true
+  become: true
+  tags: [config]
+
+# Le handler ne serait vidé qu'en FIN de play : la vérification ci-dessous
+# interrogerait alors la version PRÉCÉDENTE, et un démarrage cassé passerait
+# pour un déploiement réussi.
+- name: Flush handlers so the check hits the version just deployed
+  ansible.builtin.meta: flush_handlers
+  tags: [config]
+
+- name: Verify the service answers
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ ff_port }}/healthz"
+    return_content: true
+  register: ff_health
+  retries: 10
+  delay: 3
+  until: ff_health.status is defined and ff_health.status == 200
+  changed_when: false
+  tags: [config]
+
+# Un serveur qui répond mais ne voit aucun inventaire est un serveur inutile,
+# et rien dans `systemctl status` ne le dirait. C'est exactement la série que
+# /metrics expose pour cela.
+- name: Verify the application actually sees the fleet
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ ff_port }}/metrics"
+    return_content: true
+  register: ff_metrics
+  changed_when: false
+  tags: [config]
+
+- name: Report what the application sees
+  ansible.builtin.debug:
+    msg: >-
+      {{ ff_metrics.content.split('\n')
+         | select('match', '^fleetforge_(inventories|roles|ansible_available|fleet_)')
+         | list }}
+  tags: [config]
+
+- name: Report the access credentials
+  ansible.builtin.debug:
+    msg: >-
+      FleetForge écoute sur {{ ansible_host }}:{{ ff_port }} —
+      utilisateur « {{ ff_web_user }} ». Le mot de passe se lit dans le vault du
+      parc :
+      `ansible -i inventories/<parc>.yml -m debug -a 'var=ff_web_password' {{ inventory_hostname }}`.
+      Il n'existe nulle part sur la machine, qui n'en détient que l'empreinte.
+      Accès par le proxy : https://infra.{{ domain_name }} (whitelist).
+  tags: [config]

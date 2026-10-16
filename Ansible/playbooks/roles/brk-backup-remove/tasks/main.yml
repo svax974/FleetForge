@@ -1,0 +1,44 @@
+---
+# Désinstalle le dispositif de sauvegarde BRK sur la SOURCE : plus aucune
+# sauvegarde ne partira. Les sauvegardes déjà présentes sur la destination sont
+# CONSERVÉES, ainsi que la clé SSH et son autorisation — c'est ce qui distingue
+# `-remove` de `-purge`, et ce qui permet de restaurer après coup.
+
+- name: Remove the backup cron job
+  ansible.builtin.cron:
+    name: "brk backup"
+    user: "{{ brk_user }}"
+    state: absent
+  become: true
+
+- name: Remove the backup script
+  ansible.builtin.file:
+    path: "{{ brk_home }}/brk-backup.sh"
+    state: absent
+  become: true
+
+- name: Remove the logrotate configuration
+  ansible.builtin.file:
+    path: /etc/logrotate.d/brk-backup
+    state: absent
+  become: true
+
+# La métrique est retirée, sinon node_exporter continue de publier la date du
+# dernier succès : `BackupStale` finirait par sonner pour une sauvegarde qu'on
+# a volontairement désinstallée, et une alerte qu'on apprend à ignorer ne
+# protège plus rien.
+- name: Remove the Prometheus textfile metric
+  ansible.builtin.file:
+    path: "{{ node_exporter_textfile_dir | default('/var/lib/node_exporter/textfile_collector') }}/backup_brk.prom"
+    state: absent
+  become: true
+
+# brk-restore.sh est volontairement CONSERVÉ : les sauvegardes existent encore
+# sur la destination, et c'est précisément après avoir arrêté les sauvegardes
+# qu'on peut avoir besoin de restaurer la dernière.
+- name: Notice — the restore script is kept
+  ansible.builtin.debug:
+    msg: >-
+      Sauvegardes arrêtées. {{ brk_home }}/brk-restore.sh est conservé et reste
+      utilisable sur les sauvegardes déjà en place. Utilise brk-backup-purge
+      pour supprimer aussi les données de la destination.

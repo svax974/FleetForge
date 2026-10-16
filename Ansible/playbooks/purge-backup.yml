@@ -1,0 +1,29 @@
+---
+# Purge les sauvegardes des deux parcs (famille `backup`) : scripts, clés, ET
+# les données sauvegardées sur les destinations. DESTRUCTIF — après cette purge
+# il n'existe plus aucune copie du magasin BRK, de la base d'indicateurs ni des
+# bases PostgreSQL de tradekong et ctdapi.
+#
+#   ./play.sh papanglabs purge-backup.yml -e confirm=yes
+#   ./play.sh web3c purge-backup.yml -e confirm=yes
+#
+# Les archives SQLite des serveurs de synchro ne sont pas concernées : leur
+# purge passe par purge-sync-server.yml (voir remove-backup.yml).
+
+- name: Purge de la sauvegarde du magasin BRK
+  hosts: brk1
+  remote_user: "{{ remote_username }}"
+  roles:
+    - brk-backup-purge
+
+- name: Purge de la sauvegarde de la base d'indicateurs
+  hosts: timescale
+  remote_user: "{{ remote_username }}"
+  roles:
+    - timescaledb-backup-purge
+
+- name: Purge de la sauvegarde PostgreSQL — tradekong et ctdapi
+  hosts: tradekong:ctdapi
+  remote_user: "{{ remote_username }}"
+  roles:
+    - postgres-backup-purge

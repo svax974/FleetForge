@@ -1,0 +1,8 @@
+driver = sqlite
+connect = /etc/postfix/sqlite/mailserver.db
+
+default_pass_scheme = SHA512-CRYPT
+
+password_query = SELECT email as user, password FROM virtual_users WHERE email='%u'
+
+user_query = SELECT '/var/mail/domains/%d/%n' as home, 'maildir:/var/mail/domains/%d/%n' as mail, 5000 AS uid, 5000 AS gid FROM virtual_users WHERE email='%u' 

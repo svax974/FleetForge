@@ -1,0 +1,7 @@
+---
+# Dupliqué depuis sync-backup-install/defaults (motif rotki-purge) : ce rôle lit
+# ces valeurs dans SES PROPRES tâches. À tenir identique.
+sync_backup_name: "sync-{{ sync_instance }}"
+sync_backup_script: "/usr/local/sbin/sync-backup-{{ sync_instance }}.sh"
+sync_backup_log: "/var/log/sync-backup-{{ sync_instance }}.log"
+node_exporter_textfile_dir: /var/lib/node_exporter/textfile_collector

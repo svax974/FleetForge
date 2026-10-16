@@ -1,0 +1,12 @@
+$TTL {{ bind9_zone_ttl }}
+@   IN  SOA ns1.{{ domain_name }}. {{ bind9_zone_contact | replace('@', '.') }}. (
+            {{ bind9_zone_serial }} ; Serial
+            3600            ; Refresh
+            900             ; Retry
+            604800          ; Expire
+            86400 )         ; Minimum
+
+        IN  NS      ns1.{{ domain_name }}.
+ns1     IN  A       {{ bind9_zone_ipv4 }}
+@       IN  A       {{ bind9_zone_ipv4 }}
+*       IN  A       {{ bind9_zone_ipv4 }}

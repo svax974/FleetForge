@@ -1,0 +1,115 @@
+---
+# Enregistrement de la cible native, et ouverture du scrape.
+#
+# TOUTES les tâches portent `tags: [monitoring]` : réarmer la supervision ne
+# doit jamais imposer de rejouer le déploiement — rsync, compilation Rust,
+# redémarrage du service.
+#   ./play.sh web3c deploy-fleetforge.yml --tags monitoring
+
+- name: Fail early when no Prometheus host is defined
+  ansible.builtin.assert:
+    that:
+      - prometheus_host is defined
+      - prometheus_host in hostvars
+    fail_msg: >-
+      `prometheus_host` n'est pas défini ou absent de l'inventaire. Une cible
+      que personne ne scrape ne supervise rien.
+  tags: [monitoring]
+
+# ── Pare-feu ───────────────────────────────────────────────────────────────
+# Sans cette ouverture, la cible apparaît dans Prometheus et reste `down` — ce
+# qui ressemble à une panne du service, pas à une règle manquante.
+- name: Allow Prometheus to scrape the application
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ hostvars[prometheus_host]['ansible_host'] }}"
+    port: "{{ ff_port }}"
+    comment: "Prometheus scrape - fleetforge"
+  become: true
+  when: ansible_host != hostvars[prometheus_host]['ansible_host']
+  tags: [monitoring]
+
+# Prometheus co-localisé : il tourne en conteneur, ses scrapes arrivent donc
+# par le bridge Docker et non par l'adresse publique de la machine. Le test
+# porte sur l'IP et non sur le nom d'hôte — plusieurs entrées d'inventaire
+# décrivent la même machine.
+- name: Allow the Prometheus Docker bridge to scrape (monitor is local)
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "172.17.0.0/16"
+    port: "{{ ff_port }}"
+    comment: "Prometheus Docker scrape - fleetforge"
+  become: true
+  when: ansible_host == hostvars[prometheus_host]['ansible_host']
+  tags: [monitoring]
+
+# ── Cible Prometheus ───────────────────────────────────────────────────────
+- name: Create the target directory on the Prometheus host
+  ansible.builtin.file:
+    path: "/home/{{ remote_username }}/prometheus/prometheus-configs/{{ ff_job }}"
+    state: directory
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: '0755'
+  delegate_to: "{{ prometheus_host }}"
+  become: true
+  tags: [monitoring]
+
+- name: Deploy the Prometheus target
+  ansible.builtin.template:
+    src: prometheus-target.json.j2
+    dest: "/home/{{ remote_username }}/prometheus/prometheus-configs/{{ ff_job }}/{{ inventory_hostname }}.json"
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: '0644'
+  delegate_to: "{{ prometheus_host }}"
+  become: true
+  tags: [monitoring]
+
+# ── Vérifications ──────────────────────────────────────────────────────────
+# Une cible déposée ne prouve rien : le fichier n'est lu que si un
+# `scrape_config` porte ce job. Un job manquant laisse le fichier en place sans
+# que jamais rien ne le lise — c'est ce qui a rendu `service_up` inexistant sur
+# les DEUX parcs pendant des semaines, règles chargées et `health=ok`.
+- name: Check that a scrape job exists for this target
+  ansible.builtin.shell: >-
+    grep -c "prometheus-configs/{{ ff_job }}/"
+    /home/{{ remote_username }}/prometheus/prometheus.yml || true
+  args:
+    executable: /bin/bash
+  delegate_to: "{{ prometheus_host }}"
+  register: ff_job_declared
+  changed_when: false
+  check_mode: false
+  tags: [monitoring]
+
+- name: Fail when no scrape job reads this directory
+  ansible.builtin.fail:
+    msg: >-
+      Aucun `job_name: {{ ff_job }}` ne lit
+      prometheus-configs/{{ ff_job }}/ sur {{ prometheus_host }}. La cible est
+      posée mais ne sera JAMAIS scrapée, et rien ne le signalerait. Rejouer la
+      stack de supervision du parc (deploy-prometheus.yml ou deploy-monitoring.yml).
+  when: (ff_job_declared.stdout | default('0') | trim | int) == 0
+  tags: [monitoring]
+
+- name: Verify the metrics endpoint answers locally
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ ff_port }}{{ ff_metrics_path }}"
+    return_content: true
+  register: ff_metrics
+  retries: 6
+  delay: 5
+  until: ff_metrics.status is defined and ff_metrics.status == 200
+  changed_when: false
+  tags: [monitoring]
+
+- name: Report the health signals
+  ansible.builtin.debug:
+    msg: >-
+      {{ ff_metrics.content.split('\n')
+         | select('match', '^fleetforge_(up|ansible_available|inventories|roles) ')
+         | list }}
+  tags: [monitoring]

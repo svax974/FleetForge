@@ -1,0 +1,5 @@
+---
+dbmon_container: postgres
+dbmon_port: "{{ postgres_port | default(5432) }}"
+dbmon_db: "{{ postgres_db | default('postgres') }}"
+dbmon_user: "{{ postgres_user | default('postgres') }}"

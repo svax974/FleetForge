@@ -1,0 +1,31 @@
+---
+# Purge complète du périmètre géré par Ansible sur ctdapi : sonde svcprobe ET
+# sauvegarde PostgreSQL (dispositif + dumps sur la destination). DESTRUCTIF.
+# Ne touche pas à la stack docker-compose elle-même.
+
+- name: Refuse to purge without explicit confirmation
+  ansible.builtin.assert:
+    that:
+      - (confirm | default('')) == 'yes'
+    fail_msg: >-
+      Purge refusée. Cette opération supprime la sauvegarde PostgreSQL de
+      ctdapi (dispositif et dumps sur la destination). Relance avec
+      -e confirm=yes en connaissance de cause.
+
+- name: Remove the svcprobe check file
+  ansible.builtin.file:
+    path: "{{ svcprobe_checks_dir }}/ctdapi.json"
+    state: absent
+  become: true
+
+- name: Purge the PostgreSQL backup
+  ansible.builtin.include_role:
+    name: postgres-backup-purge
+  vars:
+    confirm: "{{ confirm }}"
+
+- name: Notice — the application stack is untouched
+  ansible.builtin.debug:
+    msg: >-
+      Sonde et sauvegarde PostgreSQL supprimées. La stack docker-compose de
+      ctdapi n'est pas gérée par Ansible et n'est pas affectée.

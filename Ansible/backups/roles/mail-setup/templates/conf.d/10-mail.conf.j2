@@ -1,0 +1,25 @@
+# Mailbox locations and namespaces
+
+mail_location = maildir:/var/mail/domains/%d/%n
+
+# System user and group used to access mails
+mail_uid = vmail
+mail_gid = vmail
+
+# Allow full filesystem access to clients
+mail_full_filesystem_access = no
+
+# Space separated list of environment variables that are preserved
+mail_plugin_dir = /usr/lib/dovecot/modules
+
+# User for accessing mails
+first_valid_uid = 5000
+last_valid_uid = 5000
+first_valid_gid = 5000
+last_valid_gid = 5000
+
+# Valid chroot directories
+valid_chroot_dirs = /var/mail
+
+# Mailbox creation
+mail_privileged_group = vmail 

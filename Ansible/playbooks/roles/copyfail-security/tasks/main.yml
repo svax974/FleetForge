@@ -1,0 +1,135 @@
+---
+# CVE-2026-31431 "Copy Fail" — mitigation + patch kernel
+#
+# Stratégie par famille OS :
+#   Debian/Ubuntu : blacklist modprobe + rmmod (effet immédiat sans reboot)
+#                   update-initramfs pour persistance dans l'initrd
+#   RedHat/Suse   : initcall_blacklist via grubby (effet au prochain boot)
+#                   → copyfail_reboot: true recommandé sur ces systèmes
+#
+# Correctif définitif : mise à jour kernel (copyfail_upgrade_kernel: true)
+
+# ── Vérification OS ────────────────────────────────────────────────────────────
+
+- name: Ignorer les hôtes non-Linux
+  ansible.builtin.meta: end_host
+  when: ansible_facts['system'] != "Linux"
+
+# ── Mitigation immédiate — Debian / Ubuntu ─────────────────────────────────────
+
+- name: Mitigation modprobe (Debian/Ubuntu)
+  when: ansible_facts['os_family'] == "Debian"
+  block:
+    - name: Déposer la blacklist modprobe algif_aead
+      ansible.builtin.copy:
+        dest: /etc/modprobe.d/disable-algif-aead.conf
+        content: "install algif_aead /bin/false\n"
+        owner: root
+        group: root
+        mode: "0644"
+      register: copyfail_blacklist_file
+
+    - name: Décharger le module algif_aead si chargé
+      ansible.builtin.command: modprobe -r algif_aead
+      register: copyfail_rmmod
+      failed_when: false
+      changed_when: copyfail_rmmod.rc == 0
+
+    - name: Régénérer initramfs pour persister la blacklist
+      ansible.builtin.command: update-initramfs -u -k all
+      changed_when: true
+      when: copyfail_blacklist_file.changed
+
+# ── Mitigation au boot — RedHat / Rocky / Alma ────────────────────────────────
+
+- name: Mitigation grubby (RedHat)
+  when: ansible_facts['os_family'] == "RedHat"
+  block:
+    - name: Installer grubby
+      ansible.builtin.dnf:
+        name: grubby
+        state: present
+
+    - name: Lire la configuration kernel GRUB actuelle
+      ansible.builtin.command: grubby --info=ALL
+      register: copyfail_grubby_info
+      changed_when: false
+
+    - name: Appliquer initcall_blacklist=algif_aead_init dans le cmdline kernel
+      ansible.builtin.command: >
+        grubby --update-kernel=ALL --args="initcall_blacklist=algif_aead_init"
+      when: "'initcall_blacklist=algif_aead_init' not in copyfail_grubby_info.stdout"
+      notify: reboot requis
+
+# ── Mitigation au boot — SUSE ─────────────────────────────────────────────────
+
+- name: Mitigation grubby (Suse)
+  when: ansible_facts['os_family'] == "Suse"
+  block:
+    - name: Installer grubby
+      community.general.zypper:
+        name: grubby
+        state: present
+
+    - name: Lire la configuration kernel GRUB actuelle
+      ansible.builtin.command: grubby --info=ALL
+      register: copyfail_grubby_info
+      changed_when: false
+
+    - name: Appliquer initcall_blacklist=algif_aead_init dans le cmdline kernel
+      ansible.builtin.command: >
+        grubby --update-kernel=ALL --args="initcall_blacklist=algif_aead_init"
+      when: "'initcall_blacklist=algif_aead_init' not in copyfail_grubby_info.stdout"
+      notify: reboot requis
+
+# ── Avertissement — reboot requis (RedHat / Suse) ─────────────────────────────
+
+- name: "AVERTISSEMENT : reboot requis pour activer la mitigation"
+  ansible.builtin.debug:
+    msg: >
+      ATTENTION [{{ inventory_hostname }}] : algif_aead est compilé dans le kernel
+      sur ce système ({{ ansible_facts['os_family'] }}). La mitigation initcall_blacklist a été
+      appliquée mais ne prendra effet qu'après reboot. Le système reste vulnérable
+      à CVE-2026-31431 jusqu'au prochain démarrage.
+      Activez copyfail_reboot=true pour redémarrer automatiquement.
+  when: ansible_facts['os_family'] in ["RedHat", "Suse"]
+
+# ── OS non supporté ────────────────────────────────────────────────────────────
+
+- name: "AVERTISSEMENT : famille OS non prise en charge — mitigation ignorée"
+  ansible.builtin.debug:
+    msg: >
+      [{{ inventory_hostname }}] OS family '{{ ansible_facts['os_family'] }}' non prise en charge
+      par ce rôle. Appliquez manuellement la mitigation CVE-2026-31431 (blacklist
+      algif_aead ou initcall_blacklist=algif_aead_init).
+  when: ansible_facts['os_family'] not in ["Debian", "RedHat", "Suse"]
+
+# ── Mise à jour kernel — correctif définitif ──────────────────────────────────
+
+- name: Mettre à jour le kernel (Debian/Ubuntu)
+  ansible.builtin.apt:
+    upgrade: dist
+    update_cache: yes
+    lock_timeout: 300
+  when:
+    - ansible_facts['os_family'] == "Debian"
+    - copyfail_upgrade_kernel | bool
+  notify: reboot requis
+
+- name: Mettre à jour le kernel (RedHat/Rocky/Alma)
+  ansible.builtin.dnf:
+    name: kernel
+    state: latest
+  when:
+    - ansible_facts['os_family'] == "RedHat"
+    - copyfail_upgrade_kernel | bool
+  notify: reboot requis
+
+- name: Mettre à jour le kernel (Suse)
+  community.general.zypper:
+    name: kernel-default
+    state: latest
+  when:
+    - ansible_facts['os_family'] == "Suse"
+    - copyfail_upgrade_kernel | bool
+  notify: reboot requis

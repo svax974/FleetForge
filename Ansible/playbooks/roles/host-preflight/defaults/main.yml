@@ -1,0 +1,73 @@
+---
+# Contrôle préalable commun à TOUS les playbooks `deploy-*`.
+#
+# Raison d'être : trois pannes constatées sur ce parc ont la même forme — un
+# prérequis absent que rien ne signale, et un service qui se déploie « ok »
+# par-dessus.
+#   • 09/08/2026 — Prometheus installé APRÈS papangmetrics : répertoires
+#     `file_sd` repartis vides, alertes BRK muettes plusieurs jours, règles
+#     pourtant chargées et `health=ok`.
+#   • 09/08/2026 — web3c sans `rule_files` ni Alertmanager : huit semaines de
+#     collecte sans qu'aucune alerte ne puisse partir.
+#   • 11/08/2026 — job `node-btc` vide depuis toujours, personne ne l'a vu.
+# Dans les trois cas la supervision manquait au moment du déploiement, et son
+# absence était indiscernable d'une supervision qui veille.
+#
+# Le rôle échoue donc AVANT toute installation quand l'hôte de supervision
+# n'existe pas, et répare ce qui peut l'être (node_exporter, cible Prometheus).
+
+# ── Traçabilité ────────────────────────────────────────────────────────────
+# Chaque étape vérifiée dépose un témoin JSON. C'est le dispositif qui permet
+# de répondre, six mois plus tard et sans deviner, à « ce playbook a-t-il déjà
+# tourné sur cette machine, quand, et depuis quel poste ? ».
+#   ls -l /var/lib/fleetforge/state/
+#   jq . /var/lib/fleetforge/state/setup-server.json
+preflight_state_dir: /var/lib/fleetforge/state
+# Emplacement sous l'ancien nom du projet (InfraManager). Repris par
+# tasks/legacy.yml avant toute lecture ou écriture de témoin.
+preflight_legacy_state_dir: /var/lib/infra-manager/state
+
+# ── Métadonnées d'inventaire ───────────────────────────────────────────────
+# Valeurs admises pour `provider` (tasks/inventory.yml). `custom` couvre ce qui
+# n'est pas un hébergeur commercial — machines derrière un NAT domestique,
+# matériel propre. La liste est fermée volontairement : « contabo » et
+# « Contabo » cohabitant produiraient deux parcs là où il n'y en a qu'un.
+preflight_providers:
+  - gcp
+  - aws
+  - contabo
+  - ovh
+  - oracle
+  - custom
+
+# ── Remédiation ────────────────────────────────────────────────────────────
+# `false` transforme le rôle en simple vérification : il signale et échoue au
+# lieu de réparer. Utile en pré-production ou pour un audit.
+preflight_remediate: true
+
+# Paquets dont la présence prouve que `install-tools` / `install-python` ont
+# tourné. Contrôlés un par un plutôt qu'en rejouant les rôles : `install-tools`
+# fait un `apt upgrade dist`, qu'on ne veut surtout pas déclencher au début de
+# chaque déploiement.
+preflight_required_commands:
+  - python3
+  - ufw
+  - jq
+  - curl
+  - git
+
+# Docker n'est pas requis partout (le nœud Bitcoin et BRK s'en passent) : les
+# playbooks qui en ont besoin le demandent explicitement.
+preflight_require_docker: false
+
+# ── Supervision ────────────────────────────────────────────────────────────
+# Écoute (toujours 9100) et scrape (port public du routeur, `monitor_port`) :
+# mêmes définitions que dans exporter-sys-install.
+node_exporter_port: 9100
+node_exporter_scrape_port: "{{ monitor_port | default(node_exporter_port) }}"
+
+# Interroger l'API de Prometheus prouve ce que le simple fichier de cible ne
+# prouve pas : que la série existe réellement. Non bloquant — Prometheus met
+# jusqu'à un intervalle de scrape à prendre en compte un nouveau `file_sd`, et
+# faire échouer un déploiement pour cela serait absurde.
+preflight_verify_series: true

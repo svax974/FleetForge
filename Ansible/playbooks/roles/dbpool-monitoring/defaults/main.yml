@@ -1,0 +1,5 @@
+---
+poolmon_container: pgpool
+# Le port du pool, pas celui de PostgreSQL : c'est par lui que passent les
+# applications, et c'est donc lui dont l'indisponibilité se voit côté client.
+poolmon_port: "{{ postgres_proxy_port | default(5432) }}"

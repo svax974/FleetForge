@@ -1,0 +1,21 @@
+---
+# Remove frontend PostgreSQL container. Data preserved. Use dbfront-purge to delete data.
+
+- name: Stop and remove frontend PostgreSQL container
+  community.docker.docker_container:
+    name: postgres-front
+    state: absent
+  ignore_errors: true
+
+# ── Supervision ────────────────────────────────────────────────────────────
+# Convention `-monitoring` (CLAUDE.md) : c'est le rôle de suppression du
+# service qui retire sa sonde. Une sonde laissée en place publierait
+# `service_up 0` indéfiniment et ferait sonner `ServiceDown` sur un service
+# volontairement désinstallé — l'alerte qu'on apprend à ignorer, et qui finit
+# par masquer les vraies.
+- name: Remove the svcprobe check
+  ansible.builtin.file:
+    path: "/etc/svcprobe/checks.d/dbfront.json"
+    state: absent
+  become: true
+  tags: [monitoring]

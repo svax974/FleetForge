@@ -1,0 +1,53 @@
+---
+# Supervision du nœud Astar.
+#
+# Cas 1 de la convention `-monitoring` (CLAUDE.md § 2) : le service expose déjà
+# Prometheus. `astar-install` lance le collator avec `--prometheus-external`,
+# il n'y a donc ni exporter à écrire ni sonde svcprobe à poser — seulement une
+# cible à enregistrer et un pare-feu à ouvrir.
+#
+# Remplace `exporter-astar-install`, qui faisait la même chose sans tag
+# `monitoring` (réarmer la supervision imposait de rejouer l'installation), sans
+# `assert` sur `prometheus_host`, avec un `ignore_errors: true` sur l'ouverture
+# ufw — donc une cible qui pouvait rester `down` sans que rien ne le dise — et
+# en n'enregistrant que la parachaîne.
+
+astarmon_job: node-astar
+
+# Deux endpoints, deux chaînes. Le collator embarque un nœud de relais complet
+# et publie ses métriques séparément (voir `astar.service.j2`). Ne scraper que
+# la parachaîne laisse la synchronisation du relais sans surveillance : elle
+# peut décrocher pendant que la parachaîne paraît saine.
+#
+# Repris de `astar-install`, jamais recopiés : ce sont les ports sur lesquels
+# l'unité systemd fait réellement écouter le nœud. Deux littéraux à tenir
+# alignés à la main finiraient par diverger, et la cible pointerait dans le vide
+# sans que rien ne le signale.
+astarmon_port_parachain: "{{ astar_prometheus_port | default(9615) }}"
+astarmon_port_relaychain: "{{ astar_prometheus_port_relay | default(9616) }}"
+
+# La cible du relais n'a de sens que si le relais est EMBARQUÉ.
+#
+# Avec `astar_relay_rpc_urls` (mode RPC), le collator n'embarque plus qu'un nœud
+# de relais minimal. Son endpoint répond toujours — 576 séries `substrate_*` —
+# mais il n'expose PLUS `substrate_block_height` : il ne suit pas la chaîne, il
+# la lit par RPC. Ce qu'il reste sont des compteurs libp2p, dont
+# `substrate_sub_libp2p_peers_count = 0`, qui devient `peers` après renommage.
+#
+# Enregistrer cette cible en mode RPC ferait donc sonner `AstarPeersLow`
+# (`peers < 5`) EN PERMANENCE, sur un nœud parfaitement sain — une alerte qui
+# ne s'éteint jamais et qui finit par masquer les autres. Et les règles de
+# hauteur, privées de séries, cesseraient silencieusement de couvrir le relais.
+# Une cible `up` qui n'expose rien d'exploitable est pire qu'une cible absente :
+# elle donne l'apparence d'une surveillance.
+#
+# En mode RPC, la santé du relais se lit sur la PARACHAÎNE : si les endpoints
+# RPC deviennent injoignables, elle cesse de progresser et `AstarBlockHeightStalled`
+# se déclenche. C'est la même information, prise là où elle est fiable.
+astarmon_relay_target: "{{ (astar_relay_rpc_urls | default([])) | length == 0 }}"
+
+# Chaîne de relais correspondante, pour l'étiquette. `.get()` plutôt qu'un accès
+# direct : une valeur inattendue d'`astar_chain` doit dégrader l'étiquette, pas
+# faire échouer le déploiement.
+astarmon_relay_name: >-
+  {{ {'astar': 'polkadot', 'shiden': 'kusama', 'shibuya': 'tokyo'}.get(astar_chain | default('astar'), 'relay') }}

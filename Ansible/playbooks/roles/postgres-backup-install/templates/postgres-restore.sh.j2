@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# Restaure {{ pgbak_db }} depuis {{ pgbak_dest_user }}@{{ pgbak_dest_addr }}:{{ pgbak_dest_dir }}.
+# Généré par Ansible (rôle postgres-backup-install) — NE PAS ÉDITER À LA MAIN.
+#
+# Usage :
+#   {{ pgbak_dir }}/postgres-restore.sh --check          # liste, ne restaure rien
+#   {{ pgbak_dir }}/postgres-restore.sh --yes            # restaure la plus récente
+#   {{ pgbak_dir }}/postgres-restore.sh --yes --file <nom>
+#
+# ARRÊTE l'application AVANT DE LANCER CE SCRIPT — elle écrit en continu dans
+# la base, la laisser tourner mélange données restaurées et données fraîches
+# sur une base à moitié reconstruite.
+set -euo pipefail
+
+DB="{{ pgbak_db }}"
+DB_USER="{{ pgbak_user }}"
+CONTAINER="{{ pgbak_container }}"
+DEST_DIR="{{ pgbak_dest_dir }}"
+
+SSH_KEY="{{ pgbak_ssh_key_path }}"
+DEST="{{ pgbak_dest_user }}@{{ pgbak_dest_addr }}"
+DEST_PORT="{{ pgbak_dest_port }}"
+
+CONFIRMED=no
+CHECK_ONLY=no
+DUMP_NAME=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --yes)   CONFIRMED=yes ;;
+    --check) CHECK_ONLY=yes ;;
+    --file)  shift; DUMP_NAME="$1" ;;
+    *) echo "Option inconnue : $1"; exit 2 ;;
+  esac
+  shift
+done
+
+log() { echo "$(date -Iseconds) $*"; }
+
+dest_sh() {
+  ssh -p "${DEST_PORT}" -i "${SSH_KEY}" -o BatchMode=yes \
+      -o ServerAliveInterval=60 -o ServerAliveCountMax=10 "${DEST}" "$1"
+}
+# Le dump est décompressé côté destination et streamé : il ne transite jamais
+# par le disque local.
+dump_stream() {
+  ssh -p "${DEST_PORT}" -i "${SSH_KEY}" -o BatchMode=yes \
+      -o ServerAliveInterval=60 -o ServerAliveCountMax=10 "${DEST}" "gunzip -c '$1'"
+}
+
+echo "Source des sauvegardes : {{ pgbak_dest_addr }}:${DEST_DIR}"
+echo "--- générations disponibles (plus récente en tête) ---"
+dest_sh "ls -lh '${DEST_DIR}'/${DB}-*.sql.gz 2>/dev/null | sort -rk9" || echo "(aucune)"
+echo "------------------------------------------------------"
+
+[ "${CHECK_ONLY}" = "yes" ] && exit 0
+
+if [ -z "${DUMP_NAME}" ]; then
+  DUMP_NAME="$(dest_sh "ls -1 '${DEST_DIR}'/${DB}-*.sql.gz 2>/dev/null | sort -r | head -1")"
+  [ -n "${DUMP_NAME}" ] || { echo "ERREUR : aucune sauvegarde disponible." >&2; exit 1; }
+else
+  case "${DUMP_NAME}" in /*) ;; *) DUMP_NAME="${DEST_DIR}/${DUMP_NAME}" ;; esac
+  dest_sh "test -f '${DUMP_NAME}'" || { echo "ERREUR : ${DUMP_NAME} introuvable." >&2; exit 1; }
+fi
+
+echo "Sauvegarde retenue : ${DUMP_NAME}"
+
+if [ "${CONFIRMED}" != "yes" ]; then
+  cat >&2 <<EOF
+
+ERREUR : confirmation requise.
+
+Cette opération SUPPRIME la base '${DB}' et la reconstruit depuis
+${DUMP_NAME}. Toutes les données postérieures à cette sauvegarde sont perdues.
+
+Vérifie que l'application est arrêtée, puis relance avec --yes.
+EOF
+  exit 1
+fi
+
+ACTIVE="$(docker exec "${CONTAINER}" psql -U "${DB_USER}" -d "${DB}" -tAc \
+  "SELECT count(*) FROM pg_stat_activity WHERE datname = '${DB}' AND application_name <> 'psql';")"
+if [ "${ACTIVE}" -gt 0 ]; then
+  log "[WARN] ${ACTIVE} connexion(s) active(s) sur ${DB} — l'application tourne probablement encore."
+  log "[WARN] Elles seront coupées par le DROP DATABASE ... WITH (FORCE)."
+fi
+
+log "Suppression et recréation de ${DB}."
+docker exec "${CONTAINER}" psql -U "${DB_USER}" -d postgres -v ON_ERROR_STOP=1 \
+  -c "DROP DATABASE IF EXISTS ${DB} WITH (FORCE);"
+docker exec "${CONTAINER}" psql -U "${DB_USER}" -d postgres -v ON_ERROR_STOP=1 \
+  -c "CREATE DATABASE ${DB} OWNER ${DB_USER};"
+
+log "Chargement du dump."
+# ON_ERROR_STOP=0 volontairement : un dump PostgreSQL rejoué contient toujours
+# quelques ordres qui échouent sans conséquence (droits, extensions déjà
+# présentes) ; les erreurs réelles sont dans le journal.
+if ! dump_stream "${DUMP_NAME}" | docker exec -i "${CONTAINER}" psql -U "${DB_USER}" -d "${DB}" -v ON_ERROR_STOP=0; then
+  log "[ERROR] Le chargement a échoué. La base est dans un état intermédiaire."
+  exit 1
+fi
+
+log "Contrôle de cohérence."
+docker exec "${CONTAINER}" psql -U "${DB_USER}" -d "${DB}" -c \
+  "SELECT pg_size_pretty(pg_database_size('${DB}')) AS taille;"
+
+log "Restauration terminée. Relance l'application."

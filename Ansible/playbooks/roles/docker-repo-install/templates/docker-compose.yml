@@ -1,0 +1,10 @@
+services:
+  registry:
+    image: registry:latest
+    restart: always
+    ports:
+    - "{{ docker_repo_port }}:5000"
+    volumes:
+    - /opt/docker-repo/data:/var/lib/registry
+    - /opt/docker-repo/config/config.yml:/etc/docker/registry/config.yml
+    - /opt/docker-repo/auth:/auth

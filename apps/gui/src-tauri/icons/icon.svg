@@ -1,0 +1,24 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="512" height="512" rx="128" fill="url(#gradient)"/>
+  <defs>
+    <linearGradient id="gradient" x1="0" y1="0" x2="512" y2="512" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#0ea5e9"/>
+      <stop offset="100%" stop-color="#0369a1"/>
+    </linearGradient>
+  </defs>
+  
+  <!-- Brain icon -->
+  <path d="M256 96C211.817 96 176 131.817 176 176C176 184.837 177.579 193.312 180.48 201.152C168.96 209.92 160 224.64 160 241.6C160 258.56 168.96 273.28 180.48 282.048C177.579 289.888 176 298.363 176 307.2C176 351.383 211.817 387.2 256 387.2C300.183 387.2 336 351.383 336 307.2C336 298.363 334.421 289.888 331.52 282.048C343.04 273.28 352 258.56 352 241.6C352 224.64 343.04 209.92 331.52 201.152C334.421 193.312 336 184.837 336 176C336 131.817 300.183 96 256 96Z" fill="white" opacity="0.95"/>
+  
+  <!-- Circuit lines -->
+  <circle cx="220" cy="160" r="8" fill="#0ea5e9"/>
+  <circle cx="292" cy="160" r="8" fill="#0ea5e9"/>
+  <circle cx="256" cy="240" r="8" fill="#0ea5e9"/>
+  <circle cx="220" cy="320" r="8" fill="#0ea5e9"/>
+  <circle cx="292" cy="320" r="8" fill="#0ea5e9"/>
+  
+  <line x1="220" y1="160" x2="256" y2="240" stroke="#0ea5e9" stroke-width="3"/>
+  <line x1="292" y1="160" x2="256" y2="240" stroke="#0ea5e9" stroke-width="3"/>
+  <line x1="256" y1="240" x2="220" y2="320" stroke="#0ea5e9" stroke-width="3"/>
+  <line x1="256" y1="240" x2="292" y2="320" stroke="#0ea5e9" stroke-width="3"/>
+</svg>

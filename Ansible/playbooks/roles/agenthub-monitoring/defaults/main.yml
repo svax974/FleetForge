@@ -1,0 +1,11 @@
+---
+# Supervision du hub AgentHub (CLAUDE.md, obligation `-monitoring`).
+#
+# Pas de collecteur/exporter dédié : le back NestJS expose bien un /metrics
+# (nestcommon/infra) mais son activation en prod (vmagent, remote_write) est
+# une décision applicative hors du périmètre de ce rôle (compose `--profile
+# metrics`, non démarré par défaut) — sonde déclarative pour `svcprobe`
+# (port 9110) uniquement, comme ctdapi-monitoring/rotki-monitoring sur cette
+# même machine.
+agenthub_svcprobe_front_url: "http://127.0.0.1:{{ hostvars['agenthub'].app_port }}/"
+agenthub_svcprobe_back_health_url: "http://127.0.0.1:{{ hostvars['agenthub'].back_port }}/api/v1/health"

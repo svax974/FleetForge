@@ -1,0 +1,57 @@
+---
+pm_user: "{{ remote_username }}"
+pm_home: "/home/{{ remote_username }}"
+pm_dir: "/home/{{ remote_username }}/papangmetrics"
+
+# Source on the Ansible control machine (rsynced to the box).
+pm_src: "/Users/steph/Dev/Projects/PapangLabs/PapangMetrics/"
+
+# Runtime config. Indicators DB is standalone (see the 'timescale' host) — override
+# pm_db_host to "127.0.0.1" per-deployment if the DB is ever co-located instead.
+pm_db_host: "{{ hostvars['timescale']['ansible_host'] | default('127.0.0.1') }}"
+pm_db_port: "{{ papangmetrics_db_port | default(5432) }}"
+pm_db_name: "{{ papangmetrics_db | default('papangmetrics') }}"
+pm_db_user: "{{ papangmetrics_user | default('papangmetrics') }}"
+pm_db_pass: "{{ papangmetrics_pass }}"
+pm_brk_url: "http://localhost:3110"
+pm_api_port: "{{ papangmetrics_api_port | default(9743) }}"
+pm_etl_metrics_port: "{{ papangmetrics_etl_metrics_port | default(9611) }}"
+# Balayage HORAIRE, à h+5.
+#
+# Mesuré le 10/08/2026, catalogue filtré à 5 290 métriques (26 085 paires) :
+# un balayage complet prend 350 à 400 s, 530 s quand des données arrivent.
+# À */2 les ticks se chevauchaient en permanence et 9 balayages sur 12 remontaient
+# ZÉRO point — la résolution la plus fine est h1, donc les données ne changent
+# qu'une fois par heure. On interrogeait BRK 26 000 fois pour rien, neuf fois
+# sur dix, sur une machine qui calcule et sert l'application en même temps.
+#
+# h+5 laisse à BRK le temps de publier le créneau de l'heure écoulée. Marge
+# confortable : 6-9 min de travail dans une fenêtre de 60.
+pm_etl_cron: "5 * * * *"
+pm_etl_reorg_window: 10
+# Number of metric/tf pairs backfilled concurrently by `npm run backfill`.
+# brk1 has 14 vCPU mostly idle during backfill — bump this on beefier boxes,
+# but mind the indicators DB's vCPU count (concurrent upserts add load there too).
+# 10 = valeur réellement en place sur brk1 (le .env avait été édité à la main ;
+# la valeur est ramenée ici pour que le déploiement cesse de la réécrire à 6).
+pm_etl_backfill_concurrency: 10
+# Concurrence du balayage incrémental. Était absente du template alors que
+# l'application la lit (configuration.ts) : elle retombait silencieusement sur
+# sa valeur par défaut de 4.
+#
+# MAINTENUE À 4 volontairement. Le plan initial prévoyait de la monter à 16-24,
+# mais il visait un catalogue de 151 k paires balayé en ~70 min. Le filtre de
+# cohortes l'a ramené à 26 k paires et 6 min : monter la concurrence ne ferait
+# que concentrer la charge sur BRK — qui est le goulot réel, à 230 % de CPU
+# pendant un backfill — sans aucun gain, la contrainte étant désormais horaire.
+pm_etl_incremental_concurrency: 4
+
+# Admin panel (PapangWorkspace indicatorApi console — tenants/API keys/usage).
+pm_admin_username: "{{ papangmetrics_admin_username | default('admin') }}"
+pm_admin_password: "{{ papangmetrics_admin_password }}"
+pm_admin_jwt_secret: "{{ papangmetrics_admin_jwt_secret }}"
+pm_admin_jwt_expires_in: "24h"
+# Default credit quotas applied to new tenants/keys when none is given explicitly.
+pm_default_tenant_credits_quota: "null"
+pm_default_apikey_credits_quota: "null"
+pm_default_period_type: "monthly"

@@ -1,0 +1,10 @@
+[
+  {
+    "targets": ["{{ ansible_host }}:{{ app_port }}"],
+    "labels": {
+      "job": "mtbridge",
+      "instance": "{{ inventory_hostname }}",
+      "node": "mtbridge"
+    }
+  }
+]

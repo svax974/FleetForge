@@ -1,0 +1,53 @@
+---
+# Install the PapangMetrics ETL worker systemd service. Assumes
+# papangmetrics-deploy has already pushed the code + built + written .env.
+
+- name: Deploy ETL systemd service
+  ansible.builtin.template:
+    src: papangmetrics-etl.service
+    dest: /etc/systemd/system/papangmetrics-etl.service
+    owner: root
+    group: root
+    mode: '0644'
+  become: true
+  notify: restart papangmetrics-etl
+
+- name: Enable and start ETL
+  ansible.builtin.systemd:
+    name: papangmetrics-etl
+    state: started
+    enabled: true
+    daemon_reload: true
+  become: true
+
+# ── Enregistrement de la cible auprès de Prometheus ────────────────────────
+# Sans ce fichier, Prometheus ne scrape rien et les alertes (dont brk_up et
+# brk_height, portées par l'ETL) ne peuvent pas se déclencher.
+#
+# Tag `monitoring` : permet d'armer/réarmer la supervision seule, sans rejouer
+# le rsync + build + migrations de `papangmetrics-deploy` —
+#   ./play.sh papanglabs deploy-papangmetrics.yml --tags monitoring
+# Indispensable quand Prometheus est (re)déployé après le service, cas où les
+# répertoires file_sd repartent vides et où les alertes deviennent muettes.
+
+- name: Create papangmetrics-etl target directory on Prometheus host
+  ansible.builtin.file:
+    path: "/home/{{ remote_username }}/prometheus/prometheus-configs/papangmetrics-etl"
+    state: directory
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: '0755'
+  delegate_to: "{{ prometheus_host }}"
+  become: true
+  tags: [monitoring]
+
+- name: Deploy papangmetrics-etl Prometheus target
+  ansible.builtin.template:
+    src: prometheus-target.json.j2
+    dest: "/home/{{ remote_username }}/prometheus/prometheus-configs/papangmetrics-etl/{{ inventory_hostname }}.json"
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: '0644'
+  delegate_to: "{{ prometheus_host }}"
+  become: true
+  tags: [monitoring]

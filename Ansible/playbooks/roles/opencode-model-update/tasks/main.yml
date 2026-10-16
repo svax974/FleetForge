@@ -1,0 +1,165 @@
+---
+# Réécrit la clé `model` de la configuration globale de chaque compte.
+#
+# Lecture, modification, réécriture — et non un nouveau rendu de gabarit : la
+# configuration accumule au fil du temps des blocs que ce rôle ne connaît pas
+# (permissions, greffons, agents, fournisseurs). Un gabarit les effacerait sans
+# rien signaler. Seul le format se perd : les commentaires d'un fichier JSONC
+# écrit à la main ne survivent pas au passage.
+
+- name: Fail when no model is given
+  ansible.builtin.fail:
+    msg: >-
+      `opencode_model` n'est pas défini. Le passer en ligne de commande
+      (-e opencode_model=opencode/mimo-v2.5-free) pour un changement ponctuel,
+      ou le poser dans l'inventaire pour qu'il devienne le défaut du parc.
+  when: opencode_model is not defined or (opencode_model | trim | length == 0)
+
+# ── Contrôle du modèle ─────────────────────────────────────────────────────
+- name: Fetch the OpenCode Zen model catalogue
+  ansible.builtin.uri:
+    url: "{{ opencode_zen_models_url }}"
+    return_content: true
+  register: opencode_zen_catalogue
+  failed_when: false
+  when: opencode_model_verify and opencode_model.startswith('opencode/')
+
+# Injoignable = on n'en tire aucune conclusion. Bloquer ici ferait échouer un
+# changement de modèle parfaitement valide parce que le réseau sortant de
+# l'hôte est filtré.
+- name: Warn when the catalogue could not be reached
+  ansible.builtin.debug:
+    msg: >-
+      Catalogue Zen injoignable ({{ opencode_zen_catalogue.status | default('?') }}) :
+      le modèle {{ opencode_model }} est écrit sans être vérifié.
+  when: opencode_model_verify and opencode_model.startswith('opencode/')
+        and opencode_zen_catalogue.status | default(0) != 200
+
+- name: Fail when the model is not in the catalogue
+  ansible.builtin.fail:
+    msg: >-
+      {{ opencode_model }} n'existe pas chez OpenCode Zen. Modèles gratuits
+      actuellement publiés :
+      {{ opencode_zen_catalogue.json.data | map(attribute='id') | select('search', '-free$') | map('regex_replace', '^', 'opencode/') | join(', ') }}.
+      Catalogue complet : {{ opencode_zen_models_url }}.
+  when: opencode_model_verify and opencode_model.startswith('opencode/')
+        and opencode_zen_catalogue.status | default(0) == 200
+        and (opencode_model | regex_replace('^opencode/', ''))
+            not in (opencode_zen_catalogue.json.data | map(attribute='id') | list)
+
+- name: Call the model once before writing anything
+  ansible.builtin.uri:
+    url: "{{ opencode_zen_completions_url }}"
+    method: POST
+    headers:
+      User-Agent: "{{ opencode_user_agent }}"
+    body_format: json
+    body:
+      model: "{{ opencode_model | regex_replace('^opencode/', '') }}"
+      max_tokens: 8
+      messages:
+        - role: user
+          content: "ping"
+    timeout: 60
+  register: opencode_smoke
+  failed_when: false
+  when: opencode_smoke_test and opencode_model.startswith('opencode/')
+
+- name: Fail when the model does not answer
+  ansible.builtin.fail:
+    msg: >-
+      {{ opencode_model }} ne répond pas
+      (HTTP {{ opencode_smoke.status | default('pas de réponse') }}) : la
+      configuration n'a PAS été modifiée, le modèle en place reste actif.
+      {{ "429 : palier gratuit épuisé, ou offre terminée."
+         if opencode_smoke.status | default(0) == 429
+         else "Sortie réseau de l'hôte vers opencode.ai à vérifier." }}
+  when: not (opencode_smoke.skipped | default(false))
+        and (opencode_smoke.status | default(0) != 200
+             or opencode_smoke.json.choices | default([]) | length == 0)
+
+# ── Réécriture ─────────────────────────────────────────────────────────────
+- name: Resolve the home directory of each account
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ item }}"
+    fail_key: false
+  loop: "{{ opencode_users }}"
+  register: opencode_passwd
+  become: true
+
+- name: Build the (account, home) pairs
+  ansible.builtin.set_fact:
+    opencode_targets: >-
+      {{ opencode_targets | default([])
+         + [{'user': item.item, 'home': item.ansible_facts.getent_passwd[item.item][4]}] }}
+  loop: "{{ opencode_passwd.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: item.ansible_facts.getent_passwd[item.item] is defined
+        and item.ansible_facts.getent_passwd[item.item] is not none
+
+- name: Read the current configuration
+  ansible.builtin.slurp:
+    src: "{{ item.home }}/.config/opencode/opencode.json"
+  loop: "{{ opencode_targets | default([]) }}"
+  loop_control:
+    label: "{{ item.user }}"
+  register: opencode_current
+  become: true
+  failed_when: false
+
+# Une configuration absente signifie qu'`opencode-install` n'a pas tourné pour
+# ce compte. En créer une ici donnerait un fichier sans le bloc `provider`,
+# donc un modèle correctement nommé et jamais joignable.
+- name: Fail when a configuration is missing
+  ansible.builtin.fail:
+    msg: >-
+      Aucune configuration opencode pour {{ item.item.user }}
+      ({{ item.item.home }}/.config/opencode/opencode.json). Jouer
+      `deploy-opencode.yml` sur cet hôte avant de changer le modèle.
+  loop: "{{ opencode_current.results }}"
+  loop_control:
+    label: "{{ item.item.user }}"
+  when: item.content is not defined
+
+- name: Write the new default model
+  ansible.builtin.copy:
+    content: >-
+      {{ (item.content | b64decode | from_json)
+         | combine({'model': opencode_model})
+         | combine({'small_model': opencode_small_model}
+                   if (opencode_small_model | default('') | length > 0) else {})
+         | to_nice_json }}
+    dest: "{{ item.item.home }}/.config/opencode/opencode.json"
+    owner: "{{ item.item.user }}"
+    group: "{{ item.item.user }}"
+    mode: "0600"
+  loop: "{{ opencode_current.results }}"
+  loop_control:
+    label: "{{ item.item.user }}"
+  become: true
+
+- name: Drop the model remembered by the TUI
+  ansible.builtin.file:
+    path: "{{ item.home }}/{{ opencode_state_model_file }}"
+    state: absent
+  loop: "{{ opencode_targets | default([]) }}"
+  loop_control:
+    label: "{{ item.user }}"
+  become: true
+  when: opencode_model_reset_selection
+
+# Rien à redémarrer : opencode lit sa configuration au lancement. Les sessions
+# ouvertes gardent donc l'ancien modèle jusqu'à leur fermeture — ce n'est pas
+# une panne, c'est le comportement attendu, et il vaut mieux le dire que le
+# laisser découvrir.
+- name: Report the change
+  ansible.builtin.debug:
+    msg: >-
+      Modèle par défaut : {{ opencode_model }} pour
+      {{ (opencode_targets | default([])) | map(attribute='user') | join(', ') }}.
+      Les sessions opencode déjà ouvertes conservent l'ancien modèle.
+      {{ "La sélection mémorisée par le TUI a été effacée."
+         if opencode_model_reset_selection
+         else "Un compte ayant déjà choisi un modèle dans le TUI garde le sien : rejouer avec -e opencode_model_reset_selection=true pour l'imposer." }}

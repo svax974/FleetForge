@@ -1,0 +1,37 @@
+---
+# Arrête les sauvegardes des deux parcs (famille `backup`). Les données déjà
+# sauvegardées et les scripts de restauration sont CONSERVÉS.
+#
+#   ./play.sh papanglabs remove-backup.yml
+#   ./play.sh web3c remove-backup.yml
+#
+# Archives SQLite conservées sur `monitor` ; leur purge : purge-sync-server.yml
+# -e sync_purge_confirm=yes -e sync_purge_backups=yes.
+#
+# La sauvegarde BRK visait `rpcbtc1` avant la fusion du 11/10/2026, alors
+# qu'elle est installée sur `brk1` (même machine, même compte) : on retire
+# désormais là où l'on installe.
+
+- name: Arrêt de la sauvegarde du magasin BRK
+  hosts: brk1
+  remote_user: "{{ remote_username }}"
+  roles:
+    - brk-backup-remove
+
+- name: Arrêt de la sauvegarde de la base d'indicateurs
+  hosts: timescale
+  remote_user: "{{ remote_username }}"
+  roles:
+    - timescaledb-backup-remove
+
+- name: Arrêt de la sauvegarde PostgreSQL — tradekong et ctdapi
+  hosts: tradekong:ctdapi
+  remote_user: "{{ remote_username }}"
+  roles:
+    - postgres-backup-remove
+
+- name: Arrêt de la sauvegarde SQLite — serveurs de synchronisation
+  hosts: sync_servers
+  remote_user: "{{ remote_username }}"
+  roles:
+    - sync-backup-remove

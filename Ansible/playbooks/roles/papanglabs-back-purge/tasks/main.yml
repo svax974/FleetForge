@@ -1,0 +1,57 @@
+---
+- name: Remove the service first
+  ansible.builtin.include_role:
+    name: papanglabs-back-remove
+
+# `-v` : les volumes nommés (redis_data, shared_directory) ne partent pas avec
+# un `down` ordinaire. `shared_directory` porte les graphiques générés, c'est
+# précisément le genre de données qu'une purge doit emporter et qu'un remove
+# doit garder.
+- name: Remove the containers with their volumes
+  ansible.builtin.command:
+    cmd: >-
+      docker compose --project-name {{ pgb_project_name }}
+      --profile metrics down --remove-orphans -v
+    chdir: "{{ pgb_dir }}"
+  become: true
+  register: pgb_purge_down
+  changed_when: "'Removed' in pgb_purge_down.stderr"
+  failed_when: false
+
+- name: Remove the application image
+  community.docker.docker_image:
+    name: "{{ pgb_image }}"
+    state: absent
+  become: true
+  failed_when: false
+
+- name: Remove the application directory
+  ansible.builtin.file:
+    path: "{{ pgb_dir }}"
+    state: absent
+  become: true
+
+# ── DNS : retirer le CNAME public de l'hôte ─────────────────────────────────
+# Le groupe `backsindicators` porte DEUX noms publics distincts
+# (backindicators. et backindicators-prod.) : c'est l'attribut
+# d'inventaire `proxy_hostname` de CHAQUE hôte qui les porte, pas une
+# variable de service unique — d'où pas de `run_once` ici, chaque hôte
+# retirant le sien.
+# Garde-fou : sans attribut, `proxy_hostname` vaut le front global
+# (group_vars/papanglabs.yml) — ne jamais tenter de retirer le record du
+# front lui-même.
+# ATTENTION : l'entrée d'inventaire porteuse de `proxy_hostname` doit être
+# retirée EN MÊME TEMPS (ou son attribut supprimé) — sinon la prochaine
+# synchronisation (update-cloudflare-dns.yml) republierait le record.
+- name: Remove the public CNAME of this host
+  community.general.cloudflare_dns:
+    api_token: "{{ cloudflare_token }}"
+    zone: "{{ domain_name }}"
+    record: "{{ proxy_hostname }}"
+    type: CNAME
+    state: absent
+  delegate_to: localhost
+  become: false
+  when:
+    - cloudflare_token | default('') | length > 0
+    - proxy_hostname | default('') != 'proxy.' ~ domain_name

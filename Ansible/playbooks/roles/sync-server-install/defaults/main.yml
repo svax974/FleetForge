@@ -1,0 +1,114 @@
+---
+# web3c-sync — serveur de synchronisation chiffrée de bout en bout (Go +
+# SQLite, un conteneur par INSTANCE : iptv, banking, aiteam). Le serveur ne voit
+# que du chiffré (spec/PROTOCOL.md), il est PUBLIC : l'accès est contrôlé par les
+# signatures d'appareil, pas par une liste d'IP — d'où des vhosts proxy sans
+# whitelist ni X-Api-Key (sites-enabled/sync-<x>.conf).
+#
+# Entrée d'inventaire (groupe `sync_servers`) : une par instance, toutes sur la
+# MACHINE PARTAGÉE (ctdapi, dev, rotki, agenthub, xbot,
+# docker-repo). Variables d'hôte fournies par l'inventaire, SANS défaut
+# plausible ici (leur absence doit se voir, cf. host-preflight) :
+#   sync_instance      iptv | banking | aiteam  (SYNC_INSTANCE)
+#   app_port           port de service publié sur l'hôte (4710/4711/4712)
+#   sync_metrics_port  port /metrics publié sur l'hôte (9710/9711/9712)
+#
+# Aucun secret : inscription ouverte (SYNC_OPEN_REGISTRATION=true) et pas de
+# jeton administrateur (SYNC_ADMIN_TOKEN_SHA256 non défini). Rien dans le vault.
+
+sync_container: "sync-{{ sync_instance }}"
+sync_hostname: "sync-{{ sync_instance }}.{{ domain_name }}"
+
+# ── Source et image ─────────────────────────────────────────────────────────
+# Pas de registre d'images pour l'instant : l'image se construit SUR L'HÔTE
+# depuis les sources, avec le MÊME Dockerfile que l'installateur SSH des
+# serveurs personnels utilisera plus tard.
+#
+# `sync_server_src` : répertoire `server/` du dépôt web3c-sync SUR LE POSTE
+# D'EXÉCUTION d'Ansible (celui qui lance play.sh). Il est synchronisé par
+# rsync vers l'hôte. Le dépôt n'ayant pas encore de remote git, c'est un chemin
+# local ; il DEVIENDRA un clone git (`git clone`/`git pull` sur l'hôte à un
+# commit ou une étiquette précis) quand le dépôt en aura un — le tag d'image,
+# dérivé du contenu des sources, passera alors naturellement au commit.
+# Surchargeable : -e sync_server_src=/autre/chemin/server
+sync_server_src: "{{ lookup('ansible.builtin.env', 'HOME') }}/Dev/Apps/web3c-sync/server"
+
+# Copie de travail sur l'hôte : UNE pour les trois instances (même image).
+sync_server_build_dir: "/home/{{ remote_username }}/sync-src"
+
+# Exclus de la synchronisation : l'historique git et les tests ne font pas
+# partie du contexte de build utile (un test modifié ne doit pas redéployer).
+sync_server_rsync_excludes:
+  - ".git"
+  - ".DS_Store"
+  - "*_test.go"
+
+# Nom de l'image (une seule pour les trois instances) ; le TAG est le début de
+# l'empreinte SHA-256 du contenu synchronisé (tasks/main.yml) : rejeu sans
+# changement de source = aucun rebuild, aucun redémarrage ; source modifiée =
+# nouveau tag, donc build puis recréation du conteneur.
+sync_server_image: web3c-sync-server
+# Générations d'images conservées sur l'hôte (la courante + de quoi revenir en
+# arrière). Les images encore utilisées par un conteneur ne sont jamais
+# supprimées, même au-delà.
+sync_server_image_keep: 3
+
+# ── Conteneur ───────────────────────────────────────────────────────────────
+sync_home: "/home/{{ remote_username }}/sync-{{ sync_instance }}"
+# Volume de données (SYNC_DB=/data/sync.db, SYNC_BLOB_DIR=/data/blobs).
+sync_data_dir: "{{ sync_home }}/data"
+
+# L'image distroless `:nonroot` tourne en uid/gid 65532 : le volume lui
+# appartient, `srvc` n'y a PAS accès sans sudo. Exception assumée à « srvc doit
+# pouvoir piloter ce qu'il déploie » (CLAUDE.md) : c'est un conteneur, le
+# compte est celui de l'image, et la sauvegarde (sync-backup-install) lit la
+# base en root.
+sync_uid: 65532
+sync_gid: 65532
+
+# Le port INTERNE du conteneur est IDENTIQUE au port publié. Ce n'est pas une
+# coquetterie : dans DOCKER-USER (où vit tout le filtrage, voir
+# sync-server-security) les paquets sont vus APRÈS le DNAT de Docker, donc
+# `--dport 4710` n'y correspondrait à rien si le conteneur écoutait en :8080 —
+# la règle DROP serait décorative et le port resterait ouvert à Internet.
+sync_listen_port: "{{ app_port }}"
+sync_metrics_listen_port: "{{ sync_metrics_port }}"
+
+# Toujours 0.0.0.0 : les proxies sont des machines DISTANTES (`proxy1`,
+# NAT domestique), jamais co-localisés avec `ctdapi`. Le
+# filtrage est fait dans DOCKER-USER (sync-server-security).
+sync_bind_address: "0.0.0.0"
+
+# Limites : le serveur borne déjà ses propres ressources (256 requêtes en vol,
+# quotas par groupe) ; ces plafonds protègent seulement les AUTRES services de
+# la machine partagée contre un emballement.
+sync_memory: "512m"
+sync_cpus: 1.0
+sync_pids_limit: 256
+
+# ── Confiance envers les proxies (SYNC_TRUST_PROXY) ────────────────────────
+# Le serveur lit l'adresse du client dans X-Real-IP, mais SEULEMENT si le pair
+# TCP est dans SYNC_TRUSTED_PROXIES. Sans cela (SYNC_TRUST_PROXY=false), tous
+# les clients partageraient l'adresse du proxy et ses limites de débit
+# (20 créations de groupe/jour, 30 votes/min…) — auto-déni de service ;
+# spec/SECURITY-REVIEW.md §3 C9.
+#
+# IP source vue par le conteneur : Docker publie par DNAT iptables (le docker-proxy
+# n'intervient que pour les connexions locales/IPv6), qui PRÉSERVE l'adresse
+# source. Le pair TCP d'un proxy distant est donc son adresse publique : on
+# liste ces adresses en /32, dérivées de l'inventaire (même source que les
+# `sources` DOCKER-USER de host_vars/ctdapi.yml). On ne reprend PAS la valeur
+# par défaut du serveur (127/8, 10/8, 172.16/12, 192.168/16) : 172.16/12 couvre
+# les bridges Docker, donc n'importe quel autre conteneur de cette machine
+# partagée pourrait se faire passer pour un proxy et usurper X-Real-IP.
+# Les entrées sont dédoublonnées : proxy1 et monitor partagent la même adresse.
+sync_trusted_proxies: >-
+  {{ groups['proxies'] | default([])
+     | map('extract', hostvars, 'ansible_host')
+     | select('defined') | unique
+     | map('regex_replace', '$', '/32')
+     | join(',') }}
+
+# Vérification fonctionnelle (tasks/main.yml).
+sync_health_retries: 24
+sync_health_delay: 5

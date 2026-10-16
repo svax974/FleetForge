@@ -1,0 +1,78 @@
+---
+# Déploie Rotki en conteneur autonome, sur sa propre machine dédiée. Voir
+# defaults/main.yml pour le choix — imposé, pas déduit — de la publication
+# sur 0.0.0.0 : le seul client (TradeKong, back/back-worker) est une VRAIE
+# machine distante, jamais l'hôte lui-même ni un pair du même bridge Docker.
+
+- name: Deploy the Rotki container
+  community.docker.docker_container:
+    name: "{{ rotki_container }}"
+    image: "{{ rotki_image }}"
+    state: started
+    restart_policy: unless-stopped
+    ports:
+      - "{{ rotki_bind_address }}:{{ rotki_port }}:{{ rotki_container_port }}"
+    volumes:
+      - "{{ rotki_data_volume }}:/data"
+      - "{{ rotki_logs_volume }}:/logs"
+    # L'image tourne en root (cf. defaults/main.yml) : ni capabilities ni
+    # cap_drop restreints ici, contrairement à searxng-install — Rotki gère
+    # lui-même la propriété de ses volumes au démarrage, sans drop de
+    # privilèges documenté en aval.
+    log_driver: json-file
+    log_options:
+      max-size: "10m"
+      max-file: "3"
+  become: true
+
+# Rotki expose son API REST sous /api/1 (cf. WalletOptimizer,
+# RotkiConnectionService : `GET /ping` sur le baseUrl configuré). Pas de
+# HEALTHCHECK documenté dans l'image elle-même au 2026-09-22 — ce ping est
+# donc le seul signal fiable que le service sert réellement des requêtes, pas
+# seulement qu'un socket TCP a ouvert.
+- name: Wait for Rotki to answer
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ rotki_port }}/api/1/ping"
+    status_code: [200]
+  register: rotki_ready
+  until: rotki_ready.status | default(0) == 200
+  retries: 24
+  delay: 10
+
+- name: Report how the service is exposed
+  ansible.builtin.debug:
+    msg: >-
+      Rotki publié sur {{ rotki_bind_address }}:{{ rotki_port }} (conteneur
+      {{ rotki_container_port }}). Filtré dans DOCKER-USER via
+      docker_ports_rules (host_vars/ctdapi.yml — l'hôte canonique de cette
+      machine partagée, pas `rotki` — voir docker-ports-security), autorisé
+      uniquement depuis TradeKong (`tradekong`, appel direct) et les deux
+      proxies (relais du vhost public) ; DOIT rester injoignable depuis
+      toute autre machine — contrôle : `nc -z {{ ansible_host }}
+      {{ rotki_port }}` depuis une machine tierce doit échouer une fois le
+      play "Filter the Rotki port in DOCKER-USER" rejoué. Pour un appel
+      direct IP (RotkiConnectionService), mettre à jour la config admin
+      TradeKong (rotkiIntegration_baseUrl) vers
+      http://{{ ansible_host }}:{{ rotki_port }}/api/1 — valeur par défaut
+      actuelle (http://rotki/api/1) résout uniquement dans le réseau Compose
+      de WalletOptimizer, pas depuis un autre projet. Le vhost public
+      (https://{{ rotki_hostname }}, jeton X-Api-Key) est une alternative
+      pour un accès chiffré en transit ou depuis un consommateur hors du
+      réseau privé de l'hébergeur — non câblé côté application TradeKong
+      pour l'instant.
+
+# ── DNS : alias CNAME vers le front des proxies ─────────────────────────────
+# Convention d'inventaire : le nom public (rotki_hostname) est déclaré sur
+# l'entrée `rotki` via `proxy_hostname`, et c'est la synchronisation générique
+# (update-cloudflare-dns.yml, cloudflare-dns-update/tasks/cnames.yml) qui
+# publie le CNAME vers le front round-robin — jamais un A vers l'IP propre de
+# cet hôte. L'inclusion ci-dessous rejoue cette même logique en portée réduite
+# (ce seul hôte) pour garantir le CNAME dès le premier déploiement, sans
+# attendre la synchronisation générique. Même mécanisme que freellm-install.
+- name: Ensure the service CNAME to the canonical proxy front
+  ansible.builtin.include_role:
+    name: cloudflare-dns-update
+    tasks_from: cnames
+  vars:
+    cfdns_cname_scope:
+      - "{{ inventory_hostname }}"

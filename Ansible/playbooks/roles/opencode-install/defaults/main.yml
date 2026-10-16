@@ -1,0 +1,96 @@
+---
+# opencode — agent de codage en ligne de commande (TUI), installé comme OUTIL
+# et non comme service : aucun démon, aucun port d'écoute, aucun utilisateur
+# système. C'est la raison pour laquelle cette famille n'a ni rôle
+# `-monitoring` ni rôle `-security`, par exception à CLAUDE.md § 2 : il n'y a
+# aucun processus permanent dont on pourrait dire qu'il est tombé, et aucune
+# écoute à filtrer. Une sonde `service_up` porterait ici sur la présence d'un
+# fichier — ce que `dpkg -l` fait déjà, en moins trompeur.
+
+# ── Binaire ────────────────────────────────────────────────────────────────
+# Version installée. `latest` interroge l'API GitHub à chaque exécution ; une
+# version figée ("1.18.18") rend le déploiement reproductible et évite qu'un
+# passage de routine ne fasse changer de version majeure sous les pieds des
+# utilisateurs connectés.
+opencode_version: "latest"
+opencode_github_repo: "anomalyco/opencode"
+
+# Binaire posé À L'ÉCHELLE DE LA MACHINE, pas dans un HOME.
+# Le script officiel (https://opencode.ai/install) écrit dans
+# `$HOME/.opencode/bin` ET modifie les fichiers de shell de l'utilisateur
+# (.bashrc, .zshrc). Sur un serveur à plusieurs comptes cela produit autant de
+# copies du binaire que d'utilisateurs, aucune mise à jour commune, et des
+# fichiers de shell réécrits dans le dos de l'opérateur. Le rôle télécharge
+# donc directement l'archive de la release et pose un seul binaire.
+opencode_binary: "/usr/local/bin/opencode"
+
+# ── Configuration déployée ─────────────────────────────────────────────────
+# Comptes qui reçoivent la configuration globale
+# (`~/.config/opencode/opencode.json`, cf. https://opencode.ai/docs/config/).
+# Ce fichier est le niveau GLOBAL : un `opencode.json` à la racine d'un projet
+# le surcharge toujours. C'est voulu — ce rôle pose un défaut, pas un carcan.
+opencode_users:
+  - "{{ remote_username }}"
+
+# Modèle par défaut. Le préfixe `opencode/` désigne le fournisseur OpenCode Zen
+# (https://opencode.ai/docs/zen/). Le suffixe `-free` est une offre
+# PROMOTIONNELLE, donc datée : le jour où elle s'arrête le modèle disparaît du
+# catalogue et opencode échoue au premier appel, pas au démarrage. C'est
+# exactement ce que `opencode-model-update` sert à corriger, sans réinstaller.
+opencode_model: "opencode/mimo-v2.5-free"
+
+# Modèle léger (titres de session, résumés). Vide = laissé au choix d'opencode.
+opencode_small_model: ""
+
+# Clé OpenCode Zen. VIDE, et c'est le cas nominal : les modèles `-free` ne
+# demandent AUCUNE authentification — ni clé, ni compte. Vérifié le 13/08/2026
+# sur un poste dont les tables `credential` et `account` d'opencode.db sont
+# vides : l'appel passe et le modèle répond.
+#
+# La clé ne sert donc qu'à passer sur un modèle Zen PAYANT. Renseignée (vault,
+# ou `-e`), elle est écrite dans les options du fournisseur `opencode` de la
+# configuration. C'est la seule voie utilisable par Ansible : le parcours
+# interactif (`/connect`) range désormais les identifiants dans la base SQLite
+# `~/.local/share/opencode/opencode.db` (table `credential`), et non plus dans
+# un `auth.json` qu'on pourrait déposer.
+opencode_zen_api_key: ""
+
+# ── Contrôle de bout en bout ───────────────────────────────────────────────
+# Un appel réel au modèle après installation. C'est le seul contrôle qui
+# distingue « le binaire est posé » de « l'agent fonctionne » : la présence du
+# modèle au catalogue ne prouve rien sur le palier gratuit, qui est une offre
+# datée.
+opencode_smoke_test: true
+opencode_zen_completions_url: "https://opencode.ai/zen/v1/chat/completions"
+
+# Le palier gratuit de Zen ne se filtre PAS sur une clé mais sur le
+# User-Agent. Constaté le 13/08/2026 sur la même machine, à la seconde près :
+#   User-Agent: curl/8.7.1     → 429 FreeUsageLimitError (« provider: Console »)
+#   User-Agent: opencode       → 200, le modèle répond
+# Toute valeur ne contenant pas « opencode » est renvoyée en 429, y compris un
+# User-Agent vide. Sans cette ligne, le contrôle ci-dessus échouerait
+# systématiquement et ferait conclure à un quota épuisé alors que le service
+# est parfaitement disponible — c'est exactement le diagnostic erroné qu'un
+# `curl` de vérification produit.
+opencode_user_agent: "opencode"
+
+# Fournisseurs supplémentaires, fusionnés tels quels dans le bloc `provider`.
+# Vide par défaut : la configuration déployée ne déclare AUCUNE source, elle se
+# contente de nommer le modèle Zen. Ne servir que pour un fournisseur
+# compatible OpenAI explicitement voulu sur l'hôte, auquel cas le modèle se
+# nomme `<fournisseur>/<id>` dans `opencode_model` :
+#   opencode_providers:
+#     <fournisseur>:
+#       npm: "@ai-sdk/openai-compatible"
+#       options:
+#         baseURL: "https://…/v1"
+#         apiKey: "{{ vault_… }}"
+opencode_providers: {}
+
+# ── Dépendances ────────────────────────────────────────────────────────────
+# `tar` extrait l'archive, `curl` sert au contrôle de version. Présents sur le
+# socle, listés ici parce qu'une machine hors `setup-server.yml` ne les a pas
+# forcément et que l'échec serait alors obscur.
+opencode_packages:
+  - curl
+  - tar

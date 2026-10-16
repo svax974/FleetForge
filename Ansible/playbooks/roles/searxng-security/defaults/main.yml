@@ -1,0 +1,37 @@
+---
+# Pare-feu du relai SearXNG.
+#
+# Le port du service est PUBLIÉ PAR DOCKER : Docker insère ses règles DNAT en
+# amont de tout ce que gère ufw, une règle ufw sur ce port n'a donc AUCUN effet
+# (CLAUDE.md, constats des 06/08 et 09/08/2026). Ce rôle n'en pose aucune : il
+# travaille dans `DOCKER-USER`, la seule chaîne que Docker traverse sans la
+# réécrire, sur le modèle de `timescaledb-security`.
+#
+# Rôle dédié plutôt que `docker-ports-security` : ce dernier régénère un script
+# UNIQUE par machine à partir de `docker_ports_rules`, déclaré dans le host_vars
+# de l'hôte CANONIQUE. Joué depuis l'entrée `station` — qui n'a pas de host_vars
+# propre — il ne poserait rien ; et y déclarer la règle depuis un autre host_vars
+# ferait dépendre la sécurité du relai d'un fichier qui ne parle pas de lui. Les
+# deux dispositifs cohabitent sans conflit : chacun ne purge et ne repose que
+# les règles de SES ports.
+
+searxng_container: searxng
+searxng_port: 8888
+
+# ── Qui a le droit d'atteindre le relai ────────────────────────────────────
+# Doit rester identique à `searxng-install` : c'est la même décision, prise
+# une fois côté publication du port et une fois côté filtrage.
+searxng_allowed_proxies: "{{ groups['proxies'] | default([]) }}"
+
+searxng_remote_proxies: >-
+  {{ searxng_allowed_proxies
+     | map('extract', hostvars, 'ansible_host')
+     | select('defined')
+     | reject('equalto', ansible_host)
+     | unique | list }}
+
+searxng_bind_address: "{{ '0.0.0.0' if (searxng_remote_proxies | length > 0) else '127.0.0.1' }}"
+
+# IP/CIDR bruts à autoriser en plus (dépannage). À garder vide : chaque entrée
+# est une exception qui survit à celui qui l'a posée.
+searxng_extra_allowed_cidrs: []

@@ -1,0 +1,8 @@
+{
+  "service": "wordpress",
+  "up": {"kind": "http", "url": "{{ wpmon_url }}", "status": [200, 301, 302], "timeout": 10},
+  "extra_checks": [
+    {"name": "apache", "kind": "systemd", "unit": "{{ wpmon_web_unit }}"},
+    {"name": "mysql", "kind": "systemd", "unit": "{{ wpmon_db_unit }}"}
+  ]
+}

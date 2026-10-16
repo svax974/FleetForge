@@ -1,0 +1,40 @@
+---
+# Mise à jour LÉGÈRE du back PapangLabs (NestJS, conteneurs Docker Compose) —
+# livre le code, reconstruit l'image, redémarre les conteneurs et vérifie la
+# santé. Ne rejoue NI le pare-feu (`papanglabs-back-security` — ouverture du
+# port back-lb, autorisations vers les services amont) NI la supervision
+# (`papanglabs-back-monitoring` — sonde svcprobe, vmagent, destinations
+# Prometheus) : posés par `deploy-papanglabs-back.yml` au premier déploiement,
+# ils n'ont aucune raison de bouger à chaque livraison de code.
+#
+#   ./play.sh papanglabs update-papanglabs-back.yml --limit backindicators1-prod
+#
+# Ne jamais jouer sans `--limit` : le groupe `backsindicators` porte la prod ET
+# la préprod, et les deux se distinguent uniquement par leur fichier .env
+# (`pgb_env_file`, posé en host_vars). Un oubli livrerait la configuration de
+# l'un sur la machine de l'autre.
+#
+# Utiliser `deploy-papanglabs-back.yml` à la place, pas celui-ci, pour : un
+# premier déploiement, une machine neuve, ou après un changement touchant le
+# pare-feu ou la supervision (nouveau service amont consommé, réécriture de
+# `pgb_upstream_services`, `pgb_remote_write_urls`…).
+#
+# ── Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ───────────────────────
+# Même règle que tout `deploy-*.yml` : host-preflight d'abord. Son coût reste
+# négligeable sur une machine déjà bootstrapée — il vérifie des invariants
+# (binaires présents, port de l'exporter qui répond), il ne rejoue pas les
+# rôles.
+- name: Contrôle préalable
+  hosts: backsindicators
+  remote_user: "{{ remote_username }}"
+  roles:
+    - role: host-preflight
+      preflight_require_docker: true
+
+- name: Mise à jour du back PapangLabs (code + build + redémarrage)
+  hosts: backsindicators
+  remote_user: "{{ remote_username }}"
+
+  roles:
+    - papanglabs-back-install
+    - papanglabs-back-setup

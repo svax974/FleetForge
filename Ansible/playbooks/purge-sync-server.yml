@@ -1,0 +1,33 @@
+---
+# Supprime les serveurs de synchronisation ET LEURS DONNÉES : conteneur, base
+# SQLite et blobs, sonde, cible Prometheus, CNAME public, cron de sauvegarde ;
+# image et sources quand plus aucune instance ne les utilise.
+#
+# IRRÉVERSIBLE : les coffres synchronisés de tous les appareils d'une instance
+# disparaissent du serveur. Deux garde-fous (sync-server-purge) :
+#   -e sync_purge_confirm=yes        obligatoire
+#   une sauvegarde < 7 jours         sinon -e sync_purge_no_backup=yes en plus
+# TOUJOURS restreindre à l'instance voulue, jamais les trois d'un coup par
+# inadvertance :
+#
+#   ./play.sh web3c purge-sync-server.yml --limit sync-iptv -e sync_purge_confirm=yes
+#
+# Les ARCHIVES de sauvegarde sur la destination sont conservées (elles gardent
+# les données jusqu'à leur rotation de 14 jours) ; pour les supprimer aussi :
+#   ./play.sh web3c purge-sync-server.yml --limit sync-iptv -e sync_purge_confirm=yes -e sync_purge_backups=yes
+# (le CNAME est retiré aussi ; retirer EN MÊME TEMPS l'entrée d'inventaire ou
+# son `proxy_hostname`, sinon update-cloudflare-dns.yml le republie.)
+- name: Purge the sync server instances
+  hosts: sync_servers
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - sync-server-purge
+
+- name: Purge the backup archives (opt-in)
+  hosts: sync_servers
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - role: sync-backup-purge
+      when: (sync_purge_backups | default('no')) == 'yes'

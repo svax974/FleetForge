@@ -1,0 +1,10 @@
+---
+brk_user: "{{ remote_username }}"
+brk_home: "/home/{{ remote_username }}"
+
+brk_backup_dest_host: backup-brk
+brk_backup_dest_user: "{{ remote_username }}"
+brk_backup_dest_dir: "{{ backup_root }}/brk"
+brk_backup_ssh_key_path: "{{ brk_home }}/.ssh/id_ed25519_brkbackup"
+
+node_exporter_textfile_dir: /var/lib/node_exporter/textfile_collector

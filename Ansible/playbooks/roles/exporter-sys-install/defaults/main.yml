@@ -1,0 +1,76 @@
+---
+node_exporter_version: "1.8.2"
+# Port d'ÉCOUTE : 9100 sur toutes les machines, sans exception. C'est aussi ce
+# que voit ufw (le NAT a déjà traduit le port à son arrivée).
+node_exporter_port: 9100
+
+# Port de SCRAPE : celui que Prometheus joint, c'est-à-dire le port PUBLIC du
+# routeur. Il ne diffère de l'écoute que derrière un NAT partagé, où chaque
+# machine a le sien (hub 9101, nuc 9102) redirigé vers son 9100. `monitor_port`
+# l'exprime dans l'inventaire ; sans lui, scrape = écoute.
+node_exporter_scrape_port: "{{ monitor_port | default(node_exporter_port) }}"
+
+# Collecteur systemd : alimente `node_systemd_unit_state`, sur laquelle repose
+# l'alerte SystemdUnitFailed. Nécessaire car --collector.disable-defaults est
+# actif : sans cette ligne, aucun collecteur non listé ne tourne.
+#
+# Vide = toutes les unités remontent (~150 unités × 5 états par hôte, négligeable
+# pour Prometheus). Renseigner une regex pour restreindre, au prix de ne plus
+# détecter l'échec d'une unité non prévue — ce qui est précisément le cas qu'on
+# cherche à couvrir.
+node_exporter_systemd_unit_include: ""
+
+# Collecteur `filesystem` : listes d'exclusion.
+#
+# node_exporter porte ses propres défauts, mais `--collector.disable-defaults`
+# ne les désactive pas — c'est le fait de passer ces deux options qui les
+# REMPLACE. La liste ci-dessous partait donc de zéro et avait perdu la moitié
+# des types que node_exporter écarte lui-même, squashfs au premier chef.
+#
+# Un squashfs est une image en lecture seule, remplie à 100 % par construction :
+# chaque snap monté publiait `node_filesystem_free_bytes = 0` et déclenchait
+# DiskSpaceLow. Constat du 13/08/2026 sur small1 : six alertes simultanées
+# (core18, oracle-cloud-agent, snapd — deux révisions chacun) sur une machine
+# occupée à 15 %. Six mails qui n'appellent aucune action apprennent à ignorer
+# la septième, qui elle sera vraie.
+#
+# `tmpfs` s'écarte de l'amont, qui le remonte : sur ce parc c'est de la mémoire,
+# pas du disque, et l'alerte disque l'exclut symétriquement.
+node_exporter_fs_types_exclude: >-
+  ^(autofs|binfmt_misc|bpf|cgroup2?|configfs|debugfs|devpts|devtmpfs|fuse\..*|fusectl|hugetlbfs|iso9660|mqueue|nsfs|overlay|proc|procfs|pstore|ramfs|rpc_pipefs|securityfs|selinuxfs|squashfs|sysfs|tmpfs|tracefs)$
+
+# Les points de montage des snaps sont écartés en plus de leur type : un snap
+# `classic` peut monter autre chose qu'un squashfs.
+node_exporter_mount_points_exclude: >-
+  ^/(dev|proc|run/credentials/.+|snap/.+|sys|var/lib/docker/.+|var/lib/containers/storage/.+)($|/)
+
+# Collecteur `diskstats` : périphériques écartés. `loop*` (montages snap,
+# encore eux) et `ram*`/`zram*` sont virtuels — leur temps d'activité ne
+# reflète rien de physique et fausserait DiskIOBusyHigh à la première mise à
+# jour snapd. `dm-*` (device-mapper — LVM, ou le stockage Docker en mode
+# devicemapper) est écarté pour la raison inverse : il DOUBLE-COMPTE le
+# disque physique sous-jacent, déjà remonté sous son propre nom (sda, nvme0n1).
+node_exporter_diskstats_device_exclude: "^(loop|ram|zram|dm-)\\d*$"
+
+# Collecteur `netdev` : interfaces écartées. `lo` ne quitte jamais la machine.
+# `docker\d*`, `br-.*`, `veth.*` sont les interfaces virtuelles que Docker crée
+# une par conteneur/réseau — les compter reviendrait à voir chaque paquet deux
+# fois (une fois sur l'interface physique, une fois sur la virtuelle qui le
+# relaie), et leur churn (un veth par conteneur recréé) grossirait la
+# cardinalité sans rien apporter : le trafic réel transite par l'interface
+# physique, seule pertinente pour NetworkThroughputHigh.
+node_exporter_netdev_device_exclude: "^(lo|docker\\d*|br-.*|veth.*)$"
+
+# Collecteur `textfile` : publie les métriques déposées par des scripts sous
+# forme de fichiers `.prom`. C'est ce qui permet de superviser des traitements
+# qui n'exposent rien eux-mêmes — au premier chef les sauvegardes.
+#
+# Une sauvegarde qui s'arrête ne produit AUCUN symptôme : pas d'unité en échec,
+# pas de cible `down`, pas de journal consulté. Elle est indiscernable d'une
+# sauvegarde qui fonctionne jusqu'au jour où on en a besoin. Les scripts
+# `brk-backup.sh` et `timescaledb-backup.sh` déposent ici leur date de dernier
+# succès, et les alertes BackupStale / BackupFailed s'en nourrissent.
+#
+# Nécessaire car `--collector.disable-defaults` est actif : sans cette option
+# le collecteur ne tournerait pas.
+node_exporter_textfile_dir: /var/lib/node_exporter/textfile_collector

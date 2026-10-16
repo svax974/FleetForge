@@ -1,0 +1,4 @@
+---
+llamacpp_instance_id: 1
+llamacpp_base_port: 8080
+llamacpp_port: "{{ llamacpp_base_port + (llamacpp_instance_id | int - 1) }}"

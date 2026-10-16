@@ -1,0 +1,33 @@
+---
+- name: Install ipcalc python package
+  ansible.builtin.pip:
+    name: ipcalc==1.99.0
+
+- name: Creates scripts directory
+  ansible.builtin.file:
+    path: ~/scripts
+    state: directory
+
+- name: Create a variable with servers IPs to create routes for
+  set_fact:
+    servers: "{{ (groups['proxies'] | map('extract', hostvars, 'ip') | list)
+      | union(groups['rpcs'] | map('extract', hostvars, 'ip') | list)
+      | union(groups['dbs'] | map('extract', hostvars, 'ip') | list) }}"
+- name: Show the list of IP addresses
+  debug:
+    var: servers
+
+- name: Copy python scripts 1/2
+  template: src=VPN.py dest=~/scripts/VPN.py
+- name: Copy python scripts 2/2
+  template: src=vpn_routes_add.py dest=~/scripts/vpn_routes_add.py
+
+- name: Execute the vpn_routes_add
+  ansible.builtin.command:
+    chdir: ~/scripts
+    cmd: python3 ./vpn_routes_add.py
+  register: addout
+
+- name: Debug
+  debug:
+    msg: Add routes output = {{ addout }}

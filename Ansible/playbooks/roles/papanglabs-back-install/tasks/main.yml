@@ -1,0 +1,142 @@
+---
+# Livraison du code et construction de l'image. Ne démarre RIEN : c'est
+# `papanglabs-back-setup` qui rend la configuration et lance les conteneurs.
+
+- name: Fail early when the source tree is missing on the control machine
+  ansible.builtin.stat:
+    path: "{{ pgb_src }}{{ pgb_env_file }}"
+  delegate_to: localhost
+  become: false
+  register: pgb_src_env
+  tags: [code]
+
+- name: Fail when the application env file is absent
+  ansible.builtin.fail:
+    msg: >-
+      {{ pgb_src }}{{ pgb_env_file }} introuvable sur le poste de contrôle.
+      C'est ce fichier qui distingue la prod de la préprod (base Supabase, clés
+      d'API, DB_POOLSIZE) : le déployer sans lui livrerait une configuration
+      arbitraire. Renseigne `pgb_env_file` pour cet hôte.
+  when: not pgb_src_env.stat.exists
+  tags: [code]
+
+- name: Create the application directory
+  ansible.builtin.file:
+    path: "{{ pgb_dir }}"
+    state: directory
+    owner: "{{ pgb_user }}"
+    group: "{{ pgb_user }}"
+    mode: '0750'
+  become: true
+  tags: [code]
+
+# `copy_links: true` (rsync -L) n'est PAS un détail : back/src/modules_shared
+# est un ensemble de LIENS vers back/.libs/nestcommon, et .libs est exclu de la
+# synchronisation. Sans -L la machine recevrait des liens cassés et le build
+# échouerait sur des imports introuvables — c'est exactement ce que fait
+# deploy-full.sh (`rsync -aL`).
+- name: Sync the build context (back/)
+  ansible.posix.synchronize:
+    src: "{{ pgb_src }}back/"
+    dest: "{{ pgb_dir }}/back/"
+    delete: true
+    copy_links: true
+    rsync_opts: "{{ pgb_rsync_excludes }}"
+  become: true
+  become_user: "{{ pgb_user }}"
+  tags: [code]
+
+# Les chemins de build sont RÉÉCRITS au passage. Dans le dépôt le compose vit
+# sous `scripts/`, ses contextes sont donc écrits `../back` et `../front` —
+# relatifs au fichier compose, pas au répertoire de projet. Ici le fichier est
+# déposé À LA RACINE de `{{ pgb_dir }}`, à côté de `back/` : `../back`
+# désignerait /home/<user>/back, qui n'existe pas, et le build échoue sur
+# « unable to prepare context: path "/home/srvc/back" not found ».
+#
+# `deploy-full.sh` fait exactement la même substitution sur son contexte de
+# build (« Rewrite relative paths: compose files use ../back and ../front ») ;
+# l'omettre ici était la seule divergence entre les deux chemins de
+# déploiement. Constaté le 19/08/2026 au premier déploiement de la prod.
+#
+# La transformation se fait sur le POSTE DE CONTRÔLE via `lookup('file')`, et
+# non par un `replace` après copie : la tâche reste ainsi idempotente, le
+# contenu final étant comparé tel quel à celui déjà en place.
+- name: Deploy the compose file (build contexts rewritten for the flat layout)
+  ansible.builtin.copy:
+    # Motifs en classes de caractères (`[.][.]`) plutôt qu'en `\.\.` : le
+    # scalaire YAML entre guillemets consomme les antislashs avant que Jinja ne
+    # voie l'expression. Le `\n` final, lui, est VOULU littéral côté YAML — il
+    # rend le saut de ligne de fin de fichier que `lookup('file')` supprime.
+    content: "{{ lookup('ansible.builtin.file', pgb_src ~ pgb_compose_file)
+      | regex_replace('[.][.]/back', './back')
+      | regex_replace('[.][.]/front', './front') }}\n"
+    dest: "{{ pgb_dir }}/docker-compose.yml"
+    owner: "{{ pgb_user }}"
+    group: "{{ pgb_user }}"
+    mode: '0640'
+  become: true
+  tags: [code]
+
+# Référencé par le compose en tant que `configs:` — le fichier doit exister à
+# côté de docker-compose.yml même quand vmagent n'est pas démarré, sinon
+# `docker compose` refuse de lire le fichier entier.
+- name: Deploy the vmagent scrape config
+  ansible.builtin.copy:
+    src: "{{ pgb_src }}scripts/vmagent.yml"
+    dest: "{{ pgb_dir }}/vmagent.yml"
+    owner: "{{ pgb_user }}"
+    group: "{{ pgb_user }}"
+    mode: '0640'
+  become: true
+  tags: [code]
+
+# Le compose interpole ${PROJECT_NAME}, ${NODE_PORT}, ${METRICS_TOKEN}… depuis
+# un `.env` À LA RACINE du projet, distinct de `back/.env` que les conteneurs
+# chargent via `env_file`. deploy-full.sh dépose le même fichier aux deux
+# endroits ; le reproduire évite qu'un build parte avec des variables vides.
+- name: Deploy the application env file (container runtime)
+  ansible.builtin.copy:
+    src: "{{ pgb_src }}{{ pgb_env_file }}"
+    dest: "{{ pgb_dir }}/back/.env"
+    owner: "{{ pgb_user }}"
+    group: "{{ pgb_user }}"
+    mode: '0600'
+  become: true
+  tags: [code, config]
+
+- name: Deploy the application env file (compose interpolation)
+  ansible.builtin.copy:
+    src: "{{ pgb_src }}{{ pgb_env_file }}"
+    dest: "{{ pgb_dir }}/.env"
+    owner: "{{ pgb_user }}"
+    group: "{{ pgb_user }}"
+    mode: '0600'
+  become: true
+  tags: [code, config]
+
+# Le back s'identifie par cette valeur pour les quotas de runs par serveur.
+# deploy-full.sh l'injecte à chaque déploiement ; sans elle, deux machines se
+# partageraient le même plafond.
+- name: Set SERVER_IP in the runtime env
+  ansible.builtin.lineinfile:
+    path: "{{ pgb_dir }}/back/.env"
+    regexp: '^SERVER_IP='
+    line: "SERVER_IP={{ ansible_host }}"
+    owner: "{{ pgb_user }}"
+    group: "{{ pgb_user }}"
+    mode: '0600'
+  become: true
+  tags: [code, config]
+
+# Construction sur la machine, et non via un contexte Docker distant comme le
+# fait deploy-full.sh : Ansible pilote la machine, pas un démon à travers SSH.
+# `back` et `back-worker` partagent la MÊME image (même tag dans le compose),
+# elle n'est donc construite qu'une fois.
+- name: Build the back image
+  ansible.builtin.command:
+    cmd: docker compose --project-name {{ pgb_project_name }} build back
+    chdir: "{{ pgb_dir }}"
+  become: true
+  register: pgb_build
+  changed_when: "'Building' in pgb_build.stdout or 'DONE' in pgb_build.stderr"
+  tags: [code]

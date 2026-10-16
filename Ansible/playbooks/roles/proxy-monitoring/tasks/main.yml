@@ -1,0 +1,52 @@
+---
+# Supervision de le reverse proxy nginx.
+#
+# Convention `<service>-monitoring` (CLAUDE.md) : le rôle dépose une SONDE
+# déclarative pour `svcprobe`, qui expose `service_up{service="nginx"}`.
+# Aucun redémarrage n'est nécessaire — svcprobe relit son répertoire de sondes
+# à chaque scrape.
+#
+# La sonde ne porte que sur 443 : c'est le seul port qu'un proxy de ce parc
+# sert à coup sûr. Le port 80 était sondé aussi, et remontait 0 en permanence
+# sur le proxy de papanglabs, qui n'écoute que sur 443 — aucun `listen 80` dans
+# ses vhosts, donc pas de redirection HTTP. Sonder un port qu'un hôte légitime
+# n'ouvre pas produit une alerte qui ne s'éteindra jamais, et qui finit par
+# masquer les autres sondes du même service.
+
+- name: Ensure the shared probe is installed
+  ansible.builtin.include_role:
+    name: svcprobe-install
+    public: true
+  tags: [monitoring]
+
+- name: Deploy the proxy probe
+  ansible.builtin.template:
+    src: check.json.j2
+    dest: "{{ svcprobe_checks_dir }}/proxy.json"
+    owner: root
+    group: root
+    mode: '0644'
+  become: true
+  tags: [monitoring]
+
+# Contrôle immédiat : une sonde déposée mais qui répond `service_up 0` alors
+# que le service tourne est une sonde MAL ÉCRITE, et elle ferait sonner une
+# alerte en permanence. Mieux vaut le voir au déploiement.
+- name: Verify the probe answers
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ svcprobe_listen_port }}/metrics"
+    return_content: true
+  register: proxy_probe
+  retries: 6
+  delay: 5
+  until: proxy_probe.status is defined and proxy_probe.status == 200
+  changed_when: false
+  tags: [monitoring]
+
+- name: Report the probe result
+  ansible.builtin.debug:
+    msg: >-
+      {{ proxy_probe.content.split('\n')
+         | select('search', 'service="nginx"')
+         | list }}
+  tags: [monitoring]

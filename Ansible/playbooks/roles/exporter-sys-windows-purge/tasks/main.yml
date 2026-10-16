@@ -1,0 +1,45 @@
+---
+# Purge windows_exporter — uninstalls the service and removes all residual files and Prometheus target.
+
+- name: Stop windows_exporter service
+  ansible.windows.win_service:
+    name: windows_exporter
+    state: stopped
+  ignore_errors: true
+
+- name: Uninstall windows_exporter MSI package
+  ansible.windows.win_package:
+    product_id: "{{ '{' }}BA31A4B5-5D0B-4C1B-9A51-B5B50CC4A6DB{{ '}' }}"
+    state: absent
+  ignore_errors: true
+
+- name: Remove residual windows_exporter program directory
+  ansible.windows.win_file:
+    path: "C:\\Program Files\\windows_exporter"
+    state: absent
+  ignore_errors: true
+
+- name: Remove windows_exporter firewall rule
+  community.windows.win_firewall_rule:
+    name: "Prometheus - windows_exporter"
+    state: absent
+  ignore_errors: true
+
+- name: Set prometheus home on monitoring host
+  ansible.builtin.set_fact:
+    prometheus_home: "/home/{{ remote_username }}/prometheus"
+
+- name: Remove windows_exporter target file from monitoring host
+  ansible.builtin.file:
+    path: "{{ prometheus_home }}/prometheus-configs/exporter/{{ inventory_hostname }}.json"
+    state: absent
+  delegate_to: "{{ prometheus_host }}"
+  ignore_errors: true
+
+- name: Reload Prometheus container
+  community.docker.docker_container:
+    name: prometheus
+    state: started
+    restart: yes
+  delegate_to: "{{ prometheus_host }}"
+  ignore_errors: true

@@ -1,0 +1,31 @@
+---
+# Retire l'exporter DMARC : service, binaire, utilisateur système.
+# Conserve l'état accumulé ({{ dmarc_exporter_state_dir }}), la configuration
+# et la cible Prometheus — c'est `dmarc-exporter-purge` qui les supprime.
+
+- name: Stop and disable dmarc-exporter
+  ansible.builtin.systemd:
+    name: dmarc-exporter
+    state: stopped
+    enabled: false
+  failed_when: false
+
+- name: Remove dmarc-exporter systemd unit
+  ansible.builtin.file:
+    path: /etc/systemd/system/dmarc-exporter.service
+    state: absent
+
+- name: Reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+- name: Remove dmarc exporter script
+  ansible.builtin.file:
+    path: /usr/local/bin/dmarc_exporter.py
+    state: absent
+
+- name: Remove dmarc-exporter system user
+  ansible.builtin.user:
+    name: "{{ dmarc_exporter_user }}"
+    state: absent
+    remove: false

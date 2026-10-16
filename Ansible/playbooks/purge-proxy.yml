@@ -1,0 +1,15 @@
+---
+# Supprime nginx, ses vhosts ET les certificats des proxies ciblés (famille
+# `proxy`).
+#
+#   ./play.sh web3c purge-proxy.yml --limit proxy2
+#
+# `--limit` vivement recommandé : sans lui, TOUS les proxies du parc sont purgés
+# et les certificats devront être réémis.
+
+- name: Purge du proxy (vhosts et certificats compris)
+  hosts: proxies
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - proxy-purge

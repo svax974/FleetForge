@@ -1,0 +1,19 @@
+services:
+  theta-edge:
+    image: {{ theta_edge_image }}
+    container_name: theta-edge-{{ theta_edge_id }}
+    restart: unless-stopped
+    environment:
+      - EDGELAUNCHER_CONFIG_PATH=/edgelauncher/data/mainnet
+      - PASSWORD={{ theta_passwd }}
+    volumes:
+      - "{{ theta_edge_base_dir }}/instance{{ theta_edge_id }}:/edgelauncher/data/mainnet"
+    ports:
+      # 127.0.0.1 uniquement : ce RPC rend la mnémonique du wallet interne
+      # (edgecore.WalletExportKey) SANS authentification.
+      - "127.0.0.1:{{ theta_edge_rpc_base_port + (theta_edge_id | int - 1) * theta_edge_port_step }}:17888"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"

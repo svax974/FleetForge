@@ -1,0 +1,68 @@
+---
+# Plafonne le journal systemd. Rôle de SOCLE : joué par `setup-server.yml` sur
+# une machine neuve, et rejouable partout par `update-journald-all.yml`.
+#
+# Pas de rôle `-monitoring` associé, à dessein : journald n'est pas un service
+# déployé ici, c'est un composant du système déjà couvert deux fois — par
+# `SystemdUnitFailed` si l'unité tombe, et par `DiskSpaceLow` si le journal
+# reprend de l'ampleur malgré le plafond. Une sonde de plus n'apporterait aucun
+# signal que ces deux-là manqueraient.
+#
+# Pour revenir au comportement par défaut : supprimer le drop-in et redémarrer
+# systemd-journald. C'est pourquoi le rôle est un `-setup` et non un `-install`,
+# qui appellerait un `-remove` et un `-purge`.
+
+- name: Ensure the journald drop-in directory exists
+  ansible.builtin.file:
+    path: /etc/systemd/journald.conf.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+# Même contenu, déposé sous l'ancien nom du projet (InfraManager) : laissé en
+# place, il doublerait le fichier ci-dessous sans que rien ne le montre.
+- name: Remove the drop-in of the former project name
+  ansible.builtin.file:
+    path: /etc/systemd/journald.conf.d/99-infra-manager.conf
+    state: absent
+  register: journald_legacy
+
+- name: Deploy the journald size limits
+  ansible.builtin.template:
+    src: 99-fleetforge.conf.j2
+    dest: /etc/systemd/journald.conf.d/99-fleetforge.conf
+    owner: root
+    group: root
+    mode: "0644"
+  register: journald_conf
+
+- name: Restart systemd-journald
+  ansible.builtin.systemd:
+    name: systemd-journald
+    state: restarted
+  when: journald_conf is changed or journald_legacy is changed
+
+# Le redémarrage ne fait qu'appliquer les limites AUX ROTATIONS À VENIR : un
+# journal déjà au-dessus du plafond y reste, et sur une machine calme il peut
+# y rester des mois. C'est ce qui distingue « la limite est posée » de « la
+# place est rendue » — sans cet élagage, le rôle passerait `changed` sans
+# libérer un octet.
+- name: Vacuum the journal down to the configured limit
+  ansible.builtin.command:
+    argv:
+      - journalctl
+      - "--vacuum-size={{ journald_system_max_use }}"
+  when: journald_conf is changed or journald_legacy is changed
+  register: journald_vacuum
+  changed_when: true
+
+- name: Report the journal size after vacuum
+  ansible.builtin.command:
+    argv: [journalctl, --disk-usage]
+  register: journald_usage
+  changed_when: false
+
+- name: Show the journal size
+  ansible.builtin.debug:
+    msg: "{{ journald_usage.stdout }}"

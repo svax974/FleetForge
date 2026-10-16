@@ -1,0 +1,27 @@
+[Unit]
+Description=Agent SSH de FleetForge (porte la clé dédiée au parc)
+Documentation=file://{{ ff_dir }}
+Before=fleetforge.service
+
+[Service]
+Type=simple
+User={{ ff_user }}
+Group={{ ff_user }}
+
+# RuntimeDirectory crée /run/fleetforge en 0700 pour ce compte, et le
+# supprime à l'arrêt. La socket ne survit donc pas au service qui la porte.
+RuntimeDirectory=fleetforge
+RuntimeDirectoryMode=0700
+
+ExecStart=/usr/bin/ssh-agent -D -a {{ ff_agent_socket }}
+ExecStartPost={{ ff_dir }}/agent-load-key.sh
+
+Restart=on-failure
+RestartSec=5
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

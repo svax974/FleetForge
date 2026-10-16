@@ -1,0 +1,23 @@
+[Unit]
+Description=Exporter Prometheus des rapports agreges DMARC
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User={{ dmarc_exporter_user }}
+Group={{ dmarc_exporter_user }}
+EnvironmentFile={{ dmarc_exporter_config_dir }}/env
+ExecStart=/usr/bin/python3 /usr/local/bin/dmarc_exporter.py
+Restart=always
+RestartSec=30
+
+# Le service ne fait que lire une boîte distante et écrire son état : il n'a
+# besoin ni des privilèges root ni du reste du système de fichiers.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths={{ dmarc_exporter_state_dir }}
+
+[Install]
+WantedBy=multi-user.target

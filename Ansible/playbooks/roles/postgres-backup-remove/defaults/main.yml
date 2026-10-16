@@ -1,0 +1,3 @@
+---
+pgbak_dir: "{{ ansible_env.HOME }}/postgres-backup"
+node_exporter_textfile_dir: /var/lib/node_exporter/textfile_collector

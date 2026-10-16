@@ -1,0 +1,32 @@
+[Unit]
+Description=Bitcoin Core Prometheus exporter
+# `bitcoind` tourne en unité UTILISATEUR (rpcbtc-install) : une unité système
+# ne peut pas en dépendre. L'ordonnancement n'est de toute façon pas requis —
+# l'exporter publie bitcoin_up=0 tant que le nœud ne répond pas, ce qui est
+# exactement l'information voulue au démarrage de la machine.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ btcexp_user }}
+Group={{ btcexp_user }}
+ExecStart=/usr/bin/env python3 {{ btcexp_bin }}
+Environment=BITCOIN_EXPORTER_CONFIG={{ btcexp_dir }}/config.json
+Restart=always
+RestartSec=15
+
+# Durcissement : l'exporter ne fait que lire le RPC local et servir du texte.
+# Il détient le mot de passe RPC du nœud, donc tout ce qu'il ne lui faut pas
+# lui est retiré.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+MemoryMax=128M
+
+[Install]
+WantedBy=multi-user.target

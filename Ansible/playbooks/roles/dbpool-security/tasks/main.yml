@@ -1,0 +1,25 @@
+---
+# Configure DB pool firewall rules
+# Allow connections from proxies and whitelist
+- name: Allow RPC connections on "{{ postgres_port }}" from back servers
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ hostvars[item].ansible_host }}"
+    port: "{{ postgres_port }}"
+  loop: "{{ groups['backs'] | default([]) }}"
+- name: Allow RPC connections on "{{ postgres_port }}" from Proxies
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ hostvars[item].ansible_host }}"
+    port: "{{ postgres_port }}"
+  loop: "{{ groups['proxies'] | default([]) }}"
+- name: Allow connections from whitelist
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ item }}"
+    port: "{{ postgres_port }}"
+  with_items:
+    "{{ whitelist }}"

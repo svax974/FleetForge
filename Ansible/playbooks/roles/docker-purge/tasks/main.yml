@@ -1,0 +1,32 @@
+---
+# Purge Docker — removes packages, all images, volumes, containers and config.
+# WARNING: ALL Docker data on this host will be permanently deleted.
+
+- name: Stop all running containers
+  ansible.builtin.command: docker stop $(docker ps -q)
+  ignore_errors: true
+
+- name: Remove Docker CE packages
+  ansible.builtin.apt:
+    pkg:
+      - docker-ce
+      - docker-ce-cli
+      - containerd.io
+      - docker-buildx-plugin
+      - docker-compose-plugin
+    state: absent
+    purge: yes
+
+- name: Remove Docker data directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /var/lib/docker
+    - /etc/docker
+    - /var/run/docker.sock
+
+- name: Remove Docker apt repository
+  ansible.builtin.file:
+    path: /etc/apt/sources.list.d/docker.list
+    state: absent

@@ -1,0 +1,10 @@
+# BRK configuration (~/.brk/config.toml). See `brk -h` for the full list.
+bitcoindir = "{{ brk_bitcoindir }}"
+brkdir = "{{ brk_dir }}"
+
+# Node RPC — our node uses a custom rpcport + rpcauth (rpcsbtc.yml), so the
+# defaults (port 8332, cookie) do not apply.
+rpcconnect = "{{ brk_rpcconnect }}"
+rpcport = {{ brk_rpcport }}
+rpcuser = "{{ rpcbtcuser }}"
+rpcpassword = "{{ rpcbtcpasswd }}"

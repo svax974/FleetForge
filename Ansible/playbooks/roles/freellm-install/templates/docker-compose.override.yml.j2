@@ -1,0 +1,11 @@
+# Généré par Ansible (freellm-install) — NE PAS ÉDITER SUR L'HÔTE, réécrit à
+# chaque exécution. Fusionné automatiquement par `docker compose` avec
+# docker-compose.yml (lui-même RÉÉCRIT par install.sh à chaque run) : c'est
+# pourquoi ce montage vit dans un fichier séparé plutôt que dans le fichier de
+# base, qu'il serait sans effet d'éditer.
+services:
+  freellmapi:
+    volumes:
+      - ./freellmapi.config.json:{{ freellm_config_container_path }}:ro
+    environment:
+      FREEAPI_CONFIG_PATH: "{{ freellm_config_container_path }}"

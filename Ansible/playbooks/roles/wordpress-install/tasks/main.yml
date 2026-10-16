@@ -1,0 +1,165 @@
+---
+- name: Install Apache2, PHP and MySQL dependencies
+  ansible.builtin.apt:
+    pkg:
+      - apache2
+      - php
+      - php-mysql
+      - php-curl
+      - php-gd
+      - php-mbstring
+      - php-xml
+      - php-xmlrpc
+      - php-zip
+      - php-intl
+      - php-imagick
+      - libapache2-mod-php
+      - unzip
+      - mysql-server
+      - python3-pymysql
+    update_cache: yes
+
+# --- MySQL setup ---
+- name: Ensure MySQL is started and enabled
+  ansible.builtin.service:
+    name: mysql
+    state: started
+    enabled: true
+
+- name: Create WordPress database
+  community.mysql.mysql_db:
+    name: "{{ wp_dbname }}"
+    state: present
+    login_unix_socket: /var/run/mysqld/mysqld.sock
+
+- name: Create WordPress database user
+  community.mysql.mysql_user:
+    name: "{{ wp_dbuser }}"
+    password: "{{ wp_dbpass }}"
+    priv: "{{ wp_dbname }}.*:ALL"
+    host: "{{ wp_dbhost }}"
+    state: present
+    login_unix_socket: /var/run/mysqld/mysqld.sock
+
+# --- Apache setup ---
+- name: Enable Apache rewrite module
+  community.general.apache2_module:
+    name: rewrite
+    state: present
+  notify: RestartApache
+
+- name: Set Apache listen port to {{ wp_port }}
+  ansible.builtin.template:
+    src: ports.conf.j2
+    dest: /etc/apache2/ports.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: RestartApache
+
+# --- WordPress setup ---
+- name: Check if WordPress is already installed
+  ansible.builtin.stat:
+    path: /var/www/html/wordpress/wp-config-sample.php
+  register: wp_installed
+
+- name: Download WordPress
+  ansible.builtin.get_url:
+    url: https://wordpress.org/latest.tar.gz
+    dest: /tmp/wordpress.tar.gz
+  when: not wp_installed.stat.exists
+
+- name: Extract WordPress
+  ansible.builtin.unarchive:
+    src: /tmp/wordpress.tar.gz
+    dest: /var/www/html/
+    remote_src: true
+  when: not wp_installed.stat.exists
+
+- name: Set WordPress ownership
+  ansible.builtin.file:
+    path: /var/www/html/wordpress
+    state: directory
+    recurse: true
+    owner: www-data
+    group: www-data
+
+# --- wp-config.php ---
+- name: Check if wp-config.php exists
+  ansible.builtin.stat:
+    path: /var/www/html/wordpress/wp-config.php
+  register: wp_config
+
+- name: Create wp-config.php from sample
+  ansible.builtin.copy:
+    src: /var/www/html/wordpress/wp-config-sample.php
+    dest: /var/www/html/wordpress/wp-config.php
+    remote_src: true
+    owner: www-data
+    group: www-data
+    mode: "0640"
+  when: not wp_config.stat.exists
+
+- name: Configure DB_NAME
+  ansible.builtin.lineinfile:
+    path: /var/www/html/wordpress/wp-config.php
+    regexp: "define\\(\\s*'DB_NAME'"
+    line: "define( 'DB_NAME', '{{ wp_dbname }}' );"
+
+- name: Configure DB_USER
+  ansible.builtin.lineinfile:
+    path: /var/www/html/wordpress/wp-config.php
+    regexp: "define\\(\\s*'DB_USER'"
+    line: "define( 'DB_USER', '{{ wp_dbuser }}' );"
+
+- name: Configure DB_PASSWORD
+  ansible.builtin.lineinfile:
+    path: /var/www/html/wordpress/wp-config.php
+    regexp: "define\\(\\s*'DB_PASSWORD'"
+    line: "define( 'DB_PASSWORD', '{{ wp_dbpass }}' );"
+
+- name: Configure DB_HOST
+  ansible.builtin.lineinfile:
+    path: /var/www/html/wordpress/wp-config.php
+    regexp: "define\\(\\s*'DB_HOST'"
+    line: "define( 'DB_HOST', '{{ wp_dbhost }}' );"
+
+# --- Apache VirtualHost ---
+- name: Deploy WordPress VirtualHost
+  ansible.builtin.template:
+    src: wordpress.conf.j2
+    dest: /etc/apache2/sites-available/wordpress.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: RestartApache
+
+- name: Disable default site
+  ansible.builtin.command: a2dissite 000-default
+  args:
+    removes: /etc/apache2/sites-enabled/000-default.conf
+  notify: RestartApache
+
+- name: Enable WordPress site
+  ansible.builtin.command: a2ensite wordpress
+  args:
+    creates: /etc/apache2/sites-enabled/wordpress.conf
+  notify: RestartApache
+
+- name: Ensure Apache is started and enabled
+  ansible.builtin.service:
+    name: apache2
+    state: started
+    enabled: true
+
+# ── DNS : CNAME du nom public vers le front des proxies ─────────────────────
+# `proxy_hostname` de l'entrée `www` → CNAME vers proxy.<zone> (jamais un A
+# vers cette machine). Garanti dès le premier déploiement, sans attendre
+# update-cloudflare-dns.yml.
+- name: Ensure the service CNAME to the canonical proxy front
+  ansible.builtin.include_role:
+    name: cloudflare-dns-update
+    tasks_from: cnames
+  vars:
+    cfdns_cname_scope:
+      - "{{ inventory_hostname }}"

@@ -1,0 +1,26 @@
+[Unit]
+Description=svcprobe — sonde de disponibilité des services
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/env python3 {{ svcprobe_bin }}
+Environment=SVCPROBE_CHECKS_DIR={{ svcprobe_checks_dir }}
+Environment=SVCPROBE_BIND={{ svcprobe_bind }}
+Environment=SVCPROBE_PORT={{ svcprobe_listen_port }}
+Environment=SVCPROBE_CACHE_TTL={{ svcprobe_cache_ttl }}
+Restart=always
+RestartSec=15
+
+# Tourne en root pour interroger systemd et Docker, donc durci d'autant : la
+# sonde ne fait que lire des états et servir du texte.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectKernelTunables=true
+MemoryMax=128M
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,77 @@
+---
+# Serveurs de synchronisation web3c-sync — TROIS instances PUBLIQUES (iptv,
+# banking, aiteam), un conteneur Docker chacune, sur la MACHINE PARTAGÉE
+# `ctdapi` (ctdapi, dev, rotki, agenthub, xbot, docker-repo : aucun port
+# existant n'est réattribué). Entrées d'inventaire `sync-iptv`, `sync-banking`,
+# `sync-aiteam` (groupe `sync_servers`), ports 4710-4712 (service) et 9710-9712
+# (/metrics natif). L'image se construit SUR L'HÔTE depuis les sources du poste
+# d'exécution (sync_server_src, voir sync-server-install/defaults).
+#
+#   ./play.sh web3c deploy-sync-server.yml
+#   ./play.sh web3c deploy-sync-server.yml --limit sync-iptv:ctdapi   # une instance
+#   ./play.sh web3c deploy-sync-server.yml --tags monitoring          # supervision seule
+#
+# ORDRE D'ENSEMBLE (voir Ansible/README.md, section « Serveurs de synchronisation ») :
+#   certificat (rien à faire : wildcard *.web3c.cc) → update-cloudflare-dns.yml →
+#   deploy-monitoring.yml (job Prometheus `sync-server`) → CE playbook →
+#   update-proxy-web3c.yml (vhosts + rotation des journaux) →
+#   deploy-backup.yml (sauvegardes SQLite).
+#
+# Ordre des effets de ce playbook :
+#   1. host-preflight (Docker requis)
+#   2. sync-server-security (joué sur `ctdapi`, hôte canonique de la machine) :
+#      DROP des six ports dans DOCKER-USER, service réservé aux proxies. Posé
+#      AVANT les conteneurs : l'ordre « install puis security » laisserait les
+#      ports ouverts à Internet entre la publication Docker et l'application des
+#      règles (un DROP sur un port qui n'écoute pas encore est inoffensif).
+#   3. sync-server-install : sources (rsync) → image → conteneur → contrôles
+#      fonctionnels → CNAME en portée réduite
+#   4. sync-server-monitoring : autorisation du scrape (drop-in DOCKER-USER),
+#      sonde svcprobe, cible Prometheus `sync-server`, contrôle `sync_up`
+#   5. règles d'alerte (groupe `sync`, tag monitoring) sur l'hôte Prometheus
+#
+# Aucun secret requis : inscription ouverte, pas de jeton administrateur.
+# Le vhost NE se déploie PAS ici (c'est update-proxy-web3c.yml, comme rotki).
+
+# ── Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ───────────────────────
+- name: Contrôle préalable
+  hosts: sync_servers
+  remote_user: "{{ remote_username }}"
+  roles:
+    - role: host-preflight
+      preflight_require_docker: true
+
+# DOCKER-USER : seule chaîne que Docker traverse sans la réécrire (une règle ufw
+# sur un port publié n'a aucun effet). `docker_ports_rules` vit dans
+# host_vars/ctdapi.yml — `ctdapi`, pas `sync-*`, est l'hôte CANONIQUE de la
+# machine (voir deploy-rotki.yml / deploy-agenthub.yml pour ce même motif).
+# Avec --limit, inclure `ctdapi` : --limit sync-iptv:ctdapi.
+- name: Filter the sync ports in DOCKER-USER
+  hosts: ctdapi
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - sync-server-security
+
+- name: Deploy the sync server instances
+  hosts: sync_servers
+  remote_user: "{{ remote_username }}"
+  roles:
+    - sync-server-install
+
+# ── Supervision (OBLIGATOIRE, voir CLAUDE.md) ──────────────────────────────
+- name: Supervision du service
+  hosts: sync_servers
+  remote_user: "{{ remote_username }}"
+  roles:
+    - sync-server-monitoring
+
+# Charge le groupe d'alertes `sync` (prom_alert_groups, group_vars/web3c.yml) et
+# les seuils BackupStale par instance. Motif en dur (un `hosts:` ne résout pas
+# les group_vars) : `prometheus1:monitor` couvre les deux parcs.
+- name: Règles d'alerte (groupe sync)
+  hosts: prometheus1:monitor
+  remote_user: "{{ remote_username }}"
+  tags: [monitoring]
+  roles:
+    - prometheus-alerts-update

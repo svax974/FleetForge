@@ -1,0 +1,98 @@
+global:
+  scrape_interval: {{ prometheus_scrape_interval }}
+  evaluation_interval: {{ prometheus_evaluation_interval }}
+
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - '{{ hostvars[alertmanager_host]['ansible_host'] if alertmanager_host in hostvars else alertmanager_host }}:{{ alertmanager_port }}'
+
+scrape_configs:
+  # Auto-scrape. Les identifiants sont indispensables : /metrics est derrière la
+  # même authentification basique que l'UI (web.yml), donc sans eux Prometheus
+  # se scrape lui-même en 401 et fait sonner TargetDown en permanence.
+  - job_name: 'prometheus'
+    basic_auth:
+      username: '{{ prometheus_user }}'
+      password: '{{ prometheus_pass }}'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # Métriques système (node_exporter). Déposées par `exporter-sys-install`.
+  - job_name: 'exporter'
+    metrics_path: /metrics
+    file_sd_configs:
+      - files:
+          - 'prometheus-configs/exporter/*.json'
+
+  - job_name: 'node-btc'
+    metrics_path: /metrics
+    file_sd_configs:
+      - files:
+          - 'prometheus-configs/node-btc/*.json'
+
+  # Nœuds Theta Edge — cibles posées par theta-edge-monitoring (9601).
+  - job_name: 'node-theta-edge'
+    metrics_path: /metrics
+    file_sd_configs:
+      - files:
+          - 'prometheus-configs/node-theta-edge/*.json'
+
+  # Relais SMTP. `mailserver-setup` dépose sa cible dans prometheus-configs/postfix ;
+  # sans ce job le fichier resterait là sans jamais être lu.
+  - job_name: 'postfix'
+    metrics_path: /metrics
+    file_sd_configs:
+      - files:
+          - 'prometheus-configs/postfix/*.json'
+
+  # API indicateurs — expose /metrics sur son port applicatif.
+  - job_name: 'papangmetrics-api'
+    metrics_path: /metrics
+    file_sd_configs:
+      - files:
+          - 'prometheus-configs/papangmetrics-api/*.json'
+
+  # Worker ETL — porte brk_up, brk_height et etl_block_lag. C'est la source des
+  # alertes BRK : l'API de BRK elle-même n'est pas scrapée (localhost only).
+  - job_name: 'papangmetrics-etl'
+    metrics_path: /metrics
+    file_sd_configs:
+      - files:
+          - 'prometheus-configs/papangmetrics-etl/*.json'
+
+  # Rapports agrégés DMARC. Déposé par `dmarc-exporter-install`. C'est ce job
+  # qui rend les rapports silencieux : sans lui, ils restent un mail quotidien
+  # que personne ne lit.
+  - job_name: 'dmarc'
+    metrics_path: /metrics
+    file_sd_configs:
+      - files:
+          - 'prometheus-configs/dmarc/*.json'
+
+  # Sonde de service partagée (port 9110). Chaque rôle `<service>-monitoring`
+  # dépose sa cible dans prometheus-configs/svcprobe ; sans ce job les fichiers
+  # restaient là sans jamais être lus, et `service_up` n'existait sur aucun des
+  # deux parcs — les groupes d'alertes `services` et `certificates` étaient
+  # chargés, `health=ok`, et n'évaluaient rien.
+  - job_name: 'svcprobe'
+    metrics_path: /metrics
+    file_sd_configs:
+      - files:
+          - 'prometheus-configs/svcprobe/*.json'
+
+  # FleetForge — l'application de gestion du parc, qui expose Prometheus
+  # nativement sur son port applicatif. Cible déposée par
+  # `fleetforge-monitoring` ; sans ce job le fichier resterait là sans
+  # jamais être lu, et l'état dégradé propre à ce service
+  # (`fleetforge_ansible_available` à 0 : répond mais ne peut rien
+  # déployer) passerait inaperçu.
+  - job_name: 'fleetforge'
+    metrics_path: /metrics
+    file_sd_configs:
+      - files:
+          - 'prometheus-configs/fleetforge/*.json'

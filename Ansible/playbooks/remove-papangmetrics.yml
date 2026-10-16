@@ -1,0 +1,7 @@
+---
+- name: Remove PapangMetrics services (keeps deployed code)
+  hosts: papangmetrics1
+  remote_user: "{{ remote_username }}"
+  roles:
+    - papangmetrics-api-remove
+    - papangmetrics-etl-remove

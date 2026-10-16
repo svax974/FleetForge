@@ -1,0 +1,349 @@
+#!/usr/bin/env bash
+# Sauvegarde du magasin BRK vers {{ brk_backup_dest_host }}
+# ({{ brk_backup_dest_addr }}:{{ brk_backup_dest_dir }}).
+# Généré par Ansible (rôle brk-backup-install) — NE PAS ÉDITER À LA MAIN :
+# la prochaine exécution du rôle écrase ce fichier.
+#
+# ── Pourquoi deux passes ───────────────────────────────────────────────────
+# BRK écrit en permanence dans son magasin. Une copie prise à chaud traverse
+# donc des fichiers vecdb en cours de réécriture et n'est pas garantie
+# restaurable — or une sauvegarde dont on ne sait pas si elle se restaure n'est
+# pas une sauvegarde. La passe 1 tourne BRK en marche et capte l'essentiel sans
+# aucune coupure ; la passe 2, BRK arrêté, ne traite plus que le résidu. La
+# coupure se compte en minutes au lieu des heures qu'imposerait une copie
+# intégrale à froid.
+#
+# ── Rétention ──────────────────────────────────────────────────────────────
+# `current/` et `previous/`, partagés par liens durs (--link-dest) : un fichier
+# inchangé n'occupe l'espace qu'une fois. `previous/` existe pour le cas où le
+# magasin source se corrompt sans que rien ne le signale — la sauvegarde
+# suivante recopierait alors fidèlement la corruption, et la génération
+# précédente serait la seule chose restaurable.
+set -euo pipefail
+
+BACKUP_NAME="brk"
+SRC="{{ brk_dir }}/"
+DEST_HOST="{{ brk_backup_dest_addr }}"
+DEST_PORT="{{ brk_backup_dest_port }}"
+DEST_USER="{{ brk_backup_dest_user }}"
+DEST_DIR="{{ brk_backup_dest_dir }}"
+SSH_KEY="{{ brk_backup_ssh_key_path }}"
+INTERVAL_DAYS="{{ brk_backup_interval_days }}"
+MIN_FREE_GB="{{ brk_backup_min_free_gb }}"
+STOP_TIMEOUT="{{ brk_backup_stop_timeout }}"
+KEEP_PREVIOUS="{{ 'yes' if brk_backup_keep_previous else 'no' }}"
+BWLIMIT="{{ brk_backup_bwlimit }}"
+SEED_STREAMS="{{ brk_backup_seed_streams }}"
+RSYNC_RETRIES="{{ brk_backup_stream_retries }}"
+METRIC_FILE="{{ node_exporter_textfile_dir }}/backup_brk.prom"
+LOCK="/tmp/brk-backup.lock"
+
+RSYNC_EXCLUDES=({% for e in brk_backup_excludes %}--exclude={{ e | quote }} {% endfor %})
+
+log() { echo "$(date -Iseconds) $*"; }
+
+# rsync avec REPRISE sur erreur transitoire. Le lien vers la destination perd
+# ~16-40 % des paquets sous charge : une connexion ssh peut tomber en plein flux
+# (codes rsync 255/12/30/10…), et sur un seed de plusieurs heures c'est quasi
+# certain. `--partial` fait qu'une reprise repart d'où on s'est arrêté. On
+# considère 0/23/24 comme un succès (23/24 = fichiers partiels/disparus, bénins
+# sur un magasin vivant que BRK compacte) ; tout autre code est transitoire et
+# on relance jusqu'à ${RSYNC_RETRIES} fois. C'est CE point qui a fait échouer le
+# seed à 98 % : un flux tombé sur une coupure réseau, code hors 23/24.
+rsync_retry() {
+  local attempt=1 rc=0
+  while : ; do
+    # `|| rc=$?` (et NON `rsync …; rc=$?`) : sous `set -e`, un rsync non-nul —
+    # y compris le code 24 bénin (fichier disparu) — tuerait le sous-shell du
+    # flux AVANT d'atteindre la logique de reprise/tolérance ci-dessous. Le `||`
+    # neutralise `set -e` pour cette commande et capture le code. C'était LA
+    # cause des échecs de seed « 0 reprise » : la tolérance ne s'exécutait jamais.
+    rc=0
+    rsync "$@" || rc=$?
+    case "${rc}" in 0|23|24) return 0 ;; esac
+    if [ "${attempt}" -ge "${RSYNC_RETRIES}" ]; then
+      log "[ERROR] rsync a échoué ${attempt}× (dernier code ${rc})."
+      return "${rc}"
+    fi
+    log "[WARN] rsync code ${rc} — reprise ${attempt}/${RSYNC_RETRIES} dans 15 s."
+    attempt=$(( attempt + 1 )); sleep 15
+  done
+}
+
+# Transfert PARALLÈLE shardé, --sparse, SANS --delete, avec reprises. Sert au
+# seed (à chaud), au rattrapage (à chaud) et à la passe froide. On ne met pas
+# --delete : incompatible avec un transfert shardé, et les fichiers orphelins
+# (tables SST compactées par BRK) sont inoffensifs — fjall n'utilise que ce que
+# référence son manifeste.
+#   $1 = libellé pour le log
+#   $2 = délai watchdog en s (optionnel) : borne la durée quand BRK est arrêté ;
+#        absent/0 = pas de watchdog (passe à chaud, aucune coupure à borner).
+# Renvoie 0 si tous les flux réussissent, 1 sinon.
+parallel_sync() {
+  local label="$1" wd_timeout="${2:-0}"
+  local list="/tmp/brk-backup-filelist.$$.${label//[^a-zA-Z0-9]/_}"
+  rm -f "${list}" "${list}".part* 2>/dev/null || true
+  ( cd "${SRC}" && find . {% for e in brk_backup_excludes %}-path {{ ('./' ~ (e | regex_replace('/$', ''))) | quote }} -prune -o {% endfor %}-type f -printf '%P\n' ) > "${list}" \
+    || { log "[ERROR] ${label} : génération de la liste impossible."; return 1; }
+  log "${label} : $(wc -l < "${list}") fichiers sur ${SEED_STREAMS} flux."
+  local pids=() k part
+  for k in $(seq 0 $(( SEED_STREAMS - 1 ))); do
+    part="${list}.part${k}"
+    awk -v n="${SEED_STREAMS}" -v k="${k}" 'NR % n == k' "${list}" > "${part}"
+    rsync_retry -a --sparse --numeric-ids --partial-dir=.brk-partial --files-from="${part}" -e "${RSH}" \
+          "${SRC}" "${DEST_USER}@${DEST_HOST}:${DEST_DIR}/incoming/" &
+    pids+=("$!")
+  done
+  local wd=""
+  if [ "${wd_timeout}" -gt 0 ]; then
+    ( sleep "${wd_timeout}"; kill "${pids[@]}" 2>/dev/null ) &
+    wd=$!
+  fi
+  local rc=0 p
+  for p in "${pids[@]}"; do wait "${p}" || rc=1; done
+  if [ -n "${wd}" ]; then kill "${wd}" 2>/dev/null || true; fi   # flux finis → annuler le watchdog
+  rm -f "${list}" "${list}".part* 2>/dev/null || true
+  return "${rc}"
+}
+
+ssh_dest() {
+  ssh -p "${DEST_PORT}" -i "${SSH_KEY}" -o BatchMode=yes \
+      -o ServerAliveInterval=60 -o ServerAliveCountMax=10 \
+      "${DEST_USER}@${DEST_HOST}" "$@"
+}
+
+# Écriture atomique : node_exporter relit le répertoire en continu, un fichier
+# tronqué lu à mi-écriture ferait disparaître la métrique — soit exactement
+# l'apparence d'une sauvegarde en panne.
+write_metrics() {
+  local status="$1" duration="$2" size="$3" downtime="$4" ts="$5" disk="${6:-0}"
+  local tmp="${METRIC_FILE}.$$"
+  cat > "${tmp}" <<EOF
+# HELP backup_last_status Résultat de la dernière exécution (1 = succès, 0 = échec).
+# TYPE backup_last_status gauge
+backup_last_status{backup="${BACKUP_NAME}"} ${status}
+# HELP backup_last_success_timestamp_seconds Date de la dernière sauvegarde réussie.
+# TYPE backup_last_success_timestamp_seconds gauge
+backup_last_success_timestamp_seconds{backup="${BACKUP_NAME}"} ${ts}
+# HELP backup_last_duration_seconds Durée de la dernière exécution.
+# TYPE backup_last_duration_seconds gauge
+backup_last_duration_seconds{backup="${BACKUP_NAME}"} ${duration}
+# HELP backup_last_size_bytes Taille APPARENTE de la dernière sauvegarde (trous du fichier sparse comptés).
+# TYPE backup_last_size_bytes gauge
+backup_last_size_bytes{backup="${BACKUP_NAME}"} ${size}
+# HELP backup_last_disk_bytes Taille RÉELLE occupée sur le disque de destination (blocs alloués, trous exclus).
+# TYPE backup_last_disk_bytes gauge
+backup_last_disk_bytes{backup="${BACKUP_NAME}"} ${disk}
+# HELP backup_last_downtime_seconds Durée d'arrêt du service pendant la sauvegarde.
+# TYPE backup_last_downtime_seconds gauge
+backup_last_downtime_seconds{backup="${BACKUP_NAME}"} ${downtime}
+EOF
+  mv "${tmp}" "${METRIC_FILE}"
+}
+
+# Reprend la date du dernier succès pour ne pas l'effacer en cas d'échec :
+# une exécution ratée ne doit pas faire croire que la sauvegarde n'a jamais eu
+# lieu, ni masquer son vieillissement.
+last_success_ts() { ssh_dest "cat '${DEST_DIR}/last-success' 2>/dev/null" || echo 0; }
+
+fail() {
+  log "[ERROR] $*"
+  write_metrics 0 "$(( $(date +%s) - START ))" 0 "${DOWNTIME:-0}" "$(last_success_ts)"
+  exit 1
+}
+
+# ── Verrou ─────────────────────────────────────────────────────────────────
+# La sauvegarde peut durer plusieurs heures : sans verrou, un cron hebdomadaire
+# qui déborde croiserait la suivante, deux rsync écrivant le même `incoming/`.
+exec 9>"${LOCK}"
+if ! flock -n 9; then
+  log "Déjà en cours (verrou ${LOCK}) — abandon."
+  exit 0
+fi
+
+START=$(date +%s)
+DOWNTIME=0
+BRK_WAS_ACTIVE=no
+
+# BRK est systématiquement relancé, quelle que soit la façon dont le script se
+# termine. Laisser l'indexation à l'arrêt parce qu'un rsync a échoué serait un
+# incident bien plus grave que la sauvegarde manquée.
+restore_service() {
+  if [ "${BRK_WAS_ACTIVE}" = "yes" ]; then
+    log "Redémarrage de BRK."
+    sudo systemctl start brk || log "[ERROR] Échec du redémarrage de BRK — INTERVENTION REQUISE."
+    BRK_WAS_ACTIVE=no
+  fi
+}
+trap restore_service EXIT
+
+# ── Auto-limitation ────────────────────────────────────────────────────────
+LAST_TS="$(last_success_ts)"
+LAST_TS="${LAST_TS:-0}"
+if [ "${LAST_TS}" != "0" ]; then
+  AGE_DAYS=$(( (START - LAST_TS) / 86400 ))
+  if [ "${AGE_DAYS}" -lt "${INTERVAL_DAYS}" ]; then
+    log "Ignoré : dernière sauvegarde vieille de ${AGE_DAYS} j (< ${INTERVAL_DAYS})."
+    exit 0
+  fi
+fi
+
+ssh_dest "mkdir -p '${DEST_DIR}'" || fail "Destination injoignable (${DEST_USER}@${DEST_HOST}:${DEST_PORT})."
+
+# ── Contrôle de place ──────────────────────────────────────────────────────
+# Un rsync qui remplit le disque de destination laisse un `incoming/` partiel
+# ET peut avoir déjà écrasé la génération précédente : le contrôle se fait
+# AVANT toute écriture.
+HAS_CURRENT=0
+ssh_dest "test -d '${DEST_DIR}/current'" && HAS_CURRENT=1 || true
+
+FREE_KB="$(ssh_dest "df -Pk '${DEST_DIR}' | awk 'NR==2 {print \$4}'")" \
+  || fail "Impossible de mesurer l'espace libre sur la destination."
+NEED_KB=$(( MIN_FREE_GB * 1024 * 1024 ))
+
+if [ "${HAS_CURRENT}" -eq 0 ]; then
+  # Première sauvegarde : il faut la taille entière de la source, en plus de la
+  # marge. `du` sur 348 Go coûte une à deux minutes — on ne le paie qu'ici.
+  log "Première sauvegarde — mesure de la taille de la source."
+  # La barre finale est retirée pour `du` : son `--exclude` compare un MOTIF au
+  # nom du fichier, et `logs/` ne correspond à aucun nom — l'exclusion serait
+  # silencieusement sans effet et la place exigée surestimée de 3,9 Go.
+  # rsync, lui, accepte les deux formes.
+  SRC_KB="$(du -sk {% for e in brk_backup_excludes %}--exclude={{ e | regex_replace('/$', '') | quote }} {% endfor %}"${SRC}" | awk '{print $1}')"
+  NEED_KB=$(( NEED_KB + SRC_KB ))
+  log "Source : $(( SRC_KB / 1024 / 1024 )) Go."
+fi
+
+if [ "${FREE_KB}" -lt "${NEED_KB}" ]; then
+  fail "Place insuffisante sur ${DEST_HOST} : $(( FREE_KB / 1024 / 1024 )) Go libres, $(( NEED_KB / 1024 / 1024 )) Go requis."
+fi
+log "Destination : $(( FREE_KB / 1024 / 1024 )) Go libres."
+
+# ── Options rsync ──────────────────────────────────────────────────────────
+# --sparse (-S) : le magasin BRK est massivement CREUX (349 Go réels pour ~844 Go
+# apparents — ~495 Go de trous). Sans -S, rsync matérialise les trous en zéros et
+# la destination gonfle à la taille apparente (~844 Go), remplissant le disque —
+# c'est ce qui a fait échouer le premier seed, pas le churn (mesuré nul).
+# --partial-dir (et NON --partial nu) : sur reprise, rsync nu ré-écrit un fichier
+# EXISTANT et ne re-perce plus les trous → --sparse est défait et la destination
+# regonfle (constaté : reprise d'un incoming de 341 Go repartie à 460 Go et plus).
+# Avec --partial-dir, les fichiers partiels vont dans un répertoire à part et le
+# fichier final est toujours écrit NEUF (donc sparse). Auto-exclu du --delete.
+RSYNC_OPTS=(-a --sparse --delete --partial-dir=.brk-partial --numeric-ids --human-readable)
+[ "${BWLIMIT}" != "0" ] && RSYNC_OPTS+=("--bwlimit=${BWLIMIT}")
+# --link-dest ne s'applique qu'aux fichiers ABSENTS de la destination : les
+# fichiers identiques deviennent des liens durs vers la génération précédente
+# (aucun octet transféré, aucun octet occupé) et les fichiers modifiés
+# utilisent quand même la copie précédente comme base de calcul du delta.
+[ "${HAS_CURRENT}" -eq 1 ] && RSYNC_OPTS+=("--link-dest=../current")
+
+RSH="ssh -p ${DEST_PORT} -i ${SSH_KEY} -o BatchMode=yes -o ServerAliveInterval=60 -o ServerAliveCountMax=10"
+
+# ── Passe 1 : à chaud, BRK tourne ──────────────────────────────────────────
+# Le magasin BRK ne transite PAS en flux unique sur ce lien : la route
+# hôte→hôte perd ~16-40 % des paquets sous charge (réordonnancement par paquet
+# côté opérateur), ce qui plafonne un flux TCP unique à ~4 Mbit/s (~40 j pour
+# 343 Go). Mesuré : l'AGRÉGAT scale (~41 Mbit/s à 8 flux) — la capacité est là,
+# un seul flux ne la capte pas. On ne parallélise donc QUE le seed initial (la
+# toute première sauvegarde, quand `current/` n'existe pas encore) ; ensuite les
+# incréments ne transfèrent qu'un petit delta, sans intérêt à shard.
+#
+# `--delete` est incompatible avec un transfert shardé (chaque flux ignore les
+# fichiers confiés aux autres et les supprimerait) : on ne l'utilise donc pas
+# ici, la passe 2 à froid le porte et réconcilie tout une fois le gros du volume
+# posé. Le sharding se fait par liste de fichiers découpée en round-robin —
+# robuste quelle que soit la forme de l'arbre, sans dépendance externe.
+if [ "${HAS_CURRENT}" -eq 0 ] && [ "${SEED_STREAMS}" -gt 1 ]; then
+  # Seed initial : deux passes À CHAUD (BRK tourne, ZÉRO coupure). La 1re pose le
+  # gros du volume (~4 h sur ce lien) ; pendant ce temps BRK compacte ses
+  # keyspaces, créant un « résidu churny ». La 2de (rattrapage) l'absorbe à chaud,
+  # de sorte que la passe FROIDE qui suit n'a plus qu'un delta minime à poser —
+  # d'où une coupure BRK de quelques minutes au lieu de ~30.
+  parallel_sync "Passe 1/3 (seed à chaud, ${SEED_STREAMS} flux)" \
+    || fail "Échec du seed parallèle (passe 1)."
+  parallel_sync "Passe 2/3 (rattrapage à chaud — réduit le résidu de la passe froide)" \
+    || fail "Échec du rattrapage à chaud (passe 2)."
+else
+  # Incrémental : `current/` existe déjà, le delta hebdo est petit → un seul flux
+  # avec --link-dest (liens durs vers current/) + --delete suffit, à chaud.
+  log "Passe incrémentale (à chaud, --link-dest) — BRK reste en service."
+  set +e
+  rsync_retry "${RSYNC_OPTS[@]}" "${RSYNC_EXCLUDES[@]}" -e "${RSH}" \
+        "${SRC}" "${DEST_USER}@${DEST_HOST}:${DEST_DIR}/incoming/"
+  RC1=$?
+  set -e
+  [ "${RC1}" -eq 0 ] || fail "Échec de la passe incrémentale (code ${RC1} après reprises)."
+fi
+
+# ── Passe froide : BRK arrêté, résidu minime grâce au rattrapage à chaud ────
+if systemctl is-active --quiet brk; then
+  BRK_WAS_ACTIVE=yes
+  DOWN_START=$(date +%s)
+  log "Arrêt de BRK pour la passe froide."
+  sudo systemctl stop brk || fail "Impossible d'arrêter BRK."
+else
+  log "[WARN] BRK n'était pas actif — passe froide sur un magasin déjà au repos."
+  DOWN_START=$(date +%s)
+fi
+
+# Magasin FIGÉ (cohérent). Bornée par STOP_TIMEOUT (watchdog dans parallel_sync) :
+# si un flux s'enlise, BRK repart quand même — le service prime sur la sauvegarde.
+# Le seed a fait précéder cette passe d'un rattrapage à chaud, donc le résidu à
+# poser ici est petit → coupure de quelques minutes. `|| P2_RC=$?` : sous set -e,
+# capturer le code sans laisser un retour non-nul tuer le script.
+P2_RC=0
+parallel_sync "Passe froide (magasin à l'arrêt, ${SEED_STREAMS} flux)" "${STOP_TIMEOUT}" || P2_RC=$?
+
+DOWNTIME=$(( $(date +%s) - DOWN_START ))
+restore_service
+trap - EXIT
+
+if [ "${P2_RC}" -ne 0 ]; then
+  fail "Échec de la passe froide (flux interrompu, possiblement le garde-fou de ${STOP_TIMEOUT} s) — BRK relancé, incoming/ conservé."
+fi
+log "Coupure de service : ${DOWNTIME} s."
+
+# ── Rotation ───────────────────────────────────────────────────────────────
+# `incoming/` ne devient `current/` qu'ici : tant que la rotation n'a pas eu
+# lieu, `current/` reste la dernière sauvegarde valide et une restauration
+# d'urgence lancée en plein milieu d'une sauvegarde ratée reste possible.
+log "Rotation des générations."
+if [ "${KEEP_PREVIOUS}" = "yes" ]; then
+  ssh_dest "rm -rf '${DEST_DIR}/previous' && \
+            { [ -d '${DEST_DIR}/current' ] && mv '${DEST_DIR}/current' '${DEST_DIR}/previous' || true; } && \
+            mv '${DEST_DIR}/incoming' '${DEST_DIR}/current'" \
+    || fail "Échec de la rotation."
+else
+  ssh_dest "rm -rf '${DEST_DIR}/current' && mv '${DEST_DIR}/incoming' '${DEST_DIR}/current'" \
+    || fail "Échec de la rotation."
+fi
+
+END=$(date +%s)
+
+# Le manifeste sert à la restauration : sans lui, rien sur la destination ne dit
+# de quelle machine ni de quelle version de BRK vient le magasin — or restaurer
+# un magasin dans un binaire d'une autre majeure peut le migrer de façon
+# irréversible (cf. le passage 0.3.6 → 0.11.2 du 08/08/2026).
+BRK_VERSION="$({{ brk_home }}/.cargo/bin/brk --version 2>/dev/null \
+                 | head -1 | sed 's/\x1b\[[0-9;]*m//g')"
+MANIFEST="$(printf 'source_host=%s\nsource_dir=%s\nbrk_version=%s\ncompleted=%s\ndowntime_seconds=%s\nexcludes=%s\n' \
+  "$(hostname)" "${SRC}" "${BRK_VERSION}" "$(date -Iseconds)" "${DOWNTIME}" "{{ brk_backup_excludes | join(',') }}")"
+
+ssh_dest "echo ${END} > '${DEST_DIR}/last-success'"
+printf '%s\n' "${MANIFEST}" | ssh_dest "cat > '${DEST_DIR}/manifest.txt'"
+
+# Deux tailles, un seul aller-retour SSH (le lien est coûteux) : `du -sb` compte
+# la taille APPARENTE (trous du magasin sparse inclus, ~906 Go), `du -sB1` la
+# taille RÉELLE sur disque (blocs alloués, ~349 Go). L'écart n'est pas du bruit :
+# c'est ~495 Go de trous. Le tableau de bord et l'alerte de capacité doivent
+# raisonner sur le disque réel, pas sur l'apparent qui ferait croire à une
+# destination pleine bien avant l'heure.
+# `|| true` : sans newline final, `read` assigne bien les deux variables mais
+# retourne non-zéro (EOF atteint avant le \n) — ce qui, sous `set -e`, couperait
+# le script juste avant `write_metrics`, laissant une sauvegarde réussie ni
+# marquée réussie ni marquée en échec (aucun trap ici). Le piège classique.
+SIZE_BYTES=0; DISK_BYTES=0
+read -r SIZE_BYTES DISK_BYTES < <(ssh_dest "du -sb '${DEST_DIR}/current' | awk '{print \$1}'; du -sB1 '${DEST_DIR}/current' | awk '{print \$1}'" | tr '\n' ' ') || true
+SIZE_BYTES="${SIZE_BYTES:-0}"; DISK_BYTES="${DISK_BYTES:-0}"
+write_metrics 1 "$(( END - START ))" "${SIZE_BYTES}" "${DOWNTIME}" "${END}" "${DISK_BYTES}"
+log "Terminé en $(( END - START )) s — $(( DISK_BYTES / 1024 / 1024 / 1024 )) Go disque ($(( SIZE_BYTES / 1024 / 1024 / 1024 )) Go apparent) sur ${DEST_HOST}."

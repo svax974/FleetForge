@@ -1,0 +1,29 @@
+---
+# Clean stuff before installing
+- name: Check if the docker compose file exists
+  ansible.builtin.stat:
+    path: ~/pgdatabase/docker-compose.yml
+  register: docker_fileinfo
+- name: Stop postgres in case it is running
+  community.docker.docker_compose_v2:
+    project_src: ~/pgdatabase/
+    state: absent
+  when: docker_fileinfo.stat.exists
+- name: Removes data directory
+  ansible.builtin.file:
+    path: "{{ ansible_env.HOME }}/pgdatabase/"
+    state: absent
+  become: yes
+
+# ── Supervision ────────────────────────────────────────────────────────────
+# Convention `-monitoring` (CLAUDE.md) : c'est le rôle de suppression du
+# service qui retire sa sonde. Une sonde laissée en place publierait
+# `service_up 0` indéfiniment et ferait sonner `ServiceDown` sur un service
+# volontairement désinstallé — l'alerte qu'on apprend à ignorer, et qui finit
+# par masquer les vraies.
+- name: Remove the svcprobe check
+  ansible.builtin.file:
+    path: "/etc/svcprobe/checks.d/db.json"
+    state: absent
+  become: true
+  tags: [monitoring]

@@ -1,0 +1,99 @@
+---
+# Configure bitcoin.conf. bitcoind is restarted via handler ONLY when the
+# config actually changes (avoids needless restarts on idempotent re-runs).
+
+# ── Garde-fou : bitcoind lancé hors de son unité ─────────────────────────────
+# Constaté le 11/08/2026 sur rpcbtc1 : un bitcoind tournait avec
+# `-reindex-chainstate -daemon`, lancé à la main, pendant que l'unité
+# utilisateur `bitcoind.service` était `enabled` mais `inactive`.
+#
+# Deux conséquences, aucune visible :
+#   • un redémarrage de la machine aurait démarré l'unité, donc SANS
+#     l'option de réindexation en cours ;
+#   • le handler « restart bitcoind » de ce rôle démarre l'unité alors que le
+#     processus manuel détient encore le verrou du datadir — l'unité échoue,
+#     le processus manuel est tué au passage, et le nœud se retrouve à l'arrêt
+#     avec une réindexation interrompue.
+#
+# Le rôle refuse donc de continuer tant que l'écart n'est pas réconcilié. C'est
+# un déploiement qui échoue franchement plutôt qu'un nœud arrêté en silence.
+- name: Detect a bitcoind process running outside its systemd unit
+  ansible.builtin.shell: |
+    set -o pipefail
+    export XDG_RUNTIME_DIR=/run/user/$(id -u)
+    PID=$(pgrep -x bitcoind || true)
+    STATE=$(systemctl --user is-active bitcoind 2>/dev/null || true)
+    echo "${PID:-none}|${STATE:-unknown}"
+  args:
+    executable: /bin/bash
+  register: btc_process_state
+  changed_when: false
+
+- name: Fail when bitcoind runs outside its unit
+  ansible.builtin.fail:
+    msg: >-
+      Un processus bitcoind tourne (PID {{ btc_process_state.stdout.split('|')[0] }})
+      alors que l'unité utilisateur `bitcoind` est
+      « {{ btc_process_state.stdout.split('|')[1] }} » : il a été lancé à la main.
+      Appliquer ce rôle risque de laisser le nœud à l'arrêt (conflit de verrou
+      sur le datadir). Réconcilie d'abord, sur rpcbtc1 :
+        pkill -x bitcoind && sleep 60
+        systemctl --user start bitcoind
+      Puis rejoue. Si l'écart est assumé (réindexation manuelle en cours),
+      relance avec -e allow_unmanaged_bitcoind=true — le nœud ne sera alors PAS
+      redémarré par ce rôle et la configuration ne prendra effet qu'au prochain
+      redémarrage manuel.
+  when:
+    - btc_process_state.stdout.split('|')[0] != 'none'
+    - btc_process_state.stdout.split('|')[1] != 'active'
+    - not (allow_unmanaged_bitcoind | default(false) | bool)
+
+- name: Ensure bitcoin.conf exists (fresh deploy — lineinfile needs the file)
+  ansible.builtin.copy:
+    dest: "~/bitcoin/bitcoin.conf"
+    content: ""
+    force: false
+    mode: '0640'
+
+- name: Enable TX indexing, needed to get full info through RPC
+  ansible.builtin.lineinfile:
+    path: "~/bitcoin/bitcoin.conf"
+    regexp: '[#|]txindex=.*'
+    line: "txindex=1"
+  notify: restart bitcoind
+
+- name: Set dbcache to speed up initial block download
+  ansible.builtin.lineinfile:
+    path: "~/bitcoin/bitcoin.conf"
+    regexp: '^#?dbcache=.*'
+    line: "dbcache={{ bitcoin_dbcache }}"
+  notify: restart bitcoind
+
+# ── BRK (Bitcoin Research Kit) requirements ──
+- name: Explicitly disable pruning (BRK needs the full block files)
+  ansible.builtin.lineinfile:
+    path: "~/bitcoin/bitcoin.conf"
+    regexp: '^#?prune=.*'
+    line: "prune=0"
+  notify: restart bitcoind
+
+- name: Enable RPC server (required by BRK)
+  ansible.builtin.lineinfile:
+    path: "~/bitcoin/bitcoin.conf"
+    regexp: '^#?server=.*'
+    line: "server=1"
+  notify: restart bitcoind
+
+- name: Enable ZMQ hashblock notifications (near-real-time new-block signal)
+  ansible.builtin.lineinfile:
+    path: "~/bitcoin/bitcoin.conf"
+    regexp: '^#?zmqpubhashblock=.*'
+    line: "zmqpubhashblock=tcp://127.0.0.1:{{ zmq_port_hashblock }}"
+  notify: restart bitcoind
+
+- name: Enable ZMQ rawblock notifications
+  ansible.builtin.lineinfile:
+    path: "~/bitcoin/bitcoin.conf"
+    regexp: '^#?zmqpubrawblock=.*'
+    line: "zmqpubrawblock=tcp://127.0.0.1:{{ zmq_port_rawblock }}"
+  notify: restart bitcoind

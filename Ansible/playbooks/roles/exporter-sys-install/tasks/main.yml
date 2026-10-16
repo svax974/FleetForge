@@ -1,0 +1,77 @@
+---
+# Install node_exporter on target host and register its Prometheus target on the monitor host.
+
+- name: Set architecture mapping
+  ansible.builtin.set_fact:
+    node_exporter_arch: "{{ 'arm64' if ansible_facts['architecture'] in ['aarch64', 'arm64'] else 'amd64' }}"
+
+# Avec `until` : l'URL de release GitHub redirige vers une URL signée servie par
+# un CDN qui coupe la connexion sans réponse de temps à autre (« Remote end
+# closed connection without response », constaté sur small3 le 12/08/2026, le
+# téléchargement repassant seul dans la seconde). Sans reprise, cet aléa d'un
+# seul appel HTTP fait échouer tout un déploiement.
+- name: Download and unarchive node_exporter
+  ansible.builtin.unarchive:
+    src: "https://github.com/prometheus/node_exporter/releases/download/v{{ node_exporter_version }}/node_exporter-{{ node_exporter_version }}.linux-{{ node_exporter_arch }}.tar.gz"
+    dest: /usr/local/bin
+    remote_src: yes
+    owner: root
+    group: root
+  register: node_exporter_fetch
+  until: node_exporter_fetch is succeeded
+  retries: 3
+  delay: 5
+
+- name: Move node_exporter binary to /usr/local/bin/node_exporter
+  ansible.builtin.copy:
+    src: "/usr/local/bin/node_exporter-{{ node_exporter_version }}.linux-{{ node_exporter_arch }}/node_exporter"
+    remote_src: yes
+    dest: /usr/local/bin/node_exporter
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Remove node_exporter archive directory
+  ansible.builtin.file:
+    path: "/usr/local/bin/node_exporter-{{ node_exporter_version }}.linux-{{ node_exporter_arch }}"
+    state: absent
+
+# Doit exister avant le démarrage : node_exporter refuse de servir le
+# collecteur textfile si le répertoire est absent, et publie alors
+# `node_textfile_scrape_error 1` — une erreur discrète qui ferait passer
+# l'absence de métriques de sauvegarde pour une absence de sauvegarde.
+- name: Create the textfile collector directory
+  ansible.builtin.file:
+    path: "{{ node_exporter_textfile_dir }}"
+    state: directory
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: '0755'
+
+- name: Deploy node_exporter systemd service file
+  ansible.builtin.template:
+    src: node_exporter.service
+    dest: /etc/systemd/system/node_exporter.service
+    owner: root
+    group: root
+    mode: '0640'
+  notify: restart node_exporter
+
+- name: Enable and start node_exporter service
+  ansible.builtin.systemd:
+    state: started
+    name: node_exporter
+    enabled: true
+    daemon_reload: true
+
+# Enregistrement de la cible + ouvertures de pare-feu — déportés dans
+# target.yml pour être rejouables SANS réinstaller l'exporter :
+#     - ansible.builtin.include_role:
+#         name: exporter-sys-install
+#         tasks_from: target
+# `host-preflight` s'en sert pour réparer une cible manquante, cas constaté le
+# 09/08/2026 quand Prometheus a été réinstallé après les services : les
+# répertoires file_sd sont repartis vides et plus rien n'était scrapé.
+- name: Register the Prometheus target and scrape rules
+  ansible.builtin.include_tasks: target.yml
+  tags: [monitoring]

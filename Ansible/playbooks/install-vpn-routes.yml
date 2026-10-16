@@ -1,0 +1,7 @@
+---
+- name: Install / update vpn routes
+  hosts: proxies
+  remote_user: "{{ remote_username }}"
+
+  roles:
+    - install-vpn-routes

@@ -1,0 +1,9 @@
+---
+# Valeurs dupliquées depuis sync-server-install et sync-server-monitoring : ce
+# rôle les lit dans SES PROPRES tâches (motif agenthub-purge/rotki-purge).
+sync_container: "sync-{{ sync_instance }}"
+sync_home: "/home/{{ remote_username }}/sync-{{ sync_instance }}"
+sync_hostname: "sync-{{ sync_instance }}.{{ domain_name }}"
+sync_mon_job: sync-server
+sync_mon_dropin_dir: /etc/docker-ports/sources.d
+sync_mon_firewall_script: /usr/local/sbin/docker-ports-firewall.sh

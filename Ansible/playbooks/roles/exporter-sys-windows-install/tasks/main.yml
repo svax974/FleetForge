@@ -1,0 +1,101 @@
+---
+# Install windows_exporter on Windows target and register its Prometheus target on the monitor host.
+
+- name: Detect architecture
+  ansible.windows.win_shell: |
+    if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'amd64' }
+  register: _win_arch
+  changed_when: false
+
+- name: Set windows_exporter architecture fact
+  ansible.builtin.set_fact:
+    _windows_exporter_arch: "{{ _win_arch.stdout | trim }}"
+
+- name: Set windows_exporter MSI path and download URL facts
+  ansible.builtin.set_fact:
+    _windows_exporter_msi_path: "C:\\Temp\\windows_exporter-{{ windows_exporter_version }}-{{ _windows_exporter_arch }}.msi"
+    windows_exporter_download_url: "https://github.com/prometheus-community/windows_exporter/releases/download/v{{ windows_exporter_version }}/windows_exporter-{{ windows_exporter_version }}-{{ _windows_exporter_arch }}.msi"
+
+- name: Ensure C:\Temp exists
+  ansible.windows.win_file:
+    path: C:\Temp
+    state: directory
+
+# `win_get_url` passe par le WebClient/Invoke-WebRequest par défaut de .NET,
+# dont le SecurityProtocol peut exclure TLS 1.2 sur cet hôte — or GitHub
+# (objects.githubusercontent.com, la redirection réelle des assets de
+# release) l'exige. La requête traîne alors jusqu'à faire expirer la session
+# WinRM elle-même : c'est ce qui s'est produit le 02/09/2026 (« Connection
+# reset by peer » côté contrôleur, en plein téléchargement). TLS 1.2 forcé et
+# trois tentatives, comme `mtbridge-deploy` le fait déjà pour ses propres
+# opérations réseau de plusieurs minutes via win_powershell.
+- name: Download windows_exporter MSI
+  ansible.windows.win_powershell:
+    script: |
+      [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+      $url = '{{ windows_exporter_download_url }}'
+      $dest = '{{ _windows_exporter_msi_path }}'
+      $attempts = 0
+      do {
+        $attempts++
+        try {
+          Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing
+          break
+        } catch {
+          if ($attempts -ge 3) { throw }
+          Start-Sleep -Seconds 5
+        }
+      } while ($attempts -lt 3)
+
+- name: Install windows_exporter as a Windows service
+  ansible.windows.win_package:
+    path: "{{ _windows_exporter_msi_path }}"
+    arguments: >-
+      ENABLED_COLLECTORS=cpu,cs,logical_disk,memory,net,os,system,tcp
+      LISTEN_PORT={{ windows_exporter_port }}
+    state: present
+
+- name: Ensure windows_exporter service is running and auto-started
+  ansible.windows.win_service:
+    name: windows_exporter
+    start_mode: auto
+    state: started
+
+- name: Allow Prometheus to scrape windows_exporter port {{ windows_exporter_port }}
+  community.windows.win_firewall_rule:
+    name: "Prometheus - windows_exporter"
+    localport: "{{ windows_exporter_port }}"
+    action: allow
+    direction: in
+    protocol: tcp
+    remoteip: "{{ hostvars[prometheus_host]['ansible_host'] }}"
+    state: present
+    enabled: yes
+
+- name: Remove MSI installer
+  ansible.windows.win_file:
+    path: "{{ _windows_exporter_msi_path }}"
+    state: absent
+
+- name: Set prometheus home on monitor host
+  ansible.builtin.set_fact:
+    prometheus_home: "/home/{{ remote_username }}/prometheus"
+
+- name: Create exporter prometheus-configs directory on monitor host
+  ansible.builtin.file:
+    path: "{{ prometheus_home }}/prometheus-configs/exporter"
+    state: directory
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: "0755"
+  delegate_to: "{{ prometheus_host }}"
+
+- name: Deploy windows_exporter Prometheus target file on monitor host
+  ansible.builtin.template:
+    src: windows_exporter.json
+    dest: "{{ prometheus_home }}/prometheus-configs/exporter/{{ inventory_hostname }}.json"
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: "0644"
+  delegate_to: "{{ prometheus_host }}"
+  notify: reload prometheus

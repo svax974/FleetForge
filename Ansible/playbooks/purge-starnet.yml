@@ -1,0 +1,24 @@
+---
+# Supprime StarNet ET ses données : tout ce que fait remove-starnet.yml, plus
+# les workspaces (agents, mémoire, transcripts, ledgers), la configuration, la
+# clé des connecteurs et le CNAME public. Destructif.
+#
+#   ./play.sh web3c purge-starnet.yml
+- name: Purge StarNet
+  hosts: starnet
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - starnet-purge
+
+- name: Retire le vhost StarNet des proxies
+  hosts: proxies
+  remote_user: "{{ remote_username }}"
+  become: true
+  tasks:
+    - name: Remove the StarNet vhost
+      ansible.builtin.include_role:
+        name: proxy-update-web3c
+        tasks_from: remove-one-site
+      vars:
+        site: starnet.conf

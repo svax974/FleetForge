@@ -1,0 +1,14 @@
+---
+# Alertmanager expose NATIVEMENT /metrics : pas de sonde `svcprobe` ici, une
+# cible directe suffit et donne bien plus — notifications émises, échecs de
+# notification, silences actifs, état du cluster.
+#
+# C'est la règle générale de la convention `-monitoring` : quand le service
+# expose déjà Prometheus, on l'active et on l'enregistre ; svcprobe n'est là
+# que pour ceux qui n'exposent rien.
+#
+# Enjeu propre à Alertmanager : c'est le maillon qui ÉMET les alertes. S'il
+# tombe, plus aucune alerte ne part et rien d'autre ne le signalerait —
+# `TargetDown` sur cette cible est la seule chose qui reste.
+amon_port: "{{ alertmanager_port | default(9093) }}"
+amon_job: alertmanager

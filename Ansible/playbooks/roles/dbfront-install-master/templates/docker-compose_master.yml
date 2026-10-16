@@ -1,0 +1,38 @@
+services:
+  db:
+    image: postgres:{{ pgversion }}-alpine
+    #command: -c ssl=on -c ssl_cert_file=/certs/postgres.crt -c ssl_key_file=/certs/postgres.key
+    #command: -c 'config_file=/etc/postgresql/postgresql.conf'
+    restart: always
+    environment:
+      - POSTGRES_DB={{ postgres_db_front }}
+      - POSTGRES_USER={{ postgres_user }}
+      - POSTGRES_PASSWORD={{ postgres_pass }}
+      - POSTGRES_HOST_AUTH_METHOD=md5
+      - POSTGRES_INITDB_ARGS=--auth-host=md5
+      #- POSTGRES_LOG_CONNECTIONS=on
+    container_name: postgres
+    volumes:
+      - ~/pgdatabase/init-master.sql:/docker-entrypoint-initdb.d/init-master.sql
+      - ~/pgdatabase/data:/var/lib/postgresql/data
+    ports:
+      - '0.0.0.0:{{ postgres_port }}:5432'
+
+  pgadmin:
+    image: dpage/pgadmin4
+    restart: always
+    container_name: pgadmin4
+    environment:
+      - PGADMIN_DEFAULT_EMAIL={{ email }}
+      - PGADMIN_DEFAULT_PASSWORD={{ postgres_pass }}
+      #- PGADMIN_ENABLE_TLS=True
+    volumes:
+      #- /opt/pgadmin/certs/pgadmin.cert:/certs/server.cert
+      #- /opt/pgadmin/certs/pgadmin.key:/certs/server.key
+      - /opt/pgadmin:/var/lib/pgadmin
+    ports:
+      #- '127.0.0.1:{{ pgadmin_port_https }}:443'
+      # We access through a SSL proxy, we just expose the http port
+      - '0.0.0.0:{{ pgadmin_port_http }}:80'
+    depends_on:
+      - db

@@ -1,0 +1,158 @@
+---
+# Supprime UNE instance web3c-sync ET SES DONNÉES : conteneur, base SQLite et
+# blobs (chiffrés), sonde, cible Prometheus, CNAME public ; ainsi que l'image et
+# les sources quand plus aucune instance ne les utilise.
+#
+# IRRÉVERSIBLE. Ce serveur détient les coffres synchronisés de TOUS les
+# appareils d'une instance : une fois supprimés, les clients ne peuvent plus
+# rien récupérer du serveur (le contenu étant chiffré de bout en bout, la
+# seule copie restante est celle des appareils eux-mêmes, et des sauvegardes
+# si elles existent). D'où DEUX garde-fous :
+#   1. -e sync_purge_confirm=yes  (explicite, jamais par défaut)
+#   2. une sauvegarde de moins de `sync_purge_backup_max_age_days` jours doit
+#      exister sur la destination, sinon -e sync_purge_no_backup=yes en plus.
+# Toujours restreindre à l'instance voulue : --limit sync-<instance>.
+#
+#   ./play.sh web3c purge-sync-server.yml --limit sync-iptv -e sync_purge_confirm=yes
+
+- name: Refuse to purge without explicit confirmation
+  ansible.builtin.assert:
+    that:
+      - (sync_purge_confirm | default('')) == 'yes'
+    fail_msg: >-
+      Purge refusée. Cette opération SUPPRIME DÉFINITIVEMENT la base et les
+      blobs de l'instance {{ sync_instance }} ({{ sync_data_dir }} sur
+      {{ inventory_hostname }}) : tous les groupes de synchronisation de cette
+      instance disparaissent, sans reconstruction possible côté serveur.
+      Relance avec --limit sync-{{ sync_instance }} -e sync_purge_confirm=yes
+      en connaissance de cause.
+    quiet: true
+
+# Lecture seule sur la destination : date de la dernière sauvegarde réussie
+# (écrite par le script de sync-backup-install).
+- name: Read the last successful backup date on the destination
+  ansible.builtin.slurp:
+    src: "{{ sync_backup_dir }}/last-success"
+  delegate_to: "{{ sync_backup_dest_host }}"
+  become: true
+  register: sync_purge_last_backup
+  failed_when: false
+  check_mode: false
+
+- name: Compute the age of the last backup
+  ansible.builtin.set_fact:
+    sync_purge_backup_age_days: >-
+      {{ ((now(utc=true).strftime('%s') | int
+           - (sync_purge_last_backup.content | b64decode | trim | int)) / 86400) | round(1)
+         if (sync_purge_last_backup.content is defined) else -1 }}
+
+- name: Refuse to purge when no recent backup exists
+  ansible.builtin.assert:
+    that:
+      - >-
+        (sync_purge_backup_age_days | float) >= 0
+        and (sync_purge_backup_age_days | float) <= (sync_purge_backup_max_age_days | float)
+        or (sync_purge_no_backup | default('')) == 'yes'
+    fail_msg: >-
+      Aucune sauvegarde de moins de {{ sync_purge_backup_max_age_days }} jours
+      pour {{ sync_instance }} sur {{ sync_backup_dest_host }}
+      ({{ sync_backup_dir }}) — âge constaté :
+      {{ 'aucune' if (sync_purge_backup_age_days | float) < 0 else sync_purge_backup_age_days ~ ' j' }}.
+      Lancer d'abord la sauvegarde (en root sur {{ inventory_hostname }} :
+      /usr/local/sbin/sync-backup-{{ sync_instance }}.sh) ou confirmer
+      qu'elle est inutile : -e sync_purge_no_backup=yes.
+    quiet: true
+
+- name: Measure what is about to be destroyed
+  ansible.builtin.command: du -sh {{ sync_data_dir }}
+  become: true
+  register: sync_purge_size
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Announce the purge
+  ansible.builtin.debug:
+    msg: >-
+      PURGE de {{ sync_container }} : suppression de {{ sync_data_dir }}
+      ({{ (sync_purge_size.stdout | default('?')).split('\t') | first }}).
+
+- name: Remove the service, its probe and its Prometheus target
+  ansible.builtin.include_role:
+    name: sync-server-remove
+
+# Le cron de sauvegarde viserait une base disparue : BackupFailed sonnerait à
+# l'infini. Les ARCHIVES déjà présentes sur la destination sont conservées (leur
+# purge est volontairement séparée : purge-sync-server.yml -e
+# sync_purge_backups=yes) — et gardent les données jusqu'à leur rotation.
+- name: Stop the backup of this instance
+  ansible.builtin.include_role:
+    name: sync-backup-remove
+
+- name: Delete the instance directory (database and blobs)
+  ansible.builtin.file:
+    path: "{{ sync_home }}"
+    state: absent
+  become: true
+
+# Image et sources sont COMMUNES aux trois instances : on ne les retire que
+# lorsqu'aucun conteneur sync-* ne subsiste sur la machine.
+- name: List the remaining sync containers on the host
+  ansible.builtin.command:
+    argv:
+      - docker
+      - ps
+      - -a
+      - --filter
+      - "name=^sync-(iptv|banking|aiteam)$"
+      - --format
+      - "{% raw %}{{.Names}}{% endraw %}"
+  become: true
+  register: sync_purge_remaining
+  changed_when: false
+  check_mode: false
+
+- name: List the image generations
+  ansible.builtin.command:
+    argv:
+      - docker
+      - images
+      - "{{ sync_server_image }}"
+      - --format
+      - "{% raw %}{{.Tag}}{% endraw %}"
+  become: true
+  register: sync_purge_images
+  changed_when: false
+  check_mode: false
+  when: sync_purge_remaining.stdout_lines | length == 0
+
+- name: Remove the sync server images
+  community.docker.docker_image_remove:
+    name: "{{ sync_server_image }}:{{ item }}"
+  loop: "{{ sync_purge_images.stdout_lines | default([]) }}"
+  become: true
+  failed_when: false
+  when: sync_purge_remaining.stdout_lines | length == 0
+
+- name: Remove the synchronized sources
+  ansible.builtin.file:
+    path: "{{ sync_server_build_dir }}"
+    state: absent
+  when: sync_purge_remaining.stdout_lines | length == 0
+
+# ── DNS : retirer le CNAME public ───────────────────────────────────────────
+# Symétrique de la publication (sync-server-install inclut cloudflare-dns-update/
+# tasks/cnames.yml via `proxy_hostname` de l'entrée d'inventaire). ATTENTION :
+# l'entrée d'inventaire porteuse de `proxy_hostname` doit être retirée EN MÊME
+# TEMPS (ou son attribut supprimé), sinon la prochaine synchronisation
+# (update-cloudflare-dns.yml) republierait le record.
+- name: Remove the sync CNAME
+  community.general.cloudflare_dns:
+    api_token: "{{ cloudflare_token }}"
+    zone: "{{ domain_name }}"
+    record: "{{ sync_hostname }}"
+    type: CNAME
+    state: absent
+  delegate_to: localhost
+  become: false
+  when: cloudflare_token | default('') | length > 0

@@ -1,0 +1,12 @@
+---
+# AgentHub hub (front React/nginx + back NestJS + Postgres, Docker Compose,
+# AppTemplate) — voir docs/plans/2026-09-24-agenthub/01-architecture.md §5.
+#
+# Ce rôle ne construit ni ne démarre RIEN : il garantit seulement le CNAME
+# public (via cloudflare-dns-update/tasks/cnames.yml, en portée réduite à cet
+# hôte — le nom public est déclaré par `proxy_hostname` sur son entrée
+# d'inventaire). Le build/démarrage de l'app vit dans `agenthub-deploy` (via les
+# scripts du dépôt app, pas un docker_container/docker_compose Ansible — voir
+# ses defaults pour le pourquoi), le filtrage réseau dans `agenthub-security`.
+
+agenthub_hostname: "agenthub.{{ domain_name }}"

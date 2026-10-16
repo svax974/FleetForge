@@ -1,0 +1,30 @@
+---
+# Supervision des nœuds Theta Edge : un exporter par hôte (toutes instances),
+# enregistrement de la cible, ouverture du pare-feu.
+#
+# Remplace `exporter-theta-edge-install` / `-remove` (un exporter et un port
+# PAR instance, en root, et inopérant — voir l'en-tête de l'exporter).
+
+# Doublons volontaires de `theta-edge-install/defaults` : les defaults d'un rôle
+# ne sont pas visibles d'un autre play. Une valeur d'inventaire
+# (`theta_edge_instances: 3` en host_vars) s'applique aux deux.
+theta_edge_instances: 1
+theta_edge_rpc_base_port: 17888
+theta_edge_port_step: 10
+
+# Port réservé au registre du CLAUDE.md.
+theta_edge_exporter_port: 9601
+# 0.0.0.0 : Prometheus tourne sur un autre hôte. Filtré par ufw (processus
+# natif, pas un port publié par Docker : ufw s'applique réellement).
+theta_edge_exporter_bind: "0.0.0.0"
+theta_edge_exporter_dir: /etc/theta-edge-exporter
+theta_edge_exporter_bin: /usr/local/bin/theta-edge-exporter
+
+theta_edge_exporter_rpc_timeout: 5
+
+# RPC public de la chaîne, celui de theta-js : soldes et hauteur réseau.
+theta_edge_public_rpc_url: "https://theta-bridge-rpc.thetatoken.org/rpc"
+# Rafraîchissement des soldes et de la hauteur réseau, en secondes.
+theta_edge_public_cache_ttl: 60
+
+theta_edge_job: node-theta-edge

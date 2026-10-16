@@ -1,0 +1,9 @@
+---
+# Le script est idempotent (il purge puis repose les règles de chaque port) :
+# le rejouer applique immédiatement une liste modifiée, sans redémarrage.
+- name: reapply docker ports firewall
+  ansible.builtin.systemd:
+    name: docker-ports-firewall
+    state: restarted
+    daemon_reload: true
+  become: true

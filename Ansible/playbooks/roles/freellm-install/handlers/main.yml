@@ -1,0 +1,10 @@
+---
+# .env et le compose ne sont relus qu'au démarrage : sans cette recréation, un
+# changement de port, de clé de licence ou de montage de clés fournisseur
+# serait déployé sans jamais prendre effet.
+- name: recreate freellm container
+  ansible.builtin.command: docker compose up -d
+  args:
+    chdir: "{{ freellm_install_dir }}"
+  become: true
+  changed_when: true

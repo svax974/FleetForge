@@ -1,0 +1,93 @@
+---
+# Arrête et retire le conteneur FreeLLMAPI, sa sonde et son filtrage de port.
+# Conserve l'installation (.env, clé de chiffrement, configuration, données) —
+# leur suppression relève de freellm-purge.
+
+- name: Stop the FreeLLMAPI container
+  ansible.builtin.command: docker compose down
+  args:
+    chdir: "{{ freellm_install_dir }}"
+  become: true
+  ignore_errors: true
+
+# ── Pare-feu ───────────────────────────────────────────────────────────────
+# Les règles DOCKER-USER survivent au conteneur : laissées en place, elles
+# bloqueraient le prochain service qui reprendrait ce port, avec une cause
+# introuvable puisque `ufw status` ne montre rien.
+- name: Stop and disable the FreeLLMAPI port firewall unit
+  ansible.builtin.systemd:
+    name: freellm-firewall
+    state: stopped
+    enabled: false
+  become: true
+  failed_when: false
+
+- name: Flush the FreeLLMAPI rules from DOCKER-USER
+  ansible.builtin.shell: |
+    set -uo pipefail
+    while true; do
+      N=$(iptables -L DOCKER-USER --line-numbers -n 2>/dev/null \
+          | awk -v p="dpt:{{ freellm_port }}" '$0 ~ p {print $1; exit}')
+      [ -z "${N}" ] && break
+      iptables -D DOCKER-USER "${N}"
+    done
+  args:
+    executable: /bin/bash
+  become: true
+  changed_when: true
+  failed_when: false
+
+- name: Remove the FreeLLMAPI port firewall files
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  become: true
+  loop:
+    - /etc/systemd/system/freellm-firewall.service
+    - /usr/local/sbin/freellm-firewall.sh
+
+- name: Reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+  become: true
+
+- name: Remove any ufw rule left on the FreeLLMAPI port
+  community.general.ufw:
+    rule: "{{ item }}"
+    proto: tcp
+    port: "{{ freellm_port }}"
+    delete: true
+  loop: [allow, deny]
+  become: true
+  ignore_errors: true
+
+# ── Supervision ────────────────────────────────────────────────────────────
+# La sonde part avec le service : laissée en place, elle publierait
+# `service_up 0` indéfiniment et ferait sonner une alerte sur un service
+# volontairement désinstallé.
+#
+# La CIBLE Prometheus de svcprobe n'est pas retirée : elle vaut pour la
+# MACHINE et porte les sondes des autres services qui y tournent.
+- name: Remove the FreeLLMAPI probe and its collector
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  become: true
+  loop:
+    - "{{ svcprobe_checks_dir | default('/etc/svcprobe/checks.d') }}/freellm.json"
+    - "{{ svcprobe_lib_dir | default('/usr/local/lib/svcprobe') }}/freellm-metrics.sh"
+  tags: [monitoring]
+
+# Ce rôle tourne sur l'hôte `freellm` : il ne peut pas, depuis ici, retirer un
+# fichier sur le groupe `proxies`. remove-freellm.yml et purge-freellm.yml
+# portent chacun une play séparée qui s'en charge (proxy-update-web3c,
+# tasks_from: remove-one-site) — ce message n'apparaît donc que si ce rôle est
+# rejoué SEUL, hors de ces playbooks.
+- name: Warn that the proxies still publish the vhost (role run standalone)
+  ansible.builtin.debug:
+    msg: >-
+      FreeLLMAPI supprimé, mais ce rôle ne touche pas aux proxies : s'il n'a
+      pas été rejoué via remove-freellm.yml ou purge-freellm.yml, le vhost
+      {{ freellm_hostname }} est toujours servi et renverra 502. Rejouer l'un
+      des deux playbooks, ou à défaut retirer
+      sites-enabled/freellm.conf à la main puis recharger nginx.

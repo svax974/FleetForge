@@ -1,0 +1,7 @@
+---
+llamacpp_user: llamacpp
+llamacpp_home: /opt/llamacpp
+llamacpp_src_dir: "{{ llamacpp_home }}/src"
+llamacpp_models_dir: "{{ llamacpp_home }}/models"
+llamacpp_version: master
+llamacpp_cmake_extra_flags: ""

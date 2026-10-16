@@ -1,0 +1,16 @@
+[Unit]
+Description=Node System Info Exporter
+
+[Service]
+User=root
+{# Noms d'options modernes (node_exporter >= 1.4). Les anciens
+   `--collector.filesystem.ignored-*` restent acceptés en 1.8 mais disparaissent
+   en 2.0, et n'émettent aucun avertissement au démarrage — la migration ne se
+   serait donc signalée que par un exporter qui refuse de démarrer. #}
+ExecStart=/usr/local/bin/node_exporter --web.listen-address=:{{ node_exporter_port }} --collector.disable-defaults --collector.cpu --collector.meminfo --collector.filesystem --collector.filesystem.mount-points-exclude={{ node_exporter_mount_points_exclude }} --collector.filesystem.fs-types-exclude={{ node_exporter_fs_types_exclude }} --collector.diskstats --collector.diskstats.device-exclude={{ node_exporter_diskstats_device_exclude }} --collector.netdev --collector.netdev.device-exclude={{ node_exporter_netdev_device_exclude }} --collector.systemd{% if node_exporter_systemd_unit_include | length > 0 %} --collector.systemd.unit-include={{ node_exporter_systemd_unit_include }}{% endif %} --collector.textfile --collector.textfile.directory={{ node_exporter_textfile_dir }}
+
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

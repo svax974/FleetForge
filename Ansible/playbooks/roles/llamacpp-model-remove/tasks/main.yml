@@ -1,0 +1,27 @@
+---
+# Stop a llama.cpp instance and delete its GGUF model file.
+# Requires: llamacpp_model_name
+# Optional: llamacpp_instance_id (default 1)
+
+- name: Fail if llamacpp_model_name is not set
+  ansible.builtin.fail:
+    msg: "llamacpp_model_name is required."
+  when: llamacpp_model_name is not defined or llamacpp_model_name == ""
+
+- name: Stop and disable llama.cpp instance {{ llamacpp_instance_id }}
+  ansible.builtin.systemd:
+    name: "llamacpp-{{ llamacpp_instance_id }}"
+    state: stopped
+    enabled: false
+  ignore_errors: true
+
+- name: Remove systemd unit for instance {{ llamacpp_instance_id }}
+  ansible.builtin.file:
+    path: "/etc/systemd/system/llamacpp-{{ llamacpp_instance_id }}.service"
+    state: absent
+  notify: reload systemd (llamacpp model)
+
+- name: Remove GGUF model file {{ llamacpp_model_name }}
+  ansible.builtin.file:
+    path: "{{ llamacpp_models_dir }}/{{ llamacpp_model_name }}.gguf"
+    state: absent

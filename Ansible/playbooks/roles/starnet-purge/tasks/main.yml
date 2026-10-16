@@ -1,0 +1,44 @@
+---
+# Supprime StarNet ET ses données : tout ce que fait starnet-remove, plus les
+# workspaces (agents, mémoire, transcripts, ledgers, clés saisies dans
+# l'interface), la configuration, la clé des connecteurs et le CNAME public.
+# Destructif.
+
+- name: Remove the service, its relay, its probe and its firewall rules
+  ansible.builtin.include_role:
+    name: starnet-remove
+
+# Le parent `StarNet/` est retiré, pas seulement `workspaces/` : le sidecar y
+# dépose aussi son verrou de propriétaire et ses fichiers de récupération.
+- name: Remove the StarNet data and configuration
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ starnet_workspaces | dirname }}"
+    - "{{ starnet_config_dir }}"
+  become: true
+
+- name: Disable lingering for srvc
+  ansible.builtin.command:
+    cmd: "loginctl disable-linger {{ starnet_user }}"
+  become: true
+  when: starnet_disable_linger | bool
+  changed_when: true
+  failed_when: false
+
+# ── DNS : retirer le CNAME public ───────────────────────────────────────────
+# ATTENTION : l'entrée d'inventaire `starnet` (porteuse de `proxy_hostname`)
+# doit être retirée en même temps — sinon update-cloudflare-dns.yml
+# republierait le record.
+- name: Remove the StarNet CNAME
+  community.general.cloudflare_dns:
+    api_token: "{{ cloudflare_token }}"
+    zone: "{{ domain_name }}"
+    record: "{{ starnet_hostname }}"
+    type: CNAME
+    state: absent
+  delegate_to: localhost
+  become: false
+  run_once: true
+  when: cloudflare_token | default('') | length > 0

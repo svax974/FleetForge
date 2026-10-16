@@ -1,0 +1,53 @@
+---
+# CVE-2026-31431 "Copy Fail" — retrait de la mitigation
+#
+# Inverse les modifications appliquées par copyfail-security :
+#   Debian/Ubuntu : supprime la blacklist modprobe + régénère initramfs
+#   RedHat/Suse   : retire initcall_blacklist du cmdline kernel via grubby
+#
+# Le kernel n'est pas rétrogradé — seule la mitigation temporaire est retirée.
+
+# ── Vérification OS ────────────────────────────────────────────────────────────
+
+- name: Ignorer les hôtes non-Linux
+  ansible.builtin.meta: end_host
+  when: ansible_facts['system'] != "Linux"
+
+# ── Retrait mitigation — Debian / Ubuntu ──────────────────────────────────────
+
+- name: Retrait blacklist modprobe (Debian/Ubuntu)
+  when: ansible_facts['os_family'] == "Debian"
+  block:
+    - name: Supprimer la blacklist modprobe algif_aead
+      ansible.builtin.file:
+        path: /etc/modprobe.d/disable-algif-aead.conf
+        state: absent
+      register: copyfail_blacklist_removed
+
+    - name: Régénérer initramfs pour retirer la blacklist de l'initrd
+      ansible.builtin.command: update-initramfs -u -k all
+      changed_when: true
+      when: copyfail_blacklist_removed.changed
+
+# ── Retrait mitigation — RedHat / Suse ────────────────────────────────────────
+
+- name: Retrait initcall_blacklist (RedHat/Suse)
+  when: ansible_facts['os_family'] in ["RedHat", "Suse"]
+  block:
+    - name: Lire la configuration kernel GRUB actuelle
+      ansible.builtin.command: grubby --info=ALL
+      register: copyfail_grubby_info
+      changed_when: false
+
+    - name: Retirer initcall_blacklist=algif_aead_init du cmdline kernel
+      ansible.builtin.command: >
+        grubby --update-kernel=ALL --remove-args="initcall_blacklist=algif_aead_init"
+      when: "'initcall_blacklist=algif_aead_init' in copyfail_grubby_info.stdout"
+
+    - name: "INFO : reboot requis pour désactiver la mitigation"
+      ansible.builtin.debug:
+        msg: >
+          [{{ inventory_hostname }}] La mitigation initcall_blacklist a été retirée
+          du cmdline kernel. Le reboot est nécessaire pour que le changement prenne effet.
+          Le module algif_aead redeviendra actif après le prochain démarrage.
+      when: "'initcall_blacklist=algif_aead_init' in copyfail_grubby_info.stdout"

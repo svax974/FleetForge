@@ -1,0 +1,16 @@
+---
+# Pare-feu du port publié de StarNet (relai systemd, process natif — pas de
+# Docker) : ufw filtre donc réellement ce trafic. Modèle : openclaw-security.
+#
+# Sources autorisées, par demande explicite (09/10/2026) : proxies + whitelist
+# + Prometheus + vpns, RIEN d'autre — pas de « serveurs liés », StarNet n'a
+# aucun client applicatif. Toutes dérivées de l'inventaire.
+
+starnet_port: "{{ app_port | default(4720) }}"
+# Port du sidecar sur la boucle locale (voir starnet-install) : ce rôle
+# vérifie qu'il n'est PAS exposé ailleurs.
+starnet_sidecar_port: 8787
+
+# IP/CIDR bruts à autoriser en plus (dépannage). À garder vide : chaque entrée
+# est une exception qui survit à celui qui l'a posée.
+starnet_extra_allowed_cidrs: []

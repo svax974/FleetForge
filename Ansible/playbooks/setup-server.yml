@@ -1,0 +1,98 @@
+---
+# Bootstrap d'une machine NEUVE : connexion en root sur le port 22, migration
+# vers le port SSH du parc, création de l'utilisateur de service, outillage de
+# base et node_exporter.
+#
+#   ./play.sh papanglabs setup-server.yml --limit <hôte>
+#
+# Machine dont l'image INTERDIT le login root (Oracle Cloud : forced-command
+# « Please login as the user "ubuntu" » dans /root/.ssh/authorized_keys) —
+# l'utilisateur de service n'existe pas encore, c'est ce playbook qui le crée,
+# donc le seul compte disponible est celui de l'image, sudoer sans mot de passe :
+#
+#   ./play.sh web3c setup-server.yml --limit small3 -e ansible_user=ubuntu
+#
+# Ne pas figer ce compte dans l'inventaire : il ne vaut QUE pour le tout premier
+# passage. Une fois `security-create-user` joué, la machine se pilote comme les
+# autres, avec `remote_username` hérité des group_vars.
+#
+# C'est le SEUL point d'entrée pour une machine vierge : `host-preflight`, joué
+# par tous les `deploy-*`, ne peut rien réparer avant que SSH et l'utilisateur
+# de service n'existent — il se connecte justement avec eux.
+#
+# Ne jamais jouer sans `--limit` : le motif `all` rejouerait le bootstrap sur
+# tout l'inventaire, dont `install-tools` qui fait un `apt upgrade dist`.
+#
+# Le premier passage avec `-e ansible_user=ubuntu` (image sans login root) ÉCHOUE
+# sur l'enregistrement de la cible : une variable `-e` s'applique à tous les
+# hôtes, y compris celui vers lequel `exporter-sys-install` délègue, et il n'y a
+# pas de compte `ubuntu` sur l'hôte Prometheus. Tout le socle est posé à ce
+# stade ; terminer par un passage ordinaire, qui enregistre la cible :
+#   ./play.sh web3c deploy-exporter-sys.yml --limit <hôte>
+
+- name: Common server setup
+  hosts: all
+  remote_user: root
+  gather_facts: false
+
+  # `become` est porté par les RÔLES, pas par le play : `remote_user: root` ne
+  # décide de rien (une variable de connexion l'emporte sur un mot-clé de play,
+  # et les group_vars posent `ansible_user: {{ remote_username }}`), et surtout
+  # une image cloud peut interdire le login root — le bootstrap arrive alors
+  # avec un compte sudoer ordinaire. Sans become, la première tâche qui touche
+  # à systemd part en polkit et meurt sur un timeout D-Bus de 25 s, dont le
+  # message ne parle jamais de permissions : « Failed to disable unit:
+  # Connection timed out ». Quand la connexion se fait en root, become est un
+  # no-op — le comportement des machines déjà en parc est inchangé.
+  pre_tasks:
+    # `host-preflight` ne tourne que sur les `deploy-*` : une machine qui ne
+    # reçoit que le socle n'y passerait jamais, et son inventaire ne serait donc
+    # jamais contrôlé. L'assert est local, il n'exige aucune connexion.
+    - name: Check the mandatory inventory metadata
+      ansible.builtin.include_role:
+        name: host-preflight
+        tasks_from: inventory
+      tags: [always]
+
+  roles:
+    - { role: security-ssh, become: true }
+    - { role: set-hostname, become: true }
+    - { role: install-tools, become: true }
+    - { role: install-python, become: true }
+    - { role: install-docker, become: true }
+    - { role: security-create-user, become: true }
+    # APRÈS security-create-user, et pas avant : les scripts et alias vont dans
+    # le home de `remote_username`, qui doit donc exister.
+    - { role: install-scripts, become: true }
+    # Plafond du journal systemd. Posé sur une machine NEUVE, donc avant qu'elle
+    # n'accumule : le défaut de journald (10 % du disque, aucune rétention
+    # maximale) ne se remarque que le jour où on cherche de la place.
+    - { role: journald-setup, become: true }
+    # `exporter-sys-install`, et non l'ancien `exporter-sys` supprimé le
+    # 13/08/2026 : ce dernier n'enregistrait AUCUNE cible Prometheus (son
+    # gabarit JSON n'était appelé par aucune tâche), ignorait `monitor_port`
+    # — donc écoutait toujours sur 9100, y compris derrière le NAT partagé de
+    # hub/nuc — et n'activait ni `--collector.systemd` ni `--collector.textfile`,
+    # laissant SystemdUnitFailed et les alertes de sauvegarde sans séries.
+    # Une machine bootstrapée gagnait ainsi un exporter que personne ne scrapait,
+    # cas de small3.
+    - { role: exporter-sys-install, become: true }
+    # At the end of root stuff, disable root ssh and ssh from everywhere
+    #- security-restrict
+
+  post_tasks:
+    # Témoin d'exécution : c'est lui que `host-preflight` cherche au début de
+    # chaque déploiement pour savoir si la machine a été bootstrapée, et lui
+    # qui permet de répondre depuis la machine — sans le dépôt sous la main —
+    # à « quand, et depuis quel poste ? ».
+    #   jq . /var/lib/fleetforge/state/setup-server.json
+    - name: Record the bootstrap
+      ansible.builtin.include_role:
+        name: host-preflight
+        tasks_from: stamp
+      vars:
+        stamp_name: setup-server
+        stamp_detail: >-
+          security-ssh, set-hostname, install-scripts, install-tools,
+          install-python, install-docker, security-create-user, journald-setup,
+          exporter-sys-install

@@ -1,0 +1,955 @@
+{#
+  Les groupes sont sélectionnés par `prom_alert_groups`, par parc.
+  Une règle dont la métrique n'existe pas sur le parc reste `inactive` avec
+  `health=ok` : indiscernable d'une règle qui veille réellement. Charger les
+  règles BRK sur web3c, qui n'a pas de BRK, reviendrait donc à peupler la page
+  d'alertes de décor — exactement ce qui rend la supervision illisible.
+#}
+groups:
+{% if 'availability' in prom_alert_groups %}
+
+  # ── Disponibilité générique ────────────────────────────────────────────────
+  - name: availability
+    rules:
+      # `keep_firing_for` est indispensable ICI : une cible qui bat (processus
+      # tué et relancé en boucle) produit sinon un couple FIRING/RESOLVED par
+      # cycle. Voir `prom_alert_flap_grace` pour le constat chiffré.
+      - alert: TargetDown
+        expr: up == 0
+        for: {{ prom_alert_target_down_for }}
+        keep_firing_for: {{ prom_alert_flap_grace }}
+        labels:
+          severity: critical
+        annotations:
+          summary: "Cible injoignable : {{ '{{' }} $labels.instance {{ '}}' }} ({{ '{{' }} $labels.job {{ '}}' }})"
+          description: "Prometheus ne parvient plus à scraper cette cible depuis {{ prom_alert_target_down_for }}."
+
+      # Nécessite node_exporter démarré avec --collector.systemd.
+      - alert: SystemdUnitFailed
+        expr: node_systemd_unit_state{state="failed", name!~"{{ prom_alert_systemd_ignored_units }}"} == 1
+        for: 5m
+        keep_firing_for: {{ prom_alert_flap_grace }}
+        labels:
+          severity: critical
+        annotations:
+          summary: "Unité systemd en échec : {{ '{{' }} $labels.name {{ '}}' }} sur {{ '{{' }} $labels.instance {{ '}}' }}"
+          description: "L'unité est en état failed. Avec StartLimitBurst configuré, c'est ce qui remonte une boucle de crash."
+
+{% endif %}
+{% if 'resources' in prom_alert_groups %}
+
+  # ── Ressources ─────────────────────────────────────────────────────────────
+  - name: resources
+    rules:
+      # Pourcentage ET volume absolu : un seuil purement relatif est ingérable
+      # sur un parc hétérogène. brk1 porte 1,4 To (chaîne Bitcoin + magasin BRK)
+      # et vit structurellement au-dessus de 90 % d'occupation : à 8 % libres il
+      # lui reste 115 Go, largement de quoi voir venir, mais l'alerte hurlait en
+      # permanence — donc plus personne ne la lisait. Sur les 96 Go de
+      # prometheus1 en revanche, 10 % ne font que 9,6 Go et méritent l'alerte.
+      # La conjonction règle les deux cas sans seuil par hôte à maintenir.
+      #
+      # Le sélecteur double celui de l'exporter (`node_exporter_fs_types_exclude`) :
+      # la règle est chargée par une stack qui scrape des exporters dont on ne
+      # maîtrise pas la date de déploiement, et un seul exporter en retard suffit
+      # à noyer l'alerte. `readonly == 0` ferme le cas général derrière le cas
+      # nommé : un montage en lecture seule est plein par construction et aucune
+      # intervention ne peut y libérer quoi que ce soit.
+{# `{%-` interdit ici : le strip avale le saut de ligne du commentaire au-dessus
+   et y recolle `- alert:`, qui se retrouve commenté. Ansible rend avec
+   trim_blocks=True, donc la ligne de tag disparaît déjà d'elle-même. #}
+{% set fs = 'fstype!~"' ~ prom_alert_disk_fstype_exclude ~ '"' %}
+      - alert: DiskSpaceLow
+        expr: |
+          (node_filesystem_free_bytes{ {{- fs -}} }
+           / node_filesystem_size_bytes{ {{- fs -}} }) * 100
+          < {{ prom_alert_disk_free_pct }}
+          and
+          node_filesystem_free_bytes{ {{- fs -}} }
+          < {{ prom_alert_disk_free_gb }} * 1024 * 1024 * 1024
+          and
+          node_filesystem_readonly{ {{- fs -}} } == 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Disque bas : {{ '{{' }} $labels.mountpoint {{ '}}' }} sur {{ '{{' }} $labels.instance {{ '}}' }}"
+          description: "Moins de {{ prom_alert_disk_free_pct }} % ET moins de {{ prom_alert_disk_free_gb }} Go d'espace libre."
+
+      # `avg by (instance)` : la moyenne des cœurs, pas un cœur en particulier —
+      # un seul cœur saturé (process mono-thread) est normal et ne doit pas
+      # sonner comme une machine chargée. `for: 15m` filtre le pic ponctuel
+      # (build, compression) que le seuil lui-même ne filtre pas.
+      - alert: CPUUsageHigh
+        expr: |
+          100 - (avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100)
+          > {{ prom_alert_cpu_busy_pct }}
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "CPU chargé durablement sur {{ '{{' }} $labels.instance {{ '}}' }}"
+          description: "Occupation CPU moyenne au-delà de {{ prom_alert_cpu_busy_pct }} % depuis 15 min."
+
+      # MemAvailable et non MemFree : MemAvailable retire déjà le cache
+      # réclamable par le noyau. Une machine dont la RAM libre sert de cache
+      # disque (son état normal) ne doit pas être vue en pénurie sur cette
+      # seule base.
+      - alert: MemoryUsageHigh
+        expr: |
+          (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100
+          > {{ prom_alert_mem_used_pct }}
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Mémoire sous pression durable sur {{ '{{' }} $labels.instance {{ '}}' }}"
+          description: "Mémoire utilisée (hors cache réclamable) au-delà de {{ prom_alert_mem_used_pct }} % depuis 15 min."
+
+      # `node_disk_io_time_seconds_total` est un compteur du temps passé avec
+      # AU MOINS une E/S en cours sur le périphérique : son taux d'accroissement
+      # est directement le %util d'iostat, déjà normalisé — pas de seuil absolu
+      # à maintenir par taille de disque comme pour DiskSpaceLow.
+      - alert: DiskIOBusyHigh
+        expr: |
+          rate(node_disk_io_time_seconds_total[5m]) * 100
+          > {{ prom_alert_disk_busy_pct }}
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Disque {{ '{{' }} $labels.device {{ '}}' }} saturé en E/S sur {{ '{{' }} $labels.instance {{ '}}' }}"
+          description: "Le périphérique a eu une E/S en cours plus de {{ prom_alert_disk_busy_pct }} % du temps depuis 15 min (équivalent iostat %util)."
+
+      # AUCUNE connaissance de la capacité réelle du lien — voir le commentaire
+      # de `prom_alert_netdev_mbps` (defaults/main.yml). Avertissement à
+      # creuser, pas une alarme de capacité.
+      - alert: NetworkThroughputHigh
+        expr: |
+          (rate(node_network_receive_bytes_total[5m]) + rate(node_network_transmit_bytes_total[5m]))
+          * 8 / 1000000
+          > {{ prom_alert_netdev_mbps }}
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Débit réseau soutenu sur {{ '{{' }} $labels.device {{ '}}' }} ({{ '{{' }} $labels.instance {{ '}}' }})"
+          description: "Réception + émission cumulées au-delà de {{ prom_alert_netdev_mbps }} Mbit/s depuis 15 min. Relever prom_alert_netdev_mbps en host_vars si ce débit est normal sur cet hôte."
+
+{% endif %}
+{% if 'database' in prom_alert_groups %}
+
+  # ── Bases PostgreSQL / TimescaleDB ─────────────────────────────────────────
+  # Séries produites par `postgres-metrics.sh` (collecteur svcprobe partagé par
+  # timescaledb-monitoring, db-monitoring, dbfront-monitoring), sous un préfixe
+  # différent par rôle faute de label commun — voir le commentaire de
+  # `prom_alert_db_connections_pct`. Chaque expression combine les trois
+  # préfixes par `or` : celui qu'aucun rôle ne déploie ici contribue une série
+  # vide, sans rendre la règle inactive pour les deux autres.
+  - name: database
+    rules:
+      # La panne qui arrive sans prévenir : la base répond parfaitement jusqu'au
+      # refus de toute connexion nouvelle.
+      - alert: PostgresConnectionsNearLimit
+        expr: |
+          (
+            (timescaledb_connections / timescaledb_max_connections)
+            or (postgres_connections / postgres_max_connections)
+            or (postgres_front_connections / postgres_front_max_connections)
+          ) * 100
+          > {{ prom_alert_db_connections_pct }}
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Connexions PostgreSQL proches du plafond sur {{ '{{' }} $labels.instance {{ '}}' }}"
+          description: "Plus de {{ prom_alert_db_connections_pct }} % de max_connections utilisées depuis 15 min."
+
+      - alert: PostgresReplicationLagHigh
+        expr: |
+          timescaledb_replication_lag_seconds
+          or postgres_replication_lag_seconds
+          or postgres_front_replication_lag_seconds
+          > {{ prom_alert_db_replication_lag_seconds }}
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Réplica PostgreSQL en retard sur {{ '{{' }} $labels.instance {{ '}}' }}"
+          description: "Retard de rejeu au-delà de {{ prom_alert_db_replication_lag_seconds }} s depuis 10 min : un lecteur consultant ce réplica voit des données significativement périmées."
+
+      # Un slot de réplication inactif retient les WAL indéfiniment et finit
+      # par remplir le disque du MAÎTRE — panne lente, sans lien direct avec le
+      # réplica qui l'a laissé inactif.
+      - alert: PostgresInactiveReplicationSlot
+        expr: |
+          timescaledb_inactive_replication_slots
+          or postgres_inactive_replication_slots
+          or postgres_front_inactive_replication_slots
+          > 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Slot(s) de réplication inactif(s) sur {{ '{{' }} $labels.instance {{ '}}' }}"
+          description: "Les WAL retenus par ce slot grossissent le disque du maître sans qu'aucun autre symptôme ne le signale."
+
+      - alert: PostgresLongRunningTransaction
+        expr: |
+          timescaledb_longest_transaction_seconds
+          or postgres_longest_transaction_seconds
+          or postgres_front_longest_transaction_seconds
+          > {{ prom_alert_db_long_transaction_seconds }}
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Transaction PostgreSQL longue sur {{ '{{' }} $labels.instance {{ '}}' }}"
+          description: "Une transaction ouverte depuis plus de {{ prom_alert_db_long_transaction_seconds }} s bloque le VACUUM et fait gonfler la base."
+
+{% endif %}
+{% if 'papangmetrics' in prom_alert_groups %}
+
+  # ── BRK / PapangMetrics ────────────────────────────────────────────────────
+  # Ces trois règles sont la réponse directe à l'incident des 3-4 août 2026 :
+  # BRK a servi des erreurs pendant ~28 h, puis a bouclé en crash 5 h, sans que
+  # rien ne le signale.
+  #
+  # Le sélecteur de job est indispensable : l'API ET l'ETL exposent tous deux
+  # brk_up / brk_height / etl_block_lag, puisqu'ils partagent le même module de
+  # métriques. Sans lui, chaque incident produit deux alertes identiques ne
+  # différant que par le label `job`, donc deux mails. On ne perd rien à ne
+  # garder que l'ETL : c'est lui qui ingère, et si son exporteur tombe c'est
+  # `TargetDown` qui prend le relais.
+  - name: papangmetrics
+    rules:
+      - alert: BrkDown
+        expr: brk_up{job="{{ prom_brk_source_job }}"} == 0
+        for: {{ prom_alert_brk_down_for }}
+        keep_firing_for: {{ prom_alert_flap_grace }}
+        labels:
+          severity: critical
+        annotations:
+          summary: "BRK injoignable depuis l'ETL"
+          description: "L'ETL ne joint plus l'API BRK : plus aucune donnée n'est ingérée."
+
+      # LA règle qui aurait détecté l'incident 28 h avant qu'il devienne fatal.
+      # Le curseur du fetcher de BRK s'était figé alors que le service répondait
+      # encore : brk_up restait à 1, seule la hauteur cessait de progresser.
+      #
+      # Le garde `etl_block_lag > 0` est indispensable à sa fiabilité (ajouté le
+      # 19/08/2026). Sans lui la règle sonnait à tort :
+      #  1. `brk_height` n'était rafraîchie qu'une fois par balayage (20–60 min) :
+      #     un balayage long la figeait > 1 h alors que BRK était pile au tip.
+      #     Corrigé côté ETL par la sonde `probeBrkHealth` (60 s).
+      #  2. Une vraie heure sans bloc (rare mais réelle) fige légitimement la
+      #     hauteur, sous le seuil de 2 h de BitcoinNodeStalled.
+      # Dans les DEUX cas `blocks_behind == 0` (BRK n'a rien de neuf à indexer).
+      # Une saturation du fetcher, elle, laisse bitcoind avancer sans BRK →
+      # `etl_block_lag > 0` : c'est la signature exacte. Aucune perte de
+      # couverture (un gel simultané nœud+BRK relève de BitcoinNodeStalled).
+      - alert: BrkHeightStalled
+        expr: >-
+          increase(brk_height{job="{{ prom_brk_source_job }}"}[1h]) == 0
+          and brk_up{job="{{ prom_brk_source_job }}"} == 1
+          and etl_block_lag{job="{{ prom_brk_source_job }}"} > 0
+        for: {{ prom_alert_brk_stalled_for }}
+        labels:
+          severity: critical
+        annotations:
+          summary: "BRK ne progresse plus (hauteur figée, retard qui s'accumule)"
+          description: >-
+            brk_height n'a pas bougé depuis plus d'une heure alors que BRK répond
+            ET que des blocs s'accumulent ({{ '{{' }} $value {{ '}}' }} de retard).
+            Signature de la saturation du fetcher : chercher « per-cycle cap » dans
+            ~/.brk/logs/AAAA-MM-JJ.txt (le warn a perdu son suffixe _warn).
+            Confirmer avec `curl -s localhost:3110/api/server/sync` (blocks_behind).
+
+      - alert: BrkBlockLagHigh
+        expr: etl_block_lag{job="{{ prom_brk_source_job }}"} > 10
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "BRK en retard de {{ '{{' }} $value {{ '}}' }} blocs"
+          description: "L'indexation de BRK décroche du tip de la chaîne."
+
+{% endif %}
+{% if 'bitcoin' in prom_alert_groups %}
+
+  # ── Nœud Bitcoin ───────────────────────────────────────────────────────────
+  # Le nœud est le PREMIER maillon du pipeline d'indicateurs et il n'a eu
+  # aucune métrique propre jusqu'au 11/08/2026 : `exporter-btc` était
+  # inexploitable (variable indéfinie, binaire en 403, écoute sur localhost,
+  # aucune cible enregistrée), et le job `node-btc` restait vide.
+  # Séries produites par `rpcbtc-monitoring`. Contrôle après déploiement :
+  # `count(bitcoin_up)` doit être non nul.
+  - name: bitcoin
+    rules:
+      - alert: BitcoinNodeDown
+        expr: bitcoin_up == 0
+        for: 10m
+        keep_firing_for: {{ prom_alert_flap_grace }}
+        labels:
+          severity: critical
+        annotations:
+          summary: "Nœud Bitcoin injoignable sur {{ '{{' }} $labels.instance {{ '}}' }}"
+          description: >-
+            L'exporter ne joint plus le RPC du nœud. BRK cesse d'indexer et le
+            pipeline d'indicateurs s'arrête en aval.
+
+      # La panne qui ne se voit pas : bitcoind répond, mais ne valide plus de
+      # bloc. `bitcoin_up` reste à 1 et seule la fraîcheur du dernier bloc
+      # bouge. Le seuil tient compte de la variance réelle du réseau — un
+      # intervalle de plus de 2 h entre deux blocs arrive, mais rarement.
+      - alert: BitcoinNodeStalled
+        expr: bitcoin_latest_block_age_seconds > {{ prom_alert_btc_block_age_seconds }}
+        for: 30m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Aucun bloc validé depuis {{ '{{' }} $value | humanizeDuration {{ '}}' }}"
+          description: >-
+            Le nœud répond mais n'avance plus. Vérifier `bitcoin_peers`
+            (isolement réseau) et `bitcoin_blocks_behind` (validation bloquée).
+
+      # Distinct du précédent : le nœud CONNAÎT des blocs qu'il ne valide pas.
+      # Symptôme d'un disque saturé ou d'une validation en échec, alors que le
+      # réseau va bien.
+      - alert: BitcoinValidationLagging
+        expr: bitcoin_blocks_behind > {{ prom_alert_btc_blocks_behind }}
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ '{{' }} $value {{ '}}' }} blocs connus mais non validés"
+          description: >-
+            Les en-têtes avancent, la validation non. Vérifier l'espace disque
+            et les journaux de bitcoind.
+
+      # Les connexions SORTANTES sont celles que le nœud maîtrise. Elles
+      # tombent à zéro sur une panne DNS ou un pare-feu sortant, pendant que
+      # les entrantes restent en place et masquent l'isolement.
+      - alert: BitcoinPeersLow
+        expr: bitcoin_peers_outbound < {{ prom_alert_btc_min_outbound_peers }}
+        for: 20m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Seulement {{ '{{' }} $value {{ '}}' }} pairs sortants"
+          description: >-
+            Le nœud s'isole du réseau. Cause fréquente : résolution DNS ou
+            filtrage sortant.
+
+      # Une resynchronisation initiale qui redémarre toute seule signale une
+      # corruption du chainstate ou un `-reindex` lancé à la main. Dans les deux
+      # cas BRK va servir des données partielles pendant des jours.
+      - alert: BitcoinReindexing
+        expr: bitcoin_initial_block_download == 1
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Nœud Bitcoin en synchronisation initiale"
+          description: >-
+            BRK indexe une chaîne incomplète tant que cela dure. Suivre
+            l'avancement : bitcoin_verification_progress.
+
+      # BRK exige la chaîne complète : un nœud élagué lui fait calculer des
+      # indicateurs faux, sans erreur visible.
+      - alert: BitcoinNodePruned
+        expr: bitcoin_pruned == 1
+        labels:
+          severity: critical
+        annotations:
+          summary: "Nœud Bitcoin élagué — incompatible avec BRK"
+          description: >-
+            `prune` doit valoir 0 (rôle rpcbtc-setup). BRK a besoin des fichiers
+            de blocs complets et produirait des données partielles.
+
+{% endif %}
+{% if 'astar' in prom_alert_groups %}
+
+  # ── Nœud Astar ─────────────────────────────────────────────────────────────
+  # Métriques natives du collator (Substrate), exposées sur 9615 pour la
+  # parachaîne et 9616 pour le relais — deux `instance` distinctes, un label
+  # `layer` pour les séparer. Cibles posées par `astar-monitoring`.
+  # Contrôle après déploiement : `count(block_height)` doit valoir au moins 6
+  # (3 `status` × 2 couches), sinon les règles ci-dessous sont décoratives.
+  # Au 14/08/2026 il vaut 3 : le relais n'écoute que sur 127.0.0.1:9616, sa
+  # cible reste donc injoignable et seule la parachaîne est réellement suivie.
+  #
+  # `up == 0` n'est PAS traité ici : `TargetDown` du groupe `availability` le
+  # couvre déjà pour toutes les cibles, y compris celles-ci.
+  - name: astar
+    rules:
+      # ── Noms de métriques ──────────────────────────────────────────────────
+      # Ce groupe interroge `block_height` et `peers`, PAS les noms exposés par
+      # Substrate (`substrate_block_height`, `substrate_sub_libp2p_peers_count`).
+      # Le job `node-astar` les renomme en `metric_relabel_configs` avant
+      # stockage, et termine par un `action: keep` sur
+      # (up|block_height|peers|syncing|uptime) : les noms d'origine n'existent
+      # donc dans AUCUNE série.
+      # Écrites avec les noms de Substrate, ces quatre règles étaient
+      # `inactive` / `health=ok` en permanence — indiscernables de règles qui
+      # veillent. Constaté le 14/08/2026, alors que le nœud affichait 7,6
+      # millions de blocs non finalisés.
+      # Toucher au renommage du job impose de rejouer ce groupe.
+      # La panne qui ne se voit pas : le processus tourne, l'endpoint répond,
+      # mais la hauteur n'avance plus. Sur 30 min le réseau produit des
+      # centaines de blocs ; une progression nulle est sans ambiguïté.
+      # `increase()` plutôt qu'une comparaison à un seuil absolu : la hauteur
+      # attendue change en permanence.
+      - alert: AstarBlockHeightStalled
+        expr: increase(block_height{status="best"}[30m]) == 0
+        for: 15m
+        keep_firing_for: {{ prom_alert_flap_grace }}
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Hauteur figée sur {{ '{{' }} $labels.instance {{ '}}' }} ({{ '{{' }} $labels.layer {{ '}}' }})'
+          description: >-
+            Le nœud répond mais n'importe plus de bloc. Vérifier les pairs
+            (`peers`) et les journaux du service.
+
+      # Distinct du précédent : les blocs arrivent, mais plus rien ne se
+      # finalise. Symptôme d'un décrochage de la finalité GRANDPA — les données
+      # servies restent réversibles.
+      - alert: AstarFinalityLagging
+        expr: >-
+          block_height{status="best"}
+          - ignoring(status) block_height{status="finalized"}
+          > {{ prom_alert_astar_finality_lag }}
+        for: 20m
+        labels:
+          severity: warning
+        annotations:
+          summary: '{{ '{{' }} $value {{ '}}' }} blocs non finalisés sur {{ '{{' }} $labels.instance {{ '}}' }}'
+          description: >-
+            La finalité décroche de la tête de chaîne. Tout ce qui est servi
+            au-delà du dernier bloc finalisé peut encore être réorganisé.
+
+      # Le nœud CONNAÎT des blocs qu'il n'a pas importés : resynchronisation en
+      # cours, ou disque/CPU saturé. Bénin au premier démarrage — d'où le `for`
+      # long — préoccupant ensuite.
+      - alert: AstarSyncLagging
+        expr: >-
+          block_height{status="sync_target"}
+          - ignoring(status) block_height{status="best"}
+          > {{ prom_alert_astar_sync_lag }}
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: '{{ '{{' }} $value {{ '}}' }} blocs de retard sur {{ '{{' }} $labels.instance {{ '}}' }}'
+          description: >-
+            Le nœud ne rattrape pas la tête de chaîne. Normal pendant une
+            synchronisation initiale, anormal en régime établi.
+
+      # Un nœud qui perd ses pairs cesse d'apprendre les nouveaux blocs sans
+      # qu'aucun autre signal ne bouge immédiatement.
+      - alert: AstarPeersLow
+        expr: peers < {{ prom_alert_astar_min_peers }}
+        for: 20m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Seulement {{ '{{' }} $value {{ '}}' }} pairs sur {{ '{{' }} $labels.instance {{ '}}' }}'
+          description: >-
+            Le nœud s'isole. Vérifier que le port 30333 est bien joignable et
+            la résolution DNS fonctionnelle.
+
+{% endif %}
+{% if 'theta' in prom_alert_groups %}
+
+  # ── Nœuds Theta Edge ───────────────────────────────────────────────────────
+  # Exporter `theta-edge-monitoring` (9601, job `node-theta-edge`), une série
+  # par instance (`theta_instance`). Contrôle après déploiement :
+  # `count(theta_edge_up)` doit valoir le nombre total d'instances du parc.
+  # `up == 0` (exporter injoignable) relève de `TargetDown`.
+  - name: theta
+    rules:
+      - alert: ThetaEdgeDown
+        expr: theta_edge_up == 0
+        for: {{ prom_alert_service_down_for }}
+        keep_firing_for: {{ prom_alert_flap_grace }}
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Nœud Theta Edge {{ '{{' }} $labels.instance {{ '}}' }}#{{ '{{' }} $labels.theta_instance {{ '}}' }} injoignable'
+          description: >-
+            Le RPC edgecore ne répond plus. `docker logs theta-edge-<N>` sur
+            l'hôte ; le conteneur redémarre seul (`unless-stopped`).
+
+      # Le nœud répond mais ne reçoit plus de blocs : la chaîne Theta en
+      # produit un toutes les ~6 s, 30 min sans progression est sans ambiguïté.
+      - alert: ThetaEdgeHeightStalled
+        expr: increase(theta_edge_block_height[30m]) == 0
+        for: 15m
+        keep_firing_for: {{ prom_alert_flap_grace }}
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Hauteur figée sur {{ '{{' }} $labels.instance {{ '}}' }}#{{ '{{' }} $labels.theta_instance {{ '}}' }}'
+          description: >-
+            Le RPC répond, mais aucun bloc n'arrive. Vérifier les pairs
+            (`theta_edge_peers`) et les journaux du conteneur.
+
+      # Retard sur la chaîne, mesuré contre le RPC public. Plus discret que la
+      # hauteur figée : le nœud avance, mais derrière le réseau.
+      - alert: ThetaEdgeLagging
+        expr: >-
+          theta_edge_network_height - on(instance) group_right
+          theta_edge_block_height > {{ prom_alert_theta_lag_blocks }}
+        for: 20m
+        labels:
+          severity: warning
+        annotations:
+          summary: '{{ '{{' }} $value {{ '}}' }} blocs de retard sur {{ '{{' }} $labels.instance {{ '}}' }}#{{ '{{' }} $labels.theta_instance {{ '}}' }}'
+          description: >-
+            Le nœud suit la chaîne avec retard : CPU ou réseau saturé, ou trop
+            d'instances pour la machine.
+
+      - alert: ThetaEdgeNoPeers
+        expr: theta_edge_peers == 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Aucun pair sur {{ '{{' }} $labels.instance {{ '}}' }}#{{ '{{' }} $labels.theta_instance {{ '}}' }}'
+          description: >-
+            Le nœud est isolé du réseau. Vérifier la sortie Internet du
+            conteneur (P2P sortant uniquement, aucun port entrant requis).
+
+{% endif %}
+{% if 'searxng' in prom_alert_groups %}
+
+  # ── Relai SearXNG ──────────────────────────────────────────────────────────
+  # Séries produites par le collecteur `searxng-metrics.sh` de svcprobe (rôle
+  # `searxng-monitoring`). Elles existent pour une raison précise : la panne
+  # caractéristique d'un métamoteur n'est pas l'arrêt mais la STÉRILITÉ — les
+  # moteurs amont bloquent l'IP de l'instance, chaque requête revient vide, et
+  # `service_up` reste à 1. Aucune sonde binaire ne peut voir cet état.
+  # Contrôle après déploiement : `count(searxng_query_success)` doit valoir 1,
+  # sinon ces règles sont décoratives.
+  - name: searxng
+    rules:
+      - alert: SearxngQueryFailing
+        expr: searxng_query_success == 0
+        for: {{ prom_alert_searxng_failing_for | default('15m') }}
+        keep_firing_for: {{ prom_alert_flap_grace }}
+        labels:
+          severity: critical
+        annotations:
+          summary: "Le relai SearXNG ne répond plus en JSON sur {{ '{{' }} $labels.instance {{ '}}' }}"
+          description: >-
+            La requête de contrôle n'a pas renvoyé de JSON exploitable. Le
+            service peut être debout : vérifier que `search.formats` contient
+            bien `json` (rôle searxng-install) et `docker logs searxng`.
+
+      # Le relai répond, l'API est là, et il ne rapporte RIEN. C'est l'état que
+      # la sonde de disponibilité ne voit pas, et celui qui casse réellement
+      # l'application cliente.
+      - alert: SearxngNoResults
+        expr: searxng_query_success == 1 and searxng_query_results == 0
+        for: {{ prom_alert_searxng_empty_for | default('30m') }}
+        keep_firing_for: {{ prom_alert_flap_grace }}
+        labels:
+          severity: critical
+        annotations:
+          summary: "Le relai SearXNG ne rapporte plus aucun résultat"
+          description: >-
+            Requête de contrôle aboutie mais vide sur toute la fenêtre. Cause
+            la plus fréquente : les moteurs amont ont bloqué l'IP de sortie de
+            l'instance. Vérifier searxng_query_unresponsive_engines et
+            `/stats/errors` sur l'instance.
+
+      # Signal PRÉCOCE : quelques moteurs muets est normal, une montée continue
+      # précède la stérilité complète.
+      - alert: SearxngEnginesUnresponsive
+        expr: searxng_query_unresponsive_engines > {{ prom_alert_searxng_max_unresponsive | default(3) }}
+        for: 1h
+        keep_firing_for: {{ prom_alert_flap_grace }}
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ '{{' }} $value {{ '}}' }} moteurs amont sans réponse sur SearXNG"
+          description: >-
+            La qualité des résultats se dégrade avant toute panne visible.
+            Vérifier `/stats/errors` sur l'instance.
+
+{% endif %}
+{% if 'sync' in prom_alert_groups %}
+
+  # ── Serveurs de synchronisation web3c-sync ─────────────────────────────────
+  # /metrics NATIF du serveur (job `sync-server`, rôle `sync-server-monitoring`,
+  # une cible par instance : iptv, banking, aiteam). Le serveur expose lui-même un
+  # label `instance` (nom de l'instance) que Prometheus renomme
+  # `exported_instance` — c'est ce label qui nomme l'instance dans les messages,
+  # `instance` étant le nom d'inventaire (sync-iptv…).
+  # Filtrées par `job` : ce module de métriques pourrait un jour être exposé par
+  # d'autres jobs (serveurs personnels), et une règle non filtrée lèverait alors
+  # une alerte par job (CLAUDE.md, « Portée des règles sur le job »).
+  # Contrôle après déploiement : `count(sync_up{job="sync-server"})` doit valoir 3,
+  # sinon ces règles sont décoratives. Une cible injoignable est couverte par
+  # `TargetDown` (groupe availability), une sauvegarde absente ou ancienne par
+  # `BackupStale`/`BackupFailed` (groupe backups — `prom_alert_backup_max_age_hours`
+  # porte sync-iptv, sync-banking, sync-aiteam), le disque de la machine par
+  # `DiskSpaceLow` (groupe resources).
+  - name: sync
+    rules:
+      # Le serveur répond mais sa base ne répond plus (sync_up = 0 : Totals() en
+      # erreur) — état que `TargetDown` ne voit pas puisque /metrics répond.
+      - alert: SyncServerDown
+        expr: sync_up{job="sync-server"} == 0
+        for: {{ prom_alert_sync_down_for | default('5m') }}
+        keep_firing_for: {{ prom_alert_flap_grace }}
+        labels:
+          severity: critical
+        annotations:
+          summary: "Serveur de synchronisation {{ '{{' }} $labels.exported_instance {{ '}}' }} : base inaccessible"
+          description: >-
+            sync_up vaut 0 : le serveur ne peut plus lire sa base SQLite. Journal :
+            `docker logs sync-{{ '{{' }} $labels.exported_instance {{ '}}' }}` sur
+            {{ '{{' }} $labels.instance {{ '}}' }} ; vérifier l'espace disque et les droits du
+            volume (uid 65532).
+
+      # Le serveur REFUSE des requêtes parce qu'il est saturé (plus de 256 en vol).
+      # Sous charge normale ce compteur reste à 0 : toute croissance durable est
+      # un signal de capacité ou d'abus.
+      - alert: SyncSaturated
+        expr: rate(sync_shed_total{job="sync-server"}[5m]) > 0
+        for: {{ prom_alert_sync_shed_for | default('10m') }}
+        keep_firing_for: {{ prom_alert_flap_grace }}
+        labels:
+          severity: warning
+        annotations:
+          summary: "Serveur de synchronisation {{ '{{' }} $labels.exported_instance {{ '}}' }} saturé"
+          description: >-
+            Des requêtes sont refusées faute de capacité (sync_shed_total en
+            croissance depuis {{ prom_alert_sync_shed_for | default('10m') }}).
+            Regarder sync_in_flight, sync_sse_clients et le débit entrant :
+            charge légitime ou inondation ?
+
+      # Échecs d'authentification/d'appartenance soutenus : scan, appareil
+      # révoqué qui boucle, ou tentative de force brute. Instance publique : un
+      # bruit de fond existe, d'où un taux soutenu et non un simple nombre.
+      - alert: SyncAuthFailuresHigh
+        expr: rate(sync_auth_failures_total{job="sync-server"}[10m]) > {{ prom_alert_sync_auth_failures_per_s | default(2) }}
+        for: 15m
+        keep_firing_for: {{ prom_alert_flap_grace }}
+        labels:
+          severity: warning
+        annotations:
+          summary: "Échecs d'authentification anormaux sur {{ '{{' }} $labels.exported_instance {{ '}}' }} : {{ '{{' }} $value | humanize {{ '}}' }}/s"
+          description: >-
+            Taux soutenu d'échecs de signature ou d'appartenance supérieur à
+            {{ prom_alert_sync_auth_failures_per_s | default(2) }}/s depuis 15 min.
+            Un client cassé qui reboucle, un scan ou une attaque : voir le
+            journal d'accès du vhost sur les proxies (/var/log/nginx-sync/).
+
+      # Erreurs serveur (5xx) soutenues : état dégradé que ni `sync_up` ni la
+      # sonde de santé ne voient (une route qui échoue, la base qui renvoie des
+      # erreurs partielles).
+      - alert: SyncServerErrors
+        expr: rate(sync_requests_5xx_total{job="sync-server"}[10m]) > {{ prom_alert_sync_5xx_per_s | default(0.1) }}
+        for: 10m
+        keep_firing_for: {{ prom_alert_flap_grace }}
+        labels:
+          severity: warning
+        annotations:
+          summary: "Erreurs 5xx soutenues sur le serveur de synchronisation {{ '{{' }} $labels.exported_instance {{ '}}' }}"
+          description: >-
+            Plus de {{ prom_alert_sync_5xx_per_s | default(0.1) }} réponse(s) 5xx par seconde
+            depuis 10 min. Journal : `docker logs sync-{{ '{{' }} $labels.exported_instance {{ '}}' }}`
+            sur {{ '{{' }} $labels.instance {{ '}}' }}.
+
+      # Volume de données chiffrées stockées : le disque est partagé avec les
+      # autres services de la machine (`ctdapi`). Les quotas par groupe
+      # bornent chaque groupe, pas leur nombre — la croissance globale se
+      # surveille ici, avant que `DiskSpaceLow` ne sonne sur toute la machine.
+      - alert: SyncStorageHigh
+        expr: sync_bytes{job="sync-server"} > {{ prom_alert_sync_bytes_max | default(21474836480) }}
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ '{{' }} $labels.exported_instance {{ '}}' }} stocke {{ '{{' }} $value | humanize1024 {{ '}}' }}B de données chiffrées"
+          description: >-
+            Seuil {{ prom_alert_sync_bytes_max | default(21474836480) }} octets dépassé. Vérifier la
+            croissance (sync_groups, sync_docs), l'espace libre de la machine
+            partagée et la rétention des sauvegardes.
+
+{% endif %}
+{% if 'services' in prom_alert_groups %}
+
+  # ── Sondes de service (svcprobe) ───────────────────────────────────────────
+  # Une seule règle couvre TOUS les services sondés : le label `service` porte
+  # l'information, il n'y a donc aucune raison d'écrire une règle par service —
+  # et une règle générique ne peut pas être oubliée lors de l'ajout du suivant.
+  # Séries produites par `svcprobe`, alimenté par les rôles `<service>-monitoring`.
+  # Contrôle après déploiement : `count(service_up)` doit être non nul.
+  - name: services
+    rules:
+      - alert: ServiceDown
+        expr: service_up == 0
+        for: {{ prom_alert_service_down_for }}
+        keep_firing_for: {{ prom_alert_flap_grace }}
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ '{{' }} $labels.service {{ '}}' }} est arrêté sur {{ '{{' }} $labels.instance {{ '}}' }}"
+          description: >-
+            La sonde principale du service échoue. Détail des sondes
+            secondaires : service_check_up{service="{{ '{{' }} $labels.service {{ '}}' }}"}.
+
+      # Le service principal répond mais une de ses dépendances non — une base
+      # dont le conteneur tourne alors que le port refuse les connexions, un
+      # nginx actif dont le 443 est fermé. Avertissement et non alerte critique :
+      # le service peut rester partiellement utilisable.
+      - alert: ServiceCheckFailing
+        expr: service_check_up == 0 and on (instance, service) service_up == 1
+        for: 15m
+        keep_firing_for: {{ prom_alert_flap_grace }}
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ '{{' }} $labels.service {{ '}}' }} : sonde « {{ '{{' }} $labels.check {{ '}}' }} » en échec"
+          description: >-
+            Le service répond mais l'une de ses dépendances non. État dégradé
+            qu'une sonde binaire seule aurait manqué.
+
+      # Une sonde mal écrite ou un collecteur cassé rend les métriques du
+      # service muettes — indiscernable d'un service en bonne santé.
+      - alert: ProbeConfigError
+        expr: svcprobe_config_error > 0 or svcprobe_metrics_error > 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Sonde invalide pour {{ '{{' }} $labels.service {{ '}}' }}"
+          description: >-
+            svcprobe ne parvient pas à lire la sonde ou à exécuter son
+            collecteur. Les métriques de ce service ne sont plus fiables.
+            Vérifier /etc/svcprobe/checks.d/ et `journalctl -u svcprobe`.
+
+  # ── Certificats TLS ────────────────────────────────────────────────────────
+  # Alimentée par le collecteur nginx de svcprobe. L'expiration d'un certificat
+  # est la panne annoncée des semaines à l'avance et découverte le jour même :
+  # un renouvellement certbot qui cesse de fonctionner ne produit aucun
+  # symptôme jusqu'à la coupure.
+  - name: certificates
+    rules:
+      - alert: CertificateExpiringSoon
+        expr: nginx_certificate_expiry_seconds < {{ prom_alert_cert_expiry_seconds }}
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Certificat {{ '{{' }} $labels.domain {{ '}}' }} expire dans {{ '{{' }} $value | humanizeDuration {{ '}}' }}"
+          description: >-
+            Le renouvellement automatique n'a pas eu lieu. Vérifier
+            `certbot renew --dry-run` sur {{ '{{' }} $labels.instance {{ '}}' }}.
+
+      - alert: CertificateExpired
+        expr: nginx_certificate_expiry_seconds <= 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "Certificat {{ '{{' }} $labels.domain {{ '}}' }} EXPIRÉ"
+          description: "Le service est inaccessible en HTTPS."
+
+{% endif %}
+{% if 'dmarc' in prom_alert_groups %}
+
+  # ── DMARC ──────────────────────────────────────────────────────────────────
+  # Ces règles sont la raison d'être de l'exporter : DMARC ne sait pas n'émettre
+  # un rapport qu'en cas d'anomalie, ses rapports `rua` sont quotidiens et
+  # inconditionnels. Le tri se fait donc ici, et la boîte `dmarc@` n'a plus à
+  # être lue par un humain.
+  - name: dmarc
+    rules:
+      - alert: DmarcExporterDown
+        expr: dmarc_up{job="dmarc"} == 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Relève des rapports DMARC en échec"
+          description: >-
+            L'exporter ne parvient plus à joindre la boîte IMAP. Cause la plus
+            fréquente : mot de passe d'application révoqué. Plus aucun rapport
+            n'est dépouillé tant que ça dure.
+
+      - alert: DmarcUnalignedMail
+        expr: >-
+          sum by (domain) (dmarc_unaligned_messages_recent{job="dmarc"})
+          > {{ prom_alert_dmarc_unaligned_threshold }}
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ '{{' }} $value {{ '}}' }} messages non alignés pour {{ '{{' }} $labels.domain {{ '}}' }}"
+          description: >-
+            Des messages se réclamant de ce domaine ont échoué à DMARC sur les
+            derniers jours. Identifier les émetteurs :
+            sum by (source_ip) (dmarc_unaligned_messages_recent{domain="{{ '{{' }} $labels.domain {{ '}}' }}"}).
+            Un transfert (liste de diffusion, redirection) casse SPF
+            légitimement — relever prom_alert_dmarc_unaligned_threshold si le
+            domaine porte du courrier humain et que le bruit est constant.
+
+      # La panne qu'on ne voit pas : des rapports qui cessent d'arriver
+      # ressemblent trait pour trait à une absence d'anomalie. C'est exactement
+      # ce qui se passait sur web3c, dont le `rua` pointait vers une adresse
+      # Gmail — destination externe non autorisée par la RFC 7489 §7.1, donc
+      # rapports jamais émis, sans la moindre erreur visible.
+      #
+      # Limite assumée : cette règle ne couvre qu'un domaine ayant déjà produit
+      # au moins un rapport. Un domaine dont le `rua` n'a JAMAIS fonctionné n'a
+      # aucune série, donc rien à évaluer. Après déploiement, vérifier
+      # `count(dmarc_last_report_end_timestamp_seconds)` domaine par domaine.
+      - alert: DmarcReportsStale
+        expr: >-
+          time() - max by (domain) (dmarc_last_report_end_timestamp_seconds{job="dmarc"})
+          > {{ prom_alert_dmarc_stale_seconds }}
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Plus de rapport DMARC pour {{ '{{' }} $labels.domain {{ '}}' }}"
+          description: >-
+            Aucun rapport agrégé reçu depuis plus de
+            {{ (prom_alert_dmarc_stale_seconds / 3600) | int }} h alors qu'ils
+            sont quotidiens. Vérifier l'enregistrement _dmarc du domaine et la
+            destination du `rua` : c'est le symptôme d'une supervision DMARC
+            devenue décorative.
+{% endif %}
+{% if 'backups' in prom_alert_groups %}
+
+  # ── Sauvegardes ────────────────────────────────────────────────────────────
+  # Une sauvegarde qui s'arrête ne produit aucun symptôme : ni unité en échec,
+  # ni cible `down`, ni journal que quelqu'un ouvre. Elle est rigoureusement
+  # indiscernable d'une sauvegarde qui fonctionne — jusqu'au jour où on en a
+  # besoin. C'est la seule panne du dispositif de sauvegarde qui compte, et ces
+  # règles n'existent que pour elle.
+  #
+  # Les séries viennent du collecteur `textfile` de node_exporter, alimenté par
+  # brk-backup.sh (sur brk1) et timescaledb-backup.sh (sur timescale).
+  # Contrôle après déploiement : `count(backup_last_success_timestamp_seconds)`
+  # doit valoir 2 — une règle sans série est décorative.
+  - name: backups
+    rules:
+      # Deux règles plutôt qu'une règle générique : les deux sauvegardes n'ont
+      # ni la même période ni la même durée (BRK est hebdomadaire et dure des
+      # heures, le dump des indicateurs tourne tous les deux jours). Un seuil
+      # unique serait soit trop laxiste pour l'un, soit sonnerait en permanence
+      # pour l'autre — et une alerte qui sonne en permanence n'alerte plus.
+      - alert: BackupStale
+        expr: >-
+          (time() - backup_last_success_timestamp_seconds{backup="brk"}) / 3600
+          > {{ backup_max_age_hours_brk | default(240) }}
+        for: 1h
+        labels:
+          severity: critical
+          # Label statique distinctif : les deux règles BackupStale partagent
+          # sinon (alertname + severity), ce que `promtool check rules` refuse
+          # comme doublon (« duplicate rule(s) found »). La valeur est celle du
+          # sélecteur `{backup="brk"}` de l'expr — donc redondante à l'exécution,
+          # jamais en conflit, mais elle rend les deux règles statiquement
+          # distinctes et garantit le label même si l'expr cessait de le propager.
+          backup: brk
+        annotations:
+          summary: "Sauvegarde du magasin BRK périmée"
+          description: >-
+            Aucune sauvegarde réussie depuis {{ '{{' }} $value | printf "%.0f" {{ '}}' }} h
+            (seuil {{ backup_max_age_hours_brk | default(240) }} h). Sans elle, une
+            corruption du magasin impose une réindexation de plusieurs dizaines
+            d'heures. Journal : ~/brk-backup.log sur {{ '{{' }} $labels.instance {{ '}}' }}.
+
+      - alert: BackupStale
+        expr: >-
+          (time() - backup_last_success_timestamp_seconds{backup="papangmetrics-timescale"}) / 3600
+          > {{ backup_max_age_hours_tsdb | default(96) }}
+        for: 1h
+        labels:
+          severity: critical
+          # Voir la règle BRK ci-dessus : label distinctif pour lever le doublon
+          # promtool entre les deux BackupStale.
+          backup: papangmetrics-timescale
+        annotations:
+          summary: "Sauvegarde de la base d'indicateurs périmée"
+          description: >-
+            Aucun dump réussi depuis {{ '{{' }} $value | printf "%.0f" {{ '}}' }} h
+            (seuil {{ backup_max_age_hours_tsdb | default(96) }} h). Journal :
+            ~/papangmetrics-db/backup.log sur {{ '{{' }} $labels.instance {{ '}}' }}.
+
+      # ── Sauvegardes génériques (boucle) ────────────────────────────────────
+      # Contrairement aux deux règles ci-dessus (écrites à la main pour BRK et
+      # l'indicateur, chacune avec son propre seuil), toute sauvegarde ajoutée
+      # via `prom_alert_backup_max_age_hours` obtient sa propre règle SANS
+      # toucher au template. Par défaut `{}` : aucun effet sur un parc qui ne
+      # définit pas la variable (papanglabs, aujourd'hui).
+{% for name, max_age in (prom_alert_backup_max_age_hours | default({})).items() %}
+      - alert: BackupStale
+        expr: >-
+          (time() - backup_last_success_timestamp_seconds{backup="{{ name }}"}) / 3600
+          > {{ max_age }}
+        for: 1h
+        labels:
+          severity: critical
+          backup: {{ name }}
+        annotations:
+          summary: "Sauvegarde {{ name }} périmée"
+          description: >-
+            Aucune sauvegarde réussie depuis {{ '{{' }} $value | printf "%.0f" {{ '}}' }} h
+            (seuil {{ max_age }} h).
+{% endfor %}
+
+      # Distincte de BackupStale, et pas redondante : un échec est visible
+      # immédiatement, alors que la péremption ne se déclare qu'au bout de
+      # plusieurs jours. Les deux ensemble donnent le signal tôt ET le filet.
+      - alert: BackupFailed
+        expr: backup_last_status == 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Dernière sauvegarde {{ '{{' }} $labels.backup {{ '}}' }} en échec"
+          description: >-
+            Le script a terminé en erreur. Les sauvegardes précédentes restent
+            en place ; c'est le moment de corriger, pas quand elles auront
+            expiré.
+
+      # La coupure de BRK pendant sa sauvegarde doit rester marginale. Si elle
+      # dérive (destination lente, magasin qui grossit), l'indexation s'arrête
+      # plus longtemps chaque semaine sans que personne ne le remarque.
+      - alert: BackupDowntimeHigh
+        expr: backup_last_downtime_seconds > {{ prom_alert_backup_downtime_seconds | default(3600) }}
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          # Scalaire YAML entre apostrophes, et non entre guillemets : le
+          # `printf "%.0f"` de Prometheus contient lui-même des guillemets, qui
+          # fermeraient la chaîne. Un fichier de règles invalide n'est pas une
+          # règle en moins — Prometheus refuse le fichier ENTIER et TOUTES les
+          # alertes du parc disparaissent.
+          summary: 'Sauvegarde {{ '{{' }} $labels.backup {{ '}}' }} : {{ '{{' }} $value | printf "%.0f" {{ '}}' }} s d''arrêt de service'
+          description: >-
+            La fenêtre d'arrêt de la dernière sauvegarde dépasse le seuil.
+            Envisager d'espacer la sauvegarde ou d'accélérer la destination.
+
+      # Le collecteur textfile lui-même peut échouer (répertoire absent, fichier
+      # malformé) : sans cette règle, la disparition des métriques de sauvegarde
+      # ressemblerait à une absence de problème.
+      - alert: TextfileCollectorFailing
+        expr: node_textfile_scrape_error > 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Collecteur textfile en erreur sur {{ '{{' }} $labels.instance {{ '}}' }}"
+          description: >-
+            node_exporter ne parvient pas à lire un fichier .prom. Les métriques
+            de sauvegarde de cet hôte ne sont plus fiables.
+{% endif %}

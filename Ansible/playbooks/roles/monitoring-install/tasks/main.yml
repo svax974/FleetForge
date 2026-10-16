@@ -1,0 +1,113 @@
+---
+# Install Prometheus via Docker with basic authentication
+
+- name: Install required Python packages
+  ansible.builtin.apt:
+    name:
+      - python3-bcrypt
+      - python3-passlib
+    state: present
+    update_cache: false
+
+- name: Set prometheus home directory
+  ansible.builtin.set_fact:
+    prometheus_home: "/home/{{ remote_username }}/prometheus"
+
+# La liste des répertoires `file_sd` est DÉDUITE du gabarit, pas recopiée.
+# Recopiée, elle avait dérivé : `node-llamacpp` était déclaré comme job dans
+# prometheus.yml sans que son répertoire n'existe. Prometheus ne tolère pas un
+# répertoire absent derrière un motif `file_sd` — il journalise « Error adding
+# file watch » à chaque rechargement et le job ne charge JAMAIS aucune cible,
+# y compris celles qu'on y déposera plus tard. Le service concerné paraît alors
+# simplement non supervisé, sans que rien ne relie ce silence à un répertoire
+# manquant.
+- name: Collect the file_sd directories declared in prometheus.yml
+  ansible.builtin.set_fact:
+    prometheus_file_sd_dirs: >-
+      {{ lookup('template', 'prometheus.yml.j2')
+         | regex_findall('prometheus-configs/([A-Za-z0-9_.-]+)/')
+         | unique | sort }}
+
+- name: Create Prometheus directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: "0755"
+  loop: "{{ _base_dirs + _file_sd_dirs }}"
+  vars:
+    _base_dirs:
+      - "{{ prometheus_home }}"
+      - "{{ prometheus_home }}/data"
+      # Les règles y sont déposées par `prometheus-alerts-update`. Sans ce
+      # répertoire, le montage plus bas créerait un répertoire appartenant à
+      # root et le rôle d'alertes échouerait à y écrire.
+      - "{{ prometheus_home }}/rules"
+      - "{{ prometheus_home }}/prometheus-configs"
+    _file_sd_dirs: >-
+      {{ prometheus_file_sd_dirs
+         | map('regex_replace', '^', prometheus_home ~ '/prometheus-configs/')
+         | list }}
+
+- name: Generate bcrypt hash for Prometheus password
+  ansible.builtin.command:
+    cmd: python3 -c "import bcrypt; print(bcrypt.hashpw(b'{{ prometheus_pass }}', bcrypt.gensalt(rounds=12)).decode())"
+  register: _bcrypt_result
+  changed_when: false
+
+- name: Set prometheus password hash fact
+  ansible.builtin.set_fact:
+    prometheus_pass_hash: "{{ _bcrypt_result.stdout }}"
+
+- name: Deploy Prometheus web config (basic auth)
+  ansible.builtin.template:
+    src: web.yml.j2
+    dest: "{{ prometheus_home }}/web.yml"
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: "0644"
+
+- name: Deploy Prometheus configuration
+  ansible.builtin.template:
+    src: prometheus.yml.j2
+    dest: "{{ prometheus_home }}/prometheus.yml"
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: "0644"
+
+# La destruction/recréation n'est pas gratuite : prometheus.yml et web.yml sont
+# montés FICHIER par fichier, donc par inode. `template` écrit un temporaire
+# puis le renomme — l'inode change, et le conteneur continue de lire l'ancien
+# contenu, désormais détaché. Un `docker kill -s HUP` recharge alors sagement
+# la configuration précédente et journalise un rechargement RÉUSSI.
+# Constaté le 13/08/2026 : le conteneur servait un prometheus.yml du 9 août.
+# Ne pas remplacer cette paire par un simple rechargement sans passer les
+# montages au répertoire.
+- name: Stop existing Prometheus container (if any)
+  community.docker.docker_container:
+    name: prometheus
+    state: absent
+  ignore_errors: true
+
+- name: Deploy Prometheus Docker container
+  community.docker.docker_container:
+    name: prometheus
+    image: prom/prometheus:latest
+    state: started
+    restart_policy: always
+    ports:
+      - "9090:9090"
+    volumes:
+      - "{{ prometheus_home }}/prometheus.yml:/etc/prometheus/prometheus.yml:ro"
+      - "{{ prometheus_home }}/web.yml:/etc/prometheus/web.yml:ro"
+      - "{{ prometheus_home }}/rules:/etc/prometheus/rules:ro"
+      - "{{ prometheus_home }}/prometheus-configs:/etc/prometheus/prometheus-configs:ro"
+      - "{{ prometheus_home }}/data:/prometheus"
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--web.config.file=/etc/prometheus/web.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=90d"
+      - "--web.enable-remote-write-receiver"
+    user: "root"

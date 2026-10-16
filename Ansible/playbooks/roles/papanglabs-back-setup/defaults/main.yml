@@ -1,0 +1,23 @@
+---
+# Démarrage des conteneurs du back PapangLabs.
+#
+# Les chemins et le nom de projet sont ceux de `papanglabs-back-install` : les
+# deux rôles décrivent la même installation, les redéclarer ici garde chaque
+# rôle jouable seul (`--tags`), au prix d'une duplication assumée — c'est déjà
+# le cas des familles searxng-* et brk-* du parc.
+
+pgb_user: "{{ remote_username }}"
+pgb_dir: "/home/{{ remote_username }}/papanglabs"
+# Même nom que celui calculé par deploy-full.sh (sanitize_identifier : minuscules,
+# tout caractère non alphanumérique remplacé par un tiret, appliqué au NOM d'hôte
+# et non à l'IP). L'aligner permet à un déploiement Ansible de reprendre les
+# conteneurs posés par le script, au lieu d'en créer un second jeu à côté.
+pgb_project_name: "papanglabs-back-{{ hostname | lower | regex_replace('[^a-z0-9]', '-') }}"
+pgb_services: [back, back-worker, back-lb, redis]
+pgb_port: "{{ app_port | default(9741) }}"
+
+# Attente de santé. Le back met 15 à 40 s à répondre (chargement TypeORM,
+# métadonnées d'entités) et son healthcheck Docker a un start_period de 120 s :
+# échouer avant serait un faux négatif.
+pgb_health_retries: 30
+pgb_health_delay: 10

@@ -1,0 +1,7 @@
+---
+- name: Remove system exporter (node_exporter) and its Prometheus target
+  hosts: all
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - exporter-sys-remove

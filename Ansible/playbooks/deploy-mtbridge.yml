@@ -1,0 +1,29 @@
+---
+# `host-preflight` (MANDATORY ailleurs, voir CLAUDE.md) est entièrement
+# SSH/systemd et ne peut pas tourner sur un hôte WinRM : ce play en est
+# l'équivalent minimal pour les hôtes du groupe mtbridges — sonde système
+# (windows_exporter) et cible Prometheus, sans quoi le socle Windows n'a
+# jamais été supervisé du tout.
+- name: Install and register the Windows system exporter
+  hosts: mtbridges
+  gather_facts: true
+  tags: monitoring
+
+  roles:
+    - exporter-sys-windows-install
+
+- name: Deploy MTBridge on Windows hosts
+  hosts: mtbridges
+  gather_facts: true
+  tags: deploy
+
+  roles:
+    - mtbridge-deploy
+
+- name: Register MTBridge Prometheus targets on monitor
+  hosts: mtbridges
+  gather_facts: false
+  tags: monitoring
+
+  roles:
+    - mtbridge-monitoring

@@ -1,0 +1,66 @@
+---
+# Déploie les règles d'alerte sur l'hôte Prometheus du parc courant.
+# Joué sur l'hôte Prometheus lui-même (`prometheus1` sur papanglabs, `monitor`
+# sur web3c), donc sans delegate_to.
+
+- name: Create Prometheus rules directory
+  ansible.builtin.file:
+    path: "{{ prometheus_home }}/rules"
+    state: directory
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: "0755"
+  become: true
+
+# Le fichier est déposé à l'écart, validé, puis seulement mis en place.
+#
+# Prometheus ne dégrade pas : une règle invalide fait échouer le chargement du
+# fichier ENTIER, le conteneur refuse de démarrer et le handler de rechargement
+# le laisse en boucle de crash. La supervision s'arrête donc net, et c'est
+# précisément le moment où plus rien ne peut le signaler. Constat du 13/08/2026 :
+# un `\.` dans une regex — échappement que PromQL n'accepte pas — a coupé
+# Prometheus sur web3c pendant quatre minutes, sans qu'aucune tâche Ansible
+# n'échoue. `promtool` aurait arrêté le déploiement avant d'y toucher.
+#
+# Le suffixe n'est pas `.yml` : le fichier est déposé dans le répertoire déjà
+# monté dans le conteneur, dont le motif de chargement est `rules/*.yml`.
+- name: Stage alert rules for validation
+  ansible.builtin.template:
+    src: alerts.yml.j2
+    dest: "{{ prometheus_home }}/rules/.alerts.staged"
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: "0644"
+  become: true
+
+- name: Validate staged alert rules with promtool
+  ansible.builtin.command:
+    argv:
+      - docker
+      - run
+      - --rm
+      - --entrypoint=promtool
+      - --volume={{ prometheus_home }}/rules:/rules:ro
+      - "{{ prometheus_image }}"
+      - check
+      - rules
+      - /rules/.alerts.staged
+  become: true
+  changed_when: false
+
+- name: Install validated alert rules
+  ansible.builtin.copy:
+    src: "{{ prometheus_home }}/rules/.alerts.staged"
+    dest: "{{ prometheus_home }}/rules/alerts.yml"
+    remote_src: true
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: "0644"
+  become: true
+  notify: reload prometheus
+
+- name: Remove staged alert rules
+  ansible.builtin.file:
+    path: "{{ prometheus_home }}/rules/.alerts.staged"
+    state: absent
+  become: true

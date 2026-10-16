@@ -1,0 +1,46 @@
+---
+# Install Postfix relay, OpenDKIM, certbot (Cloudflare DNS), SASL, postfix exporter
+
+- name: Stop any running mailserver services before install
+  ansible.builtin.import_role:
+    name: mailserver-stop
+
+- name: Preconfigure postfix as "No configuration" to prevent interactive setup
+  ansible.builtin.debconf:
+    name: postfix
+    question: postfix/main_mailer_type
+    value: "No configuration"
+    vtype: select
+
+- name: Install system packages
+  ansible.builtin.apt:
+    name:
+      - postfix
+      - opendkim
+      - opendkim-tools
+      - sasl2-bin
+      - libsasl2-modules
+      - libsasl2-2
+      - python3-pip
+      - certbot
+      - python3-certbot-dns-cloudflare
+      - prometheus-postfix-exporter
+      - mailutils
+    state: present
+    update_cache: yes
+
+- name: Create mailfilter system user
+  ansible.builtin.user:
+    name: mailfilter
+    system: yes
+    shell: /usr/sbin/nologin
+    home: /usr/local/lib/mailserver
+    create_home: yes
+
+- name: Create mailserver lib directory
+  ansible.builtin.file:
+    path: /usr/local/lib/mailserver
+    state: directory
+    owner: mailfilter
+    group: mailfilter
+    mode: '0755'

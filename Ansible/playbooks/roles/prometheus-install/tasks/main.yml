@@ -1,0 +1,117 @@
+---
+# Installe Prometheus (Docker) avec authentification basique, règles d'alerte et
+# lien vers Alertmanager.
+
+- name: Install required Python packages
+  ansible.builtin.apt:
+    name:
+      - python3-bcrypt
+      - python3-passlib
+    state: present
+    update_cache: false
+  become: true
+
+- name: Create Prometheus directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: "0755"
+  become: true
+  loop: >-
+    {{ [prometheus_home,
+        prometheus_home + '/data',
+        prometheus_home + '/rules',
+        prometheus_home + '/prometheus-configs']
+       + prometheus_sd_jobs | map('regex_replace', '^', prometheus_home + '/prometheus-configs/') | list }}
+
+- name: Generate bcrypt hash for Prometheus password
+  ansible.builtin.command:
+    cmd: python3 -c "import bcrypt; print(bcrypt.hashpw(b'{{ prometheus_pass }}', bcrypt.gensalt(rounds=12)).decode())"
+  register: _bcrypt_result
+  changed_when: false
+
+- name: Set prometheus password hash fact
+  ansible.builtin.set_fact:
+    prometheus_pass_hash: "{{ _bcrypt_result.stdout }}"
+
+- name: Deploy Prometheus web config (basic auth)
+  ansible.builtin.template:
+    src: web.yml.j2
+    dest: "{{ prometheus_home }}/web.yml"
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: "0640"
+  become: true
+  notify: reload prometheus
+
+- name: Deploy Prometheus configuration
+  ansible.builtin.template:
+    src: prometheus.yml.j2
+    dest: "{{ prometheus_home }}/prometheus.yml"
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    # Contient les identifiants d'auto-scrape.
+    mode: "0640"
+  become: true
+  notify: reload prometheus
+
+# Les règles d'alerte sont déployées par `prometheus-alerts-update`, partagé
+# avec la stack web3c (`monitoring-install`) : elles n'ont aucune raison de
+# diverger entre les deux parcs, et les dupliquer garantissait qu'un correctif
+# posé d'un côté manquerait de l'autre.
+
+- name: Deploy Prometheus Docker container
+  community.docker.docker_container:
+    name: prometheus
+    image: "{{ prometheus_image }}"
+    state: started
+    restart_policy: always
+    recreate: true
+    ports:
+      - "{{ prometheus_port }}:9090"
+    volumes:
+      - "{{ prometheus_home }}/prometheus.yml:/etc/prometheus/prometheus.yml:ro"
+      - "{{ prometheus_home }}/web.yml:/etc/prometheus/web.yml:ro"
+      - "{{ prometheus_home }}/rules:/etc/prometheus/rules:ro"
+      - "{{ prometheus_home }}/prometheus-configs:/etc/prometheus/prometheus-configs:ro"
+      - "{{ prometheus_home }}/data:/prometheus"
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--web.config.file=/etc/prometheus/web.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time={{ prometheus_retention }}"
+      # Permet `POST /-/reload` (derrière l'auth basique) plutôt qu'un restart
+      # complet du conteneur, qui crée un trou de scrape.
+      #
+      # ATTENTION : ce rechargement ne vaut que pour les fichiers montés par
+      # RÉPERTOIRE (rules, prometheus-configs). prometheus.yml et web.yml sont
+      # montés fichier par fichier, donc par inode : `template` écrit un
+      # temporaire puis le renomme, l'inode change, et le conteneur continue de
+      # lire l'ancien contenu détaché. Un `/-/reload` recharge alors la
+      # configuration PRÉCÉDENTE en journalisant un succès. C'est `recreate:
+      # true` ci-dessus qui rend une modification de prometheus.yml effective.
+      - "--web.enable-lifecycle"
+      # Récepteur remote_write. Sans ce drapeau, /api/v1/write répond 404 et
+      # tout envoi est refusé — l'agent émetteur, lui, réessaie indéfiniment
+      # sans que rien ne l'annonce : pas de cible, donc pas de `TargetDown`, et
+      # aucune série. C'est ce qui bloquait la remontée des métriques
+      # applicatives du back PapangLabs, dont les conteneurs ne sont pas
+      # scrapables depuis l'extérieur (seul le répartiteur publie un port, et
+      # il répartit justement entre réplicas).
+      - "--web.enable-remote-write-receiver"
+    user: "root"
+  become: true
+
+- name: Wait for Prometheus to answer
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ prometheus_port }}/-/ready"
+    user: "{{ prometheus_user }}"
+    password: "{{ prometheus_pass }}"
+    force_basic_auth: true
+    status_code: [200]
+  register: _prom_ready
+  until: _prom_ready.status == 200
+  retries: 12
+  delay: 5

@@ -1,0 +1,22 @@
+[Unit]
+Description=PapangMetrics API (read-only indicators)
+After=network-online.target
+Wants=network-online.target
+
+# Voir brk.service : sans fenêtre explicite, RestartSec dépasse le défaut de 10 s
+# et la limite ne se déclenche jamais — une boucle de crash resterait `active`.
+StartLimitIntervalSec={{ pm_start_limit_interval }}
+StartLimitBurst={{ pm_start_limit_burst }}
+
+[Service]
+Type=simple
+User={{ pm_user }}
+Group={{ pm_user }}
+WorkingDirectory={{ pm_dir }}
+EnvironmentFile={{ pm_dir }}/.env
+ExecStart=/usr/bin/node {{ pm_dir }}/dist/main.api.js
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

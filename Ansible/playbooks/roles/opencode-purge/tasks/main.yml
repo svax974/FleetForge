@@ -1,0 +1,68 @@
+---
+# Supprime opencode ET tout ce qu'il a écrit dans les comptes visés :
+# configuration, historique des sessions et IDENTIFIANTS des fournisseurs.
+#
+# Ce que la purge détruit n'est pas retéléchargeable, contrairement au binaire :
+# `~/.local/share/opencode/opencode.db` porte à la fois l'historique complet des
+# sessions et les identifiants des fournisseurs (tables `credential` et
+# `account`). D'où la confirmation explicite, sur le modèle d'`astar-purge`.
+
+- name: Take over the legacy state directory
+  ansible.builtin.include_role:
+    name: host-preflight
+    tasks_from: legacy
+
+- name: Require an explicit confirmation
+  ansible.builtin.fail:
+    msg: >-
+      Purge refusée. Elle supprime `~/.local/share/opencode/opencode.db` des
+      comptes {{ opencode_users | join(', ') }} — historique des sessions ET
+      identifiants des fournisseurs dans la même base — ainsi que la
+      configuration et le modèle sélectionné. Rien de cela n'est récupérable.
+      Relancer avec `-e confirm=yes` pour confirmer, ou utiliser
+      `remove-opencode.yml` pour ne retirer que le binaire.
+  when: confirm | default('') != 'yes'
+
+- name: Remove the opencode binary
+  ansible.builtin.file:
+    path: "{{ opencode_binary }}"
+    state: absent
+  become: true
+
+- name: Resolve the home directory of each account
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ item }}"
+    fail_key: false
+  loop: "{{ opencode_users }}"
+  register: opencode_passwd
+  become: true
+
+# Un compte absent n'est pas une erreur ici : la purge doit rester jouable sur
+# une machine déjà partiellement nettoyée, ou dont le compte a disparu avec le
+# service qu'il portait.
+- name: Build the (account, home) pairs
+  ansible.builtin.set_fact:
+    opencode_targets: >-
+      {{ opencode_targets | default([])
+         + [{'user': item.item, 'home': item.ansible_facts.getent_passwd[item.item][4]}] }}
+  loop: "{{ opencode_passwd.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: item.ansible_facts.getent_passwd[item.item] is defined
+        and item.ansible_facts.getent_passwd[item.item] is not none
+
+- name: Remove the opencode data, configuration and credentials
+  ansible.builtin.file:
+    path: "{{ item.0.home }}/{{ item.1 }}"
+    state: absent
+  become: true
+  loop: "{{ (opencode_targets | default([])) | product(opencode_purge_paths) | list }}"
+  loop_control:
+    label: "{{ item.0.user }}:{{ item.1 }}"
+
+- name: Remove the opencode stamp
+  ansible.builtin.file:
+    path: "{{ preflight_state_dir }}/opencode.json"
+    state: absent
+  become: true

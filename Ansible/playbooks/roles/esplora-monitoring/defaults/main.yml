@@ -1,0 +1,18 @@
+---
+# Supervision Esplora — cas 1 de la convention `-monitoring` (CLAUDE.md § 2) :
+# electrs expose déjà Prometheus sur `monitoring_addr` (esplora-install), il
+# n'y a donc ni exporter à écrire ni sonde svcprobe à poser.
+
+esploramon_job: node-esplora
+
+esploramon_port: "{{ esplora_monitoring_port | default(9899) }}"
+
+# Métrique de référence utilisée pour prouver que la chaîne de supervision
+# est complète (cf. astar-monitoring, `substrate_block_height`). D'après le
+# code de mempool/electrs (src/metrics.rs), les métriques applicatives
+# portent le préfixe `electrs_`. NON VÉRIFIÉ contre une instance réelle au
+# moment d'écrire ce rôle (pas d'accès réseau sortant depuis ce poste) :
+# si l'assertion ci-dessous échoue au premier déploiement, lire le nom exact
+# dans `curl 127.0.0.1:{{ esploramon_port }}/metrics` et corriger cette
+# variable plutôt que le rôle — c'est fait pour.
+esploramon_reference_metric: "electrs_index_height"

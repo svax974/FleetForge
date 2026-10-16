@@ -1,0 +1,15 @@
+# Généré par Ansible (starnet-install) — NE PAS ÉDITER SUR L'HÔTE.
+#
+# Le sidecar StarNet n'écoute QUE sur 127.0.0.1 (en dur dans le code amont) :
+# cette socket publie {{ starnet_port }} et passe chaque connexion à
+# systemd-socket-proxyd, qui la relaie telle quelle vers la boucle locale.
+# Filtrage : ufw (starnet-security) — process natif, pas de Docker, la règle
+# ufw a ici un effet réel.
+[Unit]
+Description=StarNet relay socket ({{ starnet_port }} -> 127.0.0.1:{{ starnet_sidecar_port }})
+
+[Socket]
+ListenStream={{ starnet_port }}
+
+[Install]
+WantedBy=sockets.target

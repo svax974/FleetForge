@@ -1,0 +1,21 @@
+---
+# CVE-2026-31431 "Copy Fail" — déploiement du correctif sur tous les hôtes Linux
+#
+# Variables disponibles (extra_vars) :
+#   copyfail_upgrade_kernel  (défaut: true)  — met à jour le kernel via le gestionnaire de paquets
+#   copyfail_reboot          (défaut: false) — redémarre automatiquement après patch
+#
+# Stratégie de mitigation :
+#   Debian/Ubuntu : blacklist modprobe algif_aead (effet immédiat) + update-initramfs
+#   RedHat/Suse   : initcall_blacklist=algif_aead_init via grubby (effet après reboot)
+#
+# Ref : CVE-2026-31431 — https://copy.fail/
+
+- name: "CVE-2026-31431 Copy Fail — mitigation et patch kernel"
+  hosts: all
+  remote_user: "{{ remote_username }}"
+  become: true
+  become_method: sudo
+
+  roles:
+    - copyfail-security

@@ -1,0 +1,96 @@
+---
+# Convention `<service>-monitoring` (CLAUDE.md) : le rôle dépose une SONDE
+# déclarative pour `svcprobe`, qui expose `service_up{service="freellm"}`.
+# Aucun redémarrage n'est nécessaire — svcprobe relit son répertoire de sondes
+# à chaque scrape.
+
+# `public: true` n'est PAS un détail de style : sans lui, les defaults du rôle
+# inclus (svcprobe_checks_dir, svcprobe_lib_dir, svcprobe_listen_port) restent
+# confinés à ses propres tâches et les tâches ci-dessous échouent sur une
+# variable indéfinie (comportement documenté d'`include_role`, `public: no`
+# par défaut).
+- name: Ensure the shared probe is installed
+  ansible.builtin.include_role:
+    name: svcprobe-install
+    public: true
+  tags: [monitoring]
+
+# Collecteur propre à ce service, déposé dans le répertoire partagé des
+# collecteurs (pas dans svcprobe-install, qui ne porte que ceux utilisés par
+# plusieurs rôles) — mais au même endroit pour que la sonde n'ait qu'un
+# chemin à connaître.
+- name: Deploy the FreeLLMAPI metric collector
+  ansible.builtin.copy:
+    src: freellm-metrics.sh
+    dest: "{{ svcprobe_lib_dir }}/freellm-metrics.sh"
+    owner: root
+    group: root
+    mode: '0755'
+  become: true
+  tags: [monitoring]
+
+# svcprobe fait un `docker inspect <nom>` DIRECT (pas `docker compose`), qui a
+# donc besoin du nom RÉEL du conteneur — Compose ne le nomme pas juste
+# « freellmapi » (v2 : « <projet>-freellmapi-1 », v1 : « <projet>_freellmapi_1 »,
+# constaté le 18/09/2026 sur la lecture de la clé API unifiée, freellm-install).
+# `docker compose ps -q` (pas de chaîne de format Go, qui se ferait templater
+# par Jinja) donne l'ID, résolu en nom stable via le module docker_container_info
+# plutôt qu'en reparsant du texte.
+- name: Discover the FreeLLMAPI container id via compose
+  ansible.builtin.command: docker compose ps -q freellmapi
+  args:
+    chdir: "{{ freellm_install_dir }}"
+  changed_when: false
+  become: true
+  register: freellm_container_id
+  tags: [monitoring]
+
+- name: Look up the container's stable name
+  community.docker.docker_container_info:
+    name: "{{ freellm_container_id.stdout | trim }}"
+  become: true
+  register: freellm_container_info
+  when: freellm_container_id.stdout | trim | length > 0
+  tags: [monitoring]
+
+# `.Name` porte un `/` initial (convention de l'API Docker) — retiré ici, la
+# sonde svcprobe compare une chaîne exacte.
+- name: Use the discovered name, falling back to the default if compose found nothing
+  ansible.builtin.set_fact:
+    freellm_container: "{{ freellm_container_info.container.Name | trim('/') }}"
+  when:
+    - freellm_container_id.stdout | trim | length > 0
+    - freellm_container_info.exists | default(false)
+  tags: [monitoring]
+
+- name: Deploy the FreeLLMAPI probe
+  ansible.builtin.template:
+    src: check.json.j2
+    dest: "{{ svcprobe_checks_dir }}/freellm.json"
+    owner: root
+    group: root
+    mode: '0644'
+  become: true
+  tags: [monitoring]
+
+# Contrôle immédiat : une sonde déposée mais qui répond `service_up 0` alors
+# que le service tourne est une sonde MAL ÉCRITE, et elle ferait sonner une
+# alerte en permanence. Mieux vaut le voir au déploiement.
+- name: Verify the probe answers
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ svcprobe_listen_port }}/metrics"
+    return_content: true
+  register: freellm_probe
+  retries: 6
+  delay: 5
+  until: freellm_probe.status is defined and freellm_probe.status == 200
+  changed_when: false
+  tags: [monitoring]
+
+- name: Report the probe result
+  ansible.builtin.debug:
+    msg: >-
+      {{ freellm_probe.content.split('\n')
+         | select('search', 'freellm')
+         | list }}
+  tags: [monitoring]

@@ -1,0 +1,19 @@
+---
+# Remove monitoring stack — stops and removes Prometheus and Grafana containers.
+# Config files and historical data are preserved. Use monitoring-purge to delete them.
+
+- name: Set prometheus home directory
+  ansible.builtin.set_fact:
+    prometheus_home: "/home/{{ remote_username }}/prometheus"
+
+- name: Stop and remove Prometheus container
+  community.docker.docker_container:
+    name: prometheus
+    state: absent
+  ignore_errors: true
+
+- name: Stop and remove Grafana container
+  community.docker.docker_container:
+    name: grafana
+    state: absent
+  ignore_errors: true

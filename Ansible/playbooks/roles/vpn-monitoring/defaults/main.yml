@@ -1,0 +1,4 @@
+---
+vpnmon_unit: openvpn@server
+vpnmon_status_file: /var/log/openvpn/status.log
+vpnmon_port: "{{ vpn_tcp_port | default(443) }}"

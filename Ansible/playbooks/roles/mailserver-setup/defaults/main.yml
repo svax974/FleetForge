@@ -1,0 +1,72 @@
+---
+# Publication automatique des enregistrements DNS sur Cloudflare pour chaque
+# entrée de `mail_domains` (A, SPF, DKIM, DMARC).
+#
+# Sans ces enregistrements, un message émis par le relais est rejeté ou classé
+# en spam : le domaine expéditeur ne résout pas, l'IP n'est pas autorisée par
+# SPF, et rien n'est signé. Ils étaient jusqu'ici affichés en fin de rôle pour
+# être créés à la main — donc en pratique jamais créés.
+mailserver_manage_dns: true
+
+# Le jeton d'API est pris sur l'entrée du domaine (`cloudflare_token`) si elle
+# en porte un, sinon sur la variable globale `cloudflare_token`.
+#
+# Un jeton Cloudflare est lié à UN compte et à un périmètre de zones : deux
+# domaines hébergés sur deux comptes distincts ne peuvent pas en partager un.
+# Sans cette surcharge, publier le second échouerait en 403 (zone invisible du
+# jeton) alors que la configuration paraîtrait correcte.
+#
+#   mail_domains:
+#     - name: "the.tradekong.app"
+#       cloudflare_token: "…"        # facultatif — défaut : cloudflare_token
+
+# IP publique annoncée pour le relais (enregistrement A et mécanisme SPF ip4).
+mailserver_public_ip: "{{ ansible_host }}"
+
+# Sélecteur DKIM — doit correspondre au nom de clé généré par ce rôle (mail.txt).
+mailserver_dkim_selector: mail
+
+# `-all` rejette tout émetteur non listé ; `~all` (softfail) est plus permissif
+# le temps d'une mise en route.
+mailserver_spf_qualifier: "-all"
+
+# Politique DMARC : `none` observe sans rejeter — à durcir en quarantine/reject
+# une fois SPF et DKIM confirmés alignés. Surchargeable par domaine via la clé
+# `dmarc_policy` d'une entrée de `mail_domains` : le défaut reste permissif pour
+# qu'un nouveau domaine ne parte jamais en rejet avant d'avoir été observé.
+mailserver_dmarc_policy: none
+
+# Destinataire des rapports agrégés (tag `rua`), à défaut de clé `dmarc_rua`
+# dans l'entrée de `mail_domains`. `reply_address` était utilisé faute de mieux
+# et reste le repli, mais c'est un mauvais défaut : c'est une adresse de contact
+# humaine, alors que le flux est quotidien, automatique et illisible sans outil.
+#
+# Contrainte à respecter en choisissant l'adresse : si son domaine n'est ni
+# identique ni parent du domaine rapporté (dmarc@gmail.com pour the.web3c.cc),
+# c'est une « destination externe » au sens RFC 7489 §7.1. Le domaine
+# destinataire doit alors publier `<domaine-rapporté>._report._dmarc.<son-nom>`
+# pour donner son accord — ce que gmail.com ne fera jamais. Sans cet
+# enregistrement, les receveurs conformes n'envoient tout simplement rien, sans
+# la moindre erreur visible : on croit superviser, et aucun rapport n'arrive.
+mailserver_dmarc_rua: ""
+
+# Domaines organisationnels sur lesquels publier un enregistrement DMARC
+# d'observation, en plus des sous-domaines de `mail_domains`.
+#
+# `mail_domains` ne contient que des sous-domaines techniques de relais
+# (mail.papanglabs.com). Protéger ceux-là seuls ne sert à rien : personne
+# n'usurpe un sous-domaine de relais, on usurpe le domaine racine, celui qui
+# porte les adresses humaines. Sans `_dmarc.papanglabs.com`, ce domaine-là n'a
+# aucune politique et aucun rapport.
+#
+# Chaque entrée : `name`, `policy` (défaut `none`) et `rua`. Laisser `none` tant
+# que les rapports n'ont pas prouvé que TOUS les émetteurs légitimes du domaine
+# (Mailjet, Cloudflare Email Routing…) sont alignés en SPF ou DKIM — durcir à
+# l'aveugle sur un domaine racine coupe le courrier légitime.
+mailserver_dmarc_org_domains: []
+
+# Supprime un CNAME préexistant portant le même nom qu'un domaine de
+# `mail_domains` avant de publier son enregistrement A. Cloudflare refuse la
+# coexistence des deux (erreur 81054), donc sans cela un CNAME hérité d'un
+# ancien nommage bloque la publication de façon permanente.
+mailserver_dns_replace_conflicting: true

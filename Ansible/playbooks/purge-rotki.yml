@@ -1,0 +1,12 @@
+---
+# Supprime le sidecar Rotki ET ses données : conteneur, image, volumes
+# nommés (portefeuille valorisé, historique). Destructif, non reconstructible
+# sans re-synchronisation complète depuis IBKR/les échanges configurés.
+#
+#   ./play.sh papanglabs purge-rotki.yml -e confirm=yes
+- name: Purge the Rotki sidecar
+  hosts: rotki
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - rotki-purge

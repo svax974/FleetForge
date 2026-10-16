@@ -1,0 +1,19 @@
+---
+# Register the CVDD formula metric (idempotent) and queue its backfill jobs
+# across every supported timeframe. The already-running ETL worker
+# (FormulaWorkerService) drains those jobs automatically — no extra step.
+# Usage: ./play.sh papanglabs seed-cvdd-papangmetrics.yml --limit papangmetrics1
+
+- name: Seed CVDD formula metric on PapangMetrics
+  hosts: papangmetrics1
+  remote_user: "{{ remote_username }}"
+  tasks:
+    - name: Run seed:cvdd
+      ansible.builtin.command:
+        cmd: npm run seed:cvdd
+        chdir: "/home/{{ remote_username }}/papangmetrics"
+      become: true
+      become_user: "{{ remote_username }}"
+      register: seed_cvdd
+    - debug:
+        var: seed_cvdd.stdout_lines

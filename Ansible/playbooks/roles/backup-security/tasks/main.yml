@@ -1,0 +1,32 @@
+---
+# Pare-feu d'un hôte de DESTINATION de sauvegarde.
+#
+# Les sauvegardes sont poussées par la source, en SSH : sans règle, la source
+# n'a aucun accès. Cas réel constaté le 11/08/2026 — `timescale` n'autorisait le
+# port 16138 que depuis les IP opérateur, donc brk1 ne pouvait
+# pas y écrire, alors même que la destination retenue est cette machine.
+#
+# Rejouable seul via `update-ufw-all.yml`, comme les autres rôles `-security` :
+# une source ajoutée ou une whitelist modifiée ne doit pas imposer de rejouer
+# l'installation des sauvegardes (rsync de 348 Go).
+
+- name: Allow SSH from each backup source
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ hostvars[item]['ansible_host'] }}"
+    port: "{{ ssh_custom_port }}"
+    comment: "backup source {{ item }} - ssh push"
+  loop: "{{ backup_sources }}"
+  when: hostvars[item]['ansible_host'] is defined
+  become: true
+
+- name: Allow SSH from extra CIDRs
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ item }}"
+    port: "{{ ssh_custom_port }}"
+    comment: "backup source (extra) - ssh push"
+  loop: "{{ backup_extra_allowed_cidrs }}"
+  become: true

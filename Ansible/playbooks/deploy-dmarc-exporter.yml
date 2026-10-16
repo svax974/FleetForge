@@ -1,0 +1,81 @@
+---
+# Déploie l'exporter Prometheus des rapports agrégés DMARC.
+#
+# Le motif d'hôtes couvre les deux parcs : le relais s'appelle `mail` sur
+# papanglabs et `mail1` sur web3c, et aucun groupe commun ne les réunit. Un
+# motif inexistant est ignoré sans erreur, la commande est donc la même
+# partout.
+#
+# L'exporter est placé sur le relais SMTP parce que le courrier y est déjà le
+# sujet du serveur — mais il n'en dépend pas techniquement : il ne fait que
+# joindre une boîte IMAP distante.
+# ── Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ───────────────────────
+# Échoue immédiatement si le parc n'a pas d'hôte de supervision utilisable,
+# puis vérifie — et répare — le socle de la machine, node_exporter et sa cible
+# Prometheus. Un service déployé sans supervision est un service dont personne
+# ne saura qu'il est tombé.
+# Les contrôles bloquants portent le tag `always` : ils s'appliquent même à un
+# rejeu ciblé par `--tags`.
+- name: Contrôle préalable
+  hosts: mail:mail1
+  remote_user: "{{ remote_username }}"
+  roles:
+    - role: host-preflight
+      preflight_require_docker: false
+
+- name: Deploy DMARC aggregate report exporter
+  hosts: mail:mail1
+  remote_user: "{{ remote_username }}"
+  become: yes
+  gather_facts: yes
+
+  pre_tasks:
+    - name: Validate required variables
+      ansible.builtin.fail:
+        msg: "Variable '{{ item }}' must be defined"
+      when: vars[item] is not defined
+      loop:
+        - dmarc_exporter_imap_user
+        - dmarc_exporter_imap_password
+        - dmarc_exporter_rua_addresses
+        - prometheus_host
+
+    - name: Display deployment plan
+      ansible.builtin.debug:
+        msg: |
+          ════════════════════════════════════════════════════════════
+          DMARC EXPORTER DEPLOYMENT
+          ════════════════════════════════════════════════════════════
+          Target      : {{ inventory_hostname }} ({{ ansible_host }})
+          Listen      : {{ ansible_host }}:{{ dmarc_exporter_port | default(7489) }}/metrics
+          IMAP        : {{ dmarc_exporter_imap_user }}@{{ dmarc_exporter_imap_host | default('imap.gmail.com') }}
+          Adresses rua: {{ dmarc_exporter_rua_addresses | join(', ') }}
+          Prometheus  : {{ prometheus_host }}
+          ════════════════════════════════════════════════════════════
+
+  roles:
+    - dmarc-exporter-install
+
+  post_tasks:
+    - name: Deployment summary
+      ansible.builtin.debug:
+        msg: |
+          ════════════════════════════════════════════════════════════
+          DMARC EXPORTER DEPLOYED
+          ════════════════════════════════════════════════════════════
+
+          VÉRIFICATION (la première relève peut prendre quelques secondes) :
+            curl -s {{ ansible_host }}:{{ dmarc_exporter_port | default(7489) }}/metrics | grep dmarc_up
+
+          Puis, dans Prometheus — une règle qui n'a aucune série à évaluer
+          reste `inactive` et `health=ok` sans rien superviser :
+            count(dmarc_up)                          doit être ≥ 1
+            count(dmarc_last_report_end_timestamp_seconds)
+                                                      doit être ≥ 1 après
+                                                      réception d'un rapport
+                                                      (comptez jusqu'à 24 h)
+
+          Tant qu'aucun rapport n'a été relevé, seules les séries dmarc_up,
+          dmarc_last_poll_timestamp_seconds et dmarc_poll_errors_total
+          existent : c'est normal, les rapports sont quotidiens.
+          ════════════════════════════════════════════════════════════

@@ -1,0 +1,82 @@
+---
+# StarNet (https://github.com/androoAGI/starnet) — harnais d'agents IA
+# « local-first » : UNE application Node (`node sidecar/index.js`) qui sert à
+# la fois l'interface (frontend/, sans étape de build) et le moteur d'agents.
+# Le projet publie des installeurs desktop Windows/macOS (Tauri) ; sur un
+# serveur on fait tourner le sidecar seul, mode « Run from source » du README.
+#
+# Installé NATIVEMENT sous `remote_username` (srvc), démon en unité systemd
+# --user (lingering activé) — même modèle qu'openclaw-install (CLAUDE.md § 2,
+# « srvc doit pouvoir piloter les services qu'il déploie »).
+#
+# ── Contraintes du code amont (lues le 09/10/2026, tag v0.13.1) ────────────
+#   • `server.listen(PORT, '127.0.0.1')` EN DUR (sidecar/index.js) : aucune
+#     option pour écouter ailleurs. D'où le relai `starnet-relay` (socket
+#     systemd + systemd-socket-proxyd, livré avec systemd : rien à installer)
+#     qui publie `starnet_port` et renvoie sur la boucle locale.
+#   • Garde anti-DNS-rebinding (sidecar/apiauth.js) : toute requête dont
+#     l'en-tête `Host` n'est pas 127.0.0.1/localhost/::1 reçoit 403
+#     « forbidden host », et un `Origin` hors de http://127.0.0.1:<port> reçoit
+#     403 « forbidden origin ». Le relai étant transparent (TCP), c'est le
+#     vhost des proxies (starnet.conf) qui réécrit ces deux en-têtes.
+#   • Le jeton d'API est INJECTÉ dans la page servie
+#     (window.__STARNET_API_TOKEN__) : quiconque charge la page pilote la
+#     station — outils shell compris, exécutés en tant que srvc. Le filtrage
+#     réseau (starnet-security + vhost) est donc la SEULE barrière.
+
+starnet_user: "{{ remote_username }}"
+starnet_home: "/home/{{ starnet_user }}"
+
+starnet_repo: https://github.com/androoAGI/starnet.git
+# Tag épinglé, jamais une branche : la branche par défaut du dépôt est une
+# branche de travail (feat/harness-backend), pas une version publiée.
+starnet_version: v0.13.1
+
+# Code de l'application (checkout partiel, voir tasks/main.yml).
+starnet_app_dir: "{{ starnet_home }}/starnet"
+# Seuls répertoires dont le sidecar a besoin à l'exécution. Le dépôt pèse
+# ~3,3 Go, dont 1,3 Go pour `website/` et 0,5 Go pour `docs/` : un checkout
+# complet triplerait le volume pour rien. Mode « cone » : les fichiers de la
+# racine (package.json, package-lock.json) suivent automatiquement.
+# `src-tauri` : le sidecar lit src-tauri/tauri.conf.json pour sa version.
+starnet_sparse_paths: [sidecar, frontend, shared, bin, skills-catalog, relay, src-tauri]
+
+# Données (workspaces, mémoire, transcripts, ledgers) — hors du code, pour
+# qu'un changement de version ne les touche jamais. Même chemin que le défaut
+# XDG du sidecar, posé explicitement (STARNET_WORKSPACES) pour que
+# starnet-purge sache quoi effacer sans le deviner.
+starnet_workspaces: "{{ starnet_home }}/.local/share/StarNet/workspaces"
+
+# Configuration et secrets (EnvironmentFile de l'unité).
+starnet_config_dir: "{{ starnet_home }}/.config/starnet"
+
+# ── Node.js embarqué ───────────────────────────────────────────────────────
+# Binaire officiel sous le préfixe de srvc plutôt que nodejs-install
+# (NodeSource, système) : la machine `ctdapi` est PARTAGÉE (ctdapi,
+# rotki, agenthub…), installer ou changer un Node système y toucherait tout le
+# monde. Version dans le chemin : une montée de version pose un NOUVEAU
+# répertoire, l'ancien reste utilisable jusqu'au redémarrage.
+# Node 22 = celui de la CI amont (README, « Node.js 22 matches CI »).
+starnet_node_version: "22.23.3"
+starnet_node_arch: "{{ {'x86_64': 'x64', 'aarch64': 'arm64'}[ansible_architecture] }}"
+starnet_node_root: "{{ starnet_home }}/.local/lib/starnet-node"
+starnet_node_dir: "{{ starnet_node_root }}/node-v{{ starnet_node_version }}"
+
+# ── Ports ──────────────────────────────────────────────────────────────────
+# Port du sidecar, sur 127.0.0.1 UNIQUEMENT (imposé par le code amont).
+starnet_sidecar_port: 8787
+# Port PUBLIÉ par le relai, filtré par ufw (starnet-security) — c'est lui que
+# visent les proxies. Registre des ports : CLAUDE.md.
+starnet_port: "{{ app_port | default(4720) }}"
+
+starnet_hostname: "starnet.{{ domain_name }}"
+
+# Chemin du relai livré par systemd (Debian/Ubuntu, merge-usr ou non).
+starnet_socket_proxyd: /lib/systemd/systemd-socket-proxyd
+
+# ── Fournisseur de modèles (optionnel) ─────────────────────────────────────
+# Clé OpenRouter lue par le sidecar au démarrage (STARNET_OPENROUTER_KEY).
+# Vide = à saisir dans l'interface (SETTINGS → PROVIDERS / onglet KEYS). Pour
+# la gérer depuis Ansible, la chiffrer dans group_vars/web3c.yml :
+#   cd Ansible && ansible-vault encrypt_string --stdin-name 'starnet_openrouter_key'
+starnet_openrouter_key: ""

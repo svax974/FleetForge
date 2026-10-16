@@ -1,0 +1,15 @@
+---
+# Purge du back PapangLabs : suppression + code livré, .env, volumes nommés et
+# image applicative.
+#
+#   ./play.sh papanglabs purge-papanglabs-back.yml --limit <hôte>
+#
+# Le volume `shared_directory` porte les graphiques générés par l'application :
+# la purge les emporte. Docker, node_exporter et svcprobe restent en place, ce
+# sont des outils partagés avec les autres services de la machine.
+- name: Purge du back PapangLabs
+  hosts: backsindicators
+  remote_user: "{{ remote_username }}"
+
+  roles:
+    - papanglabs-back-purge

@@ -1,0 +1,87 @@
+---
+# Arrête et supprime le conteneur SearXNG, sa sonde et son filtrage de port.
+# Conserve la configuration et la clé secrète — leur suppression relève de
+# `searxng-purge`.
+
+- name: Stop and remove the SearXNG container
+  community.docker.docker_container:
+    name: "{{ searxng_container }}"
+    state: absent
+  become: true
+  ignore_errors: true
+
+# ── Pare-feu ───────────────────────────────────────────────────────────────
+# Les règles DOCKER-USER survivent au conteneur : laissées en place, elles
+# bloqueraient le prochain service qui reprendrait ce port, avec une cause
+# introuvable puisque `ufw status` ne montre rien.
+- name: Stop and disable the SearXNG port firewall unit
+  ansible.builtin.systemd:
+    name: searxng-firewall
+    state: stopped
+    enabled: false
+  become: true
+  failed_when: false
+
+- name: Flush the SearXNG rules from DOCKER-USER
+  ansible.builtin.shell: |
+    set -uo pipefail
+    while true; do
+      N=$(iptables -L DOCKER-USER --line-numbers -n 2>/dev/null \
+          | awk -v p="dpt:{{ searxng_port }}" '$0 ~ p {print $1; exit}')
+      [ -z "${N}" ] && break
+      iptables -D DOCKER-USER "${N}"
+    done
+  args:
+    executable: /bin/bash
+  become: true
+  changed_when: true
+  failed_when: false
+
+- name: Remove the SearXNG port firewall files
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  become: true
+  loop:
+    - /etc/systemd/system/searxng-firewall.service
+    - /usr/local/sbin/searxng-firewall.sh
+
+- name: Reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+  become: true
+
+- name: Remove any ufw rule left on the SearXNG port
+  community.general.ufw:
+    rule: "{{ item }}"
+    proto: tcp
+    port: "{{ searxng_port }}"
+    delete: true
+  loop: [allow, deny]
+  become: true
+  ignore_errors: true
+
+# ── Supervision ────────────────────────────────────────────────────────────
+# La sonde part avec le service : laissée en place, elle publierait
+# `service_up 0` indéfiniment et ferait sonner `ServiceDown` sur un service
+# volontairement désinstallé.
+#
+# La CIBLE Prometheus de svcprobe n'est pas retirée : elle vaut pour la
+# MACHINE et porte les sondes des autres services qui y tournent.
+- name: Remove the SearXNG probe and its collector
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  become: true
+  loop:
+    - "{{ svcprobe_checks_dir | default('/etc/svcprobe/checks.d') }}/searxng.json"
+    - "{{ svcprobe_lib_dir | default('/usr/local/lib/svcprobe') }}/searxng-metrics.sh"
+    - /var/lib/svcprobe/searxng.prom
+  tags: [monitoring]
+
+- name: Warn that the proxies still publish the vhost
+  ansible.builtin.debug:
+    msg: >-
+      SearXNG supprimé, mais les proxies servent toujours le vhost
+      searxng.{{ domain_name }} et renverront 502. Retirer
+      sites-enabled/searxng.conf puis rejouer update-proxy-web3c.yml.

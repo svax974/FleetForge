@@ -1,0 +1,10 @@
+---
+- name: Update proxies configurations and security settings
+  hosts: proxies
+  remote_user: "{{ remote_username }}"
+  become: true
+  become_method: sudo
+
+  roles:
+    - proxy-update-web3c
+    - proxy-security-web3c

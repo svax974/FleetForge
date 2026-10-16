@@ -1,0 +1,18 @@
+---
+# Re-mirror the BRK series catalogue into the `metric` table and re-seed
+# displayName/brkKeyAlt from priority-metrics.ts.
+# Usage: ./play.sh papanglabs sync-catalog-papangmetrics.yml --limit papangmetrics1
+
+- name: Sync PapangMetrics catalogue from BRK
+  hosts: papangmetrics1
+  remote_user: "{{ remote_username }}"
+  tasks:
+    - name: Run catalog:sync
+      ansible.builtin.command:
+        cmd: npm run catalog:sync
+        chdir: "/home/{{ remote_username }}/papangmetrics"
+      become: true
+      become_user: "{{ remote_username }}"
+      register: catalog_sync
+    - debug:
+        var: catalog_sync.stdout_lines

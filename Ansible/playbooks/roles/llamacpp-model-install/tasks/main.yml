@@ -1,0 +1,60 @@
+---
+# Download a GGUF model and (re)start a dedicated llama-server instance serving it.
+# Requires: llamacpp_model_name, llamacpp_model_url
+# Optional: llamacpp_instance_id (default 1), llamacpp_ctx_size, llamacpp_extra_args
+# Multiple instances can run side by side on the same host — each instance_id gets
+# its own systemd service and port (llamacpp_base_port + instance_id - 1).
+
+- name: Fail if llamacpp_model_name is not set
+  ansible.builtin.fail:
+    msg: "llamacpp_model_name is required (used to name the .gguf file, e.g. 'llama-3-8b-instruct')."
+  when: llamacpp_model_name is not defined or llamacpp_model_name == ""
+
+- name: Fail if llamacpp_model_url is not set
+  ansible.builtin.fail:
+    msg: "llamacpp_model_url is required — direct download URL to the .gguf file (e.g. a Hugging Face resolve link)."
+  when: llamacpp_model_url is not defined or llamacpp_model_url == ""
+
+- name: Verify llama-server is installed
+  ansible.builtin.stat:
+    path: /usr/local/bin/llama-server
+  register: llamacpp_binary
+
+- name: Fail if llama.cpp is not installed
+  ansible.builtin.fail:
+    msg: "llama-server is not installed. Run the llamacpp-install role first."
+  when: not llamacpp_binary.stat.exists
+
+- name: Download GGUF model {{ llamacpp_model_name }}
+  ansible.builtin.get_url:
+    url: "{{ llamacpp_model_url }}"
+    dest: "{{ llamacpp_models_dir }}/{{ llamacpp_model_name }}.gguf"
+    owner: "{{ llamacpp_user }}"
+    group: "{{ llamacpp_user }}"
+    mode: '0644'
+    timeout: 3600
+
+- name: Deploy systemd service for llama.cpp instance {{ llamacpp_instance_id }}
+  ansible.builtin.template:
+    src: llamacpp.service.j2
+    dest: "/etc/systemd/system/llamacpp-{{ llamacpp_instance_id }}.service"
+    owner: root
+    group: root
+    mode: '0644'
+  notify: restart llamacpp instance
+
+- name: Reload systemd daemon
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+- name: Enable and start llama.cpp instance {{ llamacpp_instance_id }}
+  ansible.builtin.systemd:
+    name: "llamacpp-{{ llamacpp_instance_id }}"
+    state: started
+    enabled: true
+
+- name: Wait for llama.cpp instance {{ llamacpp_instance_id }} to be ready
+  ansible.builtin.wait_for:
+    port: "{{ llamacpp_port }}"
+    delay: 3
+    timeout: 60

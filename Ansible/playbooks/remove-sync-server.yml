@@ -1,0 +1,14 @@
+---
+# Retire les serveurs de synchronisation : conteneurs, sondes, cibles Prometheus
+# et autorisations de scrape. CONSERVE les données (sync.db, blobs), l'image, les
+# sources, les sauvegardes (cron compris), le CNAME, le vhost des proxies et les
+# entrées docker_ports_rules — voir le message de sync-server-remove.
+#
+#   ./play.sh web3c remove-sync-server.yml                       # les trois
+#   ./play.sh web3c remove-sync-server.yml --limit sync-iptv     # une instance
+- name: Remove the sync server instances
+  hosts: sync_servers
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - sync-server-remove

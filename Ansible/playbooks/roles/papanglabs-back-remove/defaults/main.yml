@@ -1,0 +1,9 @@
+---
+# Suppression du service : conteneurs, sonde et cible de supervision.
+# Conserve le code livré, les .env et les volumes — c'est `-purge` qui les
+# supprime.
+pgb_user: "{{ remote_username }}"
+pgb_dir: "/home/{{ remote_username }}/papanglabs"
+pgb_project_name: "papanglabs-back-{{ hostname | lower | regex_replace('[^a-z0-9]', '-') }}"
+pgb_probe_service: papanglabs-back
+pgb_lb_container: papanglabs_back_lb

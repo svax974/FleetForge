@@ -1,0 +1,12 @@
+{
+  "service": "postgres",
+  "up": {"kind": "docker", "container": "{{ dbmon_container }}"},
+  "extra_checks": [
+    {"name": "port", "kind": "tcp", "host": "127.0.0.1", "port": {{ dbmon_port }}}
+  ],
+  "metrics_command": [
+    "{{ svcprobe_lib_dir }}/postgres-metrics.sh",
+    "{{ dbmon_container }}", "{{ dbmon_user }}", "{{ dbmon_db }}", "postgres"
+  ],
+  "metrics_timeout": 15
+}

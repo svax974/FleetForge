@@ -1,0 +1,35 @@
+---
+# Désinstalle le dispositif de sauvegarde de `{{ pgbak_db }}` sur la SOURCE.
+# Les dumps déjà présents sur la destination sont CONSERVÉS, ainsi que le
+# script de restauration qui permet encore de s'en servir.
+
+- name: Remove the backup cron job
+  ansible.builtin.cron:
+    name: "{{ pgbak_name }} postgres backup"
+    state: absent
+
+- name: Remove the backup script
+  ansible.builtin.file:
+    path: "{{ pgbak_dir }}/postgres-backup.sh"
+    state: absent
+
+- name: Remove the logrotate configuration
+  ansible.builtin.file:
+    path: "/etc/logrotate.d/postgres-backup-{{ pgbak_name }}"
+    state: absent
+  become: true
+
+# Retirée : laisser la métrique en place ferait sonner BackupStale sur une
+# sauvegarde volontairement arrêtée.
+- name: Remove the Prometheus textfile metric
+  ansible.builtin.file:
+    path: "{{ node_exporter_textfile_dir }}/backup_{{ pgbak_name }}.prom"
+    state: absent
+  become: true
+
+- name: Notice — the restore script is kept
+  ansible.builtin.debug:
+    msg: >-
+      Sauvegarde arrêtée. {{ pgbak_dir }}/postgres-restore.sh est conservé et
+      reste utilisable sur les dumps déjà en place. Utilise
+      postgres-backup-purge pour supprimer aussi les données de la destination.

@@ -1,0 +1,304 @@
+---
+# Déploie UNE instance du serveur web3c-sync (conteneur Docker construit sur
+# l'hôte depuis les sources). Joué une fois par entrée du groupe `sync_servers`
+# (sync-iptv, sync-banking, sync-aiteam — même machine,
+# partagée : rien ici ne touche aux conteneurs, packages ou règles des autres
+# services). Voir defaults/main.yml pour les choix de configuration.
+#
+#   ./play.sh web3c deploy-sync-server.yml
+#   ./play.sh web3c deploy-sync-server.yml --limit sync-iptv     # une instance
+
+- name: Fail early when the inventory entry is incomplete
+  ansible.builtin.assert:
+    that:
+      - sync_instance is defined
+      - sync_instance in ['iptv', 'banking', 'aiteam']
+      - app_port is defined
+      - sync_metrics_port is defined
+      - app_port | int != sync_metrics_port | int
+      - (groups['proxies'] | default([])) | length > 0
+      - sync_trusted_proxies | length > 0
+    fail_msg: >-
+      L'entrée d'inventaire {{ inventory_hostname }} doit porter `sync_instance`
+      (iptv, banking ou aiteam), `app_port` et `sync_metrics_port` distincts, et
+      le parc doit contenir au moins un hôte du groupe `proxies` : sans proxy de
+      confiance le serveur ne verrait que l'adresse du proxy et partagerait ses
+      limites de débit entre tous les clients.
+    quiet: true
+
+# ── Sources ─────────────────────────────────────────────────────────────────
+- name: Check the local source directory
+  ansible.builtin.stat:
+    path: "{{ sync_server_src }}/Dockerfile"
+  delegate_to: localhost
+  become: false
+  register: sync_src_dockerfile
+  tags: [build]
+
+- name: Fail when the local sources are missing
+  ansible.builtin.fail:
+    msg: >-
+      {{ sync_server_src }}/Dockerfile est introuvable sur le poste d'exécution.
+      Pointer `sync_server_src` (-e sync_server_src=/chemin/web3c-sync/server)
+      vers le répertoire `server/` du dépôt web3c-sync.
+  when: not sync_src_dockerfile.stat.exists
+  tags: [build]
+
+# Un rsync manquant donnerait une erreur de `synchronize` peu parlante.
+- name: Check that rsync is installed on the host
+  ansible.builtin.shell: command -v rsync
+  args:
+    executable: /bin/bash
+  register: sync_rsync_present
+  changed_when: false
+  failed_when: sync_rsync_present.rc != 0
+  check_mode: false
+  tags: [build]
+
+- name: Create the build directory
+  ansible.builtin.file:
+    path: "{{ sync_server_build_dir }}"
+    state: directory
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: '0750'
+  tags: [build]
+
+# `throttle: 1` : les trois instances partagent la même copie de travail et la
+# même image. En parallèle, trois rsync écriraient dans le même répertoire et
+# trois `go build` se disputeraient la RAM d'une machine partagée ; en série,
+# la première construit et les suivantes constatent que le tag existe déjà.
+- name: Synchronize the server sources to the host
+  ansible.posix.synchronize:
+    src: "{{ sync_server_src | regex_replace('/+$', '') }}/"
+    dest: "{{ sync_server_build_dir }}/"
+    delete: true
+    checksum: true
+    owner: false
+    group: false
+    use_ssh_args: true
+    rsync_opts: "{{ sync_server_rsync_excludes | map('regex_replace', '^', '--exclude=') | list }}"
+  throttle: 1
+  tags: [build]
+
+# Tag = début de l'empreinte du CONTENU synchronisé (noms + contenus), pas une
+# date : le rejeu sans changement ne reconstruit rien, un changement de source
+# produit un nouveau tag donc une recréation du conteneur.
+- name: Compute the source content hash
+  ansible.builtin.shell: |
+    set -o pipefail
+    cd '{{ sync_server_build_dir }}' \
+      && find . -type f | LC_ALL=C sort | xargs sha256sum | sha256sum | cut -c1-12
+  args:
+    executable: /bin/bash
+  register: sync_src_hash
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  tags: [build]
+
+- name: Set the image tag
+  ansible.builtin.set_fact:
+    sync_image_tag: "{{ (sync_src_hash.stdout | default('') | trim) or 'unbuilt' }}"
+  tags: [build]
+
+- name: Fail when the content hash is unusable
+  ansible.builtin.assert:
+    that:
+      - ansible_check_mode or (sync_image_tag is match('^[0-9a-f]{12}$'))
+    fail_msg: "Empreinte des sources illisible (« {{ sync_src_hash.stdout | default('') }} », {{ sync_src_hash.stderr | default('') }})."
+    quiet: true
+  tags: [build]
+
+- name: Build the sync server image (skipped when this tag already exists)
+  community.docker.docker_image:
+    name: "{{ sync_server_image }}"
+    tag: "{{ sync_image_tag }}"
+    source: build
+    build:
+      path: "{{ sync_server_build_dir }}"
+      pull: false
+    force_source: false
+    state: present
+  become: true
+  throttle: 1
+  when: not ansible_check_mode
+  tags: [build]
+
+# ── Volume de données ───────────────────────────────────────────────────────
+- name: Create the instance directory
+  ansible.builtin.file:
+    path: "{{ sync_home }}"
+    state: directory
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: '0755'
+  become: true
+
+# Appartient à l'uid de l'image distroless `nonroot` (65532) : c'est ce compte
+# qui crée sync.db, ses fichiers WAL et les blobs (0700/0600).
+- name: Create the data volume owned by the image's nonroot user
+  ansible.builtin.file:
+    path: "{{ sync_data_dir }}"
+    state: directory
+    owner: "{{ sync_uid }}"
+    group: "{{ sync_gid }}"
+    mode: '0700'
+  become: true
+
+# ── Conteneur ───────────────────────────────────────────────────────────────
+# Durci : système de fichiers racine en lecture seule (le serveur n'écrit que
+# dans /data et /tmp), aucune capability, pas d'élévation de privilèges,
+# utilisateur non-root de l'image. Pas de HEALTHCHECK Docker : l'image
+# distroless n'a ni shell ni curl, un `exec` n'y a rien à lancer — la santé est
+# contrôlée de l'extérieur (ci-dessous, puis svcprobe/Prometheus dans
+# sync-server-monitoring).
+- name: Deploy the sync server container
+  community.docker.docker_container:
+    name: "{{ sync_container }}"
+    image: "{{ sync_server_image }}:{{ sync_image_tag }}"
+    state: started
+    restart_policy: always
+    user: "{{ sync_uid }}:{{ sync_gid }}"
+    read_only: true
+    tmpfs:
+      - "/tmp:rw,noexec,nosuid,nodev,size=16m"
+    cap_drop:
+      - ALL
+    security_opts:
+      - "no-new-privileges:true"
+    memory: "{{ sync_memory }}"
+    memory_swap: "{{ sync_memory }}"
+    cpus: "{{ sync_cpus }}"
+    pids_limit: "{{ sync_pids_limit }}"
+    env:
+      SYNC_INSTANCE: "{{ sync_instance }}"
+      SYNC_LISTEN: ":{{ sync_listen_port }}"
+      SYNC_METRICS_LISTEN: ":{{ sync_metrics_listen_port }}"
+      SYNC_DB: /data/sync.db
+      SYNC_BLOB_DIR: /data/blobs
+      # Instance PUBLIQUE : création de groupe sans jeton administrateur. Sans
+      # ceci (ni SYNC_ADMIN_TOKEN_SHA256) le serveur refuse de démarrer hors
+      # boucle locale.
+      SYNC_OPEN_REGISTRATION: "true"
+      SYNC_TRUST_PROXY: "true"
+      SYNC_REAL_IP_HEADER: X-Real-IP
+      SYNC_TRUSTED_PROXIES: "{{ sync_trusted_proxies }}"
+    ports:
+      - "{{ sync_bind_address }}:{{ app_port }}:{{ sync_listen_port }}"
+      - "{{ sync_bind_address }}:{{ sync_metrics_port }}:{{ sync_metrics_listen_port }}"
+    volumes:
+      - "{{ sync_data_dir }}:/data"
+    labels:
+      com.web3c.sync.instance: "{{ sync_instance }}"
+      com.web3c.sync.source-hash: "{{ sync_image_tag }}"
+    log_driver: json-file
+    log_options:
+      max-size: "10m"
+      max-file: "3"
+  become: true
+  when: not ansible_check_mode
+
+# ── Vérification fonctionnelle ──────────────────────────────────────────────
+# Un POST signé est impossible sans clé d'appareil : on vérifie donc ce qui
+# l'est sans secret — la santé, l'identité de l'instance, et la présence (ou
+# l'absence) des routes publiques de notation selon l'instance.
+- name: Wait for the server to answer on /v1/health
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ app_port }}/v1/health"
+    return_content: true
+  register: sync_health
+  until: sync_health.status | default(0) == 200
+  retries: "{{ sync_health_retries }}"
+  delay: "{{ sync_health_delay }}"
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Check the instance identity reported by /v1/health
+  ansible.builtin.assert:
+    that:
+      - sync_health.json.ok | default(false)
+      - sync_health.json.instance | default('') == sync_instance
+    fail_msg: >-
+      /v1/health ne répond pas comme attendu pour l'instance {{ sync_instance }} :
+      {{ sync_health.content | default('(pas de contenu)') }}.
+      Journal : `docker logs {{ sync_container }}` sur {{ inventory_hostname }}.
+    quiet: true
+  when: not ansible_check_mode
+
+# Les notes communautaires n'existent que sur l'instance iptv (le serveur
+# n'enregistre pas ces routes ailleurs) : 200 + agrégat JSON là, 404 ailleurs.
+- name: Query a community rating (iptv serves them, the others must not)
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ app_port }}/v1/public/ratings/movie:tmdb:1"
+    status_code: "{{ [200] if sync_instance == 'iptv' else [404] }}"
+    return_content: true
+  register: sync_rating
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Check the rating aggregate shape on the iptv instance
+  ansible.builtin.assert:
+    that:
+      - sync_rating.json is mapping
+      - "'count' in sync_rating.json"
+    fail_msg: "Agrégat de notes inattendu : {{ sync_rating.content | default('') }}"
+    quiet: true
+  when:
+    - not ansible_check_mode
+    - sync_instance == 'iptv'
+
+# ── DNS : alias CNAME vers le front des proxies ─────────────────────────────
+# Le nom public (sync-<instance>.web3c.cc) est déclaré sur l'entrée d'inventaire
+# via `proxy_hostname` ; update-cloudflare-dns.yml publie le CNAME vers le front
+# round-robin. Cette inclusion rejoue la même logique en portée réduite (cette
+# seule entrée) pour garantir le CNAME dès le premier déploiement — modèle :
+# agenthub-install/rotki-install (CLAUDE.md, « Obligation DNS + vhost »).
+- name: Ensure the service CNAME to the canonical proxy front
+  ansible.builtin.include_role:
+    name: cloudflare-dns-update
+    tasks_from: cnames
+  vars:
+    cfdns_cname_scope:
+      - "{{ inventory_hostname }}"
+  tags: [dns]
+
+# ── Rangement des anciennes images ──────────────────────────────────────────
+# `docker images` trie par date de création décroissante : on retire les
+# générations au-delà de `sync_server_image_keep`. Une image encore utilisée par
+# un conteneur (une autre instance pas encore redéployée) ne peut pas être
+# supprimée : l'échec est volontairement ignoré.
+- name: List the image generations on the host
+  ansible.builtin.command:
+    argv:
+      - docker
+      - images
+      - "{{ sync_server_image }}"
+      - --format
+      - "{% raw %}{{.Tag}}{% endraw %}"
+  become: true
+  register: sync_image_list
+  changed_when: false
+  check_mode: false
+  tags: [build]
+
+- name: Remove surplus old image generations
+  community.docker.docker_image_remove:
+    name: "{{ sync_server_image }}:{{ item }}"
+  loop: "{{ sync_image_list.stdout_lines[(sync_server_image_keep | int):] }}"
+  become: true
+  failed_when: false
+  when: not ansible_check_mode
+  tags: [build]
+
+- name: Report how the service is exposed
+  ansible.builtin.debug:
+    msg: >-
+      {{ sync_container }} (image {{ sync_server_image }}:{{ sync_image_tag }},
+      instance {{ sync_instance }}) publié sur {{ sync_bind_address }}:{{ app_port }}
+      (service) et :{{ sync_metrics_port }} (/metrics), données dans
+      {{ sync_data_dir }}. Filtrage DOCKER-USER par sync-server-security (joué
+      sur `ctdapi`) : service réservé aux proxies, métriques réservées à
+      Prometheus. Reste à poser le vhost sur les proxies :
+      ./play.sh web3c update-proxy-web3c.yml — puis
+      https://{{ sync_hostname }}/v1/health doit répondre.

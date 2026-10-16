@@ -1,0 +1,7 @@
+{
+  "service": "openclaw",
+  "up": {"kind": "http", "url": "{{ openclaw_url }}/healthz", "status": [200], "timeout": 10},
+  "extra_checks": [
+    {"name": "ready", "kind": "http", "url": "{{ openclaw_url }}/readyz", "status": [200], "timeout": 10}
+  ]
+}

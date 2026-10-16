@@ -1,0 +1,44 @@
+#!/bin/bash
+# Règles de pare-feu du port SearXNG — géré par Ansible, ne pas éditer.
+#
+# SearXNG tourne dans un conteneur avec un port publié : Docker insère ses
+# règles DNAT en amont de la chaîne INPUT, donc ufw ne voit jamais ce trafic.
+# `DOCKER-USER` est la seule chaîne que Docker traverse sans la réécrire.
+#
+# Rejoué au démarrage par searxng-firewall.service, APRÈS docker.service :
+# Docker recrée DOCKER-USER vide à chaque démarrage, une sauvegarde
+# iptables-persistent serait donc restaurée trop tôt puis écrasée. (Et sur cette
+# distribution `iptables-persistent` et `ufw` se désinstallent mutuellement.)
+set -euo pipefail
+
+PORT={{ searxng_port }}
+ALLOWED=({{ (searxng_remote_proxies + searxng_extra_allowed_cidrs) | unique | join(' ') }})
+
+# Purge des règles existantes pour ce port — rend le script idempotent et
+# retire les autorisations d'une source qui n'est plus dans la liste.
+#
+# Suppression par NUMÉRO de règle, et non par spécification : réinjecter une
+# spec contenant `--comment "SearXNG - allowed proxy"` la fait découper par le
+# shell, et iptables rejette le tiret isolé (« Bad argument `-' »).
+while true; do
+  N=$(iptables -L DOCKER-USER --line-numbers -n 2>/dev/null \
+      | awk -v p="dpt:${PORT}" '$0 ~ p {print $1; exit}')
+  [ -z "${N}" ] && break
+  iptables -D DOCKER-USER "${N}"
+done
+
+{% if searxng_remote_proxies | length > 0 %}
+# Sources autorisées d'abord : elles doivent précéder le DROP final.
+for SRC in "${ALLOWED[@]}"; do
+  iptables -A DOCKER-USER -s "${SRC}" -p tcp --dport "${PORT}" \
+    -m comment --comment "SearXNG - allowed proxy" -j RETURN
+done
+
+iptables -A DOCKER-USER -p tcp --dport "${PORT}" \
+  -m comment --comment "SearXNG - deny external" -j DROP
+{% else %}
+# Aucun proxy distant : le port n'est publié que sur 127.0.0.1 et rien ne peut
+# l'atteindre depuis l'extérieur. Le script se contente alors de PURGER les
+# règles d'un état antérieur — sans quoi un DROP orphelin resterait à couper un
+# port qu'un autre service pourrait reprendre.
+{% endif %}

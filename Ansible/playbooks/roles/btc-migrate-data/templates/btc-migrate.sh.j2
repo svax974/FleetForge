@@ -1,0 +1,163 @@
+#!/usr/bin/env bash
+# Amorce la chaîne bitcoind sur CET hôte (cible) en la TIRANT depuis la source.
+# Généré par le rôle `btc-migrate-data` — ne pas éditer sur l'hôte.
+#
+#   ~/btc-migrate.sh            # exécute la migration (passe chaude + froide)
+#   ~/btc-migrate.sh --check    # état seul, aucun transfert
+#
+# Deux passes, sur le modèle éprouvé de brk-backup :
+#   • CHAUDE — les fichiers de blocs (blk*.dat / rev*.dat) sont immuables une
+#     fois écrits : on les recopie nœud source EN MARCHE, sans coupure. C'est le
+#     gros du volume (~885 Go).
+#   • FROIDE — le chainstate et les index sont des bases LevelDB réécrites en
+#     place : les copier à chaud donnerait une base corrompue. On arrête donc
+#     bitcoind sur la source le temps d'un rsync --delete de tout `data/`, qui
+#     réconcilie chainstate + blocks/index + delta des derniers blocs, puis on
+#     relance la source. La fenêtre d'arrêt se compte en minutes.
+set -euo pipefail
+
+SRC_ADDR="{{ btc_migrate_src_addr }}"
+SRC_USER="{{ btc_migrate_src_user }}"
+SRC_PORT="{{ btc_migrate_src_port }}"
+SSH_KEY="{{ btc_migrate_ssh_key_path }}"
+SRC_DATA="{{ btc_migrate_src_datadir }}"
+DST_DATA="{{ btc_migrate_dst_datadir }}"
+STREAMS="{{ btc_migrate_streams }}"
+RSYNC_RETRIES="{{ btc_migrate_stream_retries }}"
+COLD_TIMEOUT="{{ btc_migrate_cold_timeout }}"
+
+log() { printf '%s %s\n' "$(date -Iseconds)" "$*"; }
+
+# `systemctl --user` par SSH non interactif exige XDG_RUNTIME_DIR : sans lui,
+# aucune session D-Bus utilisateur et la commande échoue (« Failed to connect to
+# bus »), alors même que le linger maintient l'unité active.
+ssh_src() {
+  ssh -p "${SRC_PORT}" -i "${SSH_KEY}" -o BatchMode=yes \
+      -o ServerAliveInterval=60 -o ServerAliveCountMax=10 \
+      "${SRC_USER}@${SRC_ADDR}" \
+      "export XDG_RUNTIME_DIR=/run/user/\$(id -u); $*"
+}
+
+# rsync qui TIRE depuis la source. `|| rc=$?` (et non `rsync …; rc=$?`) : sous
+# `set -e`, un rsync non-nul tuerait le script avant la capture du code. On
+# tolère 23 (transfert partiel) et 24 (fichiers disparus) — bénins sur une
+# chaîne vivante — et on retente les erreurs transitoires (coupure du lien).
+RSYNC_SSH="ssh -p ${SRC_PORT} -i ${SSH_KEY} -o BatchMode=yes -o ServerAliveInterval=60 -o ServerAliveCountMax=10"
+rsync_retry() {
+  local attempt=1 rc=0
+  while : ; do
+    rc=0
+    rsync -e "${RSYNC_SSH}" "$@" || rc=$?
+    case "${rc}" in
+      0|23|24) return 0 ;;
+    esac
+    if [ "${attempt}" -ge "${RSYNC_RETRIES}" ]; then
+      log "[ERROR] rsync a échoué (code ${rc}) après ${attempt} tentatives."
+      return "${rc}"
+    fi
+    log "[WARN] rsync code ${rc} — tentative ${attempt}/${RSYNC_RETRIES}, nouvelle passe dans 15 s."
+    attempt=$(( attempt + 1 ))
+    sleep 15
+  done
+}
+{% raw %}
+EXCLUDES=(
+{% endraw %}
+{% for e in btc_migrate_excludes %}  --exclude={{ e | quote }}
+{% endfor %}
+)
+
+SRC_SPEC="${SRC_USER}@${SRC_ADDR}:${SRC_DATA}"
+
+# ── Passe chaude : les fichiers de blocs, source EN MARCHE ──────────────────
+# Parallélisée en N flux pour capter la bande passante d'un lien à forte perte
+# (un flux TCP unique y plafonne). On shard la liste des .dat récupérée sur la
+# source. `blocks/index/` (LevelDB) est EXCLU ici — il part à la passe froide.
+hot_blocks() {
+  log "Passe chaude : fichiers de blocs (source en marche), ${STREAMS} flux."
+  mkdir -p "${DST_DATA}/blocks"
+  if [ "${STREAMS}" -le 1 ]; then
+    rsync_retry -a --partial-dir=.btc-partial --numeric-ids \
+      --exclude 'index/' "${SRC_SPEC}/blocks/" "${DST_DATA}/blocks/"
+    return 0
+  fi
+
+  local list; list="$(mktemp)"
+  ssh_src "cd '${SRC_DATA}/blocks' && find . -maxdepth 1 -type f -name '*.dat' -printf '%P\n'" > "${list}"
+  local total; total="$(wc -l < "${list}")"
+  log "  ${total} fichiers de blocs à répartir."
+
+  local pids=() k
+  for (( k=0; k<STREAMS; k++ )); do
+    local shard; shard="$(mktemp)"
+    awk -v n="${STREAMS}" -v k="${k}" 'NR % n == k' "${list}" > "${shard}"
+    rsync_retry -a --partial-dir=.btc-partial --numeric-ids \
+      --files-from="${shard}" "${SRC_SPEC}/blocks/" "${DST_DATA}/blocks/" &
+    pids+=("$!")
+  done
+  local rc=0 p
+  for p in "${pids[@]}"; do wait "${p}" || rc=1; done
+  rm -f "${list}"
+  return "${rc}"
+}
+
+# ── Passe froide : chainstate + index, source ARRÊTÉE ───────────────────────
+# `--delete` : la cible doit être le miroir EXACT de la source (fichiers LevelDB
+# renommés/compactés entre-temps). Un chien de garde relance la source coûte que
+# coûte si le rsync s'enlise.
+SRC_STOPPED=0
+restore_source() {
+  if [ "${SRC_STOPPED}" -eq 1 ]; then
+    log "Relance de bitcoind sur la source."
+    ssh_src "systemctl --user start bitcoind" || log "[WARN] échec relance source — à vérifier À LA MAIN."
+    SRC_STOPPED=0
+  fi
+}
+trap restore_source EXIT
+
+cold_reconcile() {
+  log "Arrêt de bitcoind sur la source (passe froide)."
+  ssh_src "systemctl --user stop bitcoind"
+  SRC_STOPPED=1
+  # Laisse LevelDB relâcher ses fichiers.
+  sleep 5
+
+  local rc=0
+  ( rsync_retry -a --delete --partial-dir=.btc-partial --numeric-ids \
+      "${EXCLUDES[@]}" "${SRC_SPEC}/" "${DST_DATA}/" ) &
+  local rsync_pid=$!
+  ( sleep "${COLD_TIMEOUT}"; kill "${rsync_pid}" 2>/dev/null ) &
+  local wd=$!
+  wait "${rsync_pid}" || rc=$?
+  if [ -n "${wd}" ]; then kill "${wd}" 2>/dev/null || true; fi
+
+  restore_source
+  return "${rc}"
+}
+
+if [ "${1:-}" = "--check" ]; then
+  echo "=== Migration bitcoind (lecture seule) ==="
+  echo "Source : ${SRC_USER}@${SRC_ADDR}:${SRC_PORT}  ${SRC_DATA}"
+  echo "Cible  : ${DST_DATA}"
+  echo "--- Taille de la chaîne source ---"
+  ssh_src "du -sh '${SRC_DATA}' 2>/dev/null" || echo "(source injoignable)"
+  echo "--- Déjà présent sur la cible ---"
+  du -sh "${DST_DATA}" 2>/dev/null || echo "(rien)"
+  exit 0
+fi
+
+START="$(date +%s)"
+log "=== Migration bitcoind : ${SRC_ADDR} → cet hôte ==="
+
+# La cible ne doit pas écrire dans son datadir pendant qu'on le remplace.
+systemctl --user stop bitcoind 2>/dev/null || true
+
+hot_blocks   || { log "[ERROR] passe chaude en échec."; exit 1; }
+cold_reconcile || { log "[ERROR] passe froide en échec (source relancée par le trap)."; exit 1; }
+
+log "Démarrage de bitcoind sur la cible."
+systemctl --user start bitcoind
+
+END="$(date +%s)"
+log "=== Migration terminée en $(( END - START )) s. Vérifier la synchro : "
+log "    bitcoin-cli -datadir=${DST_DATA} getblockchaininfo | grep -E 'blocks|headers|verificationprogress'"

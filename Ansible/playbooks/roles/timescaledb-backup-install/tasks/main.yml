@@ -1,0 +1,161 @@
+---
+# Installe la sauvegarde de la base d'indicateurs vers `{{ tsdb_backup_dest_host }}`.
+#
+# Comme côté BRK, tout est dérivé de l'inventaire. La seule différence est que
+# la destination peut être la machine elle-même — c'est le cas aujourd'hui — et
+# le script est alors rendu sans SSH.
+
+- name: Fail if the backup destination is not in the inventory
+  ansible.builtin.fail:
+    msg: >-
+      L'hôte de destination `{{ tsdb_backup_dest_host }}` est absent de
+      l'inventaire. Ajoute-le au groupe `backups` avant de jouer ce rôle.
+  when: tsdb_backup_dest_host not in hostvars
+
+- name: Report the resolved backup mode
+  ansible.builtin.debug:
+    msg: >-
+      Sauvegarde {{ 'LOCALE (destination = cette machine)' if tsdb_backup_is_local | bool
+      else 'DISTANTE vers ' ~ tsdb_backup_dest_user ~ '@' ~ tsdb_backup_dest_addr ~ ':' ~ tsdb_backup_dest_port }}
+      → {{ tsdb_backup_dest_dir }}
+
+# ── Cas distant : clé, autorisation, pare-feu, known_hosts ─────────────────
+
+- name: Generate the dedicated backup SSH key
+  community.crypto.openssh_keypair:
+    path: "{{ tsdb_backup_ssh_key_path }}"
+    type: ed25519
+    comment: "{{ inventory_hostname }}-tsdb-backup-to-{{ tsdb_backup_dest_host }}"
+  register: tsdb_backup_key
+  when: not (tsdb_backup_is_local | bool)
+
+- name: Authorize the key on the destination host
+  ansible.posix.authorized_key:
+    user: "{{ tsdb_backup_dest_user }}"
+    state: present
+    key: "{{ tsdb_backup_key.public_key }}"
+    comment: "{{ inventory_hostname }}-tsdb-backup"
+  delegate_to: "{{ tsdb_backup_dest_host }}"
+  become: true
+  when: not (tsdb_backup_is_local | bool)
+  tags: [retarget]
+
+- name: Open SSH on the destination for this host
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ ansible_host }}"
+    port: "{{ ssh_custom_port }}"
+    comment: "backup source {{ inventory_hostname }} - ssh push"
+  delegate_to: "{{ tsdb_backup_dest_host }}"
+  become: true
+  when: not (tsdb_backup_is_local | bool)
+  tags: [retarget]
+
+- name: Refresh the destination host key in known_hosts
+  ansible.builtin.known_hosts:
+    path: "{{ ansible_env.HOME }}/.ssh/known_hosts"
+    name: "[{{ tsdb_backup_dest_addr }}]:{{ tsdb_backup_dest_port }}"
+    key: "{{ lookup('pipe', 'ssh-keyscan -p ' ~ tsdb_backup_dest_port ~ ' -t ed25519 ' ~ tsdb_backup_dest_addr ~ ' 2>/dev/null | grep -v \"^#\"') }}"
+    state: present
+  when: not (tsdb_backup_is_local | bool)
+  tags: [retarget]
+
+# ── Répertoire de destination ──────────────────────────────────────────────
+
+- name: Create the destination backup directory
+  ansible.builtin.file:
+    path: "{{ tsdb_backup_dest_dir }}"
+    state: directory
+    owner: "{{ tsdb_backup_dest_user }}"
+    group: "{{ tsdb_backup_dest_user }}"
+    mode: '0750'
+  delegate_to: "{{ tsdb_backup_dest_host }}"
+  become: true
+  tags: [retarget]
+
+# ── Reprise du dump existant ───────────────────────────────────────────────
+# Uniquement en mode local : à distance, il faudrait retransférer 22 Go, ce que
+# la première exécution du cron fera de toute façon.
+
+- name: Look for a legacy backup
+  ansible.builtin.stat:
+    path: "{{ tsdb_backup_legacy_dir }}/{{ tsdb_db }}-latest.sql.gz"
+  register: tsdb_legacy_dump
+  when: tsdb_backup_migrate_legacy | bool and tsdb_backup_is_local | bool
+
+- name: Move the legacy backup into the new layout
+  ansible.builtin.shell: >-
+    set -o pipefail;
+    dest="{{ tsdb_backup_dest_dir }}/{{ tsdb_db }}-$(date -d @{{ tsdb_legacy_dump.stat.mtime | default(0) | int }} +%Y-%m-%dT%H%M%S).sql.gz";
+    [ -e "$dest" ] || mv "{{ tsdb_backup_legacy_dir }}/{{ tsdb_db }}-latest.sql.gz" "$dest";
+    echo "{{ tsdb_legacy_dump.stat.mtime | default(0) | int }}" > "{{ tsdb_backup_dest_dir }}/last-success"
+  args:
+    executable: /bin/bash
+    creates: "{{ tsdb_backup_dest_dir }}/last-success"
+  when:
+    - tsdb_backup_migrate_legacy | bool
+    - tsdb_backup_is_local | bool
+    - tsdb_legacy_dump.stat.exists | default(false)
+
+# ── Métriques ──────────────────────────────────────────────────────────────
+
+- name: Create the node_exporter textfile directory
+  ansible.builtin.file:
+    path: "{{ node_exporter_textfile_dir }}"
+    state: directory
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: '0755'
+  become: true
+
+# ── Scripts ────────────────────────────────────────────────────────────────
+
+- name: Deploy the TimescaleDB backup script
+  ansible.builtin.template:
+    src: timescaledb-backup.sh.j2
+    dest: "{{ tsdb_dir }}/timescaledb-backup.sh"
+    mode: '0750'
+  tags: [retarget]
+
+- name: Deploy the TimescaleDB restore script
+  ansible.builtin.template:
+    src: timescaledb-restore.sh.j2
+    dest: "{{ tsdb_dir }}/timescaledb-restore.sh"
+    mode: '0750'
+  tags: [retarget]
+
+- name: Schedule the TimescaleDB backup
+  ansible.builtin.cron:
+    name: "papangmetrics-timescaledb backup"
+    hour: "{{ tsdb_backup_cron_hour }}"
+    minute: "0"
+    job: "{{ tsdb_dir }}/timescaledb-backup.sh >> {{ tsdb_dir }}/backup.log 2>&1"
+
+# Les deux anciens scripts sont retirés — pas laissés « au cas où ». Un
+# backup.sh périmé qui écrit encore dans {{ tsdb_backup_legacy_dir }} donnerait
+# deux jeux de sauvegardes divergents, dont un que plus personne ne surveille.
+- name: Remove the superseded backup scripts
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ tsdb_dir }}/backup.sh"
+    - "{{ tsdb_dir }}/backup-ssh.sh"
+
+- name: Rotate the backup log
+  ansible.builtin.copy:
+    dest: /etc/logrotate.d/timescaledb-backup
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      {{ tsdb_dir }}/backup.log {
+          weekly
+          rotate 8
+          compress
+          missingok
+          notifempty
+          copytruncate
+      }
+  become: true

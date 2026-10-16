@@ -1,0 +1,14 @@
+---
+- name: Purge MTBridge (service, data, MT5 dir, Prometheus target)
+  hosts: mtbridges
+  gather_facts: false
+
+  roles:
+    - mtbridge-purge
+
+- name: Purge Windows system exporter and its Prometheus target
+  hosts: mtbridges
+  gather_facts: false
+
+  roles:
+    - exporter-sys-windows-purge

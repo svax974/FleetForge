@@ -1,0 +1,20 @@
+---
+# Supprime Ollama ET tous les modèles téléchargés.
+#
+#   ./play.sh web3c purge-ollama.yml
+#
+# ATTENTION : /usr/share/ollama part avec le reste. Les modèles devront être
+# retéléchargés (plusieurs gigaoctets chacun) par `deploy-ollama-model.yml`.
+#
+# Retire aussi la sonde, l'utilisateur système et les règles de pare-feu
+# posées par `ollama-security`.
+#
+# Vise l'entrée dédiée `ollama` (machine hub, CLAUDE.md § 2) depuis le
+# 11/10/2026 — plus de `hosts: all` à restreindre par `--limit`.
+
+- name: Purge d'Ollama (modèles compris)
+  hosts: ollama
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - ollama-purge

@@ -1,0 +1,39 @@
+---
+# Configure VPN firewall rules
+- name: Allow https connections on vpn tcp port from proxies
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ hostvars[item].ansible_host }}"
+    port: "{{ vpn_tcp_port }}"
+  loop: "{{ groups['proxies'] | default([]) }}"
+
+- name: Allow https connections on mongodb tcp port from proxies
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ hostvars[item].ansible_host }}"
+    port: "{{ mongodb_port }}"
+  loop: "{{ groups['proxies'] | default([]) }}"
+
+- name: Allow https connections on mongodb tcp port from whitelist
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ item }}"
+    port: "{{ mongodb_port }}"
+  with_items:
+    "{{ whitelist }}"
+
+- name: Allow RPC connections on VPN TCP data port number 1 from everywhere
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: any
+    port: "{{ vpn_data_port }}"
+- name: Allow RPC connections on VPN TCP data port number 2 from everywhere
+  community.general.ufw:
+    rule: limit
+    proto: tcp
+    from_ip: any
+    port: "{{ vpn_data_port2 }}"

@@ -1,0 +1,63 @@
+---
+# Reprend un déploiement fait sous l'ancien nom du projet (InfraManager).
+#
+# Sans cette étape, le premier déploiement de FleetForge laisserait tourner
+# l'ancien service sur le MÊME port — le nouveau ne démarrerait pas — et
+# recompilerait de zéro un workspace déjà construit. Chaque reprise ne joue que
+# si l'ancien emplacement existe et le nouveau pas encore : rien n'est
+# fusionné, et un rejeu ne fait rien.
+
+- name: Look for the units of the former project name
+  ansible.builtin.stat:
+    path: "/etc/systemd/system/{{ item }}.service"
+  loop: "{{ ff_legacy_units }}"
+  register: ff_legacy_unit_files
+  tags: [code]
+
+- name: Stop, disable and remove the units of the former project name
+  ansible.builtin.shell: |
+    systemctl disable --now {{ item.item }} || true
+    rm -f /etc/systemd/system/{{ item.item }}.service
+  loop: "{{ ff_legacy_unit_files.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: item.stat.exists
+  register: ff_legacy_units_removed
+  become: true
+  tags: [code]
+
+- name: Reload systemd after removing the former units
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when: ff_legacy_units_removed is changed
+  become: true
+  tags: [code]
+
+# Le répertoire porte le workspace déjà compilé (target/, plusieurs Go), la clé
+# dédiée, sa passphrase et le helper askpass : le reprendre évite une
+# recompilation complète. L'ancien fichier d'environnement est retiré, le
+# nouveau (fleetforge.env) étant déposé plus loin.
+- name: Take over the directories of the former project name
+  ansible.builtin.shell: |
+    take() {
+      if [ -d "$1" ] && [ ! -e "$2" ]; then
+        mv "$1" "$2" && echo "moved $1"
+      fi
+    }
+    take {{ ff_legacy_dir | quote }} {{ ff_dir | quote }}
+    take {{ ('/home/' ~ ff_user ~ '/.config/infra-manager') | quote }} {{ ('/home/' ~ ff_user ~ '/.config/fleetforge') | quote }}
+    rm -f {{ (ff_dir ~ '/infra-manager.env') | quote }}
+  register: ff_legacy_dirs
+  changed_when: "'moved' in ff_legacy_dirs.stdout"
+  become: true
+  become_user: "{{ ff_user }}"
+  tags: [code]
+
+# L'ancienne cible publierait `up=0` indéfiniment sous le job `infra-manager`.
+- name: Remove the Prometheus target of the former project name
+  ansible.builtin.file:
+    path: "/home/{{ remote_username }}/prometheus/prometheus-configs/infra-manager"
+    state: absent
+  delegate_to: "{{ prometheus_host }}"
+  become: true
+  tags: [monitoring]

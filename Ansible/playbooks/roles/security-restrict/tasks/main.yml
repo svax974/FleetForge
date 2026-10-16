@@ -1,0 +1,14 @@
+---
+- name: Remove ssh root access and restart sshd
+  ansible.builtin.lineinfile:
+    path: "/etc/ssh/sshd_config"
+    regexp: "PermitRootLogin"
+    line: "PermitRootLogin no"
+  notify: "RestartSSHD"
+
+- name: Remove allowance for SSH port {{ ssh_custom_port }} from everywhere
+  ansible.builtin.command:
+    cmd: ufw delete allow {{ ssh_custom_port }}/tcp
+- name: Remove allowance for SSH from everywhere
+  ansible.builtin.command:
+    cmd: ufw delete allow 22/tcp

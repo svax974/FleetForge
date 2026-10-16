@@ -1,0 +1,35 @@
+---
+# Désinstalle le dispositif de sauvegarde de la base d'indicateurs sur la
+# SOURCE. Les dumps déjà présents sur la destination sont CONSERVÉS, ainsi que
+# le script de restauration qui permet encore de s'en servir.
+
+- name: Remove the backup cron job
+  ansible.builtin.cron:
+    name: "papangmetrics-timescaledb backup"
+    state: absent
+
+- name: Remove the backup script
+  ansible.builtin.file:
+    path: "{{ tsdb_dir }}/timescaledb-backup.sh"
+    state: absent
+
+- name: Remove the logrotate configuration
+  ansible.builtin.file:
+    path: /etc/logrotate.d/timescaledb-backup
+    state: absent
+  become: true
+
+# Retirée pour la même raison que côté BRK : laisser la métrique en place ferait
+# sonner BackupStale sur une sauvegarde volontairement arrêtée.
+- name: Remove the Prometheus textfile metric
+  ansible.builtin.file:
+    path: "{{ node_exporter_textfile_dir }}/backup_timescale.prom"
+    state: absent
+  become: true
+
+- name: Notice — the restore script is kept
+  ansible.builtin.debug:
+    msg: >-
+      Sauvegardes arrêtées. {{ tsdb_dir }}/timescaledb-restore.sh est conservé et
+      reste utilisable sur les dumps déjà en place. Utilise
+      timescaledb-backup-purge pour supprimer aussi les données de la destination.

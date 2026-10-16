@@ -1,0 +1,91 @@
+---
+- name: Collecter les informations sur les services
+  ansible.builtin.service_facts:
+
+- name: Stop bitcoind service (if running)
+  ansible.builtin.service:
+    name: bitcoind
+    scope: user
+    state: stopped
+  when: "'bitcoind.service' in ansible_facts.services"
+
+# ── Ne JAMAIS supprimer ~/bitcoin ────────────────────────────────────────────
+# Le rôle faisait auparavant `state: absent` sur `~/bitcoin` avant de
+# réinstaller. Or la chaîne vit dans `~/bitcoin/data` : 887 Go au 11/08/2026.
+# Rejouer `deploy-rpcbtc.yml` sur le nœud en production détruisait donc la
+# chaîne ET la configuration, imposant plusieurs JOURS de re-synchronisation
+# initiale, suivis d'une réindexation complète de BRK — soit l'arrêt total du
+# pipeline d'indicateurs. Un rôle d'installation qu'on ne peut pas rejouer sans
+# détruire les données n'est pas redéployable, ce qui est pourtant sa raison
+# d'être.
+#
+# Seuls les répertoires livrés par l'archive sont remplacés. `data/` et
+# `bitcoin.conf` sont des données, pas des artefacts d'installation.
+#
+# Le marqueur de version pilote tout le bloc : sans lui, « supprimer les
+# binaires » et « les réinstaller » sont deux tâches indépendantes, et il suffit
+# que la seconde soit sautée (guard `creates`, échec réseau) pour laisser un
+# nœud sans binaire. Les deux sont donc conditionnées à la MÊME donnée.
+- name: Check which Bitcoin Core version is installed
+  ansible.builtin.stat:
+    path: "~/bitcoin/.installed-{{ bitcoin_core_version }}"
+  register: btc_version_marker
+
+- name: Delete the extracted archive directory if a previous run left it
+  ansible.builtin.file:
+    state: absent
+    path: "~/bitcoin-{{ bitcoin_core_version }}"
+  when: not btc_version_marker.stat.exists
+
+- name: Download BTC node software
+  ansible.builtin.unarchive:
+    src: "https://bitcoincore.org/bin/bitcoin-core-{{ bitcoin_core_version }}/bitcoin-{{ bitcoin_core_version }}-x86_64-linux-gnu.tar.gz"
+    dest: "~/"
+    remote_src: yes
+  when: not btc_version_marker.stat.exists
+
+# `cp -a <archive>/. ~/bitcoin/` et non `mv` : `~/bitcoin` existe déjà sur un
+# nœud en service (il contient `data/`), et `mv` y déplacerait l'arborescence
+# extraite EN TANT QUE SOUS-RÉPERTOIRE `~/bitcoin/bitcoin-<version>` — les
+# binaires atterriraient au mauvais endroit et bitcoind ne démarrerait plus.
+#
+# Les anciens répertoires livrés par l'archive sont retirés juste avant la
+# copie, dans la même tâche : le nœud n'est donc jamais laissé sans binaire par
+# un échec entre deux tâches.
+- name: Install the binaries alongside the existing data directory
+  ansible.builtin.shell: |
+    set -e
+    mkdir -p ~/bitcoin
+    rm -rf ~/bitcoin/bin ~/bitcoin/lib ~/bitcoin/include ~/bitcoin/share
+    cp -a ~/bitcoin-{{ bitcoin_core_version }}/. ~/bitcoin/
+    rm -rf ~/bitcoin-{{ bitcoin_core_version }}
+    rm -f ~/bitcoin/.installed-*
+    touch ~/bitcoin/.installed-{{ bitcoin_core_version }}
+  args:
+    executable: /bin/bash
+  when: not btc_version_marker.stat.exists
+
+- name: Creates bitcoin data directory
+  ansible.builtin.file:
+    path: "~/bitcoin/data"
+    state: directory
+
+- name: Creates bitcoin data directory
+  ansible.builtin.file:
+    path: "~/.config/systemd/user"
+    state: directory
+
+- name: Copy the service file
+  template: src=bitcoind.service dest="~/.config/systemd/user/bitcoind.service"
+
+- name: Enable linger so the user service keeps running without an active session
+  ansible.builtin.command: "loginctl enable-linger {{ remote_username }}"
+  become: true
+  changed_when: false
+
+- name: Enable and start bitcoind service
+  ansible.builtin.service:
+    name: bitcoind
+    scope: user
+    enabled: yes
+    state: started

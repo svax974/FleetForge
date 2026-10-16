@@ -1,0 +1,23 @@
+---
+# ── Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ───────────────────────
+# Échoue immédiatement si le parc n'a pas d'hôte de supervision utilisable,
+# puis vérifie — et répare — le socle de la machine, node_exporter et sa cible
+# Prometheus. Un service déployé sans supervision est un service dont personne
+# ne saura qu'il est tombé.
+# Les contrôles bloquants portent le tag `always` : ils s'appliquent même à un
+# rejeu ciblé par `--tags`.
+- name: Contrôle préalable
+  hosts: all
+  remote_user: "{{ remote_username }}"
+  roles:
+    - role: host-preflight
+      preflight_require_docker: false
+
+- name: Install llama.cpp engine
+  hosts: all
+  remote_user: "{{ remote_username }}"
+  become: true
+  tags: deploy
+
+  roles:
+    - llamacpp-install

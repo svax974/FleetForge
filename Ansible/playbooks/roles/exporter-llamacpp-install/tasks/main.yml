@@ -1,0 +1,37 @@
+---
+# Register the llama.cpp instance's native Prometheus metrics endpoint
+# (llama-server --metrics, served at /metrics on the instance's own port)
+# on the monitoring host, and open the firewall for the monitor to scrape it.
+
+- name: Set prometheus home on monitoring host
+  ansible.builtin.set_fact:
+    prometheus_home: "/home/{{ remote_username }}/prometheus"
+
+- name: Create node-llamacpp prometheus-configs directory on monitoring host
+  ansible.builtin.file:
+    path: "{{ prometheus_home }}/prometheus-configs/node-llamacpp"
+    state: directory
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: '0755'
+  delegate_to: "{{ prometheus_host }}"
+
+- name: Deploy llama.cpp Prometheus target file on monitoring host
+  ansible.builtin.template:
+    src: targets.json.j2
+    dest: "{{ prometheus_home }}/prometheus-configs/node-llamacpp/{{ inventory_hostname }}-{{ llamacpp_instance_id }}.json"
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: '0644'
+  delegate_to: "{{ prometheus_host }}"
+  notify: reload prometheus (llamacpp)
+
+- name: Open Prometheus scrape port {{ llamacpp_port }} on firewall
+  community.general.ufw:
+    rule: allow
+    src: "{{ hostvars[prometheus_host]['ansible_host'] }}"
+    port: "{{ llamacpp_port }}"
+    proto: tcp
+    comment: "Prometheus scrape - llama.cpp instance {{ llamacpp_instance_id }}"
+  become: yes
+  ignore_errors: true

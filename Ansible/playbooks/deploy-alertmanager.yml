@@ -1,0 +1,56 @@
+---
+# Alertmanager — notification e-mail des alertes Prometheus.
+# Valable pour les deux parcs : `alertmanager1` existe dans les deux
+# inventaires, et le rôle dérive son smarthost de `mail_domains[0].name`.
+# ── Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ───────────────────────
+# Échoue immédiatement si le parc n'a pas d'hôte de supervision utilisable,
+# puis vérifie — et répare — le socle de la machine, node_exporter et sa cible
+# Prometheus. Un service déployé sans supervision est un service dont personne
+# ne saura qu'il est tombé.
+# Les contrôles bloquants portent le tag `always` : ils s'appliquent même à un
+# rejeu ciblé par `--tags`.
+- name: Contrôle préalable
+  hosts: alertmanager1
+  remote_user: "{{ remote_username }}"
+  roles:
+    - role: host-preflight
+      preflight_require_docker: true
+
+- name: Deploy Alertmanager (email notifications)
+  hosts: alertmanager1
+  remote_user: "{{ remote_username }}"
+  roles:
+    - alertmanager-install
+    - alertmanager-security
+
+# 9093 est PUBLIÉ par Docker : les règles ufw d'alertmanager-security ne le
+# voient jamais, seul DOCKER-USER le filtre réellement. Sans cela, le
+# déploiement laisse une API sans authentification joignable depuis Internet —
+# n'importe qui peut y poser un silence et éteindre la supervision. Trop grave
+# pour attendre le prochain `update-ufw-all`.
+#
+# Le play vise l'hôte canonique de la machine, pas `alertmanager1` :
+# `docker_ports_rules` décrit une MACHINE et vit dans son host_vars
+# (prometheus1.yml, monitor.yml). Joué sur `alertmanager1`, qui n'a pas de
+# host_vars, la liste serait vide et le rôle ne poserait rien — un no-op
+# silencieux, exactement le genre de sécurité décorative qu'on cherche à éviter.
+#
+# Motif en dur : un `hosts:` de play est résolu avant les group_vars, donc
+# `{{ prometheus_host }}` y vaut toujours son défaut et n'aurait matché aucun
+# hôte sur web3c.
+- name: Filter Docker-published monitoring ports
+  hosts: prometheus1:monitor
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - docker-ports-security
+
+# ── Supervision (OBLIGATOIRE, voir CLAUDE.md) ──────────────────────────────
+# Sonde `service_up` + métriques du service, et enregistrement de la cible
+# auprès de Prometheus. Rejouable seule :
+#   ./play.sh papanglabs deploy-alertmanager.yml --tags monitoring
+- name: Supervision du service
+  hosts: alertmanager1
+  remote_user: "{{ remote_username }}"
+  roles:
+    - alertmanager-monitoring

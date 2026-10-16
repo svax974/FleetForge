@@ -1,0 +1,8 @@
+---
+# Dupliqué depuis sync-backup-install/defaults (voir sync-backup-remove).
+sync_backup_name: "sync-{{ sync_instance }}"
+sync_backup_dest_host: backup-sync
+sync_backup_dest_user: "{{ remote_username }}"
+sync_backup_dest_dir: "{{ backup_root }}/{{ sync_backup_name }}"
+sync_backup_ssh_key: "/root/.ssh/id_ed25519_{{ sync_backup_name }}"
+sync_backup_log: "/var/log/sync-backup-{{ sync_instance }}.log"

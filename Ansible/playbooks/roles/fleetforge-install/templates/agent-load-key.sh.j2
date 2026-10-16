@@ -1,0 +1,27 @@
+#!/bin/sh
+# Charge la clé dédiée dans l'agent, au démarrage du service.
+#
+# Le script attend la socket : `ssh-agent -D` est lancé par le même service et
+# systemd exécute ExecStartPost dès que le processus est démarré, souvent avant
+# que la socket n'existe. Sans cette attente, un démarrage sur deux laisse
+# l'agent vide — et un agent vide ne se distingue pas d'un agent chargé tant
+# qu'on ne tente pas une connexion.
+set -eu
+
+SOCK="{{ ff_agent_socket }}"
+KEY="/home/{{ ff_user }}/.ssh/{{ ff_remote_key_name }}"
+
+i=0
+while [ ! -S "$SOCK" ]; do
+    i=$((i + 1))
+    if [ "$i" -gt 50 ]; then
+        echo "socket de l'agent absente après 5 s : $SOCK" >&2
+        exit 1
+    fi
+    sleep 0.1
+done
+
+SSH_AUTH_SOCK="$SOCK" \
+SSH_ASKPASS="{{ ff_dir }}/askpass.sh" \
+SSH_ASKPASS_REQUIRE=force \
+    ssh-add "$KEY"

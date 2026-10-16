@@ -1,0 +1,102 @@
+---
+- name: Get proxy servers from inventory
+  ansible.builtin.set_fact:
+    proxy_hosts: "{{ groups['proxies'] | default([]) }}"
+
+- name: Get proxy IP addresses
+  ansible.builtin.set_fact:
+    proxy_ips: "{{ proxy_hosts | map('extract', hostvars, 'ansible_host') | list }}"
+
+- name: Get all hosts from inventory
+  ansible.builtin.set_fact:
+    all_inventory_hosts: "{{ groups['all'] | default([]) }}"
+
+- name: Get IP addresses from all inventory hosts
+  ansible.builtin.set_fact:
+    inventory_ips: "{{ all_inventory_hosts | map('extract', hostvars, 'ansible_host') | select('defined') | list }}"
+
+- name: Combine allowed IPs (proxies + inventory + whitelist)
+  ansible.builtin.set_fact:
+    allowed_ips: "{{ (proxy_ips + inventory_ips + (whitelist | default([]))) | unique }}"
+
+- name: Set UFW default policies
+  community.general.ufw:
+    direction: "{{ item.direction }}"
+    policy: "{{ item.policy }}"
+  loop:
+    - { direction: 'incoming', policy: 'deny' }
+    - { direction: 'outgoing', policy: 'allow' }
+  notify: restart ufw
+
+- name: Allow HTTP for webmail (will be behind proxy)
+  community.general.ufw:
+    rule: allow
+    port: '80'
+    proto: tcp
+    comment: 'Webmail HTTP (behind proxy)'
+
+- name: Allow mail ports from authorized IPs only
+  community.general.ufw:
+    rule: allow
+    port: "{{ item.1.port }}"
+    proto: "{{ item.1.proto }}"
+    src: "{{ item.0 }}"
+    comment: "{{ item.1.comment }}"
+  with_nested:
+    - "{{ allowed_ips }}"
+    - - { port: '465', proto: 'tcp', comment: 'SMTPS' }
+      - { port: '587', proto: 'tcp', comment: 'Submission' }
+      - { port: '993', proto: 'tcp', comment: 'IMAPS' }
+  notify: restart ufw
+
+- name: Check if Let's Encrypt certificate exists for domain
+  ansible.builtin.stat:
+    path: /etc/letsencrypt/live/{{ domain_name }}/fullchain.pem
+  register: letsencrypt_cert
+
+- name: Check if Let's Encrypt private key exists for domain
+  ansible.builtin.stat:
+    path: /etc/letsencrypt/live/{{ domain_name }}/privkey.pem
+  register: letsencrypt_key
+
+- name: Fail if Let's Encrypt certificates are not found
+  ansible.builtin.fail:
+    msg: |
+      ========================================
+      ERROR: Let's Encrypt certificates not found!
+      ========================================
+      
+      Expected certificate files:
+      - /etc/letsencrypt/live/{{ domain_name }}/fullchain.pem
+      - /etc/letsencrypt/live/{{ domain_name }}/privkey.pem
+      
+      Please ensure you have valid Let's Encrypt certificates for {{ domain_name }}
+      before running this mail security role.
+      
+      You can obtain certificates using certbot:
+      sudo certbot certonly --standalone -d {{ domain_name }} -d mail.{{ domain_name }}
+      
+      ========================================
+  when: not letsencrypt_cert.stat.exists or not letsencrypt_key.stat.exists
+
+- name: Display Let's Encrypt certificate information
+  ansible.builtin.debug:
+    msg: |
+      ✅ Let's Encrypt certificates found:
+      - Certificate: /etc/letsencrypt/live/{{ domain_name }}/fullchain.pem
+      - Private key: /etc/letsencrypt/live/{{ domain_name }}/privkey.pem
+      - Will be used for mail.{{ domain_name }} and mail services
+
+- name: Add postfix user to ssl-cert group for certificate access
+  ansible.builtin.user:
+    name: postfix
+    groups: ssl-cert
+    append: yes
+  notify: restart postfix
+
+- name: Add dovecot user to ssl-cert group for certificate access
+  ansible.builtin.user:
+    name: dovecot
+    groups: ssl-cert
+    append: yes
+  notify: restart dovecot

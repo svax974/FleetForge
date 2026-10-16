@@ -1,0 +1,12 @@
+---
+# Tout ce que fait `theta-edge-sweep-remove`, plus le journal des transferts.
+# Node.js/npm restent installés (paquets système génériques).
+
+- name: Run the remove role
+  ansible.builtin.include_role:
+    name: theta-edge-sweep-remove
+
+- name: Remove the sweep log
+  ansible.builtin.file:
+    path: /var/log/theta-edge-sweep.log
+    state: absent

@@ -1,0 +1,29 @@
+---
+# Filtrage du back PapangLabs.
+#
+# Le seul port exposé est celui du répartiteur nginx (back-lb), et il est PUBLIÉ
+# par Docker : une règle ufw dessus n'aurait aucun effet (Docker insère ses DNAT
+# en amont). Le filtrage réel vit dans la chaîne DOCKER-USER, alimentée par
+# `docker-ports-security` depuis `host_vars/<hôte canonique>.yml`.
+#
+# Ce rôle ne redéclare donc PAS les règles — une par MACHINE, pas une par rôle,
+# c'est la convention du parc — il applique celles de la machine et refuse de
+# passer si le port du back n'y figure pas.
+
+pgb_port: "{{ app_port | default(9741) }}"
+
+# Accès SORTANTS dont le back a besoin, et hôte d'inventaire qui les héberge.
+# Ces ouvertures se posent sur la machine DE DESTINATION (`delegate_to`), pas
+# ici : un back n'est utilisable que si les services qu'il consomme l'autorisent,
+# et personne ne pense à rejouer le pare-feu d'une autre machine après avoir
+# déployé un back. Chaque service reste par ailleurs source de vérité de ses
+# propres règles (`papangmetrics-api-security` dérive la même liste du groupe
+# `backsindicators`) — les deux chemins posent une règle au commentaire
+# identique, donc ufw n'en garde qu'une.
+#
+# La base de données n'y figure pas : la prod comme la préprod pointent sur
+# Supabase, joignable par l'Internet public.
+pgb_upstream_services:
+  - name: papangmetrics-api
+    host: papangmetrics1
+    port: "{{ papangmetrics_api_port | default(9743) }}"

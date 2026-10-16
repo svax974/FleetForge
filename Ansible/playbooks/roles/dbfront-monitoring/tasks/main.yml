@@ -1,0 +1,45 @@
+---
+# Supervision de la base PostgreSQL du frontend.
+#
+# Convention `<service>-monitoring` (CLAUDE.md) : le rôle dépose une SONDE
+# déclarative pour `svcprobe`, qui expose `service_up{service="postgres-front"}`.
+# Aucun redémarrage n'est nécessaire — svcprobe relit son répertoire de sondes
+# à chaque scrape.
+
+- name: Ensure the shared probe is installed
+  ansible.builtin.include_role:
+    name: svcprobe-install
+    public: true
+  tags: [monitoring]
+
+- name: Deploy the dbfront probe
+  ansible.builtin.template:
+    src: check.json.j2
+    dest: "{{ svcprobe_checks_dir }}/dbfront.json"
+    owner: root
+    group: root
+    mode: '0644'
+  become: true
+  tags: [monitoring]
+
+# Contrôle immédiat : une sonde déposée mais qui répond `service_up 0` alors
+# que le service tourne est une sonde MAL ÉCRITE, et elle ferait sonner une
+# alerte en permanence. Mieux vaut le voir au déploiement.
+- name: Verify the probe answers
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ svcprobe_listen_port }}/metrics"
+    return_content: true
+  register: dbfront_probe
+  retries: 6
+  delay: 5
+  until: dbfront_probe.status is defined and dbfront_probe.status == 200
+  changed_when: false
+  tags: [monitoring]
+
+- name: Report the probe result
+  ansible.builtin.debug:
+    msg: >-
+      {{ dbfront_probe.content.split('\n')
+         | select('search', 'service="postgres-front"')
+         | list }}
+  tags: [monitoring]

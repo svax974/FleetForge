@@ -1,0 +1,7 @@
+---
+# Ollama expose /api/version et /api/tags sans authentification. La sonde porte
+# sur /api/tags plutôt que sur le port : le démon accepte les connexions bien
+# avant d'être capable de servir un modèle.
+ollamamon_unit: ollama
+ollamamon_port: 11434
+ollamamon_url: "http://127.0.0.1:11434/api/tags"

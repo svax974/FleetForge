@@ -1,0 +1,82 @@
+---
+# Toutes les tâches tournent sur le poste de contrôle : `delegate_to: localhost`
+# est porté par le play, pas par le rôle.
+
+- name: Check the front env file
+  ansible.builtin.stat:
+    path: "{{ pgf_src }}/{{ pgf_env_file }}"
+  register: pgf_env
+
+- name: Fail when the front env file is missing
+  ansible.builtin.fail:
+    msg: >-
+      {{ pgf_src }}/{{ pgf_env_file }} introuvable. C'est lui qui porte
+      CLOUDFLARE_PAGES_PROJECT, CLOUDFLARE_PAGES_BRANCH et le jeton d'API :
+      sans lui, wrangler publierait sur le projet de la dernière session
+      `wrangler login`, ce qui peut être n'importe lequel.
+  when: not pgf_env.stat.exists
+
+- name: Check the npm dependencies
+  ansible.builtin.stat:
+    path: "{{ pgf_src }}/front/node_modules"
+  register: pgf_modules
+
+- name: Install the npm dependencies
+  ansible.builtin.command:
+    cmd: npm install
+    chdir: "{{ pgf_src }}/front"
+  when: pgf_force_install | bool or not pgf_modules.stat.exists
+
+# Le mode Vite se déduit du SUFFIXE du fichier d'environnement, comme dans
+# deploy-full.sh : `.env` → mode par défaut (production), `.env.preprod` →
+# `--mode preprod`. Sans cela, Vite chargerait toujours `front/.env` et un
+# déploiement de préprod partirait avec la configuration de prod — le bundle
+# n'aurait rien pour se distinguer.
+- name: Resolve the Vite mode
+  ansible.builtin.set_fact:
+    pgf_vite_mode: >-
+      {{ (pgf_env_file | basename)[5:] if (pgf_env_file | basename).startswith('.env.') else '' }}
+
+- name: Build the front bundle
+  ansible.builtin.command:
+    cmd: "./node_modules/.bin/vite build{{ ' --mode ' ~ pgf_vite_mode if pgf_vite_mode | length > 0 else '' }}"
+    chdir: "{{ pgf_src }}/front"
+  environment:
+    NODE_OPTIONS: "--max-old-space-size=4096"
+
+- name: Fail when the build produced nothing
+  ansible.builtin.stat:
+    path: "{{ pgf_src }}/front/dist/index.html"
+  register: pgf_dist
+
+- name: Stop when dist/ is empty
+  ansible.builtin.fail:
+    msg: "Le build n'a produit aucun dist/index.html — publication annulée."
+  when: not pgf_dist.stat.exists
+
+# Le fichier d'environnement est SOURCÉ plutôt que lu par un lookup : il porte
+# des valeurs guillemetées et des caractères que le parseur `properties`
+# rendrait différemment de ce que fait le shell, et c'est le shell qui fait foi
+# pour deploy-full.sh. Une seule interprétation, donc un seul comportement.
+- name: Publish to Cloudflare Pages
+  ansible.builtin.shell:
+    cmd: |
+      set -euo pipefail
+      set -a
+      . "{{ pgf_src }}/{{ pgf_env_file }}"
+      set +a
+      BRANCH="{{ pgf_branch }}"
+      [ -n "${BRANCH}" ] || BRANCH="${CLOUDFLARE_PAGES_BRANCH:-main}"
+      : "${CLOUDFLARE_PAGES_PROJECT:?CLOUDFLARE_PAGES_PROJECT absent de {{ pgf_env_file }}}"
+      echo "projet=${CLOUDFLARE_PAGES_PROJECT} branche=${BRANCH}"
+      npx --yes wrangler pages deploy dist \
+        --project-name="${CLOUDFLARE_PAGES_PROJECT}" \
+        --branch="${BRANCH}"
+    chdir: "{{ pgf_src }}/front"
+    executable: /bin/bash
+  register: pgf_publish
+  changed_when: true
+
+- name: Report the deployment URL
+  ansible.builtin.debug:
+    msg: "{{ pgf_publish.stdout_lines | select('search', 'https://') | list }}"

@@ -1,0 +1,23 @@
+---
+# Supervision de TradeKong (postgres, redis, back, répartiteur), déployée hors
+# Ansible — ce playbook ne pose QUE la sonde svcprobe, il n'installe rien.
+#
+#   ./play.sh web3c deploy-tradekong.yml
+#
+# Ex-`deploy-tradekong-monitoring.yml`, renommé le 11/10/2026 : le nom de la
+# famille (`tradekong`) est celui du playbook, même quand l'application elle-même
+# se déploie hors de ce dépôt.
+
+# ── Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ───────────────────────
+- name: Contrôle préalable
+  hosts: tradekong
+  remote_user: "{{ remote_username }}"
+  roles:
+    - role: host-preflight
+      preflight_require_docker: true
+
+- name: Supervision du service
+  hosts: tradekong
+  remote_user: "{{ remote_username }}"
+  roles:
+    - tradekong-monitoring

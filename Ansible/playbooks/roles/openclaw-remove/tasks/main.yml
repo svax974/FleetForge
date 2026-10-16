@@ -1,0 +1,65 @@
+---
+# Arrête et retire l'unité systemd --user d'OpenClaw, sa sonde et son
+# filtrage ufw. Conserve la configuration, le workspace et le jeton de
+# gateway sous {{ openclaw_prefix }} (voir openclaw-purge).
+
+- name: Look up the srvc UID
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ openclaw_user }}"
+    fail_key: false
+- name: Set the XDG runtime dir fact
+  ansible.builtin.set_fact:
+    openclaw_xdg_runtime_dir: "/run/user/{{ ansible_facts.getent_passwd[openclaw_user][1] }}"
+  when: (ansible_facts.getent_passwd | default({}))[openclaw_user] | default(none) is not none
+
+- name: Stop and disable the OpenClaw gateway unit
+  ansible.builtin.systemd:
+    scope: user
+    name: openclaw-gateway
+    state: stopped
+    enabled: false
+  become: true
+  become_user: "{{ openclaw_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "{{ openclaw_xdg_runtime_dir | default('/run/user/0') }}"
+  when: openclaw_xdg_runtime_dir is defined
+  failed_when: false
+
+- name: Remove the openclaw CLI wrapper
+  ansible.builtin.file:
+    path: /usr/local/bin/openclaw
+    state: absent
+  become: true
+
+- name: Close the OpenClaw port
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    port: "{{ openclaw_port }}"
+    from_ip: "{{ item }}"
+    delete: true
+  loop: "{{ (whitelist | default([]))
+            + (groups['proxies'] | default([]) | map('extract', hostvars, 'ansible_host') | list)
+            + [openclaw_lan_cidr]
+            + openclaw_extra_allowed_cidrs }}"
+  become: true
+  failed_when: false
+
+- name: Remove the default-deny rule on the OpenClaw port
+  community.general.ufw:
+    rule: deny
+    proto: tcp
+    port: "{{ openclaw_port }}"
+    delete: true
+  become: true
+  failed_when: false
+
+# La sonde svcprobe elle-même (port 9110) reste : elle est PARTAGÉE avec les
+# autres alias de cette machine NAT domestique.
+- name: Remove the OpenClaw probe
+  ansible.builtin.file:
+    path: "{{ svcprobe_checks_dir | default('/etc/svcprobe/checks.d') }}/openclaw.json"
+    state: absent
+  become: true
+  tags: [monitoring]

@@ -1,0 +1,47 @@
+---
+# Contrôle d'exposition des nœuds Theta Edge.
+#
+# Le RPC edgecore rend la mnémonique du wallet interne sans aucune
+# authentification (`edgecore.WalletExportKey`, vérifié le 11/10/2026 sur
+# l'image du 27/09/2026). Il ne doit être joignable que depuis l'hôte.
+#
+# Les anciennes règles ufw DENY de ce rôle étaient décoratives : ufw ne voit
+# pas le trafic des ports publiés par Docker (CLAUDE.md § 1). Ce qui protège
+# réellement ce port, c'est sa publication sur 127.0.0.1 — à condition que
+# Docker l'applique : avant la 28.0, un voisin du même segment L2 (un autre
+# client de l'hébergeur) atteignait un port publié sur 127.0.0.1 en routant
+# directement vers l'IP du conteneur. Ce rôle VÉRIFIE donc ces deux points
+# au lieu de poser des règles.
+
+- name: Read the Docker engine version
+  ansible.builtin.command: docker version --format '{{ "{{" }}.Server.Version{{ "}}" }}'
+  register: theta_edge_docker_version
+  changed_when: false
+
+- name: Require Docker >= 28 (127.0.0.1 publications enforced)
+  ansible.builtin.assert:
+    that: theta_edge_docker_version.stdout is version('28.0', '>=')
+    fail_msg: >-
+      Docker {{ theta_edge_docker_version.stdout }} : un port publié sur
+      127.0.0.1 reste joignable depuis le segment L2 de l'hôte, et le RPC
+      Theta y rend la mnémonique du wallet. Mettre Docker à jour (≥ 28.0).
+    quiet: true
+
+- name: List the published ports of the Theta Edge containers
+  ansible.builtin.shell: |
+    set -o pipefail
+    for c in $(docker ps --format '{{ "{{" }}.Names{{ "}}" }}' --filter name='^theta-edge-'); do
+      docker port "$c" | sed "s/^/$c /"
+    done
+  args:
+    executable: /bin/bash
+  register: theta_edge_ports
+  changed_when: false
+
+# `docker port` affiche `17888/tcp -> 127.0.0.1:17888` ; toute autre adresse
+# (0.0.0.0, [::]) est une publication sur Internet.
+- name: Fail on any Theta Edge port published beyond loopback
+  ansible.builtin.assert:
+    that: theta_edge_ports.stdout_lines | reject('search', '-> 127[.]0[.]0[.]1:') | list | length == 0
+    fail_msg: "Ports Theta Edge publiés hors 127.0.0.1 : {{ theta_edge_ports.stdout_lines | reject('search', '-> 127[.]0[.]0[.]1:') | list }}"
+    quiet: true

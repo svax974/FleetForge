@@ -1,0 +1,358 @@
+---
+################# CHANGE SSH LISTENING PORT ON THE REMOTE MACHINE ####################
+
+- name: Set inventory ssh_custom_port to custom port since we didn't load facts yet and that the custom port is the one from the inventory
+  set_fact:
+    ssh_custom_port: "{{ ansible_port }}"
+
+- name: Test if SSH default port is accessible before attempting connection
+  wait_for:
+    host: "{{ ansible_host }}"
+    port: "22"
+    delay: 5
+    timeout: 10
+    state: started
+  delegate_to: localhost
+  become: false
+  ignore_errors: true
+  register: ssh_default_port_check
+
+- name: Set inventory ansible_port to default port 22 if test succesful
+  set_fact:
+    ansible_port: 22
+  when: ssh_default_port_check is succeeded
+
+- name: The SSH port is not accessible, try the custom port
+  wait_for:
+    host: "{{ ansible_host }}"
+    port: "{{ ssh_custom_port }}"
+    delay: 5
+    timeout: 10
+    state: started
+  delegate_to: localhost
+  become: false
+  register: ssh_custom_port_check
+  when: ssh_default_port_check is failed
+
+- name: Set inventory ansible_port to custom port if test succesful
+  set_fact:
+    ansible_port: "{{ ssh_custom_port }}"
+  when: ssh_default_port_check is failed and ssh_custom_port_check is succeeded
+
+# Connexion. Le détail — bascule mot de passe conditionnelle, `IdentitiesOnly`,
+# message d'échec — vit dans `host-preflight/tasks/connect.yml` et non ici :
+# il servait uniquement à ce rôle, donc uniquement à `setup-server.yml`, alors
+# qu'un `deploy-*` visant une machine encore inconnue butait exactement sur le
+# même mur sans avoir aucun moyen de le franchir.
+- name: Establish the connection (key, then password if the inventory has one)
+  ansible.builtin.include_role:
+    name: host-preflight
+    tasks_from: connect
+
+- name: Ensure ufw is installed
+  ansible.builtin.apt:
+    pkg: ufw
+    update_cache: yes
+  become: true
+
+- name: Temporarily allow custom port from anywhere (will be replaced by restricted rules later)
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    port: "{{ ssh_custom_port }}"
+  become: true
+
+# Certaines images cloud (Oracle Cloud, Ubuntu) embarquent leur PROPRE jeu de
+# règles iptables, restauré au boot par netfilter-persistent : INPUT n'accepte
+# que l'établi, l'ICMP, lo et le 22, puis REJECT tout le reste. ufw n'y peut
+# rien — ses chaînes sont branchées APRÈS ce REJECT, donc toutes les règles
+# posées plus bas y seraient décoratives, exactement comme une règle ufw sur un
+# port publié par Docker. Conséquence immédiate : la bascule sur le port du
+# parc plus bas ne répondrait jamais et le rôle échouerait sur son `wait_for`.
+#
+# On fait donc d'ufw la seule source de vérité : on retire le restaurateur au
+# boot, ses fichiers (sinon le rejeu re-déclencherait ce bloc alors qu'ufw est
+# déjà actif, et le flush emporterait ses chaînes) et les règles vivantes. La
+# machine reste sans filtrage jusqu'à l'activation d'ufw en fin de rôle — c'est
+# déjà l'état d'une machine neuve chez les autres providers.
+#
+# Vérification après coup, depuis une machine NON whitelistée : le port du parc
+# répond, les autres non. `iptables -S INPUT` ne doit plus montrer de REJECT
+# `icmp-host-prohibited` mais les chaînes `ufw-*`.
+- name: Look for a provider-supplied iptables ruleset
+  ansible.builtin.slurp:
+    path: /etc/iptables/rules.v4
+  register: provider_iptables
+  failed_when: false
+  become: true
+
+- name: Hand the firewall over to ufw when the image ships its own iptables rules
+  when:
+    - provider_iptables.content is defined
+    - "'icmp-host-prohibited' in (provider_iptables.content | b64decode)"
+  become: true
+  block:
+    - name: Remove the boot-time iptables restore
+      ansible.builtin.apt:
+        name:
+          - netfilter-persistent
+          - iptables-persistent
+        state: absent
+        purge: true
+
+    - name: Drop the saved rulesets so this never re-arms
+      ansible.builtin.file:
+        path: "/etc/iptables/{{ item }}"
+        state: absent
+      loop:
+        - rules.v4
+        - rules.v6
+
+    - name: Flush the provider rules from the live tables
+      ansible.builtin.iptables:
+        chain: "{{ item.chain }}"
+        ip_version: "{{ item.ip_version }}"
+        flush: true
+      loop:
+        - { chain: INPUT, ip_version: ipv4 }
+        - { chain: FORWARD, ip_version: ipv4 }
+        - { chain: INPUT, ip_version: ipv6 }
+        - { chain: FORWARD, ip_version: ipv6 }
+
+- name: Gather OS distribution facts
+  ansible.builtin.setup:
+    filter: "ansible_distribution*"
+
+# On Ubuntu 24.04+, disable ssh.socket so sshd_config controls the port directly
+- name: Disable ssh.socket on Ubuntu 24.04+
+  when: ansible_facts['distribution'] == "Ubuntu" and ansible_facts['distribution_version'] is version('24.04', '>=')
+  block:
+    - name: Stop and disable ssh.socket
+      ansible.builtin.systemd:
+        name: ssh.socket
+        state: stopped
+        enabled: false
+
+    - name: Remove ssh.socket override directory if present
+      ansible.builtin.file:
+        path: /etc/systemd/system/ssh.socket.d
+        state: absent
+      register: socket_override_removed
+
+    - name: Reload systemd daemon
+      ansible.builtin.systemd:
+        daemon_reload: true
+      when: socket_override_removed is changed
+
+    # RuntimeDirectory=sshd (/run/sshd) is tmpfs and only exists while
+    # ssh.service is tracked as active by systemd. A prior failed
+    # stop/restart can tear it down even when the underlying sshd process
+    # keeps running orphaned - recreate it so both the config test below and
+    # any future sshd start have the privilege separation directory.
+    - name: Ensure privilege separation directory exists
+      ansible.builtin.file:
+        path: /run/sshd
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      become: true
+
+    - name: Validate sshd config before restarting standalone
+      ansible.builtin.command: /usr/sbin/sshd -t
+      changed_when: false
+      become: true
+
+    # By the time we get here a connection is already established, so
+    # ssh.socket has already socket-activated a long-lived ssh.service master
+    # process serving this very session - it is guaranteed to already be
+    # running. Never issue start/stop/restart against it here: that would
+    # try to kill/replace the master mid-session and race a new process for
+    # the port ("Address already in use"). Only manage boot-time enablement.
+    - name: Ensure ssh.service is enabled (do not start/restart - already running)
+      ansible.builtin.systemd:
+        name: ssh.service
+        enabled: true
+      register: ssh_service_restart
+      ignore_errors: true
+
+    - name: Clear any stale failed state left over from a previous run
+      ansible.builtin.command: systemctl reset-failed ssh.service
+      become: true
+      changed_when: false
+      failed_when: false
+
+    - name: Gather diagnostics if ssh.service enablement failed
+      when: ssh_service_restart is failed
+      block:
+        - name: Dump journal for ssh.service
+          ansible.builtin.command: journalctl -xeu ssh.service --no-pager -n 80
+          register: ssh_service_journal
+          become: true
+          changed_when: false
+
+        - name: Check what is listening on port 22
+          ansible.builtin.command: ss -tlnp
+          register: ssh_service_listeners
+          become: true
+          changed_when: false
+
+        - name: Show diagnostics
+          ansible.builtin.debug:
+            msg:
+              - "{{ ssh_service_journal.stdout_lines }}"
+              - "{{ ssh_service_listeners.stdout_lines }}"
+
+        - name: Fail with captured diagnostics
+          ansible.builtin.fail:
+            msg: "ssh.service failed to enable - see diagnostics above"
+
+# Configure port in sshd_config (all distros)
+- name: Configure the custom SSH port in sshd_config
+  ansible.builtin.lineinfile:
+    path: "/etc/ssh/sshd_config"
+    regexp: "^#?\\s*Port\\s"
+    line: "Port {{ ssh_custom_port }}"
+
+# Don't rely on the lineinfile task's changed status to decide whether to
+# restart: on a re-run the file may already read "Port {{ ssh_custom_port }}"
+# (so lineinfile reports ok, no notify fires) while sshd itself is still an
+# older process that never actually picked it up (e.g. still bound to the
+# previous port via a socket-activation-inherited fd, see RestartSSHD
+# handler). Check the real, live state and force a restart if the custom
+# port isn't actually being served yet, independently of what the config
+# file diff says.
+- name: Check if the custom SSH port is already live
+  wait_for:
+    host: "{{ ansible_host }}"
+    port: "{{ ssh_custom_port }}"
+    timeout: 3
+    state: started
+  delegate_to: localhost
+  become: false
+  ignore_errors: true
+  register: custom_port_precheck
+
+- name: Force sshd restart if the custom port isn't live yet
+  ansible.builtin.command: /bin/true
+  changed_when: true
+  notify: "RestartSSHD"
+  when: custom_port_precheck is failed
+
+# Flush now so SSH restarts before we continue
+- name: Ensure SSH is reloaded if needed
+  meta: flush_handlers
+
+- name: Wait for custom SSH port to be ready
+  wait_for:
+    host: "{{ ansible_host }}"
+    port: "{{ ssh_custom_port }}"
+    delay: 3
+    timeout: 30
+    state: started
+  delegate_to: localhost
+  become: false
+
+# Ensure to set ansible_port to our custom port
+- name: Ensure we use the configured SSH port after that
+  set_fact:
+    ansible_port: "{{ ssh_custom_port }}"
+
+# Gather facts should be set to false because it will fail if the Ansible SSH port is not listening on remote host
+- name: Run deferred setup to gather facts
+  setup:
+
+# Allow SSH connections from whitelist and VPNs
+- name: Allow SSH connections from whitelist on custom port
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ item }}"
+    port: "{{ ssh_custom_port }}"
+  with_items:
+    "{{ whitelist }}"
+- name: Allow SSH connections from VPNs
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    port: "{{ ssh_custom_port }}"
+    from_ip: "{{ hostvars[item].ansible_host }}"
+  loop: "{{ groups['vpns'] | default([]) }}"
+
+# Allow app_port from proxies + whitelist + VPNs (if defined for this host)
+- name: Allow app_port from proxies
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ hostvars[item].ansible_host }}"
+    port: "{{ app_port }}"
+  loop: "{{ groups['proxies'] | default([]) }}"
+  when: app_port is defined
+
+- name: Allow app_port from whitelist
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ item }}"
+    port: "{{ app_port }}"
+  with_items: "{{ whitelist }}"
+  when: app_port is defined
+
+- name: Allow app_port from VPNs
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ hostvars[item].ansible_host }}"
+    port: "{{ app_port }}"
+  loop: "{{ groups['vpns'] | default([]) }}"
+  when: app_port is defined
+
+# Allow back_port from whitelist + VPNs only (if defined for this host)
+- name: Allow back_port from whitelist
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ item }}"
+    port: "{{ back_port }}"
+  with_items: "{{ whitelist }}"
+  when: back_port is defined
+
+- name: Allow back_port from VPNs
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ hostvars[item].ansible_host }}"
+    port: "{{ back_port }}"
+  loop: "{{ groups['vpns'] | default([]) }}"
+  when: back_port is defined
+
+# Remove the temporary blanket allow rule now that restricted rules are in place
+- name: Remove blanket allow on custom port (restricted rules are now active)
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    port: "{{ ssh_custom_port }}"
+    delete: true
+
+# Deny connections on port 22
+- name: Remove SSH connections on port 22 rules if any
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: any
+    port: 22
+    delete: true
+
+- name: Set logging
+  community.general.ufw:
+    logging: 'on'
+
+- name: Deny by default and enable UFW
+  community.general.ufw:
+    state: enabled
+    policy: deny
+
+- name: Authorize the parc keys for root
+  ansible.builtin.include_tasks: authorized_keys.yml
+  vars:
+    ak_user: root

@@ -1,0 +1,7 @@
+{
+  "service": "agenthub",
+  "up": {"kind": "http", "url": "{{ agenthub_svcprobe_front_url }}", "status": [200, 301, 302], "timeout": 10},
+  "extra_checks": [
+    {"name": "back_health", "kind": "http", "url": "{{ agenthub_svcprobe_back_health_url }}", "status": [200], "timeout": 10}
+  ]
+}

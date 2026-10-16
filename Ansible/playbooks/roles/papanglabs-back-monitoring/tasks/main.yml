@@ -1,0 +1,227 @@
+---
+# ── 1. Destinations de supervision ─────────────────────────────────────────
+# TOUS les hôtes de supervision, et non le seul `prometheus_host` : les
+# métriques applicatives sont poussées, elles doivent l'être vers chacun.
+#
+# Deux sources, réunies. Aucune ne suffit seule : web3c nomme sa stack
+# `monitoring` (rôles `monitoring-*`) et ne porte donc pas la famille
+# `prometheus`, tandis qu'un parc peut porter la famille sans avoir encore créé
+# le groupe. L'union évite qu'un oubli de l'un des deux ne rende la supervision
+# silencieusement partielle.
+- name: Seed the destinations from the Prometheus group
+  ansible.builtin.set_fact:
+    pgb_prometheus_hosts: "{{ groups[pgb_prometheus_group] | default([]) | list }}"
+  tags: [monitoring]
+
+# Boucle explicite plutôt qu'un `selectattr` sur `hostvars` : ce dernier traverse
+# des mappings paresseux dont le comportement varie selon la version, et une
+# supervision qui se croit complète est pire qu'une supervision absente.
+- name: Add the hosts carrying the Prometheus role family
+  ansible.builtin.set_fact:
+    pgb_prometheus_hosts: "{{ (pgb_prometheus_hosts | default([])) + [item] }}"
+  loop: "{{ groups['all'] }}"
+  when:
+    - pgb_prometheus_family in (hostvars[item].ansible_roles | default([]))
+    - item not in (pgb_prometheus_hosts | default([]))
+  tags: [monitoring]
+
+- name: Fail when no Prometheus host is known
+  ansible.builtin.assert:
+    that:
+      - (pgb_prometheus_hosts | default([])) | length > 0
+    fail_msg: >-
+      Aucun hôte dans le groupe `{{ pgb_prometheus_group }}` ni portant
+      `ansible_roles: [{{ pgb_prometheus_family }}]`. Les métriques applicatives
+      n'auraient aucune destination et le back tomberait sans que rien ne le
+      signale. Renseigne le groupe dans l'inventaire, ou joue
+      deploy-prometheus.yml.
+    success_msg: "Destinations : {{ pgb_prometheus_hosts | default([]) | join(', ') }}"
+  tags: [monitoring]
+
+# Une URL par destination, et les identifiants RÉPLIQUÉS autant de fois :
+# vmagent apparie ses flags d'authentification aux URL par position, une seule
+# valeur pour deux URL n'authentifierait que la première.
+- name: Build the remote_write endpoints
+  ansible.builtin.set_fact:
+    pgb_rw_urls: >-
+      {{ pgb_remote_write_urls | default(
+           pgb_prometheus_hosts | map('extract', hostvars, 'ansible_host')
+           | map('regex_replace', '^(.*)$',
+                 pgb_remote_write_scheme ~ '://\1:' ~ (prometheus_port | default(9090)) ~ pgb_remote_write_path)
+           | list) }}
+  tags: [monitoring]
+
+- name: Expose the endpoints as vmagent expects them
+  ansible.builtin.set_fact:
+    pgb_rw_urls_csv: "{{ pgb_rw_urls | join(',') }}"
+    pgb_rw_users_csv: "{{ ([pgb_remote_write_user] * (pgb_rw_urls | length)) | join(',') }}"
+    pgb_rw_pass_csv: "{{ ([pgb_remote_write_pass] * (pgb_rw_urls | length)) | join(',') }}"
+  tags: [monitoring]
+
+# ── 2. Configuration du back ───────────────────────────────────────────────
+# Les clés de supervision sont écrites par Ansible dans les .env livrés, PAR
+# DESSUS le fichier venu du dépôt : le vault est la source de vérité pour ces
+# quatre valeurs, le dépôt pour tout le reste. Les deux fichiers reçoivent la
+# même chose — `back/.env` est chargé par les conteneurs, `.env` sert à
+# l'interpolation du compose.
+# METRICS_TOKEN n'est réécrit QUE si le vault en porte un. Sinon on laisse
+# celui du dépôt : le jeton ne quitte jamais la machine — vmagent scrape les
+# conteneurs voisins — donc un jeton par environnement, vivant dans son .env,
+# est légitime. L'écraser par une valeur vide rouvrirait /metrics à tout
+# Internet, ce qui était précisément l'état constaté le 18/08/2026.
+- name: Build the list of monitoring keys to write
+  ansible.builtin.set_fact:
+    pgb_env_keys: >-
+      {{ ([{'key': 'METRICS_TOKEN', 'value': pgb_metrics_token}]
+           if pgb_metrics_token | length > 0 else [])
+         + [{'key': 'PROMETHEUS_REMOTE_WRITE_URLS', 'value': pgb_rw_urls_csv},
+            {'key': 'PROMETHEUS_BASIC_AUTH_USER', 'value': pgb_rw_users_csv},
+            {'key': 'PROMETHEUS_BASIC_AUTH_PASSWORD', 'value': pgb_rw_pass_csv}] }}
+  tags: [monitoring]
+
+- name: Write the monitoring keys into both env files
+  ansible.builtin.lineinfile:
+    path: "{{ item.0 }}"
+    regexp: "^{{ item.1.key }}="
+    line: "{{ item.1.key }}={{ item.1.value }}"
+    owner: "{{ pgb_user }}"
+    group: "{{ pgb_user }}"
+    mode: '0600'
+    create: false
+  become: true
+  loop: "{{ [pgb_dir ~ '/back/.env', pgb_dir ~ '/.env'] | product(pgb_env_keys) | list }}"
+  loop_control:
+    label: "{{ item.0 | basename }} / {{ item.1.key }}"
+  no_log: true
+  tags: [monitoring]
+
+# Contrôle sur le fichier RÉELLEMENT livré, et non sur la variable Ansible :
+# c'est lui que les conteneurs chargent, et il peut porter un jeton que le vault
+# ignore.
+- name: Read the deployed metrics token
+  ansible.builtin.shell:
+    cmd: "grep -E '^METRICS_TOKEN=.+$' {{ pgb_dir }}/back/.env | head -1 | cut -d= -f2-"
+    executable: /bin/bash
+  become: true
+  register: pgb_deployed_token
+  changed_when: false
+  check_mode: false
+  no_log: true
+  tags: [monitoring]
+
+- name: Warn when /metrics is left unauthenticated
+  ansible.builtin.debug:
+    msg: >-
+      ATTENTION — METRICS_TOKEN est vide dans {{ pgb_dir }}/back/.env : /metrics
+      répondra à quiconque atteint le port du back, et vmagent scrapera en
+      anonyme. Génère un jeton (`openssl rand -hex 32`) et pose-le dans le .env
+      du dépôt, ou au vault sous `papanglabs_metrics_token` pour qu'Ansible
+      l'impose.
+  when: (pgb_deployed_token.stdout | default('')) | length == 0
+  tags: [monitoring]
+
+# ── 3. Ouverture du récepteur ──────────────────────────────────────────────
+# Posée depuis le déploiement du BACK, et non dans les host_vars de l'hôte de
+# supervision : c'est l'apparition d'un pousseur qui la justifie, et sa
+# disparition qui doit la retirer. Sans quoi la liste des clients de Prometheus
+# se maintiendrait à la main, dans un fichier décrivant une autre machine.
+- name: Open the remote_write receiver to this host
+  ansible.builtin.include_role:
+    name: prometheus-remotewrite-security
+  vars:
+    prwsec_prometheus_hosts: "{{ pgb_prometheus_hosts }}"
+    prwsec_service: "{{ pgb_probe_service }}"
+    prwsec_urls: "{{ pgb_rw_urls }}"
+  tags: [monitoring]
+
+# ── 4. Agent de collecte ───────────────────────────────────────────────────
+# vmagent lit ses destinations par variables d'environnement
+# (`-envflag.enable=true -envflag.prefix=VM_`, déjà dans le compose) : un flag
+# répétable devient une variable à valeurs séparées par des virgules. C'est ce
+# qui permet de viser N Prometheus sans réécrire la ligne `command:` du compose.
+- name: Start vmagent
+  ansible.builtin.command:
+    cmd: >-
+      docker compose --project-name {{ pgb_project_name }}
+      --profile metrics up -d vmagent
+    chdir: "{{ pgb_dir }}"
+  become: true
+  register: pgb_vmagent
+  changed_when: "'Started' in pgb_vmagent.stderr or 'Recreated' in pgb_vmagent.stderr"
+  tags: [monitoring]
+
+# Un remote_write vers un Prometheus sans récepteur activé répond 404 et vmagent
+# réessaie indéfiniment en silence : les séries n'arrivent jamais, aucune alerte
+# ne le dit, et la cible n'apparaît nulle part puisqu'il n'y a pas de cible.
+# Vérifié le 19/08/2026 : prometheus1 tourne SANS
+# `--web.enable-remote-write-receiver`.
+- name: Check that each Prometheus accepts remote writes
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ prometheus_port | default(9090) }}/api/v1/status/flags"
+    user: "{{ prometheus_user | default(omit) }}"
+    password: "{{ prometheus_pass | default(omit) }}"
+    force_basic_auth: true
+    return_content: true
+  delegate_to: "{{ item }}"
+  loop: "{{ pgb_prometheus_hosts | default([]) }}"
+  register: pgb_rw_flags
+  failed_when: false
+  changed_when: false
+  check_mode: false
+  tags: [monitoring]
+
+- name: Warn when a Prometheus rejects remote writes
+  ansible.builtin.debug:
+    msg: >-
+      ATTENTION — {{ item.item }} ne tourne pas avec
+      `--web.enable-remote-write-receiver` : il répondra 404 aux envois de
+      vmagent et aucune métrique applicative n'y arrivera. Joue
+      deploy-prometheus.yml sur cet hôte.
+  loop: "{{ pgb_rw_flags.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: >-
+    (item.json['data']['web.enable-remote-write-receiver'] | default('false')) | string | lower != 'true'
+  tags: [monitoring]
+
+# ── 5. Sonde d'état ────────────────────────────────────────────────────────
+# `public: true` : sans lui les defaults de svcprobe-install (répertoire des
+# sondes, port) restent confinés à ses propres tâches et les tâches suivantes
+# échouent sur une variable indéfinie.
+- name: Ensure the shared probe is installed
+  ansible.builtin.include_role:
+    name: svcprobe-install
+    public: true
+  tags: [monitoring]
+
+- name: Deploy the back probe
+  ansible.builtin.template:
+    src: check.json.j2
+    dest: "{{ svcprobe_checks_dir }}/{{ pgb_probe_service }}.json"
+    owner: root
+    group: root
+    mode: '0644'
+  become: true
+  tags: [monitoring]
+
+- name: Verify the probe answers
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ svcprobe_listen_port }}/metrics"
+    return_content: true
+  register: pgb_probe
+  retries: 6
+  delay: 5
+  until: pgb_probe.status is defined and pgb_probe.status == 200
+  changed_when: false
+  tags: [monitoring]
+
+- name: Fail when the probe reports the service down
+  ansible.builtin.fail:
+    msg: >-
+      La sonde répond mais annonce `service_up{service="{{ pgb_probe_service }}"} 0`
+      alors que le déploiement vient de réussir : la sonde est mal écrite ou le
+      répartiteur ne répond pas sur {{ pgb_probe_url }}. Une sonde fausse fait
+      sonner une alerte en permanence — mieux vaut le voir maintenant.
+  when: >-
+    'service_up{service="' ~ pgb_probe_service ~ '"} 0' in (pgb_probe.content | default(''))
+  tags: [monitoring]

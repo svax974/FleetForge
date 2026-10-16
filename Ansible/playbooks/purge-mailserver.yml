@@ -1,0 +1,17 @@
+---
+- name: Purge mailserver — removes services, certs, DKIM keys, config and data
+  hosts: mail
+  remote_user: "{{ remote_username }}"
+  become: yes
+  gather_facts: yes
+
+  pre_tasks:
+    - name: Confirm purge
+      ansible.builtin.debug:
+        msg: |
+          PURGE: will delete Postfix, OpenDKIM, Let's Encrypt certs,
+          DKIM keys, SASL database and all configuration.
+          This action is IRREVERSIBLE.
+
+  roles:
+    - mailserver-purge

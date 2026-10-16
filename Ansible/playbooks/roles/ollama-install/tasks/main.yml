@@ -1,0 +1,55 @@
+---
+# Install Ollama on a server for AI model serving
+- name: Check if Ollama is already installed
+  shell: which ollama
+  register: ollama_check
+  ignore_errors: true
+  changed_when: false
+
+- name: Download and install Ollama
+  shell: curl -fsSL https://ollama.com/install.sh | sh
+  when: ollama_check.rc != 0
+
+- name: Create systemd override directory
+  file:
+    path: /etc/systemd/system/ollama.service.d
+    state: directory
+    mode: '0755'
+
+- name: Configure Ollama to listen on all interfaces
+  copy:
+    dest: /etc/systemd/system/ollama.service.d/override.conf
+    content: |
+      [Service]
+      Environment="OLLAMA_HOST=0.0.0.0:{{ app_port | default(11434) }}"
+    mode: '0644'
+  notify: restart ollama
+
+- name: Reload systemd daemon
+  systemd:
+    daemon_reload: yes
+
+- name: Enable and start Ollama service
+  systemd:
+    name: ollama
+    state: started
+    enabled: yes
+
+- name: Wait for Ollama to be ready
+  wait_for:
+    port: "{{ app_port | default(11434) }}"
+    delay: 3
+    timeout: 30
+
+# Nom public (`proxy_hostname` de l'entrée) : CNAME vers le front des proxies,
+# publié dès l'installation sans attendre update-cloudflare-dns.yml (CLAUDE.md
+# § 2, modèle agenthub-install). Le vhost, lui, se pose par
+# `./play.sh web3c update-proxy-web3c.yml`.
+- name: Ensure the service CNAME to the canonical proxy front
+  ansible.builtin.include_role:
+    name: cloudflare-dns-update
+    tasks_from: cnames
+  vars:
+    cfdns_cname_scope:
+      - "{{ inventory_hostname }}"
+  when: proxy_hostname is defined

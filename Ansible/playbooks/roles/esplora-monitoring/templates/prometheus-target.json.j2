@@ -1,0 +1,9 @@
+[
+    {
+        "targets": [ "{{ ansible_host }}:{{ esploramon_port }}" ],
+        "labels": {
+            "job": "{{ esploramon_job }}",
+            "instance": "{{ inventory_hostname }}"
+        }
+    }
+]

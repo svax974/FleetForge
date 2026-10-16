@@ -1,0 +1,9 @@
+[
+    {
+        "targets": [ "{{ ansible_host }}:{{ amon_port }}" ],
+        "labels": {
+            "job": "{{ amon_job }}",
+            "instance": "{{ inventory_hostname }}"
+        }
+    }
+]

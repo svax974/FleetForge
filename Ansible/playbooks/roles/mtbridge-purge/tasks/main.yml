@@ -1,0 +1,61 @@
+---
+# Purge MTBridge: stops service, removes scheduled task, deletes install dir, MT5 data dir,
+# firewall rules and Prometheus target. Leaves Python and system tools untouched.
+
+- name: Stop MTBridge scheduled task
+  ansible.windows.win_shell: |
+    $task = Get-ScheduledTask -TaskName '{{ mtbridge_service_name }}' -ErrorAction SilentlyContinue
+    if ($task) { Stop-ScheduledTask -TaskName '{{ mtbridge_service_name }}' -ErrorAction SilentlyContinue }
+  ignore_errors: true
+
+- name: Unregister MTBridge scheduled task
+  ansible.windows.win_shell: |
+    $task = Get-ScheduledTask -TaskName '{{ mtbridge_service_name }}' -ErrorAction SilentlyContinue
+    if ($task) { Unregister-ScheduledTask -TaskName '{{ mtbridge_service_name }}' -Confirm:$false }
+  ignore_errors: true
+
+- name: Kill any remaining MTBridge Python processes
+  ansible.windows.win_shell: |
+    Get-Process python -ErrorAction SilentlyContinue |
+      Where-Object { $_.Path -like '*{{ mtbridge_install_dir }}*' } |
+      ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
+  ignore_errors: true
+
+- name: Remove MTBridge application firewall rule
+  community.windows.win_firewall_rule:
+    name: "MTBridge (TCP {{ app_port }})"
+    state: absent
+  ignore_errors: true
+
+- name: Remove Prometheus firewall rule for MTBridge
+  community.windows.win_firewall_rule:
+    name: "Prometheus - MTBridge metrics"
+    state: absent
+  ignore_errors: true
+
+- name: Delete MTBridge install directory
+  ansible.windows.win_file:
+    path: "{{ mtbridge_install_dir }}"
+    state: absent
+  ignore_errors: true
+
+- name: Delete MT5 data directory
+  ansible.windows.win_file:
+    path: "{{ mtbridge_mt5_base_dir }}"
+    state: absent
+  ignore_errors: true
+
+- name: Remove MTBridge Prometheus target file from monitor
+  ansible.builtin.file:
+    path: "{{ prometheus_home }}/prometheus-configs/mtbridge/{{ inventory_hostname }}.json"
+    state: absent
+  delegate_to: "{{ prometheus_host }}"
+  ignore_errors: true
+
+- name: Reload Prometheus after target removal
+  community.docker.docker_container:
+    name: prometheus
+    state: started
+    restart: yes
+  delegate_to: "{{ prometheus_host }}"
+  ignore_errors: true

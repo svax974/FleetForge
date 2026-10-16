@@ -1,0 +1,37 @@
+---
+# Sonde de disponibilité partagée par tous les rôles `<service>-monitoring`.
+#
+# Un exporter par HÔTE, pas par service : chaque rôle `-monitoring` se contente
+# de déposer un fichier JSON dans {{ svcprobe_checks_dir }} et d'inclure ce
+# rôle, qui est idempotent.
+
+svcprobe_user: svcprobe
+svcprobe_bin: /usr/local/bin/svcprobe
+svcprobe_dir: /etc/svcprobe
+svcprobe_checks_dir: /etc/svcprobe/checks.d
+# Répertoire des collecteurs de métriques propres à un service, déposés par les
+# rôles `-monitoring` qui en ont.
+svcprobe_lib_dir: /usr/local/lib/svcprobe
+
+# Port d'ÉCOUTE : 9110 sur toutes les machines, sans exception. C'est aussi ce
+# que voit ufw (le NAT a déjà traduit le port à son arrivée) et ce que sondent
+# les rôles `-monitoring` en local. À tenir à jour dans le registre du CLAUDE.md.
+svcprobe_listen_port: 9110
+
+# Port de SCRAPE : celui que Prometheus joint, c'est-à-dire le port PUBLIC du
+# routeur. Ne diffère de l'écoute que derrière un NAT partagé, où chaque machine
+# a le sien (hub 9111, nuc 9112) redirigé vers son 9110. C'est l'attribut
+# d'inventaire `svcprobe_port` qui l'exprime (lu aussi par l'application pour
+# distinguer les machines d'une même adresse) ; sans lui, scrape = écoute.
+svcprobe_port: "{{ svcprobe_listen_port }}"
+# 0.0.0.0 : Prometheus scrape depuis un autre hôte. Le filtrage est fait par
+# ufw, qui n'ouvre le port qu'à son IP.
+svcprobe_bind: "0.0.0.0"
+svcprobe_cache_ttl: 10
+
+svcprobe_job: svcprobe
+
+# La sonde interroge systemd et Docker : elle tourne en root, faute de quoi
+# `docker inspect` et `systemctl is-active` sur des unités système lui seraient
+# inaccessibles. Le durcissement systemd de l'unité compense (voir le gabarit).
+svcprobe_run_as_root: true

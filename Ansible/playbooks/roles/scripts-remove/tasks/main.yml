@@ -1,0 +1,14 @@
+---
+# Remove utility scripts and aliases deployed by scripts-install.
+
+- name: Remove utility scripts from /usr/local/bin
+  ansible.builtin.file:
+    path: /usr/local/bin/infra-scripts
+    state: absent
+  ignore_errors: true
+
+- name: Remove shell aliases file
+  ansible.builtin.file:
+    path: "/home/{{ remote_username }}/.bash_aliases"
+    state: absent
+  ignore_errors: true

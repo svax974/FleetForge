@@ -1,0 +1,224 @@
+---
+# Réapplique TOUTES les règles de pare-feu du parc, sur tout l'inventaire.
+#
+# À jouer dès que change une donnée transverse au pare-feu :
+#   • `whitelist` dans group_vars (IP opérateur, bureau, prestataire…)
+#   • ajout/retrait d'un hôte du groupe `vpns`
+#   • ajout/retrait d'un back, d'un proxy ou d'un node
+#
+#   ./play.sh papanglabs update-ufw-all.yml                    # tout l'inventaire
+#   ./play.sh papanglabs update-ufw-all.yml --limit timescale  # une machine
+#   ./play.sh papanglabs update-ufw-all.yml --check --diff     # simulation
+#
+# Les rôles de sécurité sont additifs : ils posent des ALLOW et laissent la
+# politique par défaut (`deny incoming`) refuser le reste. Une IP RETIRÉE de la
+# whitelist ne perd donc pas son accès par ce seul rejeu — voir la note en fin
+# de fichier.
+#
+# Les plays ciblant un groupe ou un hôte absent de l'inventaire sont simplement
+# ignorés : le même fichier sert pour papanglabs et web3c.
+
+# ── Garde-fou ──────────────────────────────────────────────────────────────
+# Le 06/08/2026, l'IP publique du poste a changé sans que la whitelist
+# suive : SSH s'est fermé sur tout le parc d'un coup, et seule `timescale` — qui n'avait aucun pare-feu — restait
+# joignable. Rejouer ce playbook avec une whitelist périmée ne répare rien et
+# peut verrouiller la dernière machine ouverte. D'où ce contrôle préalable.
+# Le play porte sur `all` — et non sur localhost — pour que `whitelist` soit
+# résolu depuis les group_vars de l'inventaire ciblé ; localhost n'appartient à
+# aucun groupe et n'y aurait pas accès. `run_once` + `delegate_to` font que le
+# contrôle s'exécute une seule fois, localement, sans connexion distante.
+- name: Preflight — the operator IP must be whitelisted
+  hosts: all
+  gather_facts: false
+  run_once: true
+  tags: [always]
+  tasks:
+    # check_mode: false — sinon le module est sauté en --check et le garde-fou
+    # ne protège justement pas la simulation qui précède l'application réelle.
+    - name: Resolve the current public IPv4
+      ansible.builtin.uri:
+        url: https://api.ipify.org?format=json
+        return_content: true
+      register: ufw_public_ip
+      failed_when: false
+      check_mode: false
+      delegate_to: localhost
+
+    - name: Warn when the current IP is absent from the whitelist
+      ansible.builtin.fail:
+        msg: >-
+          L'IP publique courante ({{ ufw_public_ip.json.ip }}) n'est pas dans
+          `whitelist` ({{ whitelist | join(', ') }}). Appliquer les règles
+          fermerait l'accès SSH depuis ce poste. Ajoute l'IP dans
+          group_vars, ou relance avec -e ufw_force_apply=true en connaissance
+          de cause (accès VPN ou console fournisseur disponible).
+      when:
+        - ufw_public_ip.json.ip is defined
+        - ufw_public_ip.json.ip not in (whitelist | default([]))
+        - not (ufw_force_apply | default(false) | bool)
+
+# ── SSH + ports applicatifs, sur toutes les machines ───────────────────────
+- name: Refresh SSH and app-port rules everywhere
+  hosts: all
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - security-ssh-update
+  tasks:
+    # Sans cette repose, activer ufw sur une machine qui n'en avait pas coupe le
+    # scrape Prometheus : la cible passe `down` et `TargetDown` sonne.
+    - name: Re-apply node_exporter scrape rules
+      ansible.builtin.include_role:
+        name: exporter-sys-install
+        tasks_from: firewall
+      when: prometheus_host is defined
+
+# ── Rôles par groupe ───────────────────────────────────────────────────────
+- name: Proxies
+  hosts: proxies
+  remote_user: "{{ remote_username }}"
+  become: true
+  tasks:
+    # Le rôle diffère par inventaire (proxy-security-papang / -web3c) : il est
+    # nommé dans group_vars plutôt qu'en dur. L'ancien update-security-all.yml
+    # référençait un `proxy-security` inexistant et échouait sur papanglabs.
+    # `include_role` et non `roles:` — un nom de rôle templaté n'est résolu
+    # qu'à l'exécution, les variables d'hôte n'existant pas encore au parsing.
+    - name: Apply the inventory's proxy security role
+      ansible.builtin.include_role:
+        name: "{{ proxy_security_role }}"
+
+- name: Bitcoin RPC nodes
+  hosts: rpcsbtc
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - rpcbtc-security
+
+- name: Backs
+  hosts: backs
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - back-security
+
+- name: Fronts
+  hosts: fronts
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - front-security
+
+- name: VPNs
+  hosts: vpns
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - vpn-security
+
+# ── Rôles par hôte ─────────────────────────────────────────────────────────
+- name: TimescaleDB host
+  hosts: timescale
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - timescaledb-security
+
+- name: BRK host
+  hosts: brk1
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - brk-security
+
+- name: PapangMetrics host
+  hosts: papangmetrics1
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - papangmetrics-api-security
+
+# Le motif est écrit en dur, et non `{{ prometheus_host }}`.
+#
+# Un `hosts:` de play est résolu AVANT le chargement des group_vars : la
+# variable y est toujours indéfinie et c'est le `default()` qui s'applique. Sur
+# web3c, où l'hôte s'appelle `monitor`, ce play a donc toujours matché zéro
+# hôte et a été sauté sans un mot — `prometheus-security` et
+# `docker-ports-security` n'y ont jamais tourné. D'où la chaîne DOCKER-USER
+# vide constatée le 09/08/2026 sur `proxy1`, avec l'UI Prometheus
+# ouverte sur Internet derrière cinq règles ufw décoratives.
+#
+# Un nom absent d'un inventaire est simplement ignoré : le motif sert les deux.
+- name: Prometheus host
+  hosts: prometheus1:monitor
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - prometheus-security
+    # Ports publiés par Docker : ufw ne les voit pas, ils se filtrent dans
+    # DOCKER-USER. La liste est dans host_vars/<hôte canonique>.yml et couvre
+    # toute la machine, pas seulement Prometheus.
+    - docker-ports-security
+
+# Destinations de sauvegarde. Sans ces règles, la source ne peut pas pousser :
+# `timescale` n'autorisait le port SSH que depuis les IP opérateur, et brk1
+# — dont la sauvegarde du magasin BRK doit atterrir là — n'y
+# avait aucun accès. Le motif est écrit en dur, un nom absent de l'inventaire
+# étant simplement ignoré (le parc web3c n'a pas de groupe `backups`).
+- name: Backup destinations
+  hosts: backup-brk:backup-timescale
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - backup-security
+
+- name: Alertmanager host
+  hosts: alertmanager1
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - alertmanager-security
+
+# la machine de `ctdapi` (ctdapi/dev/docker-repo/xbot/rotki). `docker_ports_rules`
+# vit dans host_vars/ctdapi.yml — le premier hôte établi pour cette machine,
+# donc son canonique — pas dans `rotki`, joué sur `hosts: ctdapi` pour la
+# même raison que la ligne « Prometheus host » ci-dessus.
+- name: ctdapi host (Docker-published ports)
+  hosts: ctdapi
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - docker-ports-security
+
+# Le relai SearXNG (sur `station` depuis le déménagement du 12/09/2026 —
+# l'ancienne entrée d'inventaire `searxng` est supprimée, son nom public étant
+# désormais le CNAME porté par `station`). Son port est publié par Docker : le
+# filtrage vit dans DOCKER-USER, pas dans ufw, et il DÉPEND de la whitelist
+# des proxies — un proxy qui change d'IP perd l'accès sans que rien ne le
+# signale autrement qu'un 502 sur le vhost. C'est exactement le cas d'usage de
+# ce playbook.
+# L'hôte est absent de l'inventaire papanglabs, le play y est simplement ignoré.
+- name: SearXNG relay
+  hosts: station
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - searxng-security
+
+# Même raison : le relais s'appelle `mail` sur papanglabs et `mail1` sur web3c.
+- name: Mail relay
+  hosts: mail:mail1
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - mailserver-security
+
+# ── Note : retrait d'une autorisation ──────────────────────────────────────
+# Ce playbook AJOUTE les règles correspondant à la configuration courante.
+# Pour qu'une IP sortie de la whitelist perde réellement son accès, il faut
+# purger les règles obsolètes — les rôles ne le font pas tous. Sur une machine
+# donnée :
+#     sudo ufw status numbered
+#     sudo ufw delete <n>
+# `timescaledb-security` fait exception : il révoque explicitement les sources
+# DOCKER-USER qui ne sont plus dans la liste autorisée.

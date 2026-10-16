@@ -1,0 +1,9 @@
+---
+# Remove certbot — removes package. Certificates preserved. Use cert-purge to delete them.
+
+- name: Remove certbot package
+  ansible.builtin.apt:
+    name:
+      - certbot
+      - python3-certbot-nginx
+    state: absent

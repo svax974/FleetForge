@@ -1,0 +1,6 @@
+---
+repomon_container: docker-repo
+repomon_port: "{{ docker_repo_port | default(5000) }}"
+# `/v2/` est le point d'entrée de l'API du registre. Il répond 401 quand
+# l'authentification est active : c'est une RÉPONSE, donc un service vivant.
+repomon_url: "http://127.0.0.1:{{ docker_repo_port | default(5000) }}/v2/"

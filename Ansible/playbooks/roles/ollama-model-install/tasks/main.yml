@@ -1,0 +1,22 @@
+---
+# Deploy an Ollama model on a server
+- name: Verify Ollama is installed
+  shell: which ollama
+  register: ollama_installed
+  changed_when: false
+  failed_when: ollama_installed.rc != 0
+
+- name: Pull the requested model
+  shell: "ollama pull {{ ollama_model_name }}"
+  register: pull_result
+  when: ollama_model_name is defined
+
+- name: Display pull result
+  debug:
+    msg: "{{ pull_result.stdout_lines | default(['Model pulled successfully']) }}"
+  when: ollama_model_name is defined
+
+- name: Fail if no model name provided
+  fail:
+    msg: "Variable 'ollama_model_name' must be defined. Pass it with -e ollama_model_name=<model>"
+  when: ollama_model_name is not defined

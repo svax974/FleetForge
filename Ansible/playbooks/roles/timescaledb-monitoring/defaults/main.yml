@@ -1,0 +1,9 @@
+---
+# La sonde principale porte sur le CONTENEUR et non sur le port : un conteneur
+# redémarré en boucle peut présenter un port ouvert pendant sa fenêtre de
+# démarrage. Le port reste sondé en secondaire, parce qu'un conteneur `running`
+# dont PostgreSQL refuse les connexions est la panne inverse.
+tsdbmon_container: papangmetrics-timescaledb
+tsdbmon_port: "{{ papangmetrics_db_port | default(5432) }}"
+tsdbmon_db: "{{ papangmetrics_db | default('papangmetrics') }}"
+tsdbmon_user: "{{ papangmetrics_user | default('papangmetrics') }}"

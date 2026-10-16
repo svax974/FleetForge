@@ -1,0 +1,42 @@
+---
+# Alertmanager (Docker) — routage et notification des alertes Prometheus.
+
+alertmanager_port: 9093
+alertmanager_image: "prom/alertmanager:latest"
+alertmanager_home: "/home/{{ remote_username }}/alertmanager"
+
+# ── Envoi e-mail ───────────────────────────────────────────────────────────
+# Smarthost = le serveur mail interne (rôle `mailserver-install`, hôte `mail`).
+# Attention : `mail_domains` ne contient aujourd'hui que the.web3c.cc et
+# the.tradekong.app — aucun domaine PapangLabs. Tant qu'un domaine PapangLabs
+# n'y est pas ajouté (avec ses enregistrements DNS, non automatisés à ce jour),
+# l'expéditeur doit rester sur un domaine déjà relayé, sinon les messages
+# partiront en spam ou seront rejetés.
+# Le smarthost doit être désigné par son NOM, pas par son IP : le certificat du
+# relais est émis pour mail_domains[0].name et ne porte aucun IP SAN, donc une
+# connexion par IP échoue à la vérification TLS au moment du STARTTLS.
+alertmanager_smtp_host: >-
+  {{ mail_domains[0].name
+     if (mail_domains | default([]) | length > 0)
+     else (hostvars['mail']['ansible_host'] | default('')) }}
+alertmanager_smtp_port: 587
+alertmanager_smtp_from: "alertmanager@{{ mail_domains[0].name }}"
+alertmanager_smtp_user: "{{ relay_user | default(remote_username) }}"
+alertmanager_smtp_pass: "{{ relay_user_password | default('') }}"
+alertmanager_smtp_require_tls: true
+
+# Destinataires des alertes — à renseigner en group_vars.
+alertmanager_email_to: []
+
+# ── Routage ────────────────────────────────────────────────────────────────
+alertmanager_group_wait: "30s"
+alertmanager_group_interval: "5m"
+# Fréquence de rappel tant qu'une alerte n'est pas résolue.
+#
+# 12 h et non 4 h : une panne connue et non résolue (small2 éteint, port 9110
+# non redirigé vers proxy2) n'apporte aucune information neuve en la répétant
+# six fois par jour — elle ne fait que diluer les alertes qui, elles, sont
+# nouvelles. Deux rappels quotidiens suffisent à empêcher l'oubli d'un incident
+# durable, ce qui est la seule fonction de ce paramètre.
+alertmanager_repeat_interval: "12h"
+alertmanager_resolve_timeout: "5m"

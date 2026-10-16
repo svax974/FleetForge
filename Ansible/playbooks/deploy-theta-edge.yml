@@ -1,0 +1,43 @@
+---
+# Nœuds Theta Edge — N instances par machine, une identité par instance.
+#
+#   ./play.sh web3c deploy-theta-edge.yml --limit <hôte>
+#   ./play.sh web3c deploy-theta-edge.yml --limit <hôte> --tags monitoring   # cible seule
+#   ./play.sh web3c export-theta-edge-keys.yml --limit <hôte>                 # clés seules
+#
+# Prérequis d'inventaire sur l'hôte :
+#   ansible_roles: [theta-edge]      # sans quoi l'hôte est ignoré
+#   theta_edge_instances: <N>        # défaut 1
+# et `theta_passwd` (vault) dans le group_vars du parc.
+#
+# En fin d'installation, les clés de chaque instance sont rapatriées sur CE
+# poste, sous ~/.config/fleetforge/theta-edge/<hôte>/instance<N>/ (voir
+# theta-edge-install/tasks/keys.yml). Le Summary de staking est affiché.
+#
+# Ce playbook n'existait pas avant le 11/10/2026 alors que l'application le
+# décrivait : les rôles n'avaient jamais été assemblés.
+
+# ── Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ───────────────────────
+- name: Contrôle préalable
+  hosts: all
+  remote_user: "{{ remote_username }}"
+  roles:
+    - role: host-preflight
+      preflight_require_docker: true
+
+- name: Nœuds Theta Edge
+  hosts: all
+  remote_user: "{{ remote_username }}"
+  become: true
+  pre_tasks:
+    # `hosts: all` + `--limit` oublié ne doit pas installer un nœud partout.
+    - name: Skip hosts that do not carry the theta-edge family
+      ansible.builtin.meta: end_host
+      when: "'theta-edge' not in ansible_roles | default([])"
+      tags: [always]
+  roles:
+    - theta-edge-install
+    - theta-edge-security
+    # Supervision (OBLIGATOIRE, voir CLAUDE.md) : un exporter par hôte (9601),
+    # `theta_edge_up` par instance, cible `node-theta-edge`.
+    - theta-edge-monitoring

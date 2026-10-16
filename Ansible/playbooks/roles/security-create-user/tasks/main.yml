@@ -1,0 +1,59 @@
+---
+- name: Check if docker group exists
+  ansible.builtin.getent:
+    database: group
+    key: "docker"  # Remplacez par le nom du groupe à vérifier
+  register: docker_groups
+  failed_when: false
+
+- name: Display docker_groups
+  debug:
+    var: docker_groups
+
+# Add a service user
+- name: Add the user '"{{ remote_username }}"' and add it to 'sudo' and 'adm'
+  user:
+    name: "{{ remote_username }}"
+    password: "{{ ansible_become_hash }}"
+    groups: sudo, adm
+    shell: /bin/bash
+    expires: -1
+- name: Ensure home directory ownership for '"{{ remote_username }}"'
+  ansible.builtin.file:
+    path: "/home/{{ remote_username }}"
+    state: directory
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: "0750"
+  when: remote_username is defined
+- name: Add "{{ remote_username }}" to docker group if present
+  ansible.builtin.user:
+    name: "{{ remote_username }}"
+    groups: docker
+    append: yes
+  when: "'ansible_facts' in docker_groups and 'docker' in docker_groups.ansible_facts.getent_group"
+
+# Authorize the user to run services
+- name: Authorize user to run services
+  ansible.builtin.command:
+    cmd: "loginctl enable-linger {{ remote_username }}"
+
+- name: Authorize the parc keys for "{{ remote_username }}"
+  ansible.builtin.include_role:
+    name: security-ssh
+    tasks_from: authorized_keys
+  vars:
+    ak_user: "{{ remote_username }}"
+
+- name: Allow "{{ remote_username }}" to run sudo without password
+  ansible.builtin.copy:
+    dest: "/etc/sudoers.d/{{ remote_username }}"
+    content: "{{ remote_username }} ALL=(ALL) NOPASSWD:ALL\n"
+    owner: root
+    group: root
+    mode: "0440"
+    validate: "/usr/sbin/visudo -cf %s"
+
+# Reboot the host so the "{{ remote_username }}" user/group association is taken into account
+- name: Unconditionally reboot the machine with all defaults
+  ansible.builtin.reboot:

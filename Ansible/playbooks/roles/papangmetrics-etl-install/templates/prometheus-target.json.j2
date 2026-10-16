@@ -1,0 +1,9 @@
+[
+    {
+        "targets": [ "{{ ansible_host }}:{{ pm_etl_metrics_port }}" ],
+        "labels": {
+            "job": "papangmetrics-etl",
+            "instance": "{{ inventory_hostname }}"
+        }
+    }
+]

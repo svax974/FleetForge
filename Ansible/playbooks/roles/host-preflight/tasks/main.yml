@@ -1,0 +1,391 @@
+---
+# ── 0. Métadonnées d'inventaire ────────────────────────────────────────────
+# Avant même la supervision : un hôte mal décrit se déploie sans rien signaler,
+# et c'est la description qui sert ensuite à raisonner sur le parc.
+
+- name: Check the mandatory inventory metadata
+  ansible.builtin.include_role:
+    name: host-preflight
+    tasks_from: inventory
+  tags: [always]
+
+# ── 0 bis. Connexion à l'hôte ──────────────────────────────────────────────
+# Juste après le contrôle d'inventaire (qui est local) et avant tout le reste :
+# les contrôles suivants supposent une session ouverte, et un hôte injoignable
+# les ferait échouer un par un sans jamais nommer la cause.
+#
+# La bascule mot de passe qu'elles contiennent ne se déclenche QUE si
+# l'inventaire porte un `initial_ssh_pass` pour l'hôte ET que la clé a échoué.
+# Sans mot de passe dans l'inventaire, rien ne change : l'échec est simplement
+# annoncé ici plutôt que vingt tâches plus loin.
+#
+# Une machine ENCORE VIERGE reste hors de portée d'un `deploy-*`, et c'est
+# voulu : la connexion aboutira peut-être en root par mot de passe, mais
+# l'utilisateur de service, le port du parc et le socle manquent toujours. Ce
+# sont les contrôles ci-dessous qui le diront — avec le bon message, celui qui
+# renvoie vers `setup-server.yml`.
+- name: Establish the connection (key, then password if the inventory has one)
+  ansible.builtin.include_role:
+    name: host-preflight
+    tasks_from: connect
+  tags: [always]
+
+# ── 1. Hôte de supervision : échec immédiat ────────────────────────────────
+# Tout premier contrôle, avant même de regarder l'hôte cible. Déployer un
+# service sans supervision produit un service dont personne ne saura qu'il est
+# tombé — ce n'est pas un déploiement partiellement réussi, c'est un
+# déploiement qu'il faut refuser.
+
+- name: Fail immediately when no monitoring host is defined
+  ansible.builtin.assert:
+    that:
+      - prometheus_host is defined
+      - prometheus_host | length > 0
+      - prometheus_host in hostvars
+      - hostvars[prometheus_host]['ansible_host'] is defined
+    fail_msg: >-
+      Aucun hôte de supervision utilisable. `prometheus_host` vaut
+      « {{ prometheus_host | default('(non défini)') }} » et doit désigner une
+      entrée de l'inventaire portant Prometheus (prometheus1 sur papanglabs,
+      monitor sur web3c). Déploie d'abord la supervision — deploy-prometheus.yml
+      ou deploy-monitoring.yml — puis relance.
+    success_msg: "Supervision : {{ prometheus_host }} ({{ hostvars[prometheus_host]['ansible_host'] }})"
+  tags: [always]
+
+# Le nom peut être juste et la machine muette. Le contrôle porte sur le
+# répertoire que Prometheus lit réellement : sans lui, déposer une cible
+# reviendrait à écrire dans le vide.
+- name: Verify the Prometheus file_sd directory exists on the monitoring host
+  ansible.builtin.stat:
+    path: "/home/{{ remote_username }}/prometheus/prometheus-configs"
+  delegate_to: "{{ prometheus_host }}"
+  register: preflight_promdir
+  tags: [always]
+
+- name: Fail when the monitoring host carries no Prometheus
+  ansible.builtin.assert:
+    that:
+      - preflight_promdir.stat.exists
+      - preflight_promdir.stat.isdir
+    fail_msg: >-
+      {{ prometheus_host }} est joignable mais ne porte pas de Prometheus
+      (/home/{{ remote_username }}/prometheus/prometheus-configs absent).
+      Les cibles déposées ne seraient jamais lues. Joue deploy-prometheus.yml.
+  tags: [always]
+
+# ── 2. Socle de la machine ─────────────────────────────────────────────────
+# Le témoin d'abord, les invariants ensuite : un hôte bootstrapé AVANT
+# l'existence de ce mécanisme n'a pas de témoin et n'a pourtant rien à
+# réparer. Rejouer les rôles sur la foi d'un témoin absent déclencherait un
+# `apt upgrade dist` (install-tools) au début de chaque déploiement.
+
+- name: Take over the legacy state directory
+  ansible.builtin.include_tasks: legacy.yml
+  tags: [always]
+
+- name: Look for the setup-server stamp
+  ansible.builtin.stat:
+    path: "{{ preflight_state_dir }}/setup-server.json"
+  register: preflight_setup_stamp
+
+# Une seule commande plutôt qu'un `command` par binaire : le coût du contrôle
+# doit rester négligeable, il tourne au début de chaque déploiement.
+- name: Check the baseline invariants
+  ansible.builtin.shell: |
+    missing=""
+    for c in {{ preflight_required_commands | join(' ') }}; do
+      command -v "$c" >/dev/null 2>&1 || missing="$missing $c"
+    done
+    {% if preflight_require_docker %}
+    command -v docker >/dev/null 2>&1 || missing="$missing docker"
+    {% endif %}
+    echo "${missing# }"
+  args:
+    executable: /bin/bash
+  register: preflight_missing
+  changed_when: false
+  # `check_mode: false` — sinon le module est sauté en --check, `stdout` reste
+  # indéfini et le rôle raisonne sur du vide. Constaté en simulation le
+  # 11/08/2026 : la sonde node_exporter sautée faisait conclure à son absence
+  # et déclenchait une réinstallation sur une machine parfaitement équipée.
+  # La tâche est en lecture seule : la jouer en simulation est sans effet.
+  check_mode: false
+
+# On est CONNECTÉ en {{ remote_username }} sur le port {{ ssh_custom_port }}
+# avec sudo : `security-ssh`, `set-hostname` et `security-create-user` ont donc
+# forcément tourné, la démonstration est la connexion elle-même. Seuls les
+# rôles de paquets peuvent manquer, et ce sont les seuls que ce rôle rejoue.
+# Une machine vierge (root, port 22) n'est pas réparable d'ici : Ansible échoue
+# à la connexion, bien avant ce rôle. C'est `setup-server.yml` qui l'amène à
+# cet état, et c'est écrit dans le message ci-dessous.
+- name: Fail when the baseline is incomplete and remediation is disabled
+  ansible.builtin.fail:
+    msg: >-
+      Socle incomplet sur {{ inventory_hostname }} — manquant :
+      {{ preflight_missing.stdout | default('inconnu') }}. Remédiation désactivée
+      (preflight_remediate=false). Joue `setup-server.yml --limit
+      {{ inventory_hostname }}`.
+  when:
+    - (preflight_missing.stdout | default('')) | length > 0
+    - not (preflight_remediate | bool)
+
+- name: Install the missing baseline packages
+  ansible.builtin.include_role:
+    name: "{{ item }}"
+    apply:
+      become: true
+  loop:
+    - install-python
+    - install-tools
+    - install-scripts
+  when:
+    - (preflight_missing.stdout | default('')) | length > 0
+    - preflight_remediate | bool
+
+- name: Install Docker when the service requires it
+  ansible.builtin.include_role:
+    name: install-docker
+    apply:
+      become: true
+  when:
+    - preflight_require_docker | bool
+    - "'docker' in (preflight_missing.stdout | default(''))"
+    - preflight_remediate | bool
+
+- name: Record the baseline
+  ansible.builtin.include_role:
+    name: host-preflight
+    tasks_from: stamp
+  vars:
+    stamp_name: setup-server
+    stamp_detail: >-
+      {{ 'socle vérifié (témoin posé rétroactivement, machine déjà bootstrapée)'
+         if not preflight_setup_stamp.stat.exists and (preflight_missing.stdout | default('')) | length == 0
+         else 'socle vérifié' }}
+
+# ── 2 bis. cloud-init : course de démarrage bénigne (image Contabo) ────────
+# Le `bootcmd` que Contabo injecte dans son image de base (règle root SSH par
+# mot de passe) finit par `pkill -HUP sshd`, exécuté au stage « Network » de
+# cloud-init — avant que `ssh.service` n'ait démarré sur certains boots.
+# `pkill` ne trouve alors rien, sort en 1, et comme c'est la dernière ligne du
+# script combiné, systemd marque tout `cloud-init.service` `failed`. Repéré
+# sur backindicators1-prod le 21/08/2026, remonté par l'alerte
+# SystemdUnitFailed (dont le texte générique évoque à tort une boucle de
+# crash) : échec unique au tout premier boot, cloud-init ayant pourtant fini
+# son travail (`PermitRootLogin yes` bien posé, marqueur `boot-finished`
+# présent) — un artefact d'image, pas une panne locale.
+#
+# Scope volontairement étroit, pas un `reset-failed` générique : on ne
+# nettoie QUE ce cas précis, et seulement après avoir vérifié le marqueur
+# `boot-finished` — un reset large masquerait une vraie panne sur n'importe
+# quelle autre unité. Respecte `preflight_remediate` comme le reste du rôle :
+# en audit (`preflight_remediate=false`), on signale sans corriger.
+
+- name: Check whether cloud-init.service is in a failed state
+  ansible.builtin.command: systemctl is-failed cloud-init.service
+  register: preflight_cloudinit_failed
+  failed_when: false
+  changed_when: false
+  check_mode: false
+
+- name: Check whether cloud-init actually finished despite the failed unit
+  ansible.builtin.stat:
+    path: /var/lib/cloud/instance/boot-finished
+  register: preflight_cloudinit_finished
+  when: preflight_cloudinit_failed.stdout | default('') == 'failed'
+  check_mode: false
+
+- name: Warn when cloud-init failed and remediation is disabled
+  ansible.builtin.debug:
+    msg: >-
+      cloud-init.service est en échec sur {{ inventory_hostname }} et
+      la remédiation est désactivée. Si `boot-finished` existe
+      (course pkill/sshd connue), `systemctl reset-failed cloud-init.service`
+      suffit — sinon cloud-init n'a pas fini, ça mérite d'être regardé.
+  when:
+    - preflight_cloudinit_failed.stdout | default('') == 'failed'
+    - not (preflight_remediate | bool)
+
+- name: Clear the known-benign cloud-init bootcmd race
+  ansible.builtin.command: systemctl reset-failed cloud-init.service
+  become: true
+  when:
+    - preflight_cloudinit_failed.stdout | default('') == 'failed'
+    - preflight_cloudinit_finished.stat.exists | default(false)
+    - preflight_remediate | bool
+
+# ── 3. node_exporter ───────────────────────────────────────────────────────
+# Vérifié par ce qu'il PRODUIT, et non par l'état de son unité : une unité
+# `active` dont le port ne répond pas est exactement la panne qu'on cherche.
+
+- name: Probe node_exporter
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ node_exporter_port }}/metrics"
+    method: GET
+    status_code: [200]
+  register: preflight_nodeexp
+  failed_when: false
+  changed_when: false
+  # Lecture seule, et indispensable en simulation : sans cela `--check`
+  # annoncerait une réinstallation de node_exporter à chaque déploiement.
+  check_mode: false
+
+- name: Fail when node_exporter is absent and remediation is disabled
+  ansible.builtin.fail:
+    msg: >-
+      node_exporter ne répond pas sur {{ inventory_hostname }}:{{ node_exporter_port }}
+      et la remédiation est désactivée. Joue `deploy-exporter-sys.yml --limit
+      {{ inventory_hostname }}`.
+  when:
+    - preflight_nodeexp.status | default(0) != 200
+    - not (preflight_remediate | bool)
+
+- name: Install node_exporter
+  ansible.builtin.include_role:
+    name: exporter-sys-install
+    apply:
+      become: true
+  when:
+    - preflight_nodeexp.status | default(0) != 200
+    - preflight_remediate | bool
+
+- name: Record node_exporter
+  ansible.builtin.include_role:
+    name: host-preflight
+    tasks_from: stamp
+  vars:
+    stamp_name: exporter-sys
+    stamp_detail: "node_exporter :{{ node_exporter_port }}"
+
+# ── 4. Cible Prometheus du node_exporter ───────────────────────────────────
+# Un exporter qui tourne et que personne ne scrape ne supervise rien. C'est la
+# moitié du problème que ce rôle existe pour couvrir, et celle qui échappe
+# entièrement à un contrôle fait depuis l'hôte cible.
+#
+# La recherche porte sur l'ADRESSE, pas sur le nom d'inventaire — point
+# essentiel sur ce parc : plusieurs entrées désignent la MÊME machine
+# (rpcbtc1, brk1 et backrpc1 ont tous la même adresse ; sept entrées partagent
+# `prometheus1`). Chercher `rpcbtc1.json` alors que la machine est déjà
+# enregistrée sous `brk1.json` conclurait à une cible manquante et en
+# déposerait une seconde : Prometheus scraperait deux fois le même
+# node_exporter, sous deux `instance` différents. Les métriques système de la
+# machine seraient comptées double, et chaque alerte de ressources arriverait
+# en double.
+
+- name: Look for an existing node_exporter target for this MACHINE
+  ansible.builtin.shell: >-
+    grep -l '"{{ ansible_host }}:{{ node_exporter_scrape_port }}"'
+    /home/{{ remote_username }}/prometheus/prometheus-configs/exporter/*.json
+    2>/dev/null || true
+  args:
+    executable: /bin/bash
+  delegate_to: "{{ prometheus_host }}"
+  register: preflight_target_files
+  changed_when: false
+  check_mode: false
+
+- name: Resolve the inventory name under which the machine is registered
+  ansible.builtin.set_fact:
+    preflight_registered_as: >-
+      {{ (preflight_target_files.stdout_lines | first | basename | splitext | first)
+         if (preflight_target_files.stdout_lines | length) > 0 else '' }}
+
+- name: Fail when the target is missing and remediation is disabled
+  ansible.builtin.fail:
+    msg: >-
+      Aucune cible node_exporter pour {{ ansible_host }} sur
+      {{ prometheus_host }}, et la remédiation est désactivée. Joue
+      `deploy-exporter-sys.yml --limit {{ inventory_hostname }}`.
+  when:
+    - preflight_registered_as | length == 0
+    - not (preflight_remediate | bool)
+
+- name: Register the node_exporter target and its scrape rules
+  ansible.builtin.include_role:
+    name: exporter-sys-install
+    tasks_from: target
+    apply:
+      become: true
+  when:
+    - preflight_registered_as | length == 0
+    - preflight_remediate | bool
+
+# `exporter-sys-install/target` dépose `<inventory_hostname>.json` : la machine
+# est désormais enregistrée sous ce nom-là. Sans cette reprise, la variable
+# resterait vide pour la suite du rôle — la requête à Prometheus serait sautée
+# et l'avertissement du bas tirerait à blanc, en nommant une instance « . ».
+# C'est ce qu'affichait le premier déploiement de chaque machine, exactement là
+# où un vrai défaut de supervision aurait dû se voir. Constaté le 19/08/2026.
+- name: Take the name the machine was just registered under
+  ansible.builtin.set_fact:
+    preflight_registered_as: "{{ inventory_hostname }}"
+  when:
+    - preflight_registered_as | length == 0
+    - preflight_remediate | bool
+
+# Signalé, pas corrigé : renommer la cible reviendrait à rompre l'historique
+# des séries de la machine (le label `instance` changerait). C'est une décision
+# d'exploitation, pas quelque chose qu'un contrôle préalable doit trancher.
+- name: Note the inventory name carrying the scrape
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }} ({{ ansible_host }}) est scrapé sous
+      l'instance « {{ preflight_registered_as }} » — plusieurs entrées
+      d'inventaire partagent cette machine.
+  when:
+    - preflight_registered_as | length > 0
+    - preflight_registered_as != inventory_hostname
+
+# ── 5. Contrôle par les séries ─────────────────────────────────────────────
+# Le seul contrôle qui prouve la chaîne complète. Un fichier de cible présent
+# et une règle `health=ok` ne prouvent rien : c'est l'enseignement des trois
+# incidents cités en tête du rôle.
+# Non bloquant — Prometheus met jusqu'à un intervalle de scrape à intégrer un
+# nouveau fichier `file_sd`, et un déploiement ne doit pas échouer pour cela.
+#
+# La requête porte sur l'instance RÉELLEMENT enregistrée, pas sur
+# `inventory_hostname` : sur une machine portant plusieurs entrées, interroger
+# le mauvais nom ne renvoie rien et ferait croire à une supervision absente.
+
+- name: Ask Prometheus whether the machine is really scraped
+  ansible.builtin.uri:
+    url: >-
+      http://127.0.0.1:{{ prometheus_port | default(9090) }}/api/v1/query?query=up%7Binstance%3D%22{{ preflight_registered_as | default(inventory_hostname) }}%22%7D
+    user: "{{ prometheus_user | default(omit) }}"
+    password: "{{ prometheus_pass | default(omit) }}"
+    force_basic_auth: true
+    return_content: true
+  delegate_to: "{{ prometheus_host }}"
+  register: preflight_series
+  failed_when: false
+  changed_when: false
+  check_mode: false
+  when:
+    - preflight_verify_series | bool
+    - preflight_registered_as | length > 0
+
+- name: Warn when no series exists for this machine
+  ansible.builtin.debug:
+    msg: >-
+      ATTENTION — Prometheus ne connaît aucune série `up` pour
+      {{ preflight_registered_as | default('', true) | ternary(preflight_registered_as, inventory_hostname) }}. Normal juste
+      après un premier enregistrement (le fichier file_sd est relu au prochain
+      cycle) ; anormal ensuite : vérifier l'ouverture ufw du port
+      {{ node_exporter_port }} depuis
+      {{ hostvars[prometheus_host]['ansible_host'] }}, et la redirection du
+      routeur {{ node_exporter_scrape_port }} → {{ node_exporter_port }} si la
+      machine est derrière un NAT.
+  when:
+    - preflight_verify_series | bool
+    - (preflight_series.json.data.result | default([])) | length == 0
+
+- name: Record the preflight
+  ansible.builtin.include_role:
+    name: host-preflight
+    tasks_from: stamp
+  vars:
+    stamp_name: preflight
+    stamp_detail: >-
+      supervision={{ prometheus_host }},
+      instance={{ preflight_registered_as | default('(non enregistrée)') }},
+      séries={{ (preflight_series.json.data.result | default([])) | length }}

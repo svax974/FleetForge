@@ -1,0 +1,14 @@
+---
+# CVE-2026-31431 "Copy Fail" — purge de la mitigation sur tous les hôtes Linux
+#
+# Identique à remove-copyfail-patch.yml : aucune donnée persistante n'est associée
+# à cette mitigation. Le kernel n'est PAS rétrogradé.
+
+- name: "CVE-2026-31431 Copy Fail — purge de la mitigation"
+  hosts: all
+  remote_user: "{{ remote_username }}"
+  become: true
+  become_method: sudo
+
+  roles:
+    - copyfail-remove

@@ -1,0 +1,9 @@
+[
+    {
+        "targets": [ "{{ ansible_host }}:{{ pm_api_port }}" ],
+        "labels": {
+            "job": "papangmetrics-api",
+            "instance": "{{ inventory_hostname }}"
+        }
+    }
+]

@@ -1,0 +1,30 @@
+<VirtualHost *:{{ wp_port }}>
+    #ServerName www.example.com
+
+    #SetEnvIf X-Forwarded-Proto "https" HTTPS=on
+    ServerAdmin {{ email }}
+    DocumentRoot /var/www/html/wordpress
+    DirectoryIndex index.php index.html
+    ErrorLog /var/log/apache2/wp-error.log
+    TransferLog /var/log/apache2/wp-access.log
+
+    <Directory /var/www/html/wordpress>
+        AllowOverride All
+    </Directory>
+
+    ErrorLog ${APACHE_LOG_DIR}/error.log
+    CustomLog ${APACHE_LOG_DIR}/access.log combined
+
+#RewriteCond %{THE_REQUEST} ^[A-Z]{3,9}\ /(.*)\ HTTP/ [NC]
+#RewriteCond %{HTTPS} !=on [NC]
+#RewriteRule ^/?(wp-admin/|wp-login\.php) https://www.web3c.cc%{REQUEST_URI}%{QUERY_STRING} [R=301,QSA,L]
+
+#RewriteEngine On
+#RewriteCond %{HTTP:X-Forwarded-Proto} !https
+#RewriteCond %{HTTPS} !on
+#RewriteRule ^(.*) https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
+
+#RewriteEngine on
+#RewriteCond %{SERVER_NAME} =www.web3c.cc
+#RewriteRule ^ https://%{SERVER_NAME}%{REQUEST_URI} [END,NE,R=permanent]
+</VirtualHost>

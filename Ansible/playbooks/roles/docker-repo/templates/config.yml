@@ -1,0 +1,26 @@
+version: 0.1
+log:
+  fields:
+    service: registry
+storage:
+  cache:
+    blobdescriptor: inmemory
+  filesystem:
+    rootdirectory: /data
+  delete:
+    enabled: true
+http:
+  addr: :5000
+  headers:
+    Access-Control-Allow-Origin: ["*"]
+    Access-Control-Allow-Methods: ["HEAD", "GET", "OPTIONS", "PUT", "DELETE"]
+    Access-Control-Allow-Headers: ["Authorization", "Content-Length", "Content-Type"]
+health:
+  storagedriver:
+    enabled: true
+    interval: 10s
+    threshold: 3
+auth:
+  htpasswd:
+    realm: basic-realm
+    path: /auth/htpasswd

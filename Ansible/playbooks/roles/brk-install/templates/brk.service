@@ -1,0 +1,38 @@
+[Unit]
+Description=Bitcoin Research Kit (BRK)
+After=network-online.target
+Wants=network-online.target
+
+# Une boucle de crash doit finir par échouer franchement.
+#
+# Avec le défaut systemd (5 démarrages sur une fenêtre de 10 s) et RestartSec=30,
+# la limite ne peut structurellement JAMAIS être atteinte : 5 redémarrages
+# prennent 150 s. C'est ce qui a permis, les 3-4 août 2026, 344 redémarrages
+# consécutifs pendant que `systemctl is-active` répondait `active` en permanence.
+# La fenêtre doit donc être cohérente avec RestartSec.
+StartLimitIntervalSec={{ brk_start_limit_interval }}
+StartLimitBurst={{ brk_start_limit_burst }}
+
+[Service]
+Type=simple
+User={{ brk_user }}
+Group={{ brk_user }}
+Environment=HOME={{ brk_home }}
+ExecStart={{ brk_home }}/.cargo/bin/brk
+Restart=always
+RestartSec=30
+# Initial sync is heavy (CPU + IO). Give it room.
+Nice=5
+
+# BRK écrit déjà ses propres journaux dans {{ brk_dir }}/logs/ : un fichier par
+# jour, plus les variantes _info / _warn / _error. Laisser en plus sa sortie
+# partir vers le journal systemd la duplique intégralement dans /var/log/syslog,
+# lequel n'est purgé que par une rotation hebdomadaire — très insuffisant à ce
+# débit. Le 06/08/2026, syslog + syslog.1 pesaient 24 Go accumulés en quatre
+# jours sur un disque déjà à 94 %, pour des lignes toutes présentes par ailleurs
+# dans les fichiers de BRK, qui restent la source de référence.
+StandardOutput={{ brk_journal_output }}
+StandardError={{ brk_journal_error }}
+
+[Install]
+WantedBy=multi-user.target

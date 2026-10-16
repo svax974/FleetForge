@@ -1,0 +1,16 @@
+{
+  "service": "tradekong",
+  "up": {"kind": "http", "url": "{{ tkm_health_url }}", "status": [200], "timeout": 10},
+  "extra_checks": [
+    {"name": "back-2", "kind": "docker", "container": "{{ tkm_back2_container }}"},
+    {"name": "back-worker", "kind": "docker", "container": "{{ tkm_back_worker_container }}"},
+    {"name": "postgres", "kind": "docker", "container": "{{ pgbak_container }}"},
+    {"name": "redis", "kind": "docker", "container": "{{ tkm_redis_container }}"},
+    {"name": "redis-port", "kind": "tcp", "host": "127.0.0.1", "port": {{ tkm_redis_port }}}
+  ],
+  "metrics_command": [
+    "{{ svcprobe_lib_dir }}/postgres-metrics.sh",
+    "{{ pgbak_container }}", "{{ pgbak_user }}", "{{ pgbak_db }}", "tradekong"
+  ],
+  "metrics_timeout": 15
+}

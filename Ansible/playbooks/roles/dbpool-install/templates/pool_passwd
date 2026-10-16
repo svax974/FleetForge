@@ -1,0 +1,2 @@
+{{ postgres_replication_user }}:{{ postgres_replication_pw_md5 }}
+{{ postgres_user }}:{{ postgres_pass_md5 }}

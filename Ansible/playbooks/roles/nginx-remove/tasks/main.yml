@@ -1,0 +1,14 @@
+---
+# Remove Nginx — stops service and removes packages. Configs preserved.
+
+- name: Stop and disable nginx
+  ansible.builtin.systemd:
+    name: nginx
+    state: stopped
+    enabled: no
+  ignore_errors: true
+
+- name: Remove nginx package
+  ansible.builtin.apt:
+    name: nginx
+    state: absent

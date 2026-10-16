@@ -1,0 +1,18 @@
+---
+- name: Remove the service first
+  ansible.builtin.include_role:
+    name: fleetforge-remove
+
+- name: Remove the application directory
+  ansible.builtin.file:
+    path: "{{ ff_dir }}"
+    state: absent
+  become: true
+
+# Base de l'application (historique des runs, réglages, services suivis).
+# `dirs::data_dir()` sous Linux, donc ~/.local/share.
+- name: Remove the local database
+  ansible.builtin.file:
+    path: "/home/{{ ff_user }}/.local/share/fleetforge"
+    state: absent
+  become: true

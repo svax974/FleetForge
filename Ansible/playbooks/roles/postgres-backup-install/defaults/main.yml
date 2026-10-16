@@ -1,0 +1,47 @@
+---
+# Sauvegarde logique GÉNÉRIQUE d'une base PostgreSQL en conteneur vers un hôte
+# de destination (groupe `backups`), streamée en SSH — sans jamais toucher le
+# disque de la source.
+#
+# Un seul rôle plutôt qu'un par application (tradekong, ctdapi, …) : le
+# dupliquer reviendrait exactement à l'écueil que `postgres-metrics.sh`
+# dénonce dans son propre en-tête — un script « corrigé dans une copie sur
+# trois ». Paramétré par host_vars (voir `pgbak_name` et suivants ci-dessous,
+# sans défaut plausible — fournis par l'inventaire).
+#
+# Contrairement à `timescaledb-backup-install`, PAS de mode local : la
+# destination (`monitor` sur ce parc) n'est jamais la même machine qu'une
+# source applicative, et ne le sera pas — c'est le hôte central de supervision
+# du parc, pas un hôte d'application. La branche locale de ce rôle historique
+# existe pour une raison ponctuelle qui ne s'applique pas ici ; la reproduire
+# ajouterait un chemin mort.
+
+pgbak_dir: "{{ ansible_env.HOME }}/postgres-backup"
+
+# ── Sans défaut plausible — À FOURNIR par host_vars ────────────────────────
+# pgbak_name        identifiant court, label `backup="<name>"`, ex. "tradekong"
+# pgbak_container   conteneur docker du serveur PostgreSQL, ex. tradekong_postgres
+# pgbak_db          base à sauvegarder
+# pgbak_user        rôle PostgreSQL utilisé par pg_dump
+# pgbak_dest_host   entrée d'inventaire du groupe `backups`, ex. backup-tradekong
+
+pgbak_dest_addr: "{{ hostvars[pgbak_dest_host]['ansible_host'] }}"
+pgbak_dest_user: "{{ remote_username }}"
+pgbak_dest_port: "{{ ssh_custom_port }}"
+pgbak_dest_dir: "{{ backup_root }}/{{ pgbak_name }}"
+
+pgbak_ssh_key_path: "{{ ansible_env.HOME }}/.ssh/id_ed25519_{{ pgbak_name }}backup"
+
+# Planification quotidienne, décalée selon `pgbak_name` pour éviter que deux
+# sources partageant la même destination ne cognent au même instant — voir
+# tasks/main.yml.
+pgbak_cron_hour: "3"
+pgbak_interval_days: 1
+pgbak_keep: 3
+
+# Marge libre exigée sur la destination avant de lancer le dump — un
+# `pg_dump | gzip` qui remplit le disque produit une archive tronquée
+# indiscernable d'une archive complète tant qu'on n'essaie pas de la restaurer.
+pgbak_min_free_gb: 5
+
+node_exporter_textfile_dir: /var/lib/node_exporter/textfile_collector

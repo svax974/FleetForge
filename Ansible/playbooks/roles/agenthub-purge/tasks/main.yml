@@ -1,0 +1,77 @@
+---
+# Supprime AgentHub ET ses données : conteneurs (via agenthub-remove),
+# volumes nommés (Postgres, Redis, dossier partagé), CNAME public. Destructif
+# — la base applicative (projets, sessions, historique, clés API) n'est pas
+# reconstructible sans sauvegarde.
+
+- name: Refuse to purge without explicit confirmation
+  ansible.builtin.assert:
+    that:
+      - (confirm | default('')) == 'yes'
+    fail_msg: >-
+      Purge refusée. Cette opération supprime les volumes de données
+      AgentHub (Postgres : projets, sessions, prompts, interactions,
+      historique, clés API), non reconstructibles sans sauvegarde. Relance
+      avec -e confirm=yes en connaissance de cause.
+
+- name: Remove the containers and disable the runner
+  ansible.builtin.include_role:
+    name: agenthub-remove
+
+# Noms de volumes déduits de `PROJECT_NAME` (scripts/docker-compose.yml du
+# template : `postgres_data`/`redis_data`/`shared_directory`/`vmagent_data`,
+# préfixés `<project>_` par Docker Compose v2). Lu directement dans le
+# back/.env de prod sur le poste de contrôle plutôt que supposé en dur : une
+# valeur différente de "agent-hub" (renommage du projet) romprait
+# silencieusement la purge sinon.
+- name: Read PROJECT_NAME from the local back/.env
+  ansible.builtin.set_fact:
+    agenthub_project_name: >-
+      {{ (lookup('ansible.builtin.file', agenthub_src ~ 'back/.env', errors='ignore')
+          | default('') | regex_findall('^PROJECT_NAME=(.*)$', multiline=True) | first | default('agent-hub')) | trim }}
+  delegate_to: localhost
+  become: false
+
+- name: Remove the AgentHub named volumes (Postgres, Redis, shared dir)
+  community.docker.docker_volume:
+    name: "{{ agenthub_project_name }}_{{ item }}"
+    state: absent
+  loop:
+    - postgres_data
+    - redis_data
+    - shared_directory
+    - vmagent_data
+  become: true
+  ignore_errors: true
+
+- name: Remove any leftover AgentHub images
+  community.docker.docker_image_remove:
+    name: "{{ agenthub_project_name }}_{{ item }}:latest"
+  loop:
+    - front
+    - back
+  become: true
+  ignore_errors: true
+
+# ── DNS : retirer le CNAME public ───────────────────────────────────────────
+- name: Remove the AgentHub CNAME
+  community.general.cloudflare_dns:
+    api_token: "{{ cloudflare_token }}"
+    zone: "{{ domain_name }}"
+    record: "{{ agenthub_hostname }}"
+    type: CNAME
+    state: absent
+  delegate_to: localhost
+  become: false
+  run_once: true
+  when: cloudflare_token | default('') | length > 0
+
+- name: Remind the operator about the vhost and the firewall rules
+  ansible.builtin.debug:
+    msg: >-
+      AgentHub purgé (conteneurs, volumes, images, CNAME DNS). Restent à
+      retirer à la main si le port doit être réattribué : le gabarit
+      sites-enabled/agenthub.conf (proxy-update-web3c) et les entrées
+      {{ agenthub_front_port }}/{{ agenthub_back_port }} de
+      docker_ports_rules (host_vars/ctdapi.yml) — voir la limite documentée
+      dans agenthub-remove.

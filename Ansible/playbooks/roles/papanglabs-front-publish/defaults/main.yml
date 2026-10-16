@@ -1,0 +1,28 @@
+---
+# Publication du front PapangLabs sur Cloudflare Pages.
+#
+# Aucune machine du parc n'est concernée : le front est un bundle statique servi
+# par Cloudflare. Le rôle s'exécute donc sur le POSTE DE CONTRÔLE — c'est là que
+# vivent le dépôt, les dépendances npm et le jeton Cloudflare.
+#
+# Il reproduit exactement la branche « cloud » de deploy-full.sh, y compris le
+# mode Vite déduit du nom du fichier d'environnement : `front/.env` → build de
+# production, `front/.env.preprod` → `--mode preprod`, qui charge `.env` puis
+# `.env.preprod` par-dessus.
+
+pgf_src: "/Users/steph/Dev/Projects/PapangLabs/PapangWorkspace"
+
+# Fichier d'environnement du front. Il porte à la fois la configuration du
+# bundle (VITE_*) et les identifiants Cloudflare (projet, branche, jeton).
+# `front/.env` = prod (CLOUDFLARE_PAGES_BRANCH=main).
+pgf_env_file: "front/.env"
+
+# Branche Cloudflare Pages. Elle décide de l'environnement CIBLE côté
+# Cloudflare : `main` publie en production, tout autre nom crée un déploiement
+# de prévisualisation. Vide = valeur du fichier d'environnement.
+pgf_branch: ""
+
+# `npm install` est sauté quand node_modules existe déjà — même compromis que
+# deploy-full.sh, qui réutilise les dépendances pour éviter une réinstallation
+# complète à chaque publication. Forcer avec `-e pgf_force_install=true`.
+pgf_force_install: false

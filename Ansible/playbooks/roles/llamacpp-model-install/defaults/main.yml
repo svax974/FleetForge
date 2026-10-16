@@ -1,0 +1,9 @@
+---
+llamacpp_instance_id: 1
+llamacpp_base_port: 8080
+llamacpp_port: "{{ llamacpp_base_port + (llamacpp_instance_id | int - 1) }}"
+llamacpp_user: llamacpp
+llamacpp_home: /opt/llamacpp
+llamacpp_models_dir: "{{ llamacpp_home }}/models"
+llamacpp_ctx_size: 4096
+llamacpp_extra_args: ""

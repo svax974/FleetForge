@@ -1,0 +1,42 @@
+---
+# Supervision de ctdapi.
+#
+# Convention `<service>-monitoring` (CLAUDE.md) : le rôle dépose une SONDE
+# déclarative pour `svcprobe`, qui expose `service_up{service="ctdapi"}`.
+
+- name: Ensure the shared probe is installed
+  ansible.builtin.include_role:
+    name: svcprobe-install
+    public: true
+  tags: [monitoring]
+
+- name: Deploy the ctdapi probe
+  ansible.builtin.template:
+    src: check.json.j2
+    dest: "{{ svcprobe_checks_dir }}/ctdapi.json"
+    owner: root
+    group: root
+    mode: '0644'
+  become: true
+  tags: [monitoring]
+
+- name: Verify the probe answers
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ svcprobe_listen_port }}/metrics"
+    return_content: true
+  register: ctdapi_probe
+  retries: 6
+  delay: 5
+  until: ctdapi_probe.status is defined and ctdapi_probe.status == 200
+  changed_when: false
+  tags: [monitoring]
+
+- name: Fail when the probe reports the service down
+  ansible.builtin.fail:
+    msg: >-
+      La sonde répond mais annonce `service_up{service="ctdapi"} 0` alors que
+      le déploiement vient de réussir : la sonde est mal écrite ou
+      {{ ctm_health_url }} ne répond pas.
+  when: >-
+    'service_up{service="ctdapi"} 0' in (ctdapi_probe.content | default(''))
+  tags: [monitoring]

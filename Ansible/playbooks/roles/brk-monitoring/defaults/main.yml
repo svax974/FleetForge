@@ -1,0 +1,6 @@
+---
+brkmon_unit: brk
+brkmon_port: "{{ brk_port | default(3110) }}"
+# L'API de synchronisation, et pas seulement le port : BRK a servi des erreurs
+# pendant ~28 h les 3-4 août 2026 avec un port parfaitement ouvert.
+brkmon_url: "http://127.0.0.1:{{ brk_port | default(3110) }}/api/server/sync"

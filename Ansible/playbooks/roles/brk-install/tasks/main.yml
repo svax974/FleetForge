@@ -1,0 +1,159 @@
+---
+# Install BRK from crates.io (cargo install brk_cli) and run it as a systemd
+# service under {{ brk_user }} (same user as bitcoind -> direct blk*.dat access).
+
+# ── Guard: BRK requires a FULLY SYNCED node, else it computes wrong/partial data ──
+- name: Check bitcoin-cli is present (node deployed?)
+  ansible.builtin.stat:
+    path: "{{ brk_home }}/bitcoin/bin/bitcoin-cli"
+  register: btc_cli
+
+- name: Fail early if the node is not deployed
+  ansible.builtin.fail:
+    msg: "Bitcoin node not found at {{ brk_home }}/bitcoin. Deploy & sync it first (deploy-rpcbtc.yml)."
+  when: not btc_cli.stat.exists
+
+- name: Query node sync state (wait for RPC warmup after restart)
+  ansible.builtin.command: >
+    {{ brk_home }}/bitcoin/bin/bitcoin-cli
+    -datadir={{ brk_bitcoindir }}
+    -conf={{ brk_home }}/bitcoin/bitcoin.conf
+    getblockchaininfo
+  become: true
+  become_user: "{{ brk_user }}"
+  register: btc_chaininfo
+  until: btc_chaininfo.rc == 0
+  retries: 60
+  delay: 10
+  changed_when: false
+
+- name: Assert node is fully synced (verificationprogress >= 99.99%)
+  ansible.builtin.assert:
+    that:
+      - (btc_chaininfo.stdout | from_json).verificationprogress | float >= 0.9999
+      - not (btc_chaininfo.stdout | from_json).initialblockdownload
+    fail_msg: >
+      Node not fully synced (progress={{ (btc_chaininfo.stdout | from_json).verificationprogress }}).
+      Wait for IBD to complete before deploying BRK.
+    success_msg: "Node fully synced — proceeding with BRK."
+
+- name: Install build dependencies for brk_cli
+  ansible.builtin.apt:
+    name:
+      - build-essential
+      - pkg-config
+      - libssl-dev
+      - clang
+      - curl
+    state: present
+    update_cache: true
+  become: true
+
+- name: Install rustup toolchain (as {{ brk_user }})
+  ansible.builtin.shell: |
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+  args:
+    creates: "{{ brk_home }}/.rustup"
+  become: true
+  become_user: "{{ brk_user }}"
+
+- name: "Build and install brk_cli {{ brk_version }} (long ~10-20 min first time)"
+  ansible.builtin.shell: |
+    source "{{ brk_home }}/.cargo/env"
+    RUSTFLAGS="{{ brk_rustflags }}" cargo install --locked --version {{ brk_version }} brk_cli
+  args:
+    executable: /bin/bash
+  become: true
+  become_user: "{{ brk_user }}"
+  register: brk_cargo
+  # `Replaced package` doit figurer ici : sans lui, une montée de version qui
+  # remplace réellement le binaire est rapportée `ok`. Constaté le 08/08/2026 —
+  # le passage 0.3.6 -> 0.11.2 s'est affiché `changed=0` alors qu'il a remplacé
+  # le binaire ET provoqué la purge du magasin sur disque au démarrage suivant.
+  changed_when: >-
+    'Installed package' in brk_cargo.stdout
+    or 'Replacing' in brk_cargo.stdout
+    or 'Replaced package' in brk_cargo.stdout
+  # Tagué pour pouvoir changer de version SANS démarrer le service : une montée
+  # de majeure peut migrer le magasin sur disque de façon irréversible, on veut
+  # valider la compatibilité de l'API avant de laisser le binaire y toucher.
+  #   ./play.sh papanglabs deploy-brk.yml --limit rpcbtc1 --tags install
+  tags: [install]
+
+- name: Verify the installed binary matches brk_version
+  ansible.builtin.command: "{{ brk_home }}/.cargo/bin/brk --version"
+  become: true
+  become_user: "{{ brk_user }}"
+  register: brk_installed_version
+  changed_when: false
+  # `brk --version` sort « brk <version> » avec des codes ANSI de couleur.
+  failed_when: brk_version not in (brk_installed_version.stdout | regex_replace('\x1b\[[0-9;]*m', ''))
+  tags: [install]
+
+- name: Create BRK working directory
+  ansible.builtin.file:
+    path: "{{ brk_dir }}"
+    state: directory
+    owner: "{{ brk_user }}"
+    group: "{{ brk_user }}"
+    mode: '0750'
+  become: true
+
+- name: Deploy BRK config.toml
+  ansible.builtin.template:
+    src: config.toml
+    dest: "{{ brk_dir }}/config.toml"
+    owner: "{{ brk_user }}"
+    group: "{{ brk_user }}"
+    mode: '0640'
+  become: true
+  notify: restart brk
+
+# Tagué `unit` pour pouvoir mettre à jour l'unité seule :
+#   ./play.sh papanglabs deploy-brk.yml --tags unit
+# Le rôle complet relance `cargo install brk_cli` (10-20 min, et met à jour la
+# version), ce qu'on ne veut pas quand on ne change qu'une directive systemd.
+# ATTENTION : ce tag REDÉMARRE BRK. À n'appliquer qu'entre deux phases lourdes.
+- name: Deploy BRK systemd service
+  ansible.builtin.template:
+    src: brk.service
+    dest: /etc/systemd/system/brk.service
+    owner: root
+    group: root
+    mode: '0644'
+  become: true
+  notify: restart brk
+  tags: [unit]
+
+- name: Enable and start BRK
+  ansible.builtin.systemd:
+    name: brk
+    state: started
+    enabled: true
+    daemon_reload: true
+  become: true
+  tags: [unit]
+
+# Tagué `logs` pour pouvoir être posé seul :
+#   ./play.sh papanglabs deploy-brk.yml --tags logs
+# Ne touche ni à l'unité ni au binaire, donc aucun risque de redémarrer BRK —
+# une réindexation ou une phase de calcul en cours coûte des dizaines d'heures.
+- name: Deploy logrotate configuration for BRK logs
+  ansible.builtin.template:
+    src: logrotate-brk.j2
+    dest: /etc/logrotate.d/brk
+    owner: root
+    group: root
+    mode: '0644'
+  become: true
+  when: brk_logrotate
+  tags: [logs]
+
+# logrotate refuse en bloc un répertoire entier dès qu'un fichier de
+# configuration est invalide : mieux vaut le détecter au déploiement.
+- name: Verify the logrotate configuration parses
+  ansible.builtin.command: logrotate --debug /etc/logrotate.d/brk
+  become: true
+  changed_when: false
+  when: brk_logrotate
+  tags: [logs]

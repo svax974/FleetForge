@@ -1,0 +1,53 @@
+---
+# Sauvegarde périodique et COHÉRENTE de la base SQLite (+ blobs) d'une instance
+# web3c-sync vers un hôte du groupe `backups` (backup-sync, sur `monitor`),
+# poussée en SSH. Calquée sur postgres-backup-install (cron, métrique textfile,
+# rotation, destination dérivée de l'inventaire — jamais d'IP écrite en dur).
+#
+# Pourquoi pas un `cp` : la base est ouverte en WAL par le serveur ; copier
+# sync.db seul rate les pages encore dans sync.db-wal, et copier les trois
+# fichiers non atomiquement donne une base incohérente. `VACUUM INTO` écrit un
+# instantané cohérent (une transaction de lecture) ET compacté : les pages
+# libres — où `secure_delete` a déjà effacé les groupes purgés — n'y figurent
+# pas. Il s'exécute sous l'uid de l'image (65532) en lecture seule : une
+# ouverture par root pourrait laisser des sync.db-shm/-wal appartenant à root
+# et empêcher ensuite le serveur d'ouvrir sa propre base.
+#
+# Entrée d'inventaire (host_vars des `sync-*`) : `sync_instance`,
+# `sync_backup_dest_host` (entrée du groupe `backups`) et
+# `sync_backup_cron_minute` (décalage entre instances).
+
+sync_backup_name: "sync-{{ sync_instance }}"
+sync_backup_dest_host: backup-sync
+
+sync_backup_dest_addr: "{{ hostvars[sync_backup_dest_host]['ansible_host'] }}"
+sync_backup_dest_user: "{{ remote_username }}"
+sync_backup_dest_port: "{{ ssh_custom_port }}"
+sync_backup_dest_dir: "{{ backup_root }}/{{ sync_backup_name }}"
+
+# Sauvegarde exécutée par ROOT (le volume appartient à l'uid 65532, 0700) :
+# script, clé et journal sont donc sous root, pas sous le home de srvc.
+sync_backup_script: "/usr/local/sbin/sync-backup-{{ sync_instance }}.sh"
+sync_backup_log: "/var/log/sync-backup-{{ sync_instance }}.log"
+sync_backup_ssh_key: "/root/.ssh/id_ed25519_{{ sync_backup_name }}"
+sync_backup_known_hosts: /root/.ssh/known_hosts
+
+sync_backup_data_dir: "/home/{{ remote_username }}/sync-{{ sync_instance }}/data"
+sync_backup_uid: 65532
+sync_backup_gid: 65532
+
+# Quotidienne (cron). 04:xx : après la sauvegarde PostgreSQL de ctdapi (03:25),
+# sur la même machine ; les minutes se décalent par instance (inventaire).
+sync_backup_cron_hour: "4"
+sync_backup_cron_minute: "5"
+
+# Durée de rétention = nombre de générations (une par jour). IMPORTANT (vie
+# privée, spec/PROTOCOL.md §12) : l'effacement d'un groupe est physique pour la
+# base vivante, PAS pour les sauvegardes — un groupe supprimé reste lisible
+# (chiffré) dans les archives jusqu'à leur rotation, soit 14 jours ici.
+sync_backup_keep: 14
+
+# Marge libre exigée sur la destination avant de pousser.
+sync_backup_min_free_gb: 2
+
+node_exporter_textfile_dir: /var/lib/node_exporter/textfile_collector

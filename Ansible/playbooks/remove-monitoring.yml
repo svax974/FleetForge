@@ -1,0 +1,15 @@
+---
+# Arrête la stack de supervision de web3c (famille `monitoring` : Prometheus en
+# conteneur sur `monitor`, Grafana n'y est pas installé). Configuration et historique conservés :
+# `purge-monitoring.yml` les supprime. Côté papanglabs : remove-prometheus.yml.
+#
+#   ./play.sh web3c remove-monitoring.yml
+#
+# Tant qu'elle est arrêtée, plus aucune alerte du parc ne peut partir.
+
+- name: Désinstallation de la supervision (données conservées)
+  hosts: monitor
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - monitoring-remove

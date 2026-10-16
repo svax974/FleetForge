@@ -1,0 +1,9 @@
+[
+    {
+        "targets": [ "{{ ansible_host }}:{{ btcexp_port }}" ],
+        "labels": {
+            "job": "{{ btcexp_job }}",
+            "instance": "{{ inventory_hostname }}"
+        }
+    }
+]

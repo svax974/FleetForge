@@ -1,0 +1,13 @@
+---
+# Remove the Theta Edge sweep cron job and all associated files.
+# Node.js/npm are left in place (system packages).
+
+- name: Remove theta-edge-sweep cron job
+  ansible.builtin.cron:
+    name: "theta-edge-sweep"
+    state: absent
+
+- name: Remove sweep directory (script, config, node_modules)
+  ansible.builtin.file:
+    path: /opt/theta-edge/sweep
+    state: absent

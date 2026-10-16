@@ -1,0 +1,11 @@
+---
+tsdb_dir: "{{ ansible_env.HOME }}/papangmetrics-db"
+
+tsdb_backup_dest_host: backup-timescale
+tsdb_backup_dest_addr: "{{ hostvars[tsdb_backup_dest_host]['ansible_host'] }}"
+tsdb_backup_dest_user: "{{ remote_username }}"
+tsdb_backup_dest_dir: "{{ backup_root }}/papangmetrics"
+tsdb_backup_is_local: "{{ tsdb_backup_dest_addr == ansible_host }}"
+tsdb_backup_ssh_key_path: "{{ ansible_env.HOME }}/.ssh/id_ed25519_tsdbbackup"
+
+node_exporter_textfile_dir: /var/lib/node_exporter/textfile_collector

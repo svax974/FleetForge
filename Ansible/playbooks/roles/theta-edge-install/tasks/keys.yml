@@ -1,0 +1,43 @@
+---
+# Rapatrie sur le POSTE de contrôle les clés de chaque instance présente sur
+# l'hôte, dans `theta_edge_keys_dir/<hôte>/instance<N>/` (0700/0600) :
+#
+#   node-keystore-<adresse>.json  keystore V3 de la clé du NŒUD, chiffré par
+#                                 `theta_passwd`. S'importe tel quel dans
+#                                 wallet.thetatoken.org (« Keystore file »).
+#   wallet-mnemonic.txt           12 mots du wallet INTERNE de l'edgecore —
+#                                 un second compte, distinct de la clé du
+#                                 nœud, stocké dans sa base.
+#   info.json                     adresses + Summary de staking (public).
+#
+# Réutilisé tel quel par `export-theta-edge-keys.yml` et, AVANT toute
+# suppression, par `theta-edge-purge` : les instances sont donc découvertes sur
+# disque, pas déduites de `theta_edge_instances`. Rien n'est jamais affiché :
+# le journal Ansible, celui de l'application et le terminal ne voient que les
+# adresses, le Summary et les chemins.
+#
+# Un nœud arrêté n'empêche pas l'export : le keystore est lu sur disque. Seuls
+# la mnémonique et le Summary, servis par le RPC, manquent alors.
+
+- name: Find the instance directories
+  ansible.builtin.find:
+    paths: "{{ theta_edge_base_dir }}"
+    patterns: "instance*"
+    file_type: directory
+  register: theta_edge_key_dirs
+
+- name: Export the keys of each instance
+  ansible.builtin.include_tasks: keys-instance.yml
+  loop: >-
+    {{ theta_edge_key_dirs.files | map(attribute='path') | map('basename')
+       | map('regex_replace', '^instance', '') | select('match', '^[0-9]+$')
+       | map('int') | sort | list }}
+  loop_control:
+    loop_var: theta_edge_id
+
+- name: Where the keys were saved
+  ansible.builtin.debug:
+    msg: >-
+      Clés de {{ inventory_hostname }} rapatriées sous
+      {{ theta_edge_keys_dir }}/{{ inventory_hostname }}/ (hors dépôt, 0600).
+      Mot de passe des keystores : `theta_passwd` (vault).

@@ -1,0 +1,48 @@
+---
+# Remove Astar node — stops service, removes binary and system user.
+# Data directory /var/lib/astar is preserved. Use astar-purge to delete it.
+#
+# Retire aussi la cible Prometheus : laissée en place, elle publie `up 0`
+# indéfiniment et fait sonner `TargetDown` sur un service volontairement
+# désinstallé (CLAUDE.md § 2). C'est le `-remove` du service qui en a la
+# charge, il n'existe pas de `-monitoring-remove`.
+
+- name: Remove the Astar Prometheus target
+  ansible.builtin.file:
+    path: >-
+      /home/{{ remote_username }}/prometheus/prometheus-configs/{{ astarmon_job
+      | default('node-astar') }}/{{ inventory_hostname }}.json
+    state: absent
+  delegate_to: "{{ prometheus_host }}"
+  become: true
+  when: prometheus_host is defined and prometheus_host in hostvars
+
+- name: Stop and disable astar service
+  ansible.builtin.systemd:
+    name: astar
+    state: stopped
+    enabled: no
+  ignore_errors: true
+
+- name: Remove systemd service file
+  ansible.builtin.file:
+    path: /etc/systemd/system/astar.service
+    state: absent
+
+- name: Reload systemd daemon
+  ansible.builtin.systemd:
+    daemon_reload: yes
+
+- name: Remove astar binary
+  ansible.builtin.file:
+    path: /usr/local/bin/astar-collator
+    state: absent
+
+# `remove: yes` supprimerait le répertoire personnel — l'utilisateur est créé
+# avec `create_home: no` et les données vivent dans /var/lib/astar, que ce rôle
+# préserve explicitement.
+- name: Remove astar system user
+  ansible.builtin.user:
+    name: astar
+    state: absent
+    remove: no

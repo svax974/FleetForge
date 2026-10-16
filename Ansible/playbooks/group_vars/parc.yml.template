@@ -1,0 +1,356 @@
+# ═════════════════════════════════════════════════════════════════════════════
+# Modèle de group_vars d'un PARC — versionné, ne contient AUCUNE valeur réelle.
+#
+# Usage :
+#   cp group_vars/parc.yml.template group_vars/<parc>.yml   # ex. web3c.yml
+#   puis remplacer chaque valeur, et chiffrer chaque secret (🔒) :
+#     ansible-vault encrypt_string --stdin-name '<clé>'   # valeur sur stdin
+#   Mot de passe du vault : ~/.config/fleetforge/vault-pass (ansible.cfg).
+#
+# Les fichiers réels `group_vars/*.yml` sont gitignorés (Ansible/.gitignore) :
+# même chiffrées, les valeurs vault ne sortent pas du poste. Ce fichier, lui,
+# porte une extension que ni Ansible ni l'application ne chargent.
+#
+# Conventions :
+#   🔒  secret — à chiffrer par ansible-vault, jamais en clair
+#   [rôles]  consommateurs principaux de la variable
+#   Les variables commentées sont OPTIONNELLES (un défaut existe dans le rôle).
+#   Les variables d'hôte (`ansible_host`, `app_port`, `proxy_hostname`,
+#   `ansible_roles`, `provider`, `access_mode`…) vivent dans l'INVENTAIRE, pas
+#   ici ; les variables de MACHINE (`docker_ports_rules`) dans host_vars/.
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+# ── Identité du parc ─────────────────────────────────────────────────────────
+# Dossier des clés SSH autorisées sur root et srvc : Ansible/keys/<parc_name>/*.pub
+# [security-ssh]
+parc_name: monparc
+# Domaine principal du parc : noms publics des services (<service>.<domain_name>),
+# CNAME et vhosts. [cloudflare-dns-update, *-install, proxy-update-*]
+domain_name: example.com
+# Domaines couverts par les certificats TLS (certbot, défi DNS-01). [cert-install, install-cert]
+domains: ["example.com"]
+# Adresse de notification certbot (expiration des certificats). [cert-install, install-cert, mailserver-setup, db-install-*]
+email: admin@example.com
+# Domaines dont le certificat inclut le wildcard des aperçus AgentHub. [install-cert]
+# agenthub_preview_domains: ["example.com"]
+
+
+# ── Connexion Ansible / SSH ──────────────────────────────────────────────────
+# Compte de service créé sur chaque serveur ; c'est aussi lui qui exécute les
+# services natifs (CLAUDE.md § « srvc doit pouvoir piloter… »). [quasi tous les rôles]
+remote_username: srvc
+ansible_user: "{{ remote_username }}"
+# Port SSH personnalisé posé par setup-server.yml. [security-ssh, firewall-security, host-preflight, *-security]
+ssh_custom_port: 2222
+ansible_port: 2222
+# Clé privée de contrôle du parc (nom de fichier sous ~/.ssh). [fleetforge-install, fleetforge-remove]
+ssh_key: id_monparc
+ansible_ssh_private_key_file: "{{ lookup('ansible.builtin.env', 'HOME') }}/.ssh/{{ ssh_key }}"
+ansible_ssh_extra_args: "-o IdentitiesOnly=true"
+ansible_ssh_common_args: '-o StrictHostKeyChecking=no'
+# 🔒 Mot de passe root initial d'une machine vierge (premier setup-server.yml). [host-preflight]
+initial_ssh_pass: CHANGE_ME
+# 🔒 Mot de passe sudo de remote_username (en clair pour become)…
+ansible_become_password: CHANGE_ME
+# 🔒 …et son empreinte crypt (mkpasswd -m sha-512) posée sur les serveurs. [security-create-user]
+ansible_become_hash: CHANGE_ME
+# 🔒 Uniquement si la connexion se fait par mot de passe plutôt que par clé.
+# ansible_ssh_password: CHANGE_ME
+# Hôtes autorisés sur tous les services non publics (ufw, nginx allow, DOCKER-USER) :
+# IP opérateur, réseau domestique (IPv4 NAT + /64 IPv6), proxies…
+# [*-security, proxy-update-*, update-ufw-all.yml]
+whitelist: ["203.0.113.10", "2001:db8::/64"]
+
+
+# ── Cloudflare ───────────────────────────────────────────────────────────────
+# 🔒 Jeton API (permission Zone:DNS:Edit) : défi DNS-01 certbot ET publication
+# des enregistrements (A des proxies, CNAME des services, DKIM/SPF/DMARC).
+# Surchargeable par domaine via mail_domains[].cloudflare_token.
+# [cloudflare-dns-update, cert-install, install-cert, mailserver-setup, *-install, *-purge]
+cloudflare_token: CHANGE_ME
+# Plages d'edge Cloudflare (IPv4 + IPv6), données publiques — habituellement
+# déclarées dans group_vars/all.yml. https://www.cloudflare.com/ips/
+# [back-security, proxy-update-papang, proxy-update-web3c]
+cloudflare_ips:
+  - 173.245.48.0/20
+  - 2400:cb00::/32
+  # … liste complète sur https://www.cloudflare.com/ips/
+
+
+# ── Proxies (nginx frontaux) ─────────────────────────────────────────────────
+# Nom canonique du front des proxies (A round-robin sur tout le groupe
+# `proxies`) ; cible des CNAME des services publiés. [cloudflare-dns-update, ollama-install]
+proxy_hostname: "proxy.{{ domain_name }}"
+# Rôle de sécurité appliqué aux proxies de ce parc. [update-ufw-all.yml]
+proxy_security_role: proxy-security-web3c        # ou proxy-security-papang
+# Ports d'amont relayés par les proxies vers les back/front applicatifs.
+# [proxy-update-*, proxy-security-*, back-security, front-security]
+proxy_back_port: 9741
+proxy_backindicators_port: 9742
+proxy_front_port: 9740
+
+
+# ── Supervision : Prometheus / Grafana / Alertmanager ────────────────────────
+# Entrée d'inventaire portant Prometheus (UNE supervision par parc). Tous les
+# rôles *-monitoring y enregistrent leur cible. [host-preflight, *-monitoring, *-security]
+prometheus_host: prometheus1
+prometheus_port: 9090
+# Basic auth de l'UI/API Prometheus. [prometheus-install, monitoring-install, host-preflight, *-monitoring]
+prometheus_user: prom
+prometheus_pass: CHANGE_ME                       # 🔒
+# Version de node_exporter installée partout. [exporter-sys-install]
+node_exporter_version: 1.8.2
+# Administrateur Grafana. [monitor-grafana-install]
+grafana_admin_user: admin
+grafana_admin_pass: CHANGE_ME                    # 🔒
+# Entrée d'inventaire portant Alertmanager. [prometheus-install, monitoring-install]
+alertmanager_host: alertmanager1
+alertmanager_port: 9093
+# Destinataires des alertes e-mail (envoyées via le relais SMTP du parc). [alertmanager-install]
+alertmanager_email_to:
+  - ops@example.com
+# Groupes de règles chargés : ne déclarer que ceux dont les métriques existent
+# sur ce parc. Valeurs : availability, resources, database, papangmetrics,
+# bitcoin, dmarc, backups, services, astar, searxng, sync. [prometheus-alerts-update]
+prom_alert_groups: [availability, resources, services]
+# Seuils du groupe `sync` (défauts indiqués). [prometheus-alerts-update]
+# prom_alert_sync_down_for: 5m
+# prom_alert_sync_shed_for: 10m
+# prom_alert_sync_5xx_per_s: 0.1
+# prom_alert_sync_auth_failures_per_s: 2
+# prom_alert_sync_bytes_max: 21474836480
+# Port de l'exporter Bitcoin scrapé par Prometheus. [rpcbtc-monitoring]
+# prometheus_port_btc: 9898
+
+
+# ── Sauvegardes ──────────────────────────────────────────────────────────────
+# Racine des sauvegardes sur l'hôte de DESTINATION (groupe `backups`).
+# [brk-backup-*, postgres-backup-*, brk-restore, retarget-backups*.yml]
+backup_root: "/home/{{ remote_username }}/backups"
+# Péremption (h) avant alerte, par nom de sauvegarde (postgres-backup, sync-backup). [prometheus-alerts-update]
+prom_alert_backup_max_age_hours:
+  monapp: 48
+# Péremption (h) des sauvegardes BRK et TimescaleDB (papanglabs). [prometheus-alerts-update]
+# backup_max_age_hours_brk: 240
+# backup_max_age_hours_tsdb: 96
+
+
+# ── Relais mail (Postfix/OpenDKIM) et DMARC ──────────────────────────────────
+# Domaines de relais. dmarc_policy/dmarc_rua recopient l'état DNS voulu (défaut
+# du rôle : `none`). cloudflare_token optionnel si le domaine est sur un autre compte.
+# [mailserver-setup, mailserver-purge, alertmanager-install, deploy-mailserver.yml]
+mail_domains:
+  - name: "mail.example.com"
+    reply_address: "contact@example.com"
+    subject_prefix: "[Example] "
+    dmarc_policy: quarantine
+    dmarc_rua: "dmarc@example.com"
+    # cloudflare_token: CHANGE_ME                # 🔒 optionnel
+# Domaines RACINE dont le relais publie l'enregistrement DMARC. [mailserver-setup]
+mailserver_dmarc_org_domains:
+  - name: "example.com"
+    policy: none
+    rua:
+      - "dmarc@example.com"
+# Compte SMTP authentifié du relais, partagé par tous les domaines.
+# [mailserver-setup, alertmanager-install]
+relay_user: "{{ remote_username }}"
+relay_user_password: CHANGE_ME                   # 🔒
+# Boîte IMAP relevée par l'exporter DMARC (Gmail : mot de passe d'application).
+# [dmarc-exporter-install, deploy-dmarc-exporter.yml]
+dmarc_exporter_imap_user: "dmarc-reports@example.com"
+dmarc_exporter_imap_password: CHANGE_ME          # 🔒
+dmarc_exporter_rua_addresses:
+  - "dmarc@example.com"
+
+
+# ── VPN (Pritunl + MongoDB) ──────────────────────────────────────────────────
+# Ports du VPN, relayés par les proxies. [vpn-setup, vpn-security, vpn-monitoring, proxy-*]
+vpn_tcp_port: 5443
+vpn_data_port: 14601
+vpn_data_port2: 14602
+# Restaurer un dump Pritunl local (roles/vpn-setup/templates/pritunl.dump,
+# gitignoré : il contient les clés privées du VPN). [vpn-setup]
+vpn_import_dump: false
+# MongoDB de Pritunl. [vpn-setup, vpn-security, vpn-routes-install, install-vpn-routes.yml]
+mongodb_port: 14603
+mongodb_admin_name: mongo-adm
+mongodb_admin_pass: CHANGE_ME                    # 🔒
+mongodb_user_name: mongo-srvc
+mongodb_user_pass: CHANGE_ME                     # 🔒
+
+
+# ── PostgreSQL répliqué (db-*, dbfront-*, dbpool-*) ──────────────────────────
+pgversion: 17
+postgres_port: 15434
+# Ports publiés par pgpool / relayés par les proxies. [dbpool-*, proxy-*]
+postgres_proxy_port: 15432
+postgresfront_proxy_port: 15433
+postgres_db: appdb
+postgres_db_front: appdbfront
+postgres_user: app
+postgres_pass: CHANGE_ME                         # 🔒
+# Empreinte md5 pour pool_passwd : 'md5' + md5(<pass><user>). [dbpool-install]
+postgres_pass_md5: CHANGE_ME                     # 🔒
+postgres_replication_user: replication_user
+postgres_replication_pw: CHANGE_ME               # 🔒 [db-*-install-*, entrypoint-backup.sh]
+postgres_replication_pw_md5: CHANGE_ME           # 🔒
+pgpool_user: pgpool
+pgpool_pass_md5: CHANGE_ME                       # 🔒 [dbpool-install]
+# pgAdmin. [db-install-*, dbfront-install-*, db-security, proxy-update-*]
+pgadmin_port_http: 15080
+pgadmin_port_https: 15443
+
+
+# ── Registre Docker privé ────────────────────────────────────────────────────
+# [docker-repo-*, proxy-security-*, proxy-update-web3c]
+docker_repo_port: 12500
+
+
+# ── Bitcoin Core / BRK / Esplora (habituellement group_vars/<groupe rpc>.yml) ─
+# Identifiants RPC de bitcoind. [rpcbtc-monitoring, brk-install, esplora-install]
+rpcbtcuser: rpcuser
+rpcbtcpasswd: CHANGE_ME                          # 🔒
+# Ligne rpcauth (share/rpcauth/rpcauth.py) — empreinte salée, se casse hors ligne. [rpcbtc-rpcauth]
+rpcbtcauth: CHANGE_ME                            # 🔒
+bitcoin_core_version: "31.0"                     # [rpcbtc-install]
+bitcoin_dbcache: 8000                            # Mo, accélère l'IBD [rpcbtc-setup]
+zmq_port_hashblock: 28332                        # [rpcbtc-setup]
+zmq_port_rawblock: 28333
+exporter_job: node-btc                           # [rpcbtc-monitoring, rpcbtc-remove, rpcbtc-purge]
+# Ports P2P et RPC de bitcoind. [rpcbtc-security, brk-install, esplora-install, proxy-update-papang]
+proxy_port_btcd: 8333
+proxy_port_rpc_btc: 13687
+
+
+# ── PapangMetrics (TimescaleDB + ETL + API) ──────────────────────────────────
+# [papangmetrics-*, timescaledb-*]
+papangmetrics_db: papangmetrics
+papangmetrics_user: papangmetrics
+papangmetrics_pass: CHANGE_ME                    # 🔒
+papangmetrics_db_port: 5432
+papangmetrics_api_port: 9743
+papangmetrics_etl_metrics_port: 9611
+papangmetrics_admin_username: admin
+papangmetrics_admin_password: CHANGE_ME          # 🔒
+papangmetrics_admin_jwt_secret: CHANGE_ME        # 🔒 openssl rand -base64 48
+# Jeton Bearer de /metrics du back PapangLabs. [papanglabs-back-monitoring]
+# papanglabs_metrics_token: CHANGE_ME            # 🔒
+
+
+# ── Astar (collator) ─────────────────────────────────────────────────────────
+# Relais Polkadot interrogé par RPC plutôt qu'embarqué. [astar-install, astar-monitoring]
+astar_relay_rpc_urls:
+  - "wss://rpc.polkadot.io"
+# Pool de transactions (single-state | fork-aware). [astar-install]
+astar_pool_type: "single-state"
+
+
+# ── Theta Edge ───────────────────────────────────────────────────────────────
+# Mot de passe des wallets internes edgecore. [theta-edge-install, theta-edge-sweep-install]
+theta_passwd: CHANGE_ME                          # 🔒
+# Adresse destination des balayages TFuel automatiques (0x…). [theta-edge-sweep-install]
+theta_wallet: ""
+
+
+# ── OpenClaw (gateway d'agents) ──────────────────────────────────────────────
+# [openclaw-install]
+openclaw_openai_api_key: CHANGE_ME               # 🔒
+# Provider de modèles OpenAI-compatible personnalisé.
+openclaw_custom_provider_name: llm-proxy
+openclaw_custom_provider_base_url: "https://llm.example.com/v1"
+openclaw_custom_provider_models:
+  - { id: "auto:reasoning", name: "Auto-Reasoning" }
+openclaw_custom_provider_api_key: CHANGE_ME      # 🔒
+# Heartbeat : route Telegram et modèle fixe.
+openclaw_heartbeat_account_id: moncompte
+openclaw_heartbeat_to: "000000000"               # identifiant de chat Telegram
+openclaw_heartbeat_model: provider/model
+openclaw_telegram_bot_token: CHANGE_ME           # 🔒 @BotFather
+
+
+# ── SearXNG ──────────────────────────────────────────────────────────────────
+# [searxng-install, searxng-security, searxng-monitoring, proxy-update-web3c]
+searxng_host: station                            # entrée d'inventaire qui porte le service
+searxng_port: 8888
+searxng_hostname: "searxng.{{ domain_name }}"
+searxng_allowed_proxies: [proxy1, proxy2]        # proxies autorisés (publication + filtre + vhost)
+searxng_api_key: CHANGE_ME                       # 🔒 en-tête X-Api-Key du vhost (openssl rand -base64 32)
+
+
+# ── Rotki ────────────────────────────────────────────────────────────────────
+# [proxy-update-web3c (rotki.conf), rotki-*]
+# rotki_host: rotki                              # entrée d'inventaire (défaut : rotki)
+rotki_allowed_proxies: [proxy1, proxy2]
+rotki_api_key: CHANGE_ME                         # 🔒 en-tête X-Api-Key du vhost API
+
+
+# ── FreeLLMAPI ───────────────────────────────────────────────────────────────
+# [freellm-install, freellm-security, freellm-monitoring, proxy-update-web3c]
+freellm_host: freellm
+freellm_port: 3001
+freellm_hostname: "freellm.{{ domain_name }}"
+freellm_allowed_proxies: [proxy1, proxy2]
+# Fichier LOCAL où est déposée la clé unifiée générée au déploiement.
+freellm_unified_key_local_path: "{{ lookup('ansible.builtin.env', 'HOME') }}/.config/fleetforge/freellm-unified-api-key"
+# Clé de licence : son NOM de variable est donné par `freellm_license_var_name`
+# (freellm-install/defaults), résolu par lookup('vars', …).
+# <valeur de freellm_license_var_name>: CHANGE_ME   # 🔒
+
+
+# ── StarNet ──────────────────────────────────────────────────────────────────
+# [starnet-*, proxy-update-web3c]
+starnet_host: starnet
+starnet_hostname: "starnet.{{ domain_name }}"
+starnet_sidecar_port: 8787
+
+
+# ── AgentHub ─────────────────────────────────────────────────────────────────
+# Jeton d'enregistrement du runner, émis par le hub. [agenthub-deploy]
+# agenthub_runner_token: CHANGE_ME               # 🔒
+
+
+# ── Umami (analytics) ────────────────────────────────────────────────────────
+# [umami-install]
+# umami_db_pass: CHANGE_ME                       # 🔒
+# umami_hash_salt: CHANGE_ME                     # 🔒 openssl rand -hex 32
+
+
+# ── WordPress ────────────────────────────────────────────────────────────────
+# [wordpress-install, wordpress-backup, wordpress-restore, wordpress-*]
+wp_dbhost: localhost
+wp_dbname: wordpress
+wp_dbuser: wordpress
+wp_dbpass: CHANGE_ME                             # 🔒
+wp_port: 1080
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Groupe `mtbridges` (hôtes Windows) — group_vars/mtbridges.yml
+# ═════════════════════════════════════════════════════════════════════════════
+# ansible_connection: winrm
+# ansible_winrm_transport: ntlm
+# ansible_winrm_server_cert_validation: ignore
+# ansible_port: 5985
+# ansible_winrm_operation_timeout_sec: 60        # < read_timeout_sec (contrainte pywinrm)
+# ansible_winrm_read_timeout_sec: 90
+# ansible_user: Administrator
+# ansible_password: CHANGE_ME                    # 🔒
+# [mtbridge-deploy]
+# mtbridge_github_token: CHANGE_ME               # 🔒 obligatoire : accès au dépôt privé
+# mtbridge_api_key: CHANGE_ME                    # 🔒 optionnel
+# mtbridge_autologon_password: CHANGE_ME         # 🔒 optionnel
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Variables passées en `-e` (jamais en group_vars) — pour mémoire
+# ═════════════════════════════════════════════════════════════════════════════
+#   llamacpp_model_name, llamacpp_model_url   deploy/remove-llamacpp-model.yml
+#   ollama_model_name                          deploy/remove-ollama-model.yml
+#   allow_unmanaged_bitcoind=true              rpcbtc-setup : accepter un bitcoind hors systemd
+#   src_host, dst_host                         migrate-*.yml
+#   target_host                                restore-brk.yml
+#   run_now, purge_old                         retarget-backups*.yml
+#   sync_purge_confirm, sync_purge_backups     purge-sync-server.yml
+#   wp_restore_db_file, wp_restore_files_file  restore-wordpress.yml

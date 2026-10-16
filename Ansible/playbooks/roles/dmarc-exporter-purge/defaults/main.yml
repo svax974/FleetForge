@@ -1,0 +1,8 @@
+---
+# Repris de `dmarc-exporter-install` pour que le rôle soit jouable seul, sans
+# dépendre des variables d'inventaire du parc qui l'a installé.
+dmarc_exporter_user: dmarcexp
+dmarc_exporter_state_dir: /var/lib/dmarc-exporter
+dmarc_exporter_config_dir: /etc/dmarc-exporter
+dmarc_exporter_port: 7489
+dmarc_exporter_docker_bridge_cidr: "172.17.0.0/16"

@@ -1,0 +1,8 @@
+---
+starnet_user: "{{ remote_username }}"
+starnet_home: "/home/{{ starnet_user }}"
+starnet_app_dir: "{{ starnet_home }}/starnet"
+starnet_node_root: "{{ starnet_home }}/.local/lib/starnet-node"
+starnet_port: "{{ app_port | default(4720) }}"
+starnet_hostname: "starnet.{{ domain_name }}"
+starnet_extra_allowed_cidrs: []

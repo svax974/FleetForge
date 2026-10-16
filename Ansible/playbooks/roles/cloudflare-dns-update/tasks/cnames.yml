@@ -1,0 +1,160 @@
+---
+# Alias CNAME des services vers le front canonique des proxies.
+#
+# Convention d'inventaire : tout `hostname` est synchronisé en A (tasks/
+# main.yml) ; un hôte qui expose un service sous un NOM PUBLIC distinct de son
+# `hostname` le déclare via `proxy_hostname: <nom public>` — ce fichier publie
+# alors un CNAME <nom public> → proxy.<zone>, le front round-robin dont les A
+# records sont garantis juste avant (proxy-front.yml, inclus ci-dessous).
+#
+# Le front est construit en dur (`proxy.` + zone) plutôt que lu depuis la
+# variable globale `proxy_hostname` (group_vars/<parc>.yml) : un hôte portant
+# l'attribut d'inventaire MASQUE ce global (les vars d'hôte gagnent sur les
+# group_vars), et `value: "{{ proxy_hostname }}"` évalué dans son contexte
+# publierait un CNAME bouclé sur le service lui-même.
+#
+# Fichier séparé pour être inclus des DEUX côtés (même motif que
+# proxy-front.yml) : synchronisation générique (tasks/main.yml, tous les hôtes
+# du parc) et rôles `-install` (portée réduite à leur seul hôte via
+# `cfdns_cname_scope`, pour garantir le CNAME dès le premier déploiement sans
+# attendre un `update-cloudflare-dns.yml`).
+- name: Fail early without a Cloudflare API token
+  ansible.builtin.assert:
+    that:
+      - cfdns_token | length > 0
+    fail_msg: >-
+      `cloudflare_token` est vide. Crée un jeton Cloudflare (My Profile → API
+      Tokens → Create Token → « Edit zone DNS »), limité à la zone
+      {{ cfdns_zone }}, puis chiffre-le :
+      `ansible-vault encrypt_string --name cloudflare_token '<jeton>'`
+      et pose-le dans group_vars/<parc>.yml.
+    success_msg: "Jeton présent, zone {{ cfdns_zone }}."
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+# Garantit le front AVANT les CNAME : sans ça, un premier déploiement
+# publierait des CNAME vers un nom sans AUCUN A record — injoignables tant que
+# personne n'a pensé à jouer la synchronisation générique séparément.
+#
+# PAS de `delegate_to` ici : un `include_tasks` n'accepte que les mots-clés de
+# VALID_INCLUDE_KEYWORDS (delegate_to en est exclu → « 'delegate_to' is not a
+# valid attribute for a TaskInclude »). La délégation et `run_once` vivent dans
+# proxy-front.yml lui-même, sur chaque tâche qu'il contient — l'include ne fait
+# que charger le fichier depuis le contrôleur, il n'exécute rien à distance.
+- name: Ensure the canonical proxy front exists before pointing to it
+  ansible.builtin.include_tasks: proxy-front.yml
+  run_once: true
+
+- name: Build the CNAME list from the proxy_hostname attributes
+  ansible.builtin.set_fact:
+    cfdns_cnames: >-
+      {{ (cfdns_cnames | default([])) + [{
+           'host': item,
+           'record': hostvars[item].proxy_hostname
+         }] }}
+  loop: "{{ cfdns_cname_scope | default(groups[cfdns_group] | default([]) | sort) }}"
+  when:
+    - hostvars[item].proxy_hostname is defined
+    - hostvars[item].proxy_hostname is search('\.' ~ cfdns_zone ~ '$')
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+# Écartés listés, jamais tus — même motif que les A records de main.yml. Les
+# hôtes SANS attribut sont le cas normal (pas un service nommé) : seuls les
+# noms hors zone sont signalés.
+- name: Report the CNAMEs left out
+  ansible.builtin.debug:
+    msg: >-
+      Hors synchronisation CNAME : {{ item }}
+      (nom {{ hostvars[item].proxy_hostname }} hors de la zone {{ cfdns_zone }})
+  loop: "{{ cfdns_cname_scope | default(groups[cfdns_group] | default([]) | sort) }}"
+  when:
+    - hostvars[item].proxy_hostname is defined
+    - not (hostvars[item].proxy_hostname is search('\.' ~ cfdns_zone ~ '$'))
+    - item not in (cfdns_cnames | default([]) | map(attribute='host') | list)
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Fail on duplicate CNAME names
+  ansible.builtin.assert:
+    that:
+      - (cfdns_cnames | default([]) | map(attribute='record') | list | unique | length)
+        == (cfdns_cnames | default([]) | length)
+    fail_msg: >-
+      Deux hôtes d'inventaire revendiquent le même nom CNAME :
+      {{ cfdns_cnames | default([]) | map(attribute='record') | list
+         | difference(cfdns_cnames | default([]) | map(attribute='record') | list | unique) | unique | join(', ') }}.
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+# Un A et un CNAME ne peuvent pas coexister sur le même nom (Cloudflare
+# renvoie 81054) : publier un CNAME là où la synchronisation A maintient un
+# homonyme, c'est les faire se succéder à chaque exécution. Refuser plutôt
+# que publier au hasard — corriger, c'est renommer le `hostname` (suffixe
+# `-priv`, identité machine) pour libérer le nom public au CNAME.
+- name: Fail on A/CNAME name collision
+  ansible.builtin.assert:
+    that:
+      - (cfdns_records | default([]) | map(attribute='record') | list
+         | intersect(cfdns_cnames | default([]) | map(attribute='record') | list)
+         | length) == 0
+    fail_msg: >-
+      Conflit A/CNAME sur :
+      {{ cfdns_records | default([]) | map(attribute='record') | list
+         | intersect(cfdns_cnames | default([]) | map(attribute='record') | list) | join(', ') }}.
+      Un A et un CNAME ne peuvent pas coexister sur le même nom.
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+# Un CNAME et un A ne peuvent pas coexister sur le même nom : un A record
+# hérité d'une synchronisation antérieure (avant la bascule du nom en CNAME)
+# bloquerait la publication (Cloudflare 81054). Purge ciblée AVANT création.
+- name: Remove any conflicting A record before creating the CNAME
+  community.general.cloudflare_dns:
+    api_token: "{{ cfdns_token }}"
+    zone: "{{ cfdns_zone }}"
+    record: "{{ item.record }}"
+    type: A
+    state: absent
+  loop: "{{ cfdns_cnames | default([]) }}"
+  loop_control:
+    label: "{{ item.record }} (A)"
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Publish the CNAMEs to the canonical proxy front
+  community.general.cloudflare_dns:
+    api_token: "{{ cfdns_token }}"
+    zone: "{{ cfdns_zone }}"
+    record: "{{ item.record }}"
+    type: CNAME
+    value: "proxy.{{ cfdns_zone }}"
+    ttl: "{{ cfdns_ttl }}"
+    proxied: false
+    solo: true
+    state: present
+  loop: "{{ cfdns_cnames | default([]) }}"
+  loop_control:
+    label: "{{ item.record }} → proxy.{{ cfdns_zone }} ({{ item.host }})"
+  delegate_to: localhost
+  become: false
+  run_once: true
+  register: cfdns_cnames_published
+
+- name: Summarise the CNAMEs
+  ansible.builtin.debug:
+    msg: >-
+      Zone {{ cfdns_zone }} : {{ cfdns_cnames | default([]) | length }} CNAME(s) traité(s),
+      {{ cfdns_cnames_published.results | default([]) | selectattr('changed', 'defined') | selectattr('changed') | list | length }}
+      modifié(s) —
+      {{ cfdns_cnames_published.results | default([]) | selectattr('changed', 'defined') | selectattr('changed')
+         | map(attribute='item.record') | list | join(', ') | default('aucun', true) }}.
+  delegate_to: localhost
+  become: false
+  run_once: true

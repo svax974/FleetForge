@@ -1,0 +1,39 @@
+---
+- name: Apply the machine's Docker port rules
+  ansible.builtin.include_role:
+    name: docker-ports-security
+
+# Une machine dont les host_vars ignorent le port du back publierait le
+# répartiteur sur 0.0.0.0 sans aucun filtre, et `ufw status` afficherait
+# néanmoins des DENY rassurants. C'est le constat du 06/08/2026 sur
+# `prometheus1`, reproduit ici en garde-fou plutôt qu'en commentaire.
+- name: Fail when the load balancer port is not filtered
+  ansible.builtin.assert:
+    that:
+      - (docker_ports_rules | default([]) | selectattr('port', 'equalto', pgb_port | int) | list | length) > 0
+    fail_msg: >-
+      Le port {{ pgb_port }} (back-lb) est publié par Docker mais absent de
+      `docker_ports_rules` : il serait joignable depuis Internet sans filtre, et
+      ufw n'y peut rien. Ajoute une entrée dans
+      playbooks/host_vars/{{ inventory_hostname }}.yml (rôle docker-ports-security),
+      avec `sources` limité aux IP des proxies.
+    success_msg: "Port {{ pgb_port }} filtré dans DOCKER-USER."
+
+# `delegate_to` et non un play `hosts: <service>` : le déploiement d'un back se
+# joue TOUJOURS avec `--limit`, qui exclurait un tel play et laisserait le
+# pare-feu amont fermé sans le dire. La délégation, elle, ignore `--limit`.
+- name: Autoriser ce back sur les services amont
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ ansible_host }}"
+    port: "{{ item.port }}"
+    comment: "{{ item.name }} - back {{ inventory_hostname }}"
+  delegate_to: "{{ item.host }}"
+  become: true
+  loop: "{{ pgb_upstream_services }}"
+  loop_control:
+    label: "{{ item.name }} sur {{ item.host }}"
+  # Service co-localisé avec le back : le trafic ne sort pas de la machine.
+  when: ansible_host != hostvars[item.host].ansible_host
+  tags: [ufw]

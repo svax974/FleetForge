@@ -1,0 +1,108 @@
+---
+# Allow SSH connections from whitelist and VPNs
+- name: Allow SSH connections from whitelist on custom port
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ item }}"
+    port: "{{ ssh_custom_port }}"
+  with_items: "{{ whitelist }}"
+
+- name: Allow SSH connections from VPNs
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    port: "{{ ssh_custom_port }}"
+    from_ip: "{{ hostvars[item].ansible_host }}"
+  loop: "{{ groups['vpns'] | default([]) }}"
+
+# Allow app_port from proxies + whitelist + VPNs (if defined for this host)
+- name: Allow app_port from proxies
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ hostvars[item].ansible_host }}"
+    port: "{{ app_port }}"
+  loop: "{{ groups['proxies'] | default([]) }}"
+  when: app_port is defined
+
+- name: Allow app_port from whitelist
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ item }}"
+    port: "{{ app_port }}"
+  with_items: "{{ whitelist }}"
+  when: app_port is defined
+
+- name: Allow app_port from VPNs
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ hostvars[item].ansible_host }}"
+    port: "{{ app_port }}"
+  loop: "{{ groups['vpns'] | default([]) }}"
+  when: app_port is defined
+
+# Allow back_port from whitelist + VPNs only (if defined for this host)
+- name: Allow back_port from whitelist
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ item }}"
+    port: "{{ back_port }}"
+  with_items: "{{ whitelist }}"
+  when: back_port is defined
+
+- name: Allow back_port from VPNs
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ hostvars[item].ansible_host }}"
+    port: "{{ back_port }}"
+  loop: "{{ groups['vpns'] | default([]) }}"
+  when: back_port is defined
+
+# Deny connections on port 22
+- name: Remove SSH connections on port 22 rules if any
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: any
+    port: 22
+    delete: true
+
+- name: Set logging
+  community.general.ufw:
+    logging: 'on'
+
+# Add sshd restriction in /etc/hosts.allow
+# tcpwrappers wants IPv6 as `[addr]` / `[prefix]/len` (a bare `2a01:…::/64` is a "bad net/mask"
+# pattern that can void the whole rule, hence a Connection reset before the SSH banner), and an
+# empty VPN list must not leave a trailing comma. The list lives in a managed block so a changed
+# whitelist REPLACES the previous one instead of piling up lines; other roles' own
+# `sshd: <ip>` lines (brk-backup-install, brk-restore…) stay untouched.
+- name: Build the tcpwrappers sshd allow list
+  set_fact:
+    sshd_allow_list: >-
+      {{ (whitelist | map('regex_replace', '^([0-9a-fA-F]*:[0-9a-fA-F:.]*)(/[0-9]+)?$', '[\1]\2') | list)
+         + (groups['vpns'] | default([]) | map('extract', hostvars, ['ansible_host']) | list) }}
+- name: Remove legacy hosts.allow sshd lines carrying an unbracketed IPv6 prefix
+  ansible.builtin.lineinfile:
+    path: /etc/hosts.allow
+    regexp: '^sshd:[^\[]*:[0-9a-fA-F:]*/[0-9]+'
+    state: absent
+- name: Add whitelist hosts.allow
+  ansible.builtin.blockinfile:
+    path: /etc/hosts.allow
+    marker: "# {mark} ANSIBLE sshd whitelist"
+    block: 'sshd: {{ sshd_allow_list | join(", ") }}'
+- name: Add sshd ALL to hosts.deny
+  ansible.builtin.lineinfile:
+    path: /etc/hosts.deny
+    line: 'sshd: ALL'
+
+- name: Deny by default and enable UFW
+  community.general.ufw:
+    state: enabled
+    policy: deny

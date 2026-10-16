@@ -1,0 +1,9 @@
+[
+    {
+        "targets": [ "{{ ansible_host }}:{{ svcprobe_port }}" ],
+        "labels": {
+            "job": "{{ svcprobe_job }}",
+            "instance": "{{ inventory_hostname }}"
+        }
+    }
+]

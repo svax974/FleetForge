@@ -1,0 +1,17 @@
+---
+# Supprime le nœud Astar ET la chaîne.
+#
+#   ./play.sh web3c purge-astar.yml --limit hub -e confirm=yes
+#
+# ATTENTION : /var/lib/astar contient la chaîne complète en mode `archive`.
+# Sa suppression impose une resynchronisation de plusieurs jours. Le rôle
+# refuse de s'exécuter sans `-e confirm=yes`.
+#
+# `--limit` est OBLIGATOIRE.
+
+- name: Purge du nœud Astar (chaîne comprise)
+  hosts: all
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - astar-purge

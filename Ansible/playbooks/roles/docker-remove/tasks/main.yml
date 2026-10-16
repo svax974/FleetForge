@@ -1,0 +1,20 @@
+---
+# Remove Docker CE — stops the service and removes packages.
+# Images, volumes and networks are preserved. Use docker-purge to delete them.
+
+- name: Stop and disable docker service
+  ansible.builtin.systemd:
+    name: docker
+    state: stopped
+    enabled: no
+  ignore_errors: true
+
+- name: Remove Docker CE packages
+  ansible.builtin.apt:
+    pkg:
+      - docker-ce
+      - docker-ce-cli
+      - containerd.io
+      - docker-buildx-plugin
+      - docker-compose-plugin
+    state: absent

@@ -1,0 +1,146 @@
+---
+# Installe la sauvegarde SQLite de l'instance `{{ sync_instance }}` vers
+# `{{ sync_backup_dest_host }}`. Modèle : postgres-backup-install. Joué par
+# deploy-backup.yml (sur le groupe `sync_servers`).
+
+- name: Fail if the backup destination is not in the inventory
+  ansible.builtin.fail:
+    msg: >-
+      L'hôte de destination `{{ sync_backup_dest_host }}` est absent de
+      l'inventaire. Ajoute-le au groupe `backups` avant de jouer ce rôle.
+  when: sync_backup_dest_host not in hostvars
+
+- name: Report the resolved backup destination
+  ansible.builtin.debug:
+    msg: >-
+      Sauvegarde de {{ sync_instance }} → {{ sync_backup_dest_user }}@{{ sync_backup_dest_addr }}:{{ sync_backup_dest_dir }}
+      (rétention {{ sync_backup_keep }} générations).
+
+# Outil générique, jamais retiré par remove/purge. `VACUUM INTO` exige SQLite
+# >= 3.27 (Ubuntu 20.04+ : 3.31).
+- name: Install the sqlite3 command-line tool
+  ansible.builtin.apt:
+    name: sqlite3
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  become: true
+
+# ── Clé, autorisation, pare-feu, known_hosts ───────────────────────────────
+- name: Ensure root's .ssh directory exists
+  ansible.builtin.file:
+    path: /root/.ssh
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+  become: true
+
+- name: Generate the dedicated backup SSH key
+  community.crypto.openssh_keypair:
+    path: "{{ sync_backup_ssh_key }}"
+    type: ed25519
+    comment: "{{ inventory_hostname }}-{{ sync_backup_name }}-backup"
+  become: true
+  register: sync_backup_key
+
+- name: Authorize the key on the destination host
+  ansible.posix.authorized_key:
+    user: "{{ sync_backup_dest_user }}"
+    state: present
+    key: "{{ sync_backup_key.public_key }}"
+    comment: "{{ inventory_hostname }}-{{ sync_backup_name }}-backup"
+  delegate_to: "{{ sync_backup_dest_host }}"
+  become: true
+  tags: [retarget]
+
+- name: Open SSH on the destination for this host
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ ansible_host }}"
+    port: "{{ sync_backup_dest_port }}"
+    comment: "backup source {{ inventory_hostname }} - ssh push"
+  delegate_to: "{{ sync_backup_dest_host }}"
+  become: true
+  tags: [retarget]
+
+# Les scripts tournent en root : le known_hosts est celui de root.
+- name: Refresh the destination host key in root's known_hosts
+  ansible.builtin.known_hosts:
+    path: "{{ sync_backup_known_hosts }}"
+    name: "[{{ sync_backup_dest_addr }}]:{{ sync_backup_dest_port }}"
+    key: "{{ lookup('pipe', 'ssh-keyscan -p ' ~ sync_backup_dest_port ~ ' -t ed25519 ' ~ sync_backup_dest_addr ~ ' 2>/dev/null | grep -v \"^#\"') }}"
+    state: present
+  become: true
+  tags: [retarget]
+
+- name: Create the destination backup directory
+  ansible.builtin.file:
+    path: "{{ sync_backup_dest_dir }}"
+    state: directory
+    owner: "{{ sync_backup_dest_user }}"
+    group: "{{ sync_backup_dest_user }}"
+    mode: '0750'
+  delegate_to: "{{ sync_backup_dest_host }}"
+  become: true
+  tags: [retarget]
+
+# ── Métriques ───────────────────────────────────────────────────────────────
+- name: Create the node_exporter textfile directory
+  ansible.builtin.file:
+    path: "{{ node_exporter_textfile_dir }}"
+    state: directory
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: '0755'
+  become: true
+
+# ── Script, cron, rotation du journal ───────────────────────────────────────
+- name: Deploy the backup script
+  ansible.builtin.template:
+    src: sync-backup.sh.j2
+    dest: "{{ sync_backup_script }}"
+    owner: root
+    group: root
+    mode: '0750'
+  become: true
+  register: sync_backup_script_deployed
+  tags: [retarget]
+
+- name: Schedule the backup
+  ansible.builtin.cron:
+    name: "{{ sync_instance }} sqlite backup"
+    user: root
+    hour: "{{ sync_backup_cron_hour }}"
+    minute: "{{ sync_backup_cron_minute }}"
+    job: "{{ sync_backup_script }} >> {{ sync_backup_log }} 2>&1"
+  become: true
+
+- name: Rotate the backup log
+  ansible.builtin.copy:
+    dest: "/etc/logrotate.d/sync-backup-{{ sync_instance }}"
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      {{ sync_backup_log }} {
+          weekly
+          rotate 8
+          compress
+          missingok
+          notifempty
+          copytruncate
+      }
+  become: true
+
+# Première exécution à l'installation (et à chaque changement du script) : elle
+# prouve la chaîne complète (SSH, VACUUM INTO, archive, métrique) au lieu de
+# l'attendre à 04:xx, et fait exister `backup_last_success_timestamp_seconds`
+# dès le déploiement. Le script sort en 0 sans rien faire s'il n'y a pas encore
+# de base.
+- name: Run the backup once to prove the whole chain
+  ansible.builtin.command: "{{ sync_backup_script }}"
+  become: true
+  changed_when: sync_backup_script_deployed.changed
+  when: sync_backup_script_deployed.changed

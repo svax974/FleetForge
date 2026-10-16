@@ -1,0 +1,95 @@
+---
+# Voir defaults/main.yml : ufw ne voit pas le trafic vers un port publié par
+# Docker, seule la chaîne DOCKER-USER le filtre réellement.
+#
+# Le script est déployé dans les DEUX cas — proxies distants ou non. Dans le
+# second il ne pose aucune règle mais purge celles d'un état antérieur : c'est
+# ce qui rend le passage « port ouvert filtré » → « boucle locale » réellement
+# effectif, au lieu de laisser des règles orphelines sur un port que rien
+# n'atteint plus.
+
+- name: Deploy the FreeLLMAPI port firewall script
+  ansible.builtin.template:
+    src: freellm-firewall.sh.j2
+    dest: /usr/local/sbin/freellm-firewall.sh
+    owner: root
+    group: root
+    mode: '0750'
+  become: true
+  notify: reapply freellm firewall
+
+- name: Deploy the FreeLLMAPI port firewall unit
+  ansible.builtin.template:
+    src: freellm-firewall.service
+    dest: /etc/systemd/system/freellm-firewall.service
+    owner: root
+    group: root
+    mode: '0644'
+  become: true
+  notify: reapply freellm firewall
+
+- name: Enable and start the FreeLLMAPI port firewall unit
+  ansible.builtin.systemd:
+    name: freellm-firewall
+    state: started
+    enabled: true
+    daemon_reload: true
+  become: true
+
+# Une règle ufw sur ce port serait décorative — mais elle a pu être posée à la
+# main, et elle donne l'impression que le port est traité. On la retire pour
+# que `ufw status` ne raconte pas une histoire différente de la réalité.
+- name: Remove any decorative ufw rule on the FreeLLMAPI port
+  community.general.ufw:
+    rule: "{{ item }}"
+    proto: tcp
+    port: "{{ freellm_port }}"
+    delete: true
+  loop: [allow, deny]
+  become: true
+
+# ── Contrôle ───────────────────────────────────────────────────────────────
+# Les handlers ne tournent qu'en fin de play : le contrôle porte donc sur
+# l'état RÉEL de la chaîne après application immédiate, pas sur le fait d'avoir
+# déposé un fichier.
+- name: Apply the rules now
+  ansible.builtin.command: /usr/local/sbin/freellm-firewall.sh
+  become: true
+  changed_when: false
+
+- name: Read back the DOCKER-USER chain
+  ansible.builtin.command: iptables -S DOCKER-USER
+  become: true
+  register: freellm_chain
+  changed_when: false
+  check_mode: false
+
+- name: Verify the port is really filtered
+  ansible.builtin.assert:
+    that:
+      # Motif et non égalité : `iptables -S` intercale `-m tcp` et réordonne
+      # les options selon la version, une comparaison littérale casserait au
+      # premier changement de forme sans qu'aucune règle ne manque.
+      - freellm_chain.stdout is search('--dport ' ~ freellm_port ~ '.*-j DROP')
+    fail_msg: >-
+      Le port {{ freellm_port }} est publié sur 0.0.0.0 mais aucun DROP ne le
+      protège dans DOCKER-USER : le service est joignable depuis Internet.
+      Vérifier `systemctl status freellm-firewall` et `iptables -S DOCKER-USER`.
+    success_msg: >-
+      Port {{ freellm_port }} filtré dans DOCKER-USER, autorisé pour
+      {{ freellm_remote_proxies | join(', ') }}.
+  when:
+    - freellm_remote_proxies | length > 0
+    # En simulation, la tâche d'application est sautée : la chaîne n'a pas
+    # encore les règles et le contrôle échouerait sur un hôte parfaitement
+    # sain. On ne vérifie que ce qu'on a réellement appliqué.
+    - not ansible_check_mode
+
+- name: Report that no opening is needed
+  ansible.builtin.debug:
+    msg: >-
+      Aucun proxy distant : le port {{ freellm_port }} n'est publié que sur
+      127.0.0.1 et n'est atteignable que depuis cette machine. Rien à ouvrir —
+      contrôle depuis une machine tierce : `nc -z {{ ansible_host }}
+      {{ freellm_port }}` doit échouer.
+  when: freellm_remote_proxies | length == 0

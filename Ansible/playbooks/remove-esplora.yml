@@ -1,0 +1,6 @@
+---
+- name: Remove Esplora (keeps the built index)
+  hosts: esplora1
+  remote_user: "{{ remote_username }}"
+  roles:
+    - esplora-remove

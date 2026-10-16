@@ -1,0 +1,22 @@
+---
+# Move the PapangMetrics API + ETL from one host to another.
+# Usage: -e "src_host=papangmetrics1 dst_host=<new>"
+# The app is stateless (ETL watermark lives in the DB), so migration = redeploy
+# on dst, then remove from src. (The DB itself is migrated separately if needed.)
+
+- name: Deploy on destination
+  hosts: "{{ dst_host }}"
+  remote_user: "{{ remote_username }}"
+  roles:
+    - nodejs-install
+    - papangmetrics-deploy
+    - papangmetrics-api-install
+    - papangmetrics-etl-install
+    - papangmetrics-api-security
+
+- name: Remove from source
+  hosts: "{{ src_host }}"
+  remote_user: "{{ remote_username }}"
+  roles:
+    - papangmetrics-api-remove
+    - papangmetrics-etl-remove

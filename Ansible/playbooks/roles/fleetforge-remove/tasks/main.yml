@@ -1,0 +1,82 @@
+---
+- name: Stop and disable the services
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: stopped
+    enabled: false
+  loop:
+    - fleetforge
+    - fleetforge-agent
+  become: true
+  failed_when: false
+
+- name: Remove the systemd units
+  ansible.builtin.file:
+    path: "/etc/systemd/system/{{ item }}"
+    state: absent
+  loop:
+    - fleetforge.service
+    - fleetforge-agent.service
+  become: true
+
+# La clé dédiée et sa passphrase partent avec le service : les laisser sur une
+# machine qui ne porte plus l'application, c'est laisser de quoi administrer
+# tout le parc sur un serveur que plus personne ne surveille.
+#
+# La contrepartie côté parc n'est PAS automatique : la clé publique reste dans
+# les `authorized_keys` de chaque hôte. Elle y est inoffensive — le `from="…"`
+# la limite à cette machine, qui n'a plus la privée — mais la retirer relève
+# d'un passage explicite sur le parc.
+- name: Remove the dedicated key and its passphrase
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "/home/{{ ff_user }}/.ssh/{{ ff_remote_key_name }}"
+    - "/home/{{ ff_user }}/.ssh/{{ ff_remote_key_name }}.pub"
+    - "{{ ff_passphrase_file }}"
+    - "{{ ff_dir }}/askpass.sh"
+    - "{{ ff_dir }}/agent-load-key.sh"
+  become: true
+
+- name: Remove the vault password
+  ansible.builtin.file:
+    path: "/home/{{ ff_user }}/.config/fleetforge/vault-pass"
+    state: absent
+  become: true
+
+- name: Reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+  become: true
+
+- name: Remove the built binaries
+  ansible.builtin.file:
+    path: "{{ ff_dir }}/target"
+    state: absent
+  become: true
+
+# La cible Prometheus part avec le service, comme l'exige la convention : une
+# cible laissée en place publie `up=0` indéfiniment et fait sonner une alerte
+# sur un service VOLONTAIREMENT désinstallé — le bruit qui finit par rendre la
+# supervision illisible.
+- name: Remove the Prometheus target
+  ansible.builtin.file:
+    path: "/home/{{ remote_username }}/prometheus/prometheus-configs/{{ ff_job }}/{{ inventory_hostname }}.json"
+    state: absent
+  delegate_to: "{{ prometheus_host }}"
+  become: true
+  when: prometheus_host is defined and prometheus_host in hostvars
+
+- name: Close the application port
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ item }}"
+    port: "{{ ff_port }}"
+    delete: true
+  loop: "{{ (whitelist | default([]))
+            + (groups['proxies'] | default([]) | map('extract', hostvars, 'ansible_host') | list)
+            + ([hostvars[prometheus_host]['ansible_host']] if prometheus_host is defined and prometheus_host in hostvars else []) }}"
+  become: true
+  failed_when: false

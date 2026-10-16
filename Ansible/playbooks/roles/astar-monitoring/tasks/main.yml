@@ -1,0 +1,98 @@
+---
+# Enregistre les endpoints Prometheus natifs du collator Astar et ouvre le
+# scrape. La parachaîne toujours ; le relais SEULEMENT s'il est embarqué —
+# voir `astarmon_relay_target` dans defaults/main.yml, où est expliqué pourquoi
+# l'enregistrer en mode RPC ferait sonner `AstarPeersLow` indéfiniment.
+# Tout est tagué `monitoring` : réarmer la supervision ne doit jamais
+# imposer de rejouer l'installation (téléchargement du binaire, redémarrage du
+# nœud, resynchronisation éventuelle).
+#   ./play.sh papanglabs deploy-astar.yml --tags monitoring
+
+- name: Fail early when no Prometheus host is defined
+  ansible.builtin.assert:
+    that:
+      - prometheus_host is defined
+      - prometheus_host in hostvars
+    fail_msg: >-
+      `prometheus_host` n'est pas défini ou absent de l'inventaire. Un nœud
+      que personne ne scrape n'est pas supervisé.
+  tags: [monitoring]
+
+# ── Pare-feu ───────────────────────────────────────────────────────────────
+# Sans ouverture, la cible s'enregistre puis reste `down` — ce qui ressemble à
+# un nœud en panne. Pas d'`ignore_errors` ici, contrairement à
+# `exporter-astar-install` : un échec d'ouverture doit se voir.
+- name: Allow Prometheus to scrape the Astar endpoints
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ hostvars[prometheus_host]['ansible_host'] }}"
+    port: "{{ item }}"
+    comment: "Prometheus scrape - astar"
+  loop: "{{ [astarmon_port_parachain] + ([astarmon_port_relaychain] if astarmon_relay_target | bool else []) }}"
+  become: true
+  when: ansible_host != hostvars[prometheus_host]['ansible_host']
+  tags: [monitoring]
+
+- name: Allow the Prometheus Docker bridge to scrape Astar (monitor is local)
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "172.17.0.0/16"
+    port: "{{ item }}"
+    comment: "Prometheus Docker scrape - astar"
+  loop: "{{ [astarmon_port_parachain] + ([astarmon_port_relaychain] if astarmon_relay_target | bool else []) }}"
+  become: true
+  when: ansible_host == hostvars[prometheus_host]['ansible_host']
+  tags: [monitoring]
+
+# ── Cible Prometheus ───────────────────────────────────────────────────────
+- name: Create the Astar target directory on the Prometheus host
+  ansible.builtin.file:
+    path: "/home/{{ remote_username }}/prometheus/prometheus-configs/{{ astarmon_job }}"
+    state: directory
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: '0755'
+  delegate_to: "{{ prometheus_host }}"
+  become: true
+  tags: [monitoring]
+
+- name: Deploy the Astar Prometheus target
+  ansible.builtin.template:
+    src: prometheus-target.json.j2
+    dest: "/home/{{ remote_username }}/prometheus/prometheus-configs/{{ astarmon_job }}/{{ inventory_hostname }}.json"
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: '0644'
+  delegate_to: "{{ prometheus_host }}"
+  become: true
+  tags: [monitoring]
+
+# ── Contrôle ───────────────────────────────────────────────────────────────
+# Une cible enregistrée ne prouve rien : c'est l'exposition qui fait foi. On
+# vérifie que la série de référence des alertes existe RÉELLEMENT, faute de quoi
+# le groupe `astar` resterait `inactive` avec `health=ok` — indiscernable d'un
+# nœud en bonne santé.
+- name: Read the parachain metrics endpoint
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ astarmon_port_parachain }}/metrics"
+    return_content: true
+  register: astarmon_exposition
+  retries: 6
+  delay: 10
+  until: astarmon_exposition.status | default(0) == 200
+  changed_when: false
+  check_mode: false
+  tags: [monitoring]
+
+- name: Fail when substrate_block_height is absent from the exposition
+  ansible.builtin.assert:
+    that:
+      - "'substrate_block_height' in (astarmon_exposition.content | default(''))"
+    fail_msg: >-
+      L'endpoint répond mais n'expose pas `substrate_block_height` : toutes les
+      alertes du groupe `astar` seraient décoratives. Vérifier que le service
+      tourne bien avec `--prometheus-external --prometheus-port
+      {{ astarmon_port_parachain }}`.
+  tags: [monitoring]

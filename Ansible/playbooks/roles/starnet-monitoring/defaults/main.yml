@@ -1,0 +1,13 @@
+---
+# Supervision de StarNet. Aucun endpoint Prometheus natif (lu le 09/10/2026,
+# tag v0.13.1) : sonde déclarative pour svcprobe (port 9110, partagé avec les
+# autres services de `ctdapi` — un exporter par HÔTE, CLAUDE.md).
+#
+# Pas de check systemd : l'unité est une unité --user de srvc, que le
+# durcissement de svcprobe (ProtectHome, NoNewPrivileges) l'empêche de sonder
+# — même constat qu'openclaw-monitoring. Tout passe par HTTP.
+
+starnet_sidecar_port: 8787
+starnet_port: "{{ app_port | default(4720) }}"
+starnet_url: "http://127.0.0.1:{{ starnet_sidecar_port }}"
+starnet_relay_url: "http://127.0.0.1:{{ starnet_port }}"

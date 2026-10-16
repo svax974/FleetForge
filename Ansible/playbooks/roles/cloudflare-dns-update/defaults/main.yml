@@ -1,0 +1,36 @@
+---
+# Publication des enregistrements DNS depuis l'INVENTAIRE.
+#
+# L'inventaire décrit déjà « quelle machine porte quel nom » : le recopier à la
+# main dans Cloudflare, c'est entretenir une seconde source de vérité qui se
+# périme sans bruit. Constat du 19/08/2026 : `prometheus1.papanglabs.com`
+# pointait sur `small1` — une instance Oracle du parc web3c — alors que
+# Prometheus tourne sur `prometheus1`. Le nom était utilisé tel quel dans un
+# `.env` de production.
+#
+# Sens de la synchronisation : inventaire → Cloudflare, jamais l'inverse. Ce qui
+# existe chez Cloudflare sans correspondre à un hôte d'inventaire n'est ni lu ni
+# touché — enregistrements MX, DKIM/DMARC posés par `mailserver-setup`, vhosts,
+# vérifications de domaine, tout cela vit très bien à côté.
+
+# Zone Cloudflare. Une par parc, celle du domaine de l'inventaire.
+cfdns_zone: "{{ domain_name }}"
+
+# Groupe dont les hôtes sont publiés. `all` = tout l'inventaire du parc.
+cfdns_group: all
+
+# Jeton d'API. Le même que le reste du parc (certbot DNS-01, mailserver-setup) :
+# les deux usages exigent la même permission Zone:DNS:Edit, et deux variables
+# pour un même droit n'ont jamais servi qu'à diverger.
+cfdns_token: "{{ cloudflare_token | default('') }}"
+
+# Passage par le réseau Cloudflare. FAUX par défaut, et ce n'est pas un
+# réglage de confort : un enregistrement « proxifié » ne répond plus qu'en
+# HTTP/HTTPS et masque l'IP réelle. SSH, scrape Prometheus, remote_write,
+# réplication PostgreSQL — tout cela cesserait de fonctionner, et l'A record ne
+# résoudrait plus vers la machine mais vers un edge Cloudflare.
+# Surchargeable par hôte dans l'inventaire : `cloudflare_proxied: true`.
+cfdns_proxied: false
+
+# TTL. 1 = automatique côté Cloudflare.
+cfdns_ttl: 1

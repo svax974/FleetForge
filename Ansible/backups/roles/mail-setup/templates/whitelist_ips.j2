@@ -1,0 +1,6 @@
+# Whitelist IPs access file  
+# Format: IP_or_network action
+
+{% for ip in whitelist | default([]) %}
+{{ ip }} OK
+{% endfor %} 

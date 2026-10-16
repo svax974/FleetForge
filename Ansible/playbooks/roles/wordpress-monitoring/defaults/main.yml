@@ -1,0 +1,12 @@
+---
+wpmon_web_unit: apache2
+wpmon_db_unit: mysql
+# Sonde HTTP sur wp-login.php (pas sur `/` : WordPress y redirige vers
+# http://127.0.0.1/ sans le port, que la sonde suivrait vers le port 80 et
+# déclarerait le service tombé ; wp-login.php sollicite aussi PHP et la base),
+# sur le port d'écoute d'Apache (`wp_port`) :
+# sur 80 elle ne verrait rien et publierait `service_up 0` en permanence.
+# Apache peut tourner pendant que PHP ou la base sont cassés, cas où le serveur
+# répond 500 en permanence. La liste des codes acceptés exclut donc
+# volontairement les 5xx.
+wpmon_url: "http://127.0.0.1:{{ wp_port }}/wp-login.php"

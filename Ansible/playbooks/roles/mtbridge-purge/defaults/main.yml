@@ -1,0 +1,5 @@
+---
+mtbridge_service_name: "MTBridge"
+mtbridge_install_dir: 'C:\MTBridge'
+mtbridge_mt5_base_dir: 'C:\MT5'
+prometheus_home: "/home/{{ remote_username }}/prometheus"

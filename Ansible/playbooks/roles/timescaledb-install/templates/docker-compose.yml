@@ -1,0 +1,44 @@
+services:
+  timescaledb:
+    image: {{ tsdb_image }}
+    restart: always
+    container_name: papangmetrics-timescaledb
+    command:
+      - "postgres"
+      - "-c"
+      - "shared_preload_libraries=timescaledb"
+      - "-c"
+      - "shared_buffers={{ tsdb_shared_buffers }}"
+      - "-c"
+      - "effective_cache_size={{ tsdb_effective_cache_size }}"
+      - "-c"
+      - "work_mem={{ tsdb_work_mem }}"
+      - "-c"
+      - "maintenance_work_mem={{ tsdb_maintenance_work_mem }}"
+      - "-c"
+      - "max_connections={{ tsdb_max_connections }}"
+      - "-c"
+      # Un verrou par chunk touché : indispensable pour les timeframes larges
+      # (w1 = ~919 chunks par série). Voir defaults/main.yml.
+      - "max_locks_per_transaction={{ tsdb_max_locks_per_transaction }}"
+      - "-c"
+      - "max_wal_size={{ tsdb_max_wal_size }}"
+      - "-c"
+      - "synchronous_commit={{ tsdb_synchronous_commit }}"
+      - "-c"
+      - "autovacuum_max_workers={{ tsdb_autovacuum_max_workers }}"
+      - "-c"
+      - "timescaledb.telemetry_level=off"
+    environment:
+      - POSTGRES_DB={{ tsdb_db }}
+      - POSTGRES_USER={{ tsdb_user }}
+      - POSTGRES_PASSWORD={{ tsdb_pass }}
+      - POSTGRES_HOST_AUTH_METHOD=scram-sha-256
+      - POSTGRES_INITDB_ARGS=--auth-host=scram-sha-256
+    volumes:
+      - {{ tsdb_dir }}/init.sql:/docker-entrypoint-initdb.d/init.sql
+      - {{ tsdb_dir }}/data:/var/lib/postgresql/data
+    ports:
+      # localhost-only: indicators DB is reached by the co-located ETL/API.
+      - '{{ tsdb_bind }}:{{ tsdb_port }}:5432'
+    shm_size: '1gb'

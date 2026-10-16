@@ -1,0 +1,44 @@
+---
+# Synchronise la zone Cloudflare depuis l'INVENTAIRE :
+#   - un enregistrement A par hôte portant un `hostname` dans la zone du parc,
+#     pointant sur son `ansible_host` ;
+#   - un enregistrement CNAME par hôte portant un `proxy_hostname` (nom public
+#     d'un service servi par un vhost sur les proxies), pointant sur le front
+#     canonique `proxy.<zone>` (round-robin entre les hôtes du groupe
+#     `proxies`, garanti avant les CNAME).
+#
+#   ./play.sh papanglabs update-cloudflare-dns.yml            # papanglabs.com
+#   ./play.sh web3c update-cloudflare-dns.yml            # zone du parc web3c
+#   ./play.sh papanglabs update-cloudflare-dns.yml --check    # simulation, ne publie rien
+#
+# Sens unique, inventaire → Cloudflare. Créé s'il manque, mis à jour s'il
+# diffère, JAMAIS supprimé : ce qui existe chez Cloudflare sans correspondre à
+# un hôte d'inventaire n'est ni lu ni touché (MX, DKIM/DMARC de
+# `mailserver-setup`, vhosts, vérifications de domaine…).
+#
+# Aucune machine n'est jointe : tout se fait par l'API depuis le poste de
+# contrôle. Pas de `host-preflight` donc — il n'y a pas d'hôte à contrôler, et
+# ce playbook n'installe aucun service.
+#
+# `hosts: all` avec `delegate_to: localhost` et `run_once`, plutôt que
+# `hosts: localhost` : c'est l'appartenance au parc qui donne accès à ses
+# group_vars (`domain_name`, `cloudflare_token`). Sur localhost, qui n'est
+# membre d'aucun groupe, les deux seraient indéfinis — et un playbook qui
+# marche sur un parc et pas sur l'autre serait une régression silencieuse.
+# Aucune connexion SSH n'est ouverte pour autant : toutes les tâches sont
+# déléguées.
+#
+# Ce qu'il corrige : l'inventaire décrit déjà quelle machine porte quel nom, le
+# recopier à la main dans Cloudflare entretient une seconde source de vérité qui
+# se périme sans bruit. Le 19/08/2026, `prometheus1.papanglabs.com` résolvait
+# vers `small1` — une instance Oracle du parc web3c — alors que
+# Prometheus tourne sur `prometheus1`, et ce nom servait de destination
+# remote_write dans un `.env` de production.
+- name: Synchronisation DNS Cloudflare depuis l'inventaire
+  hosts: all
+  gather_facts: false
+
+  roles:
+    - role: cloudflare-dns-update
+      delegate_to: localhost
+      run_once: true

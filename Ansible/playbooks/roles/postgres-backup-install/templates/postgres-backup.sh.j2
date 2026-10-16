@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+# Sauvegarde logique de {{ pgbak_db }} vers
+# {{ pgbak_dest_user }}@{{ pgbak_dest_addr }}:{{ pgbak_dest_dir }}.
+#
+# Le dump est STREAMÉ vers la destination : il ne touche jamais le disque
+# local. C'est précisément ce qui manquait avant ce rôle — un dump local suivi
+# d'une rotation qui ne s'exécute qu'après un succès a fini par remplir le
+# disque de la source quand plusieurs dumps consécutifs ont échoué faute de
+# place (incident tradekong du 2026-08-29).
+#
+# Généré par Ansible (rôle postgres-backup-install) — NE PAS ÉDITER À LA MAIN.
+set -euo pipefail
+
+BACKUP_NAME="{{ pgbak_name }}"
+DB="{{ pgbak_db }}"
+DB_USER="{{ pgbak_user }}"
+CONTAINER="{{ pgbak_container }}"
+DEST_DIR="{{ pgbak_dest_dir }}"
+INTERVAL_DAYS="{{ pgbak_interval_days }}"
+KEEP="{{ pgbak_keep }}"
+MIN_FREE_GB="{{ pgbak_min_free_gb }}"
+METRIC_FILE="{{ node_exporter_textfile_dir }}/backup_{{ pgbak_name }}.prom"
+LOCK="/tmp/postgres-backup-{{ pgbak_name }}.lock"
+
+SSH_KEY="{{ pgbak_ssh_key_path }}"
+DEST="{{ pgbak_dest_user }}@{{ pgbak_dest_addr }}"
+DEST_PORT="{{ pgbak_dest_port }}"
+
+log() { echo "$(date -Iseconds) $*"; }
+
+dest_sh() {
+  ssh -p "${DEST_PORT}" -i "${SSH_KEY}" -o BatchMode=yes \
+      -o ServerAliveInterval=60 -o ServerAliveCountMax=10 "${DEST}" "$1"
+}
+
+write_metrics() {
+  local status="$1" duration="$2" size="$3" ts="$4"
+  local tmp="${METRIC_FILE}.$$"
+  cat > "${tmp}" <<EOF
+# HELP backup_last_status Résultat de la dernière exécution (1 = succès, 0 = échec).
+# TYPE backup_last_status gauge
+backup_last_status{backup="${BACKUP_NAME}"} ${status}
+# HELP backup_last_success_timestamp_seconds Date de la dernière sauvegarde réussie.
+# TYPE backup_last_success_timestamp_seconds gauge
+backup_last_success_timestamp_seconds{backup="${BACKUP_NAME}"} ${ts}
+# HELP backup_last_duration_seconds Durée de la dernière exécution.
+# TYPE backup_last_duration_seconds gauge
+backup_last_duration_seconds{backup="${BACKUP_NAME}"} ${duration}
+# HELP backup_last_size_bytes Taille du dernier dump.
+# TYPE backup_last_size_bytes gauge
+backup_last_size_bytes{backup="${BACKUP_NAME}"} ${size}
+EOF
+  mv "${tmp}" "${METRIC_FILE}"
+}
+
+last_success_ts() { dest_sh "cat '${DEST_DIR}/last-success' 2>/dev/null" || echo 0; }
+
+fail() {
+  log "[ERROR] $*"
+  write_metrics 0 "$(( $(date +%s) - START ))" 0 "$(last_success_ts)"
+  exit 1
+}
+
+# Un dump qui chevauche le suivant se disputerait l'espace disque de la
+# destination et corromprait la rotation.
+exec 9>"${LOCK}"
+if ! flock -n 9; then
+  log "Déjà en cours (verrou ${LOCK}) — abandon."
+  exit 0
+fi
+
+START=$(date +%s)
+
+# ── Auto-limitation ────────────────────────────────────────────────────────
+LAST_TS="$(last_success_ts)"
+LAST_TS="${LAST_TS:-0}"
+if [ "${LAST_TS}" != "0" ]; then
+  AGE_DAYS=$(( (START - LAST_TS) / 86400 ))
+  if [ "${AGE_DAYS}" -lt "${INTERVAL_DAYS}" ]; then
+    log "Ignoré : dernière sauvegarde vieille de ${AGE_DAYS} j (< ${INTERVAL_DAYS})."
+    exit 0
+  fi
+fi
+
+dest_sh "mkdir -p '${DEST_DIR}'" || fail "Destination injoignable."
+
+# ── Contrôle de place ──────────────────────────────────────────────────────
+FREE_KB="$(dest_sh "df -Pk '${DEST_DIR}' | awk 'NR==2 {print \$4}'")" \
+  || fail "Impossible de mesurer l'espace libre sur la destination."
+if [ "${FREE_KB}" -lt $(( MIN_FREE_GB * 1024 * 1024 )) ]; then
+  fail "Place insuffisante : $(( FREE_KB / 1024 / 1024 )) Go libres, ${MIN_FREE_GB} Go requis."
+fi
+
+# ── Dump ───────────────────────────────────────────────────────────────────
+STAMP="$(date +%Y-%m-%dT%H%M%S)"
+OUT="${DEST_DIR}/${DB}-${STAMP}.sql.gz"
+TMP="${OUT}.tmp"
+
+log "Dump de ${DB} → ${OUT}"
+
+# `set -o pipefail` déjà actif : une erreur de pg_dump ou de gzip fait échouer
+# le pipeline entier, pas seulement le dernier maillon.
+if ! docker exec "${CONTAINER}" pg_dump -U "${DB_USER}" -d "${DB}" | gzip \
+     | ssh -p "${DEST_PORT}" -i "${SSH_KEY}" -o BatchMode=yes \
+           -o ServerAliveInterval=60 -o ServerAliveCountMax=10 \
+           "${DEST}" "cat > '${TMP}'"; then
+  dest_sh "rm -f '${TMP}'" || true
+  fail "Échec du dump."
+fi
+
+# Le renommage n'a lieu qu'après un dump complet : un `.tmp` traînant est
+# visiblement un échec, un `.sql.gz` tronqué se ferait passer pour valide.
+dest_sh "mv '${TMP}' '${OUT}'" || fail "Échec du renommage final."
+
+# ── Rétention ──────────────────────────────────────────────────────────────
+# Purge APRÈS le succès du nouveau dump : purger d'abord laisserait un instant
+# sans copie saine si le dump échouait ensuite.
+dest_sh "ls -1 '${DEST_DIR}'/${DB}-*.sql.gz 2>/dev/null | sort -r | tail -n +$(( KEEP + 1 )) | xargs -r rm -f" \
+  || log "[WARN] Purge des anciennes générations en échec."
+
+END=$(date +%s)
+dest_sh "echo ${END} > '${DEST_DIR}/last-success'"
+SIZE_BYTES="$(dest_sh "stat -c %s '${OUT}'" || echo 0)"
+write_metrics 1 "$(( END - START ))" "${SIZE_BYTES}" "${END}"
+log "Terminé en $(( END - START )) s — $(( SIZE_BYTES / 1024 / 1024 )) Mo."

@@ -1,0 +1,88 @@
+---
+# Rend l'hôte CIBLE capable de tirer la chaîne bitcoind depuis la SOURCE, puis
+# dépose le script de migration. En mode `ibd`, ne fait rien : le nœud cible se
+# resynchronise seul depuis le réseau P2P (déjà démarré par `rpcbtc-install`).
+
+- name: Mode IBD — aucun transfert, resynchronisation P2P
+  ansible.builtin.debug:
+    msg: >-
+      bitcoind_seed=ibd : le nœud cible se resynchronise depuis le réseau
+      Bitcoin (~1 j). Aucune donnée tirée de la source. BRK ne pourra démarrer
+      qu'une fois la chaîne à jour (c'est le comportement voulu).
+  when: bitcoind_seed == 'ibd'
+
+- name: Amorçage rsync depuis la source
+  when: bitcoind_seed == 'rsync'
+  block:
+    - name: Fail if the source host is not in the inventory
+      ansible.builtin.fail:
+        msg: >-
+          La source `{{ btc_migrate_src_host }}` est absente de l'inventaire.
+          Passe `-e src_host=<hôte>` pointant un membre du parc.
+      when: btc_migrate_src_host not in hostvars
+
+    # ── Clé SSH dédiée (générée si absente) ────────────────────────────────
+    - name: Generate the dedicated migration SSH key
+      community.crypto.openssh_keypair:
+        path: "{{ btc_migrate_ssh_key_path }}"
+        type: ed25519
+        comment: "{{ inventory_hostname }}-btc-migrate-from-{{ btc_migrate_src_host }}"
+        owner: "{{ remote_username }}"
+        group: "{{ remote_username }}"
+      become: true
+      register: btc_migrate_key
+
+    # ── Accès à la source (autorisation clé + pare-feu + tcpwrappers) ───────
+    # La migration TIRE depuis la source : c'est la cible qui s'y connecte. Il
+    # faut donc l'autoriser côté source sur les DEUX couches — ufw ET
+    # tcpwrappers (`/etc/hosts.deny` y porte `sshd: ALL`) — sinon sshd refuse la
+    # connexion avant l'authentification. Même piège que brk-backup/brk-restore.
+    - name: Authorize the migration key on the source host
+      ansible.posix.authorized_key:
+        user: "{{ btc_migrate_src_user }}"
+        state: present
+        key: "{{ btc_migrate_key.public_key }}"
+        comment: "{{ inventory_hostname }}-btc-migrate"
+      delegate_to: "{{ btc_migrate_src_host }}"
+      become: true
+
+    - name: Open SSH on the source host for this host
+      community.general.ufw:
+        rule: allow
+        proto: tcp
+        from_ip: "{{ ansible_host }}"
+        port: "{{ ssh_custom_port }}"
+        comment: "btc migrate target {{ inventory_hostname }} - ssh pull"
+      delegate_to: "{{ btc_migrate_src_host }}"
+      become: true
+
+    - name: Allow this host through tcpwrappers on the source host (sshd)
+      ansible.builtin.lineinfile:
+        path: /etc/hosts.allow
+        line: "sshd: {{ ansible_host }}"
+        regexp: "^sshd: {{ ansible_host | regex_escape }}$"
+        create: true
+        owner: root
+        group: root
+        mode: '0644'
+      delegate_to: "{{ btc_migrate_src_host }}"
+      become: true
+
+    - name: Refresh the source host key in known_hosts
+      ansible.builtin.known_hosts:
+        path: "/home/{{ remote_username }}/.ssh/known_hosts"
+        name: "[{{ btc_migrate_src_addr }}]:{{ btc_migrate_src_port }}"
+        key: "{{ lookup('pipe', 'ssh-keyscan -p ' ~ btc_migrate_src_port ~ ' -t ed25519 ' ~ btc_migrate_src_addr ~ ' 2>/dev/null | grep -v \"^#\"') }}"
+        state: present
+      become: true
+      become_user: "{{ remote_username }}"
+
+    # ── Script de migration ────────────────────────────────────────────────
+    - name: Deploy the bitcoind migration script
+      ansible.builtin.template:
+        src: btc-migrate.sh.j2
+        dest: "/home/{{ remote_username }}/btc-migrate.sh"
+        owner: "{{ remote_username }}"
+        group: "{{ remote_username }}"
+        mode: '0750'
+      become: true

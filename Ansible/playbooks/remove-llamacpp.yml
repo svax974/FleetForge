@@ -1,0 +1,8 @@
+---
+- name: Remove llama.cpp engine (all instances stopped, models preserved)
+  hosts: all
+  remote_user: "{{ remote_username }}"
+  become: true
+
+  roles:
+    - llamacpp-remove

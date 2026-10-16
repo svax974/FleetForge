@@ -1,0 +1,85 @@
+---
+# Pare-feu du port d'Apache (`wp_port`, process natif — pas de Docker) : ufw le
+# filtre réellement. Profil « service exposé par les proxies » (CLAUDE.md § 1) :
+# proxies + vpns + Prometheus + whitelist. Sources dérivées de l'inventaire.
+#
+# Sans la règle des proxies, le vhost répond 504 depuis tout proxy qui n'est
+# pas la machine elle-même (constat du 13/10/2026 : proxy2 bloqué par ufw sur
+# 1080, la moitié du round-robin DNS tombait en timeout).
+
+- name: Fail early when the whitelist is empty
+  ansible.builtin.fail:
+    msg: "`whitelist` est vide : DENY sans exception opérateur. Renseigner group_vars/web3c.yml."
+  when: (whitelist | default([])) | length == 0
+
+- name: Allow the WordPress port from the operator whitelist
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    port: "{{ wp_port }}"
+    from_ip: "{{ item }}"
+    comment: "WordPress - whitelist"
+  loop: "{{ whitelist | default([]) }}"
+  become: true
+
+- name: Allow the WordPress port from the proxies
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    port: "{{ wp_port }}"
+    from_ip: "{{ hostvars[item].ansible_host }}"
+    comment: "WordPress - proxy {{ item }}"
+  loop: "{{ groups['proxies'] | default([]) }}"
+  become: true
+
+- name: Allow the WordPress port from the VPNs
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    port: "{{ wp_port }}"
+    from_ip: "{{ hostvars[item].ansible_host }}"
+    comment: "WordPress - vpn {{ item }}"
+  loop: "{{ groups['vpns'] | default([]) }}"
+  become: true
+
+- name: Allow the WordPress port from Prometheus
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    port: "{{ wp_port }}"
+    from_ip: "{{ hostvars[prometheus_host].ansible_host }}"
+    comment: "WordPress - prometheus {{ prometheus_host }}"
+  become: true
+
+- name: Deny the WordPress port from anywhere else
+  community.general.ufw:
+    rule: deny
+    proto: tcp
+    port: "{{ wp_port }}"
+    comment: "WordPress - default deny"
+  become: true
+
+- name: Check whether ufw is actually active
+  ansible.builtin.command: ufw status
+  become: true
+  register: wp_ufw_state
+  changed_when: false
+  check_mode: false
+
+- name: Fail when ufw is inactive on this host
+  ansible.builtin.fail:
+    msg: "ufw est INACTIF sur {{ inventory_hostname }} : les règles WordPress ne sont pas appliquées."
+  when:
+    - "'Status: active' not in wp_ufw_state.stdout"
+    - not ansible_check_mode
+
+- name: Report the effective rules
+  ansible.builtin.shell: "ufw status numbered | grep -F '{{ wp_port }}' || true"
+  become: true
+  register: wp_ufw
+  changed_when: false
+  check_mode: false
+
+- name: Show them
+  ansible.builtin.debug:
+    var: wp_ufw.stdout_lines

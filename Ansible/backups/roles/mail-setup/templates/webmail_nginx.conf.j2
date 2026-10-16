@@ -1,0 +1,66 @@
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    
+    root /var/www/webmail;
+    index index.php index.html index.htm;
+    
+    server_name _;
+    
+    # Security headers
+    add_header X-Frame-Options SAMEORIGIN;
+    add_header X-Content-Type-Options nosniff;
+    add_header X-XSS-Protection "1; mode=block";
+    
+    # Main location
+    location / {
+        try_files $uri $uri/ /index.php?$query_string;
+    }
+    
+    # PHP processing
+    location ~ \.php$ {
+        include snippets/fastcgi-php.conf;
+        fastcgi_pass unix:/var/run/php/php8.1-fpm.sock;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        include fastcgi_params;
+        
+        # Prevent PHP execution in non-executable directories
+        location ~ ^/(?:config|temp|logs)/ {
+            deny all;
+        }
+    }
+    
+    # Deny access to sensitive files
+    location ~ ^/(config|temp|logs)/ {
+        deny all;
+    }
+    
+    location ~ /\. {
+        deny all;
+        access_log off;
+        log_not_found off;
+    }
+    
+    # Roundcube specific locations
+    location ~* ^/(.+\.(js|css|png|jpg|jpeg|gif|ico|svg))$ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+        try_files $uri =404;
+    }
+    
+    # Block access to version control directories
+    location ~ /\.(svn|git|hg|bzr) {
+        deny all;
+    }
+    
+    # Health check endpoint
+    location /health {
+        access_log off;
+        add_header Content-Type "text/plain";
+        return 200 "Webmail OK\n";
+    }
+    
+    # Logs
+    access_log /var/log/nginx/webmail.access.log;
+    error_log /var/log/nginx/webmail.error.log;
+} 

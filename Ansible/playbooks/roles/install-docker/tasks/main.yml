@@ -1,0 +1,68 @@
+---
+# Install docker
+- name: Gather distribution facts
+  ansible.builtin.setup:
+    filter:
+      - "ansible_distribution"
+      - "ansible_distribution_release"
+
+- name: Remove old Docker APT repo if present
+  ansible.builtin.file:
+    path: /etc/apt/sources.list.d/docker.list
+    state: absent
+
+- name: Install dependencies
+  ansible.builtin.apt:
+    pkg:
+      - ca-certificates
+      - curl
+      # Requis par `deb822_repository` (il manipule les fichiers .sources via
+      # le module python `debian`). Absent, la tache echoue avec
+      # « Failed to import the required Python library (python3-debian) ».
+      - python3-debian
+    update_cache: yes
+
+- name: Ensure /etc/apt/keyrings exists
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: "0755"
+
+- name: Download Docker GPG key
+  ansible.builtin.get_url:
+    url: "https://download.docker.com/linux/{{ ansible_facts['distribution'] | lower }}/gpg"
+    dest: /etc/apt/keyrings/docker.asc
+    mode: "0644"
+    force: false
+
+# `apt_repository` est deprecie (retrait annonce en ansible-core 2.25) au
+# profit de `deb822_repository`, qui ecrit le format .sources de Debian au lieu
+# du .list d'une ligne. Effet de bord bienvenu : la tache devient idempotente.
+# L'ancienne ecrivait /etc/apt/sources.list.d/docker.list, que la tache
+# « Remove old Docker APT repo if present » plus haut effacait a chaque passage
+# avant de le recreer — d'ou un `changed` systematique.
+- name: Add Docker APT repository
+  ansible.builtin.deb822_repository:
+    name: docker
+    types: [deb]
+    uris: "https://download.docker.com/linux/{{ ansible_facts['distribution'] | lower }}"
+    suites: ["{{ ansible_facts['distribution_release'] }}"]
+    components: [stable]
+    architectures: [amd64]
+    signed_by: /etc/apt/keyrings/docker.asc
+    state: present
+
+- name: Update APT cache
+  ansible.builtin.apt:
+    update_cache: yes
+
+- name: Install Docker
+  ansible.builtin.apt:
+    name: docker-ce
+    state: latest
+
+- name: Ensure docker is started
+  ansible.builtin.service:
+    name: docker
+    state: started
+    enabled: true

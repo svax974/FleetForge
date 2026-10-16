@@ -1,0 +1,11 @@
+---
+# Retire FleetForge : service, binaire compilé, cible Prometheus et
+# ouvertures de pare-feu. Conserve le code livré, l'arbre Ansible synchronisé
+# et la base locale (voir purge-fleetforge.yml).
+#
+#   ./play.sh web3c remove-fleetforge.yml
+- name: Remove FleetForge
+  hosts: infras
+  remote_user: "{{ remote_username }}"
+  roles:
+    - fleetforge-remove

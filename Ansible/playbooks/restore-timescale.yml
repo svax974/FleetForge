@@ -1,0 +1,93 @@
+---
+# Restaure la base d'indicateurs depuis la dernière sauvegarde.
+#
+#   ./play.sh papanglabs restore-timescale.yml                    # état des dumps seul
+#   ./play.sh papanglabs restore-timescale.yml -e confirm=yes     # restaure le plus récent
+#   ./play.sh papanglabs restore-timescale.yml -e confirm=yes -e dump=papangmetrics-2026-08-09T042500.sql.gz
+#
+# Contrairement à la restauration BRK, celle-ci ARRÊTE L'ETL ET L'API sur papangmetrics1
+# avant l'opération et les relance après. Ce n'est pas un excès de prudence :
+# l'ETL écrit en continu dans la base, et le laisser tourner ferait échouer le
+# DROP DATABASE — ou pire, réussir, puis se faire réécrire par le balayage en
+# cours sur une base à moitié reconstruite.
+
+- name: Arrêt de l'ETL et de l'API pendant la restauration
+  hosts: papangmetrics1
+  remote_user: "{{ remote_username }}"
+  gather_facts: false
+  tasks:
+    - name: Arrêter papangmetrics-etl et papangmetrics-api
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: stopped
+      loop:
+        - papangmetrics-etl
+        - papangmetrics-api
+      become: true
+      when: (confirm | default('')) == 'yes'
+
+- name: Restauration de la base d'indicateurs
+  hosts: timescale
+  remote_user: "{{ remote_username }}"
+  tasks:
+    - name: État des dumps disponibles
+      ansible.builtin.command: "{{ ansible_env.HOME }}/papangmetrics-db/timescaledb-restore.sh --check"
+      changed_when: false
+      register: tsdb_restore_check
+
+    - name: Afficher l'état
+      ansible.builtin.debug:
+        var: tsdb_restore_check.stdout_lines
+
+    - name: Rappel — confirmation requise
+      ansible.builtin.debug:
+        msg: >-
+          Lecture seule. Pour restaurer réellement :
+          ./play.sh papanglabs restore-timescale.yml -e confirm=yes
+      when: (confirm | default('')) != 'yes'
+
+    # Synchrone, contrairement à la restauration BRK : le chargement dure
+    # certes des heures, mais l'ETL et l'API sont arrêtés pendant ce temps et
+    # doivent être relancés par le play suivant. Lancer en tâche de fond les
+    # relancerait sur une base en cours de reconstruction.
+    #
+    # Prévoir un `tmux` côté poste, ou augmenter le délai SSH : une coupure de
+    # la connexion Ansible ici laisse les services arrêtés.
+    - name: Restaurer
+      ansible.builtin.command: >-
+        {{ ansible_env.HOME }}/papangmetrics-db/timescaledb-restore.sh --yes
+        {{ ('--file ' ~ dump) if dump is defined else '' }}
+      changed_when: true
+      register: tsdb_restore
+      when: (confirm | default('')) == 'yes'
+
+    - name: Journal de restauration
+      ansible.builtin.debug:
+        var: tsdb_restore.stdout_lines
+      when: (confirm | default('')) == 'yes'
+
+- name: Reprise de l'ETL et de l'API
+  hosts: papangmetrics1
+  remote_user: "{{ remote_username }}"
+  gather_facts: false
+  tasks:
+    # Relancés quoi qu'il arrive une fois le play de restauration passé : des
+    # services laissés à l'arrêt après une restauration réussie, c'est une
+    # panne de plus, pas une précaution.
+    - name: Démarrer papangmetrics-api et papangmetrics-etl
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: started
+      loop:
+        - papangmetrics-api
+        - papangmetrics-etl
+      become: true
+      when: (confirm | default('')) == 'yes'
+
+    - name: Contrôle de reprise
+      ansible.builtin.debug:
+        msg: >-
+          Vérifier la reprise de l'ingestion :
+          curl -s localhost:{{ papangmetrics_etl_metrics_port }}/metrics | grep -E '^(brk_up|etl_block_lag)'
+          — et dans Prometheus, que etl_block_lag redescende.
+      when: (confirm | default('')) == 'yes'

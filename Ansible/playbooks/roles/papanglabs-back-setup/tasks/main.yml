@@ -1,0 +1,50 @@
+---
+# Démarrage des conteneurs et contrôle de santé RÉEL (l'endpoint répond), pas
+# l'état déclaré de l'unité — c'est la leçon de `host-preflight` : un conteneur
+# `Up` dont /api/v1/health ne répond pas est exactement la panne recherchée.
+
+- name: Start the back containers
+  ansible.builtin.command:
+    cmd: >-
+      docker compose --project-name {{ pgb_project_name }}
+      up -d --remove-orphans {{ pgb_services | join(' ') }}
+    chdir: "{{ pgb_dir }}"
+  become: true
+  register: pgb_up
+  changed_when: "'Started' in pgb_up.stderr or 'Created' in pgb_up.stderr or 'Recreated' in pgb_up.stderr"
+
+# Le répartiteur nginx (back-lb) est le SEUL point d'entrée HTTP : les réplicas
+# `back` n'exposent leur port qu'entre conteneurs. Interroger le LB vérifie donc
+# la chaîne complète — nginx joignable ET au moins un réplica sain derrière.
+#
+# Piège vérifié le 18/08/2026 sur backindicators1 : `back-1` a crashé au
+# démarrage (pool Supabase saturé), Compose a renoncé à la chaîne `depends_on`
+# et back-lb est resté en état `Created`. Les conteneurs `back` étaient sains,
+# l'API répondait 502, et RIEN dans `docker ps` ne le disait.
+- name: Wait for the API to answer through the load balancer
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ pgb_port }}/api/v1/health"
+    status_code: [200]
+  register: pgb_health
+  retries: "{{ pgb_health_retries }}"
+  delay: "{{ pgb_health_delay }}"
+  until: pgb_health.status is defined and pgb_health.status == 200
+  changed_when: false
+
+# Un conteneur absent de `docker compose ps` alors qu'il figure dans
+# `pgb_services` est le symptôme exact de l'incident ci-dessus : la chaîne de
+# dépendances a été abandonnée en cours de route.
+- name: Collect the container states
+  ansible.builtin.command:
+    cmd: docker compose --project-name {{ pgb_project_name }} ps --format '{% raw %}{{.Service}} {{.State}}{% endraw %}'
+    chdir: "{{ pgb_dir }}"
+  become: true
+  register: pgb_ps
+  changed_when: false
+
+- name: Fail when a service is not running
+  ansible.builtin.fail:
+    msg: >-
+      Service(s) non démarré(s) : {{ pgb_services | reject('in', pgb_ps.stdout) | list | join(', ') }}.
+      État relevé : {{ pgb_ps.stdout_lines | join(' | ') }}.
+  when: pgb_services | reject('in', pgb_ps.stdout) | list | length > 0

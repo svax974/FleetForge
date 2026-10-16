@@ -1,0 +1,5 @@
+---
+# Dupliqué depuis rotki-install/defaults : ce rôle a besoin de cette
+# variable dans SES PROPRES tâches (retrait du CNAME) — aucun autre
+# défaut n'est exposé ici (motif agenthub-purge).
+rotki_hostname: "rotki.{{ domain_name }}"

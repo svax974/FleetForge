@@ -1,0 +1,25 @@
+[package]
+name = "fleetforge-desktop"
+description = "Application de gestion intégrale d'infrastructure serveurs"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[build-dependencies]
+tauri-build = { version = "1.5", features = [] }
+
+[dependencies]
+# Tout le métier vit dans le cœur partagé ; ce binaire n'est plus qu'une façade.
+fleetforge-core.workspace = true
+fleetforge-providers.workspace = true
+
+tauri = { version = "1.5", features = [ "fs-remove-dir", "dialog-all", "fs-create-dir", "fs-remove-file", "fs-read-dir", "path-all", "fs-write-file", "fs-read-file", "shell-open"] }
+anyhow.workspace = true
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]

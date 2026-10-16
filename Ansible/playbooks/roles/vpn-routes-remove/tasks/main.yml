@@ -1,0 +1,16 @@
+---
+# Remove VPN routing rules added by vpn-routes-install.
+
+- name: Flush iptables VPN forwarding rules
+  ansible.builtin.command: "{{ item }}"
+  loop:
+    - iptables -F FORWARD
+    - iptables -t nat -F POSTROUTING
+  ignore_errors: true
+
+- name: Disable IP forwarding
+  ansible.posix.sysctl:
+    name: net.ipv4.ip_forward
+    value: "0"
+    state: present
+    reload: yes

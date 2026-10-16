@@ -1,0 +1,38 @@
+---
+tsdb_port: "{{ papangmetrics_db_port | default(5432) }}"
+
+# ── Activation d'ufw ───────────────────────────────────────────────────────
+# `timescale` n'avait aucun filtrage : ufw absent, chaînes `ufw-*` vides
+# héritées d'une désinstallation, politique INPUT à ACCEPT. N'importe quelle IP
+# pouvait ouvrir une session SSH, et la machine servait de rebond vers le reste
+# du parc.
+#
+# Les règles SSH elles-mêmes appartiennent à `security-ssh-update` (appliqué à
+# tout l'inventaire) : ce rôle se contente d'installer ufw et d'activer la
+# politique, après avoir vérifié qu'une règle SSH existe bien.
+tsdb_manage_ufw: true
+
+# ── Accès à la base ────────────────────────────────────────────────────────
+# PostgreSQL tourne DANS UN CONTENEUR avec un port publié (`0.0.0.0:5432`).
+# Docker insère ses propres règles DNAT en amont de la chaîne INPUT : les règles
+# ufw ne voient JAMAIS ce trafic. Filtrer 5432 avec `community.general.ufw`
+# donnerait une illusion de protection — la base resterait ouverte à Internet.
+# `DOCKER-USER` est la seule chaîne que Docker traverse et ne réécrit pas ;
+# c'est le point d'accroche prévu par Docker pour exactement ce besoin.
+tsdb_manage_docker_rules: true
+
+# Sources autorisées à joindre la base, dérivées de l'inventaire pour survivre
+# aux changements d'IP : les backs (l'API et l'ETL PapangMetrics y tournent) et
+# les nodes BTC/BRK. Les entrées d'inventaire partageant une IP sont dédoublonnées.
+tsdb_allowed_ips: >-
+  {{ ((groups['backs'] | default([])) + (groups['nodes'] | default([])) + tsdb_extra_db_hosts)
+     | map('extract', hostvars, 'ansible_host')
+     | select('defined')
+     | select('match', '^[0-9]{1,3}(\.[0-9]{1,3}){3}$')
+     | unique | list }}
+
+# Hôtes d'inventaire supplémentaires ayant besoin de la base.
+tsdb_extra_db_hosts: []
+
+# IP/CIDR bruts à autoriser en plus (dépannage, prestataire…). À garder vide.
+tsdb_extra_allowed_cidrs: []

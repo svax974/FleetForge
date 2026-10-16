@@ -1,0 +1,43 @@
+[DEFAULT]
+# Ban time in seconds
+bantime = 3600
+
+# Find time window
+findtime = 600
+
+# Number of failures before ban
+maxretry = 5
+
+# Ignore IP list (localhost and whitelist)
+ignoreip = 127.0.0.1/8 ::1
+{% for ip in whitelist | default([]) %}
+           {{ ip }}
+{% endfor %}
+
+[sshd]
+enabled = true
+port = ssh
+filter = sshd
+logpath = /var/log/auth.log
+maxretry = 3
+
+[postfix]
+enabled = true
+port = smtp,465,submission
+filter = postfix
+logpath = /var/log/mail.log
+maxretry = 3
+
+[postfix-sasl]
+enabled = true
+port = smtp,465,submission,imap,imaps,pop3,pop3s
+filter = postfix-sasl
+logpath = /var/log/mail.log
+maxretry = 3
+
+[dovecot]
+enabled = true
+port = pop3,pop3s,imap,imaps,submission,465,sieve
+filter = dovecot
+logpath = /var/log/mail.log
+maxretry = 3 

@@ -1,0 +1,13 @@
+---
+starnet_user: "{{ remote_username }}"
+starnet_home: "/home/{{ starnet_user }}"
+starnet_workspaces: "{{ starnet_home }}/.local/share/StarNet/workspaces"
+starnet_config_dir: "{{ starnet_home }}/.config/starnet"
+# Dupliqué depuis starnet-remove plutôt qu'hérité (`include_role` n'expose pas
+# les defaults sans `public: true`) : nécessaire au retrait du CNAME — même
+# motif que freellm-purge.
+starnet_hostname: "starnet.{{ domain_name }}"
+
+# Désactivé par défaut, comme openclaw-purge : d'autres services de srvc
+# peuvent dépendre du lingering.
+starnet_disable_linger: false

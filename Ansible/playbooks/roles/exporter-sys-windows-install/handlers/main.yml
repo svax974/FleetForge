@@ -1,0 +1,7 @@
+---
+- name: reload prometheus
+  community.docker.docker_container:
+    name: prometheus
+    state: started
+    restart: yes
+  delegate_to: "{{ prometheus_host }}"

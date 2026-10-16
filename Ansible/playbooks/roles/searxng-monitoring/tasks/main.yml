@@ -1,0 +1,67 @@
+---
+# Supervision du relai SearXNG.
+#
+# Convention `<service>-monitoring` (CLAUDE.md) : le rôle dépose une SONDE
+# déclarative pour `svcprobe`, qui expose `service_up{service="searxng"}`.
+# Aucun redémarrage n'est nécessaire — svcprobe relit son répertoire de sondes
+# à chaque scrape.
+#
+# La sonde binaire ne suffit pas ici, d'où le collecteur : un métamoteur bloqué
+# par ses moteurs amont répond encore parfaitement et ne rapporte plus rien.
+
+# `public: true` n'est PAS un détail de style : sans lui, les defaults du rôle
+# inclus (svcprobe_checks_dir, svcprobe_lib_dir, svcprobe_listen_port) restent
+# confinés à ses propres tâches et les tâches ci-dessous échouent sur une
+# variable indéfinie. C'est le comportement documenté d'`include_role`, dont
+# `public` vaut `no` par défaut — vérifié sur ansible-core 2.21.2.
+- name: Ensure the shared probe is installed
+  ansible.builtin.include_role:
+    name: svcprobe-install
+    public: true
+  tags: [monitoring]
+
+# Collecteur propre à ce service, déposé dans le répertoire partagé des
+# collecteurs. Il n'est pas dans `svcprobe-install` — qui ne porte que ceux
+# utilisés par PLUSIEURS rôles (PostgreSQL, nginx, OpenVPN) — mais il vit au
+# même endroit pour que la sonde n'ait qu'un chemin à connaître.
+- name: Deploy the SearXNG metric collector
+  ansible.builtin.copy:
+    src: searxng-metrics.sh
+    dest: "{{ svcprobe_lib_dir }}/searxng-metrics.sh"
+    owner: root
+    group: root
+    mode: '0755'
+  become: true
+  tags: [monitoring]
+
+- name: Deploy the SearXNG probe
+  ansible.builtin.template:
+    src: check.json.j2
+    dest: "{{ svcprobe_checks_dir }}/searxng.json"
+    owner: root
+    group: root
+    mode: '0644'
+  become: true
+  tags: [monitoring]
+
+# Contrôle immédiat : une sonde déposée mais qui répond `service_up 0` alors
+# que le service tourne est une sonde MAL ÉCRITE, et elle ferait sonner une
+# alerte en permanence. Mieux vaut le voir au déploiement.
+- name: Verify the probe answers
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ svcprobe_listen_port }}/metrics"
+    return_content: true
+  register: searxng_probe
+  retries: 6
+  delay: 5
+  until: searxng_probe.status is defined and searxng_probe.status == 200
+  changed_when: false
+  tags: [monitoring]
+
+- name: Report the probe result
+  ansible.builtin.debug:
+    msg: >-
+      {{ searxng_probe.content.split('\n')
+         | select('search', 'searxng')
+         | list }}
+  tags: [monitoring]

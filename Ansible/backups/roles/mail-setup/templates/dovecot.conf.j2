@@ -1,0 +1,112 @@
+# Dovecot configuration file
+
+# Protocols we want to be serving.
+protocols = imap pop3 lmtp
+
+# Base directory where to store runtime data.
+base_dir = /var/run/dovecot/
+
+# Dovecot user and group
+mail_uid = vmail
+mail_gid = vmail
+
+# Location for users' mailboxes.
+mail_location = maildir:/var/mail/domains/%d/%n
+
+# System user and group used to access mails.
+first_valid_uid = 5000
+last_valid_uid = 5000
+first_valid_gid = 5000
+last_valid_gid = 5000
+
+# SSL/TLS support - Let's Encrypt certificates
+ssl = required
+ssl_cert = </etc/letsencrypt/live/{{ domain_name }}/fullchain.pem
+ssl_key = </etc/letsencrypt/live/{{ domain_name }}/privkey.pem
+ssl_min_protocol = TLSv1.2
+
+# Authentication
+auth_mechanisms = plain login
+passdb {
+  driver = sql
+  args = /etc/dovecot/dovecot-sql.conf.ext
+}
+userdb {
+  driver = sql
+  args = /etc/dovecot/dovecot-sql.conf.ext
+}
+
+# LMTP
+service lmtp {
+  unix_listener /var/spool/postfix/private/dovecot-lmtp {
+    group = postfix
+    mode = 0600
+    user = postfix
+  }
+}
+
+# Authentication for Postfix
+service auth {
+  unix_listener /var/spool/postfix/private/auth {
+    group = postfix
+    mode = 0660
+    user = postfix
+  }
+  
+  # Auth client socket with proper permissions
+  unix_listener auth-client {
+    group = mail
+    mode = 0666
+    user = dovecot
+  }
+  
+  user = dovecot
+}
+
+# Stats service with proper permissions
+service stats {
+  unix_listener stats-writer {
+    group = mail
+    mode = 0666
+    user = dovecot
+  }
+}
+
+# Auth worker
+service auth-worker {
+  user = vmail
+}
+
+# IMAP settings
+protocol imap {
+  mail_max_userip_connections = 20
+}
+
+# POP3 settings
+protocol pop3 {
+  mail_max_userip_connections = 10
+}
+
+# LMTP settings
+protocol lmtp {
+  postmaster_address = postmaster@{{ domain_name }}
+}
+
+# Mailbox settings
+namespace inbox {
+  type = private
+  separator = /
+  inbox = yes
+  mailbox "Drafts" {
+    special_use = \Drafts
+  }
+  mailbox "Junk" {
+    special_use = \Junk
+  }
+  mailbox "Trash" {
+    special_use = \Trash
+  }
+  mailbox "Sent" {
+    special_use = \Sent
+  }
+} 

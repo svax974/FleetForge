@@ -1,0 +1,73 @@
+---
+# ── DNS : alias CNAME vers le front des proxies ─────────────────────────────
+# Convention d'inventaire : le nom public (agenthub_hostname) est déclaré sur
+# l'entrée `agenthub` via `proxy_hostname`, et c'est la synchronisation
+# générique (update-cloudflare-dns.yml, cloudflare-dns-update/tasks/
+# cnames.yml) qui publie le CNAME vers le front round-robin — jamais un A vers
+# l'IP propre de cet hôte. Le `hostname` de l'entrée reste l'identité machine
+# (agenthub-priv), synchronisé en A comme tout hôte.
+#
+# L'inclusion ci-dessous rejoue cette même logique en portée réduite (ce seul
+# hôte) pour garantir le CNAME dès le premier déploiement, sans attendre la
+# synchronisation générique — même mécanisme que rotki-install/
+# freellm-install/esplora-install (CLAUDE.md, « Obligation DNS + vhost pour un
+# service nommé »).
+- name: Ensure the service CNAME to the canonical proxy front
+  ansible.builtin.include_role:
+    name: cloudflare-dns-update
+    tasks_from: cnames
+  vars:
+    cfdns_cname_scope:
+      - "{{ inventory_hostname }}"
+
+# ── Display stack : prérequis des lancements debug graphiques ───────────────────
+# Le runner fait tourner Xvfb + x11vnc par lancement (cibles linux/windows) ; sans eux,
+# `display.start` échoue avec DISPLAY_UNAVAILABLE et le hub refuse avant même d'essayer
+# (pré-requis affichés dans le bloc Lancer). `wine` = binaire `wine` 64 bits (le paquet
+# `wine64` ne fournit pas de binaire `wine64` séparé — le dispatcher suffit, vérifié live
+# en 9.0) ; wine32 volontairement absent (apps 32 bits hors scope, cf. design 2026-10-06).
+# Pas de SDK Android ici : sans /dev/kvm l'émulateur est inexploitable de toute façon, et
+# plusieurs Go pour rien — le bouton mobile reste désactivé avec sa raison (même design).
+# `x11-apps` (xeyes/xclock) n'est PAS installé : test-only, vérifié une fois en live.
+- name: Install the debug display stack (Xvfb, x11vnc, wine)
+  ansible.builtin.apt:
+    name: [xvfb, x11vnc, wine, wine64]
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  become: true
+
+- name: Report the display stack versions
+  ansible.builtin.shell: |
+    command -v Xvfb && command -v x11vnc && (command -v wine64 || command -v wine)
+  register: agenthub_display_bins
+  changed_when: false
+  failed_when: false
+  become: true
+
+- name: Fail when the display stack is incomplete
+  ansible.builtin.assert:
+    that:
+      - agenthub_display_bins.rc == 0
+    fail_msg: >-
+      Stack d'affichage incomplète sur {{ inventory_hostname }} :
+      Xvfb/x11vnc/wine attendus pour les lancements debug graphiques.
+      Vérifier `apt install xvfb x11vnc wine wine64` à la main.
+    success_msg: "Stack d'affichage présente (Xvfb + x11vnc + wine)."
+  become: true
+
+# Le parc utilise un certificat WILDCARD par domaine (cert-install/
+# install-cert, `certbot certonly --dns-cloudflare -d "*.{{ domain_name }}"`,
+# voir Ansible/README.md) : *.web3c.cc couvre déjà agenthub.web3c.cc sans
+# action supplémentaire. Rien à réémettre, rien à `--expand`.
+- name: Report DNS + certificate status
+  ansible.builtin.debug:
+    msg: >-
+      CNAME {{ agenthub_hostname }} → proxy.{{ domain_name }} garanti (front
+      round-robin entre les proxies {{ groups['proxies'] | default([]) | join(', ') }}).
+      Certificat : déjà couvert par le wildcard *.{{ domain_name }}
+      (cert-install/install-cert) — aucune action cert nécessaire pour ce
+      nouveau nom. Reste à pousser le vhost sur les proxies :
+      ./play.sh web3c deploy-agenthub.yml --tags proxy-conf
+      (ou ./play.sh web3c update-proxy-web3c.yml pour une resynchronisation
+      complète).

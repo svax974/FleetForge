@@ -1,0 +1,421 @@
+---
+# Installe OpenClaw NATIVEMENT (CLI officiel, `install-cli.sh`) sous le compte
+# `srvc`, démon géré par une unité systemd --user. Idempotent : si déjà
+# onboardé, seuls la config des proxies de confiance et le contrôle de santé
+# rejouent.
+
+- name: Fail early when the provider key is missing
+  ansible.builtin.assert:
+    that:
+      - openclaw_openai_api_key is defined
+      - openclaw_openai_api_key | length > 0
+    fail_msg: >-
+      `openclaw_openai_api_key` n'est pas défini. OpenClaw est onboardé avec
+      --auth-choice {{ openclaw_auth_choice }} et a besoin de cette clé pour
+      finir l'installation en mode non interactif. La chiffrer et l'ajouter à
+      group_vars/web3c.yml :
+        cd Ansible && ansible-vault encrypt_string --stdin-name 'openclaw_openai_api_key'
+      (coller la clé sur l'entrée standard, Ctrl-D pour terminer), puis coller
+      le bloc obtenu dans group_vars/web3c.yml.
+  when: openclaw_auth_choice == 'openai-api-key'
+
+# Le socle (curl, tar, ca-certificates) est garanti par host-preflight ; ceux-ci
+# sont les seuls en plus, spécifiques à l'installeur OpenClaw.
+- name: Install required packages
+  ansible.builtin.apt:
+    name: [curl, ca-certificates, tar]
+    state: present
+  become: true
+
+# UID de srvc, nécessaire à chaque appel `systemctl --user` hors session
+# interactive (XDG_RUNTIME_DIR=/run/user/<uid>) — Ansible se connecte en SSH
+# non interactif, aucun bus de session n'est déjà exporté dans l'environnement.
+- name: Look up the srvc UID
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ openclaw_user }}"
+- name: Set the XDG runtime dir fact
+  ansible.builtin.set_fact:
+    openclaw_xdg_runtime_dir: "/run/user/{{ ansible_facts.getent_passwd[openclaw_user][1] }}"
+
+# Auto-suffisant : Node embarqué sous le préfixe, aucune dépendance au
+# Node/npm du système (à l'image de la préférence de ce dépôt pour des
+# binaires autonomes plutôt que des mirroirs/paquets tiers — cf. astar-install).
+- name: Install the OpenClaw CLI (official installer)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    curl -fsSL https://openclaw.ai/install-cli.sh | bash -s -- --no-onboard
+  args:
+    executable: /bin/bash
+    creates: "{{ openclaw_binary }}"
+  become: true
+  become_user: "{{ openclaw_user }}"
+  environment:
+    HOME: "{{ openclaw_home }}"
+
+# Généré UNE FOIS sur l'hôte, comme la clé secrète de searxng : le régénérer à
+# chaque exécution invaliderait silencieusement tout accès Control UI déjà
+# distribué, sans que rien ne l'explique.
+- name: Generate the gateway token on first run
+  ansible.builtin.shell:
+    cmd: "umask 077 && openssl rand -hex 32 > {{ openclaw_home }}/.gateway_token"
+    creates: "{{ openclaw_home }}/.gateway_token"
+  become: true
+  become_user: "{{ openclaw_user }}"
+
+- name: Read the gateway token
+  ansible.builtin.slurp:
+    src: "{{ openclaw_home }}/.gateway_token"
+  become: true
+  register: openclaw_gateway_token_raw
+
+- name: Set the gateway token fact
+  ansible.builtin.set_fact:
+    openclaw_gateway_token: "{{ openclaw_gateway_token_raw.content | b64decode | trim }}"
+
+- name: Check whether OpenClaw has already been onboarded
+  ansible.builtin.stat:
+    path: "{{ openclaw_prefix }}/openclaw.json"
+  become: true
+  register: openclaw_onboarded
+
+# Secrets passés par l'ENVIRONNEMENT du process (--secret-input-mode ref, seule
+# valeur valide avec "plaintext" — "env" n'existe pas, constaté le 09/09/2026),
+# jamais sur la ligne de commande : un argument de commande est lisible par
+# tout compte via `ps`, ce que CLAUDE.md documente déjà pour ansible-vault
+# --stdin-name. Ne tourne qu'une fois : si openclaw est déjà installé, ne PAS
+# relancer l'onboarding — ce sont openclaw-security et openclaw-monitoring,
+# toujours rejoués, qui couvrent les étapes annexes.
+- name: Run the non-interactive onboarding
+  ansible.builtin.command:
+    cmd: >-
+      {{ openclaw_binary }} onboard --non-interactive --accept-risk --skip-health
+      --mode local
+      --auth-choice {{ openclaw_auth_choice }}
+      --secret-input-mode ref
+      --gateway-auth token
+      --gateway-token-ref-env OPENCLAW_GATEWAY_TOKEN
+      --skip-channels
+    chdir: "{{ openclaw_home }}"
+  become: true
+  become_user: "{{ openclaw_user }}"
+  environment:
+    HOME: "{{ openclaw_home }}"
+    OPENAI_API_KEY: "{{ openclaw_openai_api_key | trim }}"
+    OPENCLAW_GATEWAY_TOKEN: "{{ openclaw_gateway_token }}"
+  when: not openclaw_onboarded.stat.exists
+
+# Rejoué à chaque exécution (pas seulement au premier onboarding) : c'est la
+# correction d'un défaut découvert en production, elle doit s'appliquer aussi
+# à une installation déjà onboardée. La gateway déjà démarrée ne relit ce
+# fichier qu'au redémarrage — d'où le `notify`. `controlUi.allowedOrigins`
+# attend des origines EXACTES (schéma+hôte, sans caractère générique) : sans
+# elle, la Control UI servie via le vhost proxy est rejetée avec « Origine du
+# navigateur non autorisée », même une fois trustedProxies/XFF corrects
+# (constaté le 10/09/2026 — erreur distincte de proxy_attribution_required,
+# vérifiée après coup, pas avant).
+- name: Configure the trusted reverse-proxy source, bind address and Control UI origin
+  ansible.builtin.command:
+    cmd: >-
+      {{ openclaw_binary }} config set --batch-json
+      '{{ [{"path": "gateway.trustedProxies", "value": openclaw_trusted_proxies},
+           {"path": "gateway.bind", "value": openclaw_gateway_bind},
+           {"path": "gateway.port", "value": openclaw_port | int},
+           {"path": "gateway.controlUi.allowedOrigins", "value": openclaw_control_ui_allowed_origins}] | to_json }}'
+    chdir: "{{ openclaw_home }}"
+  become: true
+  become_user: "{{ openclaw_user }}"
+  environment:
+    HOME: "{{ openclaw_home }}"
+  changed_when: true
+  notify: restart openclaw gateway
+
+# Optionnel (openclaw_custom_provider_name vide = sauté). Écrit dans un
+# FICHIER plutôt qu'en argv (`--batch-file`, pas `--batch-json`) : la clé API
+# ne doit jamais apparaître dans la ligne de commande, lisible par tout compte
+# via `ps`. `--merge` préserve les autres providers déjà présents sous
+# `models.providers`. `no_log` sur les deux tâches : la clé transite par le
+# contenu du fichier ET par le module Ansible qui l'écrit.
+- name: Deploy the custom model provider batch file
+  ansible.builtin.copy:
+    dest: "{{ openclaw_home }}/.provider-batch.json"
+    owner: "{{ openclaw_user }}"
+    group: "{{ openclaw_user }}"
+    mode: '0600'
+    content: >-
+      {{ [{"path": "models.providers." ~ openclaw_custom_provider_name,
+           "value": {"baseUrl": openclaw_custom_provider_base_url,
+                      "apiKey": openclaw_custom_provider_api_key | trim,
+                      "api": openclaw_custom_provider_api,
+                      "models": openclaw_custom_provider_models}}] | to_json }}
+  become: true
+  become_user: "{{ openclaw_user }}"
+  no_log: true
+  when: openclaw_custom_provider_name | length > 0
+  notify: restart openclaw gateway
+
+- name: Configure the custom model provider
+  ansible.builtin.command:
+    cmd: >-
+      {{ openclaw_binary }} config set --batch-file {{ openclaw_home }}/.provider-batch.json
+      --strict-json --merge
+    chdir: "{{ openclaw_home }}"
+  become: true
+  become_user: "{{ openclaw_user }}"
+  environment:
+    HOME: "{{ openclaw_home }}"
+  changed_when: true
+  no_log: true
+  when: openclaw_custom_provider_name | length > 0
+  notify: restart openclaw gateway
+
+# Canal Telegram (optionnel : jeton vide = sauté). Fichier de batch en 0600 et
+# `no_log`, jamais en argv : le jeton du bot donne le contrôle complet du bot
+# et serait lisible par tout compte via `ps`. Les chemins sont des FEUILLES :
+# `config set` ne touche qu'elles, les autres comptes et réglages (groups,
+# allowFrom...) sous `channels.telegram` sont préservés. Pas de `--merge` : il
+# est réservé aux valeurs objet et refuse un scalaire (« Cannot merge
+# channels.telegram.enabled; use --replace »). Redémarrage de la gateway : le provider Telegram ne
+# relit pas un jeton modifié à chaud.
+- name: Deploy the Telegram channel batch file
+  ansible.builtin.copy:
+    dest: "{{ openclaw_home }}/.telegram-batch.json"
+    owner: "{{ openclaw_user }}"
+    group: "{{ openclaw_user }}"
+    mode: '0600'
+    content: >-
+      {{ [{"path": "channels.telegram.enabled", "value": true},
+          {"path": "channels.telegram.accounts." ~ openclaw_telegram_account ~ ".enabled", "value": true},
+          {"path": "channels.telegram.accounts." ~ openclaw_telegram_account ~ ".botToken",
+           "value": openclaw_telegram_bot_token | trim}] | to_json }}
+  become: true
+  become_user: "{{ openclaw_user }}"
+  no_log: true
+  when: openclaw_telegram_bot_token | length > 0
+  notify: restart openclaw gateway
+
+- name: Configure the Telegram channel
+  ansible.builtin.command:
+    cmd: >-
+      {{ openclaw_binary }} config set --batch-file {{ openclaw_home }}/.telegram-batch.json
+      --strict-json
+    chdir: "{{ openclaw_home }}"
+  become: true
+  become_user: "{{ openclaw_user }}"
+  environment:
+    HOME: "{{ openclaw_home }}"
+  changed_when: true
+  no_log: true
+  when: openclaw_telegram_bot_token | length > 0
+  notify: restart openclaw gateway
+
+# Route et consigne du heartbeat (optionnel : `openclaw_heartbeat_to` vide =
+# sauté). Fichier de batch + `--strict-json` : le prompt contient des
+# apostrophes, ingérables dans un argv entre quotes, et `to` doit rester une
+# CHAÎNE (l'identifiant Telegram, passé nu, est lu comme un nombre et la
+# validation échoue : « expected string, received number »). La gateway relit
+# cette section à chaud — pas de `notify` de redémarrage.
+- name: Deploy the heartbeat batch file
+  ansible.builtin.copy:
+    dest: "{{ openclaw_home }}/.heartbeat-batch.json"
+    owner: "{{ openclaw_user }}"
+    group: "{{ openclaw_user }}"
+    mode: '0600'
+    content: >-
+      {{ ([{"path": "agents.defaults.heartbeat.target", "value": openclaw_heartbeat_target},
+          {"path": "agents.defaults.heartbeat.accountId", "value": openclaw_heartbeat_account_id},
+          {"path": "agents.defaults.heartbeat.to", "value": openclaw_heartbeat_to | string},
+          {"path": "agents.defaults.heartbeat.isolatedSession", "value": true},
+          {"path": "agents.defaults.heartbeat.lightContext", "value": false},
+          {"path": "agents.defaults.heartbeat.prompt", "value": lookup('ansible.builtin.template', 'heartbeat-prompt.j2') | trim}]
+         + ([{"path": "agents.defaults.heartbeat.model", "value": openclaw_heartbeat_model}]
+            if openclaw_heartbeat_model | length > 0 else [])) | to_json }}
+  become: true
+  become_user: "{{ openclaw_user }}"
+  when: openclaw_heartbeat_to | string | length > 0
+
+- name: Configure the heartbeat route and prompt
+  ansible.builtin.command:
+    cmd: >-
+      {{ openclaw_binary }} config set --batch-file {{ openclaw_home }}/.heartbeat-batch.json
+      --strict-json
+    chdir: "{{ openclaw_home }}"
+  become: true
+  become_user: "{{ openclaw_user }}"
+  environment:
+    HOME: "{{ openclaw_home }}"
+  changed_when: true
+  when: openclaw_heartbeat_to | string | length > 0
+
+# Veille du parc : remplace le heartbeat LLM (voir defaults). Le heartbeat natif
+# est mis à 0m ; l'automation `fleet-watch` (commande, sans modèle) le remplace
+# et ne réveille le modèle que sur changement d'alertes. `--declaration-key`
+# rend l'ajout idempotent.
+- name: Deploy the fleet-watch script and its configuration
+  ansible.builtin.copy:
+    src: fleet-watch.py
+    dest: "{{ openclaw_home }}/.openclaw/bin/fleet-watch.py"
+    owner: "{{ openclaw_user }}"
+    group: "{{ openclaw_user }}"
+    mode: '0750'
+  become: true
+  when: openclaw_heartbeat_to | string | length > 0
+
+- name: Render the fleet-watch configuration
+  ansible.builtin.copy:
+    dest: "{{ openclaw_home }}/.openclaw/bin/fleet-watch.json"
+    owner: "{{ openclaw_user }}"
+    group: "{{ openclaw_user }}"
+    mode: '0640'
+    content: "{{ lookup('ansible.builtin.template', 'fleet-watch.json.j2') }}"
+  become: true
+  when: openclaw_heartbeat_to | string | length > 0
+
+- name: Disable the native LLM heartbeat
+  ansible.builtin.command:
+    cmd: "{{ openclaw_binary }} config set agents.defaults.heartbeat.every 0m"
+    chdir: "{{ openclaw_home }}"
+  become: true
+  become_user: "{{ openclaw_user }}"
+  environment:
+    HOME: "{{ openclaw_home }}"
+  changed_when: true
+  when: openclaw_heartbeat_to | string | length > 0
+
+- name: Register the fleet-watch automation
+  ansible.builtin.command:
+    cmd: >-
+      {{ openclaw_binary }} automations add --name fleet-watch
+      --declaration-key fleet-watch --every {{ openclaw_fleetwatch_every }}
+      --command "python3 {{ openclaw_home }}/.openclaw/bin/fleet-watch.py {{ openclaw_home }}/.openclaw/bin/fleet-watch.json"
+      --timeout-seconds {{ openclaw_fleetwatch_timeout + 120 }} --no-deliver
+  become: true
+  become_user: "{{ openclaw_user }}"
+  environment:
+    HOME: "{{ openclaw_home }}"
+  changed_when: true
+  when: openclaw_heartbeat_to | string | length > 0
+
+# Écrit l'unité systemd --user (~/.config/systemd/user/openclaw-gateway.service),
+# PAS une unité système : srvc n'a pas de droits root permanents, et c'est le
+# mode officiellement documenté pour un compte non-root (docs.openclaw.ai/gateway).
+# `gateway.auth.token` est un SecretRef (env:OPENCLAW_GATEWAY_TOKEN) : `gateway
+# install` le résout au moment de poser l'unité et refuse s'il n'est pas
+# présent dans l'environnement de CET appel précis (constaté le 09/09/2026).
+- name: Install the systemd --user unit
+  ansible.builtin.command:
+    cmd: "{{ openclaw_binary }} gateway install"
+    creates: "{{ openclaw_home }}/.config/systemd/user/openclaw-gateway.service"
+  become: true
+  become_user: "{{ openclaw_user }}"
+  environment:
+    HOME: "{{ openclaw_home }}"
+    XDG_RUNTIME_DIR: "{{ openclaw_xdg_runtime_dir }}"
+    OPENCLAW_GATEWAY_TOKEN: "{{ openclaw_gateway_token }}"
+
+# Sans lingering, systemd-logind tue toute unité --user de srvc à la
+# déconnexion SSH (KillUserProcesses=yes) : la gateway s'arrêterait dès la fin
+# du run Ansible. Condition documentée par le projet pour tout serveur headless.
+# L'unité systemd --user posée par `gateway install` ne porte AUCUNE variable
+# d'environnement : le process démarré par systemd n'a donc pas accès aux
+# secrets que l'onboarding lisait, lui, depuis l'environnement du process
+# Ansible. Sans ce fichier, la gateway crashe en boucle au démarrage :
+# « Startup failed: required secrets are unavailable. » (constaté le
+# 09/09/2026). Fichier séparé de la conf systemd elle-même, à l'image de
+# l'ancien `.env` docker — mêmes secrets, même mode 0600.
+# `| trim` sur la clé : `ansible-vault encrypt_string` embarque le `\n` final
+# d'un here-string bash si c'est ainsi qu'elle a été chiffrée — constaté le
+# 10/09/2026 sur ce fichier (ligne vide parasite après la clé, `cat -A`).
+- name: Deploy the gateway secrets file
+  ansible.builtin.copy:
+    dest: "{{ openclaw_home }}/.openclaw.env"
+    owner: "{{ openclaw_user }}"
+    group: "{{ openclaw_user }}"
+    mode: '0600'
+    content: |
+      OPENAI_API_KEY={{ openclaw_openai_api_key | trim }}
+      OPENCLAW_GATEWAY_TOKEN={{ openclaw_gateway_token }}
+  become: true
+  become_user: "{{ openclaw_user }}"
+  no_log: true
+  notify: restart openclaw gateway
+
+- name: Create the systemd --user override directory
+  ansible.builtin.file:
+    path: "{{ openclaw_home }}/.config/systemd/user/openclaw-gateway.service.d"
+    state: directory
+    owner: "{{ openclaw_user }}"
+    group: "{{ openclaw_user }}"
+    mode: '0700'
+  become: true
+  become_user: "{{ openclaw_user }}"
+
+- name: Deploy the systemd --user override (secrets EnvironmentFile)
+  ansible.builtin.copy:
+    dest: "{{ openclaw_home }}/.config/systemd/user/openclaw-gateway.service.d/secrets.conf"
+    owner: "{{ openclaw_user }}"
+    group: "{{ openclaw_user }}"
+    mode: '0600'
+    content: |
+      [Service]
+      EnvironmentFile={{ openclaw_home }}/.openclaw.env
+  become: true
+  become_user: "{{ openclaw_user }}"
+  notify: restart openclaw gateway
+
+- name: Enable lingering for srvc
+  ansible.builtin.command:
+    cmd: "loginctl enable-linger {{ openclaw_user }}"
+    creates: "/var/lib/systemd/linger/{{ openclaw_user }}"
+  become: true
+
+- name: Reload the user systemd daemon
+  ansible.builtin.systemd:
+    scope: user
+    daemon_reload: true
+  become: true
+  become_user: "{{ openclaw_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "{{ openclaw_xdg_runtime_dir }}"
+
+- name: Enable and start the OpenClaw gateway
+  ansible.builtin.systemd:
+    scope: user
+    name: openclaw-gateway
+    state: started
+    enabled: true
+  become: true
+  become_user: "{{ openclaw_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "{{ openclaw_xdg_runtime_dir }}"
+
+# Point d'entrée utilisé par le HEALTHCHECK du projet lui-même.
+- name: Wait for OpenClaw to answer
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ openclaw_port }}/healthz"
+    status_code: [200]
+  register: openclaw_ready
+  until: openclaw_ready.status | default(0) == 200
+  retries: 24
+  delay: 5
+
+# Rien n'installe le CLI dans le PATH système : sans ce wrapper, chaque
+# commande d'administration (devices, dashboard, doctor...) demande de
+# retrouver le binaire sous le préfixe de srvc et de repasser par `sudo -u`.
+- name: Deploy the openclaw CLI wrapper
+  ansible.builtin.template:
+    src: openclaw-cli-wrapper.sh.j2
+    dest: /usr/local/bin/openclaw
+    owner: root
+    group: root
+    mode: '0755'
+  become: true
+
+- name: Report how the gateway is exposed
+  ansible.builtin.debug:
+    msg: >-
+      OpenClaw en écoute sur 0.0.0.0:{{ openclaw_port }} (bind
+      « {{ openclaw_gateway_bind }} »), process natif sous systemd --user de
+      {{ openclaw_user }}. Le port est filtré par ufw (openclaw-security) —
+      contrairement à l'ancienne installation en conteneur, une règle ufw a
+      ici un effet réel (pas de publication Docker).

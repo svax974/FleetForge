@@ -1,0 +1,21 @@
+---
+# Désinstalle le nœud Astar en conservant la chaîne.
+#
+#   ./play.sh web3c remove-astar.yml --limit hub
+#
+# Retire le binaire, l'unité systemd, l'utilisateur système et la cible
+# Prometheus — laissée en place, elle publierait `up 0` indéfiniment et ferait
+# sonner `TargetDown` sur un service volontairement désinstallé.
+#
+# Conserve /var/lib/astar : la chaîne en mode `archive` pèse plusieurs centaines
+# de gigaoctets et se resynchroniser prend des jours. Pour tout supprimer :
+# `purge-astar.yml`.
+#
+# `--limit` est OBLIGATOIRE.
+
+- name: Désinstallation du nœud Astar (chaîne conservée)
+  hosts: all
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - astar-remove

@@ -1,0 +1,57 @@
+---
+# Scripts et alias d'exploitation, installés dans le home de l'utilisateur de
+# SERVICE.
+#
+# Surtout pas `~` : pendant un bootstrap ce rôle tourne avec le compte de
+# connexion — root, ou le compte fourni par l'image cloud quand elle interdit
+# root (Oracle : `ubuntu`). Les alias atterrissaient donc dans /root ou dans
+# /home/ubuntu, deux homes que personne n'ouvre ensuite puisque l'exploitation
+# se fait avec `remote_username`.
+#
+# Conséquence sur l'ordre des rôles : ce rôle passe APRÈS `security-create-user`
+# dans les playbooks de bootstrap, sinon le compte n'existe pas encore et le
+# chown échoue.
+
+- name: Resolve the service user's home directory
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ remote_username }}"
+
+- name: Set the target home directory
+  ansible.builtin.set_fact:
+    scripts_home: "{{ ansible_facts.getent_passwd[remote_username][4] }}"
+
+- name: Creates a bin directory
+  ansible.builtin.file:
+    path: "{{ scripts_home }}/bin"
+    state: directory
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: "0750"
+  become: true
+
+- name: Add bin to path
+  lineinfile:
+    path: "{{ scripts_home }}/.bashrc"
+    line: 'export PATH=$PATH:~/bin'
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: "0644"
+    create: true
+  become: true
+
+- name: Add alias lsports
+  lineinfile:
+    path: "{{ scripts_home }}/.bashrc"
+    line: "alias lsports='lsof -nP -iTCP -sTCP:LISTEN'"
+  become: true
+- name: Add alias l
+  lineinfile:
+    path: "{{ scripts_home }}/.bashrc"
+    line: "alias l='ls -alF'"
+  become: true
+- name: Add alias psg
+  lineinfile:
+    path: "{{ scripts_home }}/.bashrc"
+    line: "alias psg='ps aux | grep'"
+  become: true

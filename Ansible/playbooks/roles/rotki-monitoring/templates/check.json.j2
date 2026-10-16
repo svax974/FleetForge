@@ -1,0 +1,7 @@
+{
+  "service": "rotki",
+  "up": {"kind": "http", "url": "{{ rotki_url }}/api/1/ping", "status": [200], "timeout": 10},
+  "extra_checks": [
+    {"name": "container", "kind": "docker", "container": "{{ rotki_container }}"}
+  ]
+}

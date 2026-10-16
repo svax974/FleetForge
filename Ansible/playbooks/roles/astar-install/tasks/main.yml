@@ -1,0 +1,78 @@
+---
+# Install Astar node — fetches latest release from GitHub
+
+- name: Install required packages
+  ansible.builtin.apt:
+    name:
+      - curl
+      - wget
+      - tar
+    state: present
+    update_cache: yes
+
+- name: Create astar system user
+  ansible.builtin.user:
+    name: "{{ astar_user }}"
+    shell: /usr/sbin/nologin
+    create_home: no
+    system: yes
+
+- name: Create data directory
+  ansible.builtin.file:
+    path: "{{ astar_data_dir }}"
+    state: directory
+    owner: "{{ astar_user }}"
+    group: "{{ astar_user }}"
+    mode: "0755"
+
+- name: Fetch latest Astar release info from GitHub API
+  ansible.builtin.uri:
+    url: "https://api.github.com/repos/{{ astar_github_repo }}/releases/latest"
+    headers:
+      Accept: "application/vnd.github.v3+json"
+    return_content: yes
+  register: astar_release_info
+
+- name: Set release version facts
+  ansible.builtin.set_fact:
+    astar_version: "{{ astar_release_info.json.tag_name }}"
+    astar_version_num: "{{ astar_release_info.json.tag_name | regex_replace('^v', '') }}"
+
+- name: Build download URL
+  ansible.builtin.set_fact:
+    astar_download_url: "https://github.com/{{ astar_github_repo }}/releases/download/{{ astar_version }}/astar-collator-{{ astar_version }}-{{ astar_arch }}.tar.gz"
+
+- name: Download Astar binary archive
+  ansible.builtin.get_url:
+    url: "{{ astar_download_url }}"
+    dest: "/tmp/astar-collator.tar.gz"
+    mode: "0644"
+    timeout: 120
+
+- name: Extract Astar binary
+  ansible.builtin.unarchive:
+    src: "/tmp/astar-collator.tar.gz"
+    dest: "/tmp/"
+    remote_src: yes
+
+- name: Install binary to /usr/local/bin
+  ansible.builtin.copy:
+    src: "/tmp/astar-collator"
+    dest: "{{ astar_binary }}"
+    remote_src: yes
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Clean up downloaded archive
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /tmp/astar-collator.tar.gz
+    - /tmp/astar-collator
+
+# Unité systemd : dans un fichier à part pour pouvoir être reposée seule, sans
+# rejouer le téléchargement du binaire (voir l'en-tête de unit.yml).
+- name: Deploy the systemd unit and start the service
+  ansible.builtin.include_tasks: unit.yml

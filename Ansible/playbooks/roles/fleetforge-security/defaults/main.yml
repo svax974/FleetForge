@@ -1,0 +1,9 @@
+---
+# Filtrage du port applicatif de FleetForge.
+#
+# Ici, contrairement à Prometheus et Alertmanager, ufw fonctionne RÉELLEMENT :
+# le service est un binaire natif sous systemd, pas un conteneur avec un port
+# publié. Docker n'insère donc aucune règle DNAT en amont, et il n'y a rien à
+# poser dans DOCKER-USER. C'est la différence qui a rendu décoratives quinze
+# règles ufw sur 9090/9093 ; elle mérite d'être dite plutôt que supposée.
+ff_port: "{{ app_port | default(9750) }}"

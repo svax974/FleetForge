@@ -1,0 +1,53 @@
+---
+# Back PapangLabs (NestJS) déployé en conteneurs Docker Compose.
+#
+# Le découpage install / setup suit la convention du parc (cf. vpn-install et
+# vpn-setup) : `-install` amène la machine et le CODE à l'état voulu (contexte
+# synchronisé, image construite), `-setup` rend la configuration et démarre les
+# conteneurs. Les deux sont joués à la suite par deploy-papanglabs-back.yml ;
+# les séparer permet de relivrer du code sans redémarrer, et inversement.
+
+pgb_user: "{{ remote_username }}"
+pgb_dir: "/home/{{ remote_username }}/papanglabs"
+
+# Source sur le poste de contrôle (rsyncée vers la machine). Même mécanisme que
+# `pm_src` pour PapangMetrics : c'est le dépôt de travail qui fait foi, il n'y a
+# pas d'artefact intermédiaire.
+pgb_src: "/Users/steph/Dev/Projects/PapangLabs/PapangWorkspace/"
+
+# Fichier d'environnement applicatif à livrer, relatif à `pgb_src`. La prod et
+# la préprod ne se distinguent QUE par ce fichier — c'est lui qui porte la base
+# Supabase, les clés d'API et le pool de connexions.
+pgb_env_file: "back/.env"
+
+# Fichier compose. `docker-compose-cloud.yml` est celui que deploy-full.sh
+# choisit quand DB_ENGINE n'est ni `postgres` ni `selfhosted` — c'est le
+# cas ici, la base est sur Supabase, donc aucun conteneur `db` n'est démarré.
+pgb_compose_file: "scripts/docker-compose-cloud.yml"
+
+# Nom de projet Compose. Identique à celui de deploy-full.sh
+# (build_project_name : "<projet>-back-<hôte assaini>") pour qu'un déploiement
+# Ansible reprenne les conteneurs d'un déploiement fait par le script, au lieu
+# d'en créer un second jeu à côté.
+# Même nom que celui calculé par deploy-full.sh (sanitize_identifier : minuscules,
+# tout caractère non alphanumérique remplacé par un tiret, appliqué au NOM d'hôte
+# et non à l'IP). L'aligner permet à un déploiement Ansible de reprendre les
+# conteneurs posés par le script, au lieu d'en créer un second jeu à côté.
+pgb_project_name: "papanglabs-back-{{ hostname | lower | regex_replace('[^a-z0-9]', '-') }}"
+
+# Services démarrés. `front` est sur Cloudflare Pages (deploy-papanglabs-front),
+# `db` est chez Supabase : ni l'un ni l'autre n'a de conteneur ici. `vmagent`
+# est ajouté par le rôle `-monitoring`, pas ici.
+pgb_services: [back, back-worker, back-lb, redis]
+
+# Port publié par le répartiteur nginx (back-lb), seul point d'entrée HTTP.
+pgb_port: "{{ app_port | default(9741) }}"
+
+# Exclusions rsync. `node_modules` et `dist` sont reconstruits dans l'image :
+# les livrer ferait transiter ~1 Go pour rien et écraserait un build Linux par
+# un build macOS.
+pgb_rsync_excludes:
+  - "--exclude=.git"
+  - "--exclude=node_modules"
+  - "--exclude=dist"
+  - "--exclude=.env.*"

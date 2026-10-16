@@ -1,0 +1,15 @@
+---
+mtbridge_github_user: "svax974"
+mtbridge_github_repo: "MTBridge"
+mtbridge_github_branch: "main"
+mtbridge_install_dir: 'C:\MTBridge'
+mtbridge_service_name: "MTBridge"
+mtbridge_python_version: "3.14.3"
+mtbridge_autologon_user: "Administrator"
+mtbridge_skip_autologon: false
+mtbridge_skip_python: false
+# Path to MTBridge sources on the control node (sibling project)
+mtbridge_sources_dir: "{{ playbook_dir }}/../../../MTBridge"
+# Required (vault): mtbridge_github_token
+# Optional (vault): mtbridge_api_key
+# Optional (vault): mtbridge_autologon_password (required if not mtbridge_skip_autologon)

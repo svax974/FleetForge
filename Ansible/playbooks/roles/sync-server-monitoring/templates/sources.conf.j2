@@ -1,0 +1,4 @@
+# Géré par Ansible (sync-server-monitoring) — ne pas éditer.
+# Scrape Prometheus de {{ inventory_hostname }} (/metrics natif). Format :
+# « <port> <source> », lu par docker-ports-firewall.sh.
+{{ sync_mon_port }} {{ hostvars[prometheus_host]['ansible_host'] }}

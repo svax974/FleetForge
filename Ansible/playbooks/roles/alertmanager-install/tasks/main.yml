@@ -1,0 +1,112 @@
+---
+# Installe Alertmanager (Docker) et le configure pour notifier par e-mail.
+
+- name: Fail early when no alert recipient is configured
+  ansible.builtin.fail:
+    msg: >-
+      `alertmanager_email_to` est vide : Alertmanager serait déployé sans
+      destinataire et les alertes ne partiraient nulle part. Renseigner la
+      variable dans group_vars avant de déployer.
+  when: alertmanager_email_to | length == 0
+
+- name: Fail early when the SMTP smarthost cannot be resolved
+  ansible.builtin.fail:
+    msg: >-
+      `alertmanager_smtp_host` est vide (l'hôte `mail` est-il dans cet
+      inventaire ?). Renseigner explicitement le smarthost SMTP.
+  when: alertmanager_smtp_host | length == 0
+
+- name: Create Alertmanager directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: "0755"
+  become: true
+  loop:
+    - "{{ alertmanager_home }}"
+    - "{{ alertmanager_home }}/data"
+
+# La configuration est VALIDÉE avant d'être mise en place, jamais l'inverse.
+# Une erreur de syntaxe livrée directement met Alertmanager en boucle de crash,
+# et un Alertmanager en boucle de crash n'envoie plus rien : la supervision
+# s'éteint en silence, au moment précis où elle devrait parler. C'est le mode de
+# panne rencontré sur Prometheus le 14/08/2026, d'où le même garde-fou ici.
+- name: Stage Alertmanager configuration for validation
+  ansible.builtin.template:
+    src: alertmanager.yml.j2
+    dest: "{{ alertmanager_home }}/.alertmanager.staged"
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    # Contient les identifiants SMTP.
+    mode: "0640"
+  become: true
+  changed_when: false
+
+- name: Validate the staged Alertmanager configuration with amtool
+  ansible.builtin.command:
+    argv:
+      - docker
+      - run
+      - --rm
+      # L'image tourne en `nobody`, or le fichier est en 0640 root:srvc — il
+      # porte les identifiants SMTP et n'a pas à être lisible plus largement.
+      # Sans cela le contrôle échoue en « permission denied », ce qui est
+      # indiscernable d'une configuration invalide.
+      - --user
+      - "0:0"
+      - --entrypoint=amtool
+      - -v
+      - "{{ alertmanager_home }}/.alertmanager.staged:/tmp/alertmanager.yml:ro"
+      - "{{ alertmanager_image }}"
+      - check-config
+      - /tmp/alertmanager.yml
+  become: true
+  register: _am_check
+  changed_when: false
+
+- name: Install the validated Alertmanager configuration
+  ansible.builtin.copy:
+    src: "{{ alertmanager_home }}/.alertmanager.staged"
+    dest: "{{ alertmanager_home }}/alertmanager.yml"
+    remote_src: true
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: "0640"
+  become: true
+  notify: restart alertmanager
+
+- name: Remove the staged Alertmanager configuration
+  ansible.builtin.file:
+    path: "{{ alertmanager_home }}/.alertmanager.staged"
+    state: absent
+  become: true
+  changed_when: false
+
+- name: Deploy Alertmanager Docker container
+  community.docker.docker_container:
+    name: alertmanager
+    image: "{{ alertmanager_image }}"
+    state: started
+    restart_policy: always
+    recreate: true
+    ports:
+      - "{{ alertmanager_port }}:9093"
+    volumes:
+      - "{{ alertmanager_home }}/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro"
+      - "{{ alertmanager_home }}/data:/alertmanager"
+    command:
+      - "--config.file=/etc/alertmanager/alertmanager.yml"
+      - "--storage.path=/alertmanager"
+    user: "root"
+  become: true
+
+- name: Wait for Alertmanager to answer
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ alertmanager_port }}/-/ready"
+    status_code: [200]
+  register: _am_ready
+  until: _am_ready.status == 200
+  retries: 12
+  delay: 5

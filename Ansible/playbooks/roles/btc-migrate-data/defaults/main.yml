@@ -1,0 +1,57 @@
+---
+# Amorce les données du nœud bitcoind sur un hôte CIBLE en les tirant depuis un
+# hôte SOURCE, pour une migration de serveur (changement de fournisseur). Le rôle
+# ne fait rien de destructif tant qu'il n'est pas invoqué explicitement par
+# `migrate-btc-brk.yml`.
+#
+# Deux stratégies, pilotées par `bitcoind_seed` :
+#   • rsync (défaut) — recopie fidèle de la chaîne (~887 Go) depuis la source.
+#     Passe CHAUDE des fichiers de blocs (immuables, sans arrêt), puis passe
+#     FROIDE (source arrêtée) du chainstate LevelDB et du delta. La coupure du
+#     nœud source se compte en minutes, pas en heures.
+#   • ibd — aucun transfert : le nœud cible se resynchronise seul depuis le
+#     réseau P2P (~1 j). Le rôle est alors quasi vide (le nœud est déjà démarré
+#     par `rpcbtc-install`). Zéro charge sur la source, zéro risque LevelDB.
+
+# Stratégie d'amorçage : rsync | ibd
+bitcoind_seed: rsync
+
+# ── Source (hôte d'inventaire d'où l'on tire la chaîne) ─────────────────────
+# Nom d'INVENTAIRE, pas une IP. Fourni par le playbook (`-e src_host=…`).
+btc_migrate_src_host: "{{ src_host | default('rpcbtc1') }}"
+btc_migrate_src_addr: "{{ hostvars[btc_migrate_src_host]['ansible_host'] }}"
+btc_migrate_src_user: "{{ remote_username }}"
+btc_migrate_src_port: "{{ ssh_custom_port }}"
+
+# Emplacements — identiques source et cible (posés par `rpcbtc-install`).
+btc_migrate_src_datadir: "/home/{{ remote_username }}/bitcoin/data"
+btc_migrate_dst_datadir: "/home/{{ remote_username }}/bitcoin/data"
+
+# Clé SSH dédiée à la migration : la cible TIRE depuis la source, distincte de
+# la clé d'administration comme pour brk-backup/brk-restore.
+btc_migrate_ssh_key_path: "/home/{{ remote_username }}/.ssh/id_ed25519_btcmigrate"
+
+# Flux rsync concurrents pour la passe chaude des fichiers de blocs. Sur un lien
+# à forte perte (cf. le contexte papanglabs), l'agrégat parallèle capte la bande
+# passante qu'un flux unique laisserait au sol. 1 = flux unique.
+btc_migrate_streams: 8
+
+# Reprises d'un flux sur erreur transitoire (coupure ssh, code réseau hors
+# 23/24). Un transfert de plusieurs heures voit toujours passer un blip.
+btc_migrate_stream_retries: 5
+
+# Plafond dur sur la passe froide : si rsync s'enlise source arrêtée, le nœud
+# source doit repartir malgré tout. Dépassement = migration en échec, pas nœud
+# de production laissé à terre.
+btc_migrate_cold_timeout: 3600      # 1 h
+
+# Exclusions : verrous, journaux et fichiers d'exécution — sans valeur pour la
+# chaîne, réécrits en permanence. `bitcoin.conf` vit hors de `data/` (dans
+# `~/bitcoin/`) et reste géré par `rpcbtc-setup` sur la cible : on ne recopie
+# JAMAIS la conf de la source, dont le rpcauth/binding lui est propre.
+btc_migrate_excludes:
+  - ".lock"
+  - ".cookie"
+  - "*.pid"
+  - "debug.log"
+  - "wallets/"

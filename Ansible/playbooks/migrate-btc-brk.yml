@@ -1,0 +1,174 @@
+---
+# Duplique un serveur « nœud Bitcoin + BRK » d'une machine SOURCE vers une
+# machine CIBLE (typiquement un nouveau fournisseur), avec binaires, données et
+# règles de sécurité adaptées.
+#
+#   ./play.sh papanglabs migrate-btc-brk.yml -e "src_host=rpcbtc1 dst_host=brk2"
+#   ./play.sh papanglabs migrate-btc-brk.yml -e "src_host=rpcbtc1 dst_host=brk2 bitcoind_seed=ibd"
+#
+# ── Prérequis (comme deploy-btc-pipeline) ──────────────────────────────────
+#   1. La CIBLE existe dans l'inventaire (nouveau fournisseur = nouvelle IP,
+#      `provider:` renseigné) et appartient aux mêmes groupes que la source
+#      (`rpcsbtc` + `brks`), pour que les rôles `-security` en dérivent le
+#      pare-feu. Ajouter aussi `backup-brk` en `backup_sources` si la cible doit
+#      devenir source de sauvegarde (via `retarget-backups.yml` ensuite).
+#   2. La CIBLE est bootstrapée UNE fois : `./play.sh papanglabs setup-server.yml
+#      --limit <cible>` (root@22 → port du parc, utilisateur de service).
+#   3. Une sauvegarde BRK récente existe sur `backup-brk` : c'est d'elle que le
+#      magasin est restauré (choix verrouillé — voir plus bas).
+#
+# ── Ce que fait ce playbook ────────────────────────────────────────────────
+#   • installe bitcoind + BRK (binaires, config, unités systemd) sur la cible ;
+#   • adapte la sécurité (pare-feu du nœud et de BRK, dérivée de l'inventaire) ;
+#   • amorce la chaîne bitcoind : rsync chaud+froid depuis la source (défaut) ou
+#     resynchronisation P2P (`bitcoind_seed=ibd`) ;
+#   • restaure le magasin BRK depuis `backup-brk` (rôle `brk-restore`) — zéro
+#     charge sur le BRK source ;
+#   • repose la supervision et contrôle la reprise.
+#
+# ── Tags ───────────────────────────────────────────────────────────────────
+#   --tags node   : nœud Bitcoin seul (binaires + amorçage chaîne).
+#   --tags brk    : BRK seul (binaires + restauration du magasin).
+#   En mode `ibd`, la chaîne met ~1 j à se synchroniser et `brk-install` refuse
+#   un nœud non synchronisé : jouer d'abord `--tags node`, ATTENDRE la synchro
+#   (bitcoin-cli getblockchaininfo), puis `--tags brk`.
+#
+# ── Après la migration ─────────────────────────────────────────────────────
+#   • repointer l'ETL PapangMetrics vers la nouvelle API BRK (group_vars puis
+#     `deploy-papangmetrics.yml`) ;
+#   • basculer l'inventaire (rpcbtc1/brk1 → nouvelle IP) et retirer l'ancien
+#     hôte (`remove-brk.yml`, `purge`), une fois la cible validée.
+
+# ── 0. Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ──────────────────────
+- name: Contrôle préalable
+  hosts: "{{ dst_host }}"
+  remote_user: "{{ remote_username }}"
+  tags: [always]
+  roles:
+    - role: host-preflight
+      preflight_require_docker: false
+
+# ── 1. Nœud Bitcoin — binaires, configuration, pare-feu ─────────────────────
+- name: Nœud Bitcoin — dépendances
+  hosts: "{{ dst_host }}"
+  remote_user: "{{ remote_username }}"
+  become: true
+  tags: [node]
+  roles:
+    - install-python
+
+- name: Nœud Bitcoin — installation et configuration
+  hosts: "{{ dst_host }}"
+  remote_user: "{{ remote_username }}"
+  tags: [node]
+  roles:
+    - rpcbtc-install
+    - rpcbtc-setup
+    - rpcbtc-rpcauth
+
+- name: Nœud Bitcoin — pare-feu
+  hosts: "{{ dst_host }}"
+  remote_user: "{{ remote_username }}"
+  become: true
+  tags: [node]
+  roles:
+    - rpcbtc-security
+
+# ── 2. Amorçage de la chaîne bitcoind (rsync source→cible, ou IBD) ──────────
+# Le rôle rend la cible capable de tirer depuis la source (clé, pare-feu,
+# tcpwrappers, known_hosts) puis dépose le script. Le transfert lui-même —
+# ~887 Go, plusieurs heures — est lancé en tâche de fond : un `poll` classique
+# romprait la connexion Ansible bien avant la fin, laissant le nœud source
+# arrêté au milieu d'un rsync.
+- name: Amorçage de la chaîne bitcoind
+  hosts: "{{ dst_host }}"
+  remote_user: "{{ remote_username }}"
+  tags: [node]
+  roles:
+    - btc-migrate-data
+  tasks:
+    - name: Lancer la migration de la chaîne (rsync, tâche de fond)
+      ansible.builtin.shell: >-
+        /home/{{ remote_username }}/btc-migrate.sh
+        >> /home/{{ remote_username }}/btc-migrate.log 2>&1
+      async: 172800
+      poll: 0
+      changed_when: true
+      when: (bitcoind_seed | default('rsync')) == 'rsync'
+
+    - name: Suivi
+      ansible.builtin.debug:
+        msg: >-
+          {{ 'Amorçage rsync lancé en tâche de fond (plusieurs heures). Suivi : '
+             ~ 'tail -f ~/btc-migrate.log — puis bitcoin-cli getblockchaininfo.'
+             if (bitcoind_seed | default('rsync')) == 'rsync'
+             else 'Mode IBD : le nœud se resynchronise depuis le réseau P2P (~1 j).' }}
+
+# ── 3. BRK — binaires, pare-feu, restauration du magasin ────────────────────
+# `brk-restore` (et non `brk-backup-install`) : il rend un hôte MÊME VIERGE
+# capable de tirer le magasin depuis `backup-brk`, sans poser le cron de
+# sauvegarde. `brk-install` refuse un nœud non synchronisé — d'où l'ordre après
+# l'amorçage de la chaîne (en rsync, la chaîne est déjà là ; en IBD, jouer cette
+# section plus tard via `--tags brk`).
+- name: BRK — installation et pare-feu
+  hosts: "{{ dst_host }}"
+  remote_user: "{{ remote_username }}"
+  tags: [brk]
+  roles:
+    - brk-install
+    - brk-security
+
+- name: BRK — capacité de restauration + restauration du magasin
+  hosts: "{{ dst_host }}"
+  remote_user: "{{ remote_username }}"
+  tags: [brk]
+  roles:
+    - brk-restore
+  tasks:
+    - name: État des sauvegardes BRK disponibles
+      ansible.builtin.command: "/home/{{ remote_username }}/brk-restore.sh --check"
+      changed_when: false
+      register: brk_restore_check
+
+    - name: Afficher l'état
+      ansible.builtin.debug:
+        var: brk_restore_check.stdout_lines
+
+    # Async : la restauration transfère jusqu'à ~349 Go et dure des heures.
+    - name: Restaurer le magasin BRK (tâche de fond)
+      ansible.builtin.shell: >-
+        /home/{{ remote_username }}/brk-restore.sh --yes
+        >> /home/{{ remote_username }}/brk-restore.log 2>&1
+      async: 172800
+      poll: 0
+      changed_when: true
+
+    - name: Suivi
+      ansible.builtin.debug:
+        msg: >-
+          Restauration du magasin BRK lancée en tâche de fond. Suivi :
+          tail -f ~/brk-restore.log — puis journalctl -u brk -f.
+
+# ── 4. Supervision ──────────────────────────────────────────────────────────
+- name: Supervision (nœud + BRK)
+  hosts: "{{ dst_host }}"
+  remote_user: "{{ remote_username }}"
+  tags: [monitoring]
+  roles:
+    - rpcbtc-monitoring
+    - brk-monitoring
+
+- name: node_exporter (dont collecteur textfile)
+  hosts: "{{ dst_host }}"
+  remote_user: "{{ remote_username }}"
+  become: true
+  tags: [monitoring]
+  roles:
+    - exporter-sys-install
+
+- name: Règles d'alerte
+  hosts: prometheus1:monitor
+  remote_user: "{{ remote_username }}"
+  tags: [monitoring]
+  roles:
+    - prometheus-alerts-update

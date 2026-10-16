@@ -1,0 +1,9 @@
+[
+    {
+        "targets": [ "{{ ansible_host }}:{{ sync_mon_port }}" ],
+        "labels": {
+            "job": "{{ sync_mon_job }}",
+            "instance": "{{ inventory_hostname }}"
+        }
+    }
+]

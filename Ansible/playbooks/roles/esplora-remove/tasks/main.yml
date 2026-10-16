@@ -1,0 +1,42 @@
+---
+# Arrête et supprime le service Esplora et le binaire. Préserve l'index
+# construit ({{ esplora_db_dir }}) — un re-import complet prend des heures.
+
+- name: Stop and disable Esplora service
+  ansible.builtin.systemd:
+    name: esplora
+    state: stopped
+    enabled: false
+  become: true
+  ignore_errors: true
+
+- name: Remove Esplora systemd unit
+  ansible.builtin.file:
+    path: /etc/systemd/system/esplora.service
+    state: absent
+  become: true
+
+- name: Reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+  become: true
+
+- name: Remove the electrs binary
+  ansible.builtin.file:
+    path: "{{ esplora_bin }}"
+    state: absent
+  become: true
+
+# ── Supervision ────────────────────────────────────────────────────────────
+# Convention `-monitoring` (CLAUDE.md) : c'est le rôle de suppression du
+# service qui retire sa cible Prometheus. Une cible laissée en place publierait
+# `up=0` indéfiniment et ferait sonner une alerte sur un service volontairement
+# désinstallé.
+- name: Remove the Esplora Prometheus target
+  ansible.builtin.file:
+    path: "/home/{{ remote_username }}/prometheus/prometheus-configs/{{ esploramon_job | default('node-esplora') }}/{{ inventory_hostname }}.json"
+    state: absent
+  delegate_to: "{{ prometheus_host }}"
+  become: true
+  when: prometheus_host is defined and prometheus_host in hostvars
+  tags: [monitoring]

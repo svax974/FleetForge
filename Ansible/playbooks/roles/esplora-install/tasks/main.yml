@@ -1,0 +1,193 @@
+---
+# Installe Esplora (mempool/electrs, construit depuis les sources) et publie
+# son CNAME public. Tourne sous {{ esplora_user }} (même utilisateur que
+# bitcoind) : comme BRK, electrs lit les fichiers blk*.dat du nœud directement,
+# en plus du RPC.
+
+# ── Garde-fou : nœud déployé et SYNCHRONISÉ ──────────────────────────────────
+# Même raisonnement que brk-install : construire l'index d'adresses contre un
+# nœud partiellement synchronisé (IBD en cours) produirait un index partiel ou
+# faux, indiscernable d'un index complet tant qu'on ne l'a pas comparé à la
+# chaîne réelle.
+- name: Check bitcoin-cli is present (node deployed?)
+  ansible.builtin.stat:
+    path: "{{ esplora_bitcoin_home }}/bin/bitcoin-cli"
+  register: esplora_btc_cli
+
+- name: Fail early if the node is not deployed
+  ansible.builtin.fail:
+    msg: "Nœud Bitcoin introuvable dans {{ esplora_bitcoin_home }}. Déployer et synchroniser d'abord (deploy-rpcbtc.yml)."
+  when: not esplora_btc_cli.stat.exists
+
+- name: Query node sync state (wait for RPC warmup after restart)
+  ansible.builtin.command: >
+    {{ esplora_bitcoin_home }}/bin/bitcoin-cli
+    -datadir={{ esplora_daemon_dir }}
+    -conf={{ esplora_bitcoin_home }}/bitcoin.conf
+    getblockchaininfo
+  become: true
+  become_user: "{{ esplora_user }}"
+  register: esplora_chaininfo
+  until: esplora_chaininfo.rc == 0
+  retries: 60
+  delay: 10
+  changed_when: false
+
+- name: Assert node is fully synced (verificationprogress >= 99.99%)
+  ansible.builtin.assert:
+    that:
+      - (esplora_chaininfo.stdout | from_json).verificationprogress | float >= 0.9999
+      - not (esplora_chaininfo.stdout | from_json).initialblockdownload
+    fail_msg: >
+      Nœud non synchronisé (progress={{ (esplora_chaininfo.stdout | from_json).verificationprogress }}).
+      Attendre la fin de l'IBD avant de déployer Esplora.
+    success_msg: "Nœud synchronisé — poursuite du déploiement Esplora."
+
+# ── Construction ─────────────────────────────────────────────────────────────
+- name: Install build dependencies for electrs
+  ansible.builtin.apt:
+    name:
+      - git
+      - clang
+      - cmake
+      - build-essential
+      - pkg-config
+      - libssl-dev
+    state: present
+    update_cache: true
+  become: true
+
+- name: Install rustup toolchain (as {{ esplora_user }})
+  ansible.builtin.shell: |
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+  args:
+    creates: "{{ esplora_home }}/.rustup"
+  become: true
+  become_user: "{{ esplora_user }}"
+
+- name: Check if the electrs binary is already built at the pinned version
+  ansible.builtin.stat:
+    path: "{{ esplora_home }}/.installed-esplora-{{ esplora_version }}"
+  register: esplora_version_marker
+
+- name: "Clone mempool/electrs {{ esplora_version }}"
+  ansible.builtin.git:
+    repo: "{{ esplora_repo }}"
+    dest: "{{ esplora_src_dir }}"
+    version: "{{ esplora_version }}"
+    force: true
+  become: true
+  become_user: "{{ esplora_user }}"
+  when: not esplora_version_marker.stat.exists
+
+- name: "Build electrs {{ esplora_version }} (long — first sync-sized build)"
+  ansible.builtin.shell: |
+    source "{{ esplora_home }}/.cargo/env"
+    cargo build --locked --release
+  args:
+    chdir: "{{ esplora_src_dir }}"
+    executable: /bin/bash
+  become: true
+  become_user: "{{ esplora_user }}"
+  when: not esplora_version_marker.stat.exists
+
+- name: Install the electrs binary
+  ansible.builtin.copy:
+    src: "{{ esplora_src_dir }}/target/release/electrs"
+    dest: "{{ esplora_bin }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: '0755'
+  become: true
+  notify: restart esplora
+  when: not esplora_version_marker.stat.exists
+
+- name: Record the installed version marker
+  ansible.builtin.file:
+    path: "{{ esplora_home }}/.installed-esplora-{{ esplora_version }}"
+    state: touch
+    owner: "{{ esplora_user }}"
+    group: "{{ esplora_user }}"
+    mode: '0640'
+  become: true
+  when: not esplora_version_marker.stat.exists
+
+# ── Configuration ────────────────────────────────────────────────────────────
+- name: Create Esplora working directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ esplora_user }}"
+    group: "{{ esplora_user }}"
+    mode: '0750'
+  loop:
+    - "{{ esplora_dir }}"
+    - "{{ esplora_db_dir }}"
+  become: true
+
+- name: Deploy Esplora config.toml
+  ansible.builtin.template:
+    src: config.toml
+    dest: "{{ esplora_dir }}/config.toml"
+    owner: "{{ esplora_user }}"
+    group: "{{ esplora_user }}"
+    mode: '0640'
+  become: true
+  notify: restart esplora
+
+- name: Deploy Esplora systemd service
+  ansible.builtin.template:
+    src: esplora.service
+    dest: /etc/systemd/system/esplora.service
+    owner: root
+    group: root
+    mode: '0644'
+  become: true
+  notify: restart esplora
+  tags: [unit]
+
+- name: Enable and start Esplora
+  ansible.builtin.systemd:
+    name: esplora
+    state: started
+    enabled: true
+    daemon_reload: true
+  become: true
+  tags: [unit]
+
+# Le premier import (P2P + construction de l'index) peut prendre des heures :
+# on ne bloque pas dessus, on vérifie seulement que le service a bien démarré
+# et commencé à écouter (le port HTTP peut mettre du temps à répondre pendant
+# l'import initial, cf. mempool/electrs README).
+- name: Wait for the Esplora HTTP API to accept connections
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ esplora_http_port }}"
+    timeout: 60
+  ignore_errors: true
+
+- name: Report the service state
+  ansible.builtin.debug:
+    msg: >-
+      Esplora démarré. L'import initial de l'index d'adresses peut prendre
+      plusieurs heures sur mainnet — suivre avec
+      `journalctl -u esplora -f`. L'API REST Esplora sera disponible sur
+      {{ esplora_http_bind }}:{{ esplora_http_port }} une fois l'import terminé.
+
+# ── DNS : alias CNAME vers le front des proxies ─────────────────────────────
+# Convention d'inventaire : le nom public (esplora_hostname) est déclaré sur
+# l'entrée `esplora1` via `proxy_hostname`, et c'est la synchronisation
+# générique (update-cloudflare-dns.yml, cloudflare-dns-update/tasks/
+# cnames.yml) qui publie le CNAME vers le front round-robin — jamais un A vers
+# l'IP propre de cet hôte. L'inclusion ci-dessous rejoue cette même logique en
+# portée réduite (ce seul hôte) pour garantir le CNAME dès le premier
+# déploiement, sans attendre la synchronisation générique. Même mécanisme que
+# freellm-install / rotki-install (CLAUDE.md § « Obligation DNS + vhost »).
+- name: Ensure the service CNAME to the canonical proxy front
+  ansible.builtin.include_role:
+    name: cloudflare-dns-update
+    tasks_from: cnames
+  vars:
+    cfdns_cname_scope:
+      - "{{ inventory_hostname }}"

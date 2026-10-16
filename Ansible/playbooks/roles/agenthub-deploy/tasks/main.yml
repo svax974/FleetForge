@@ -1,0 +1,88 @@
+---
+# Voir defaults/main.yml pour le choix (orchestrer les scripts du dépôt app,
+# ne pas réimplémenter le build/déploiement en Ansible).
+
+- name: Fail early when the prod env files are missing on the control machine
+  ansible.builtin.stat:
+    path: "{{ agenthub_src }}{{ item }}"
+  delegate_to: localhost
+  become: false
+  loop:
+    - "{{ agenthub_back_env_file }}"
+    - "{{ agenthub_front_env_file }}"
+  loop_control:
+    label: "{{ item }}"
+  register: agenthub_env_stat
+
+- name: Fail when an env file is absent
+  ansible.builtin.fail:
+    msg: >-
+      {{ agenthub_src }}{{ item.item }} introuvable sur le poste de contrôle.
+      Ce fichier porte à la fois les secrets applicatifs de prod et les
+      variables de déploiement distant (REMOTE_HOST, REMOTE_USER,
+      REMOTE_SSH_PORT, SSH_KEY_FILE, REMOTE_CONTEXT_NAME, PROJECT_NAME — voir
+      scripts/deploy-full.sh --help). Ce rôle ne le génère pas : le préparer
+      avant de rejouer ce playbook (voir agenthub-deploy/defaults/main.yml
+      pour le détail des variables attendues).
+  loop: "{{ agenthub_env_stat.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: not item.stat.exists
+
+# `run.sh prod` == `deploy-full.sh` (build local + push via un contexte Docker
+# SSH + démarrage distant), avec la gestion des migrations en amont (voir
+# defaults). Exécuté depuis le poste de contrôle : Ansible n'a pas de contexte
+# Docker vers l'hôte cible, le script en crée/gère un lui-même.
+- name: Deploy the AgentHub app (build + push + start, via the app's own tooling)
+  ansible.builtin.command:
+    cmd: "./scripts/run.sh prod{{ ' --migrate' if agenthub_migrate else '' }}"
+  args:
+    chdir: "{{ agenthub_src }}"
+  delegate_to: localhost
+  become: false
+  environment:
+    BACK_ENV_FILE: "{{ agenthub_back_env_file }}"
+    FRONT_ENV_FILE: "{{ agenthub_front_env_file }}"
+  register: agenthub_deploy_run
+  changed_when: true
+
+# Contrôles exécutés SUR l'hôte (boucle locale) plutôt que depuis le poste de
+# contrôle : le port n'est joignable depuis l'extérieur que pour les proxies/
+# whitelist/VPN une fois agenthub-security appliqué (voir deploy-agenthub.yml,
+# joué juste avant) — un contrôle en boucle locale reste valide quel que soit
+# l'état du pare-feu ou l'IP du poste de contrôle.
+- name: Wait for the front to answer
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ hostvars['agenthub'].app_port }}/"
+    status_code: [200, 301, 302]
+  register: agenthub_front_ready
+  until: agenthub_front_ready.status is defined and agenthub_front_ready.status in [200, 301, 302]
+  retries: "{{ agenthub_health_retries }}"
+  delay: "{{ agenthub_health_delay }}"
+  changed_when: false
+
+- name: Wait for the back API health endpoint
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ hostvars['agenthub'].back_port }}/api/v1/health"
+    status_code: [200]
+  register: agenthub_back_ready
+  until: agenthub_back_ready.status is defined and agenthub_back_ready.status == 200
+  retries: "{{ agenthub_health_retries }}"
+  delay: "{{ agenthub_health_delay }}"
+  changed_when: false
+
+- name: Report how the app is exposed
+  ansible.builtin.debug:
+    msg: >-
+      AgentHub déployé : front sur 127.0.0.1:{{ hostvars['agenthub'].app_port }},
+      back sur 127.0.0.1:{{ hostvars['agenthub'].back_port }}. Publiquement
+      joignable via https://{{ agenthub_hostname | default('agenthub.' ~ domain_name) }}
+      (vhost proxies) une fois `--tags proxy-conf` joué, et filtré dans
+      DOCKER-USER (proxies + whitelist + VPN uniquement) une fois
+      agenthub-security joué. Prochaine étape : activer le runner
+      (tasks/runner.yml, --tags runner) une fois un jeton obtenu depuis la
+      page « Nouveau runner » du hub.
+
+- name: Activate the AgentHub runner
+  ansible.builtin.import_tasks: runner.yml
+  tags: [runner]

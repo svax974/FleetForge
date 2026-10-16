@@ -1,0 +1,134 @@
+---
+# Exporter Prometheus des rapports agrégés DMARC.
+# Relève une boîte IMAP, agrège les rapports XML et expose le résultat sur
+# dmarc_exporter_port. Enregistre sa cible auprès de Prometheus.
+
+- name: Fail when IMAP credentials are missing
+  ansible.builtin.fail:
+    msg: >-
+      dmarc_exporter_imap_user et dmarc_exporter_imap_password doivent être
+      définis. Sans eux le service démarre et reste à dmarc_up=0 : une
+      supervision qui a l'air installée mais ne lit rien.
+  when: not dmarc_exporter_imap_user or not dmarc_exporter_imap_password
+
+- name: Install Python 3 (required by the exporter)
+  ansible.builtin.apt:
+    name: python3
+    state: present
+    update_cache: false
+
+- name: Create dmarc-exporter system user
+  ansible.builtin.user:
+    name: "{{ dmarc_exporter_user }}"
+    system: true
+    shell: /usr/sbin/nologin
+    create_home: false
+    home: "{{ dmarc_exporter_state_dir }}"
+
+- name: Create dmarc-exporter directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner }}"
+    group: "{{ dmarc_exporter_user }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: "{{ dmarc_exporter_state_dir }}", owner: "{{ dmarc_exporter_user }}", mode: "0750" }
+    - { path: "{{ dmarc_exporter_config_dir }}", owner: root, mode: "0750" }
+
+- name: Deploy dmarc exporter script
+  ansible.builtin.copy:
+    src: dmarc_exporter.py
+    dest: /usr/local/bin/dmarc_exporter.py
+    owner: root
+    group: root
+    mode: "0755"
+  notify: restart dmarc-exporter
+
+# Le mot de passe IMAP vit ici et nulle part ailleurs : ni dans le script, ni
+# dans l'unité systemd, ni dans la sortie d'Ansible.
+- name: Deploy dmarc exporter environment file
+  ansible.builtin.template:
+    src: dmarc-exporter.env.j2
+    dest: "{{ dmarc_exporter_config_dir }}/env"
+    owner: root
+    group: "{{ dmarc_exporter_user }}"
+    mode: "0640"
+  no_log: true
+  notify: restart dmarc-exporter
+
+- name: Deploy dmarc exporter systemd service
+  ansible.builtin.template:
+    src: dmarc-exporter.service.j2
+    dest: /etc/systemd/system/dmarc-exporter.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: restart dmarc-exporter
+
+- name: Enable and start dmarc-exporter
+  ansible.builtin.systemd:
+    name: dmarc-exporter
+    state: started
+    enabled: true
+    daemon_reload: true
+
+# ── Enregistrement auprès de Prometheus ───────────────────────────────────────
+# Tag `monitoring` obligatoire : réarmer la supervision seule ne doit pas
+# imposer de rejouer l'installation complète du service.
+
+- name: Set prometheus home on monitoring host
+  ansible.builtin.set_fact:
+    prometheus_home: "/home/{{ remote_username }}/prometheus"
+  tags: [monitoring]
+
+- name: Create dmarc prometheus-configs directory on monitoring host
+  ansible.builtin.file:
+    path: "{{ prometheus_home }}/prometheus-configs/dmarc"
+    state: directory
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: "0755"
+  delegate_to: "{{ prometheus_host }}"
+  tags: [monitoring]
+
+- name: Deploy dmarc Prometheus target file on monitoring host
+  ansible.builtin.template:
+    src: targets.json.j2
+    dest: "{{ prometheus_home }}/prometheus-configs/dmarc/{{ inventory_hostname }}.json"
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: "0644"
+  delegate_to: "{{ prometheus_host }}"
+  notify: reload prometheus
+  tags: [monitoring]
+
+# Vaut pour un Prometheus DISTANT : son trafic sort du conteneur, est SNATé
+# vers l'IP publique de sa machine, et arrive ici avec cette adresse. C'est le
+# cas de web3c (`monitor` scrute `mail1`).
+- name: Allow Prometheus to scrape exporter port {{ dmarc_exporter_port }}
+  community.general.ufw:
+    rule: allow
+    src: "{{ hostvars[prometheus_host]['ansible_host'] }}"
+    port: "{{ dmarc_exporter_port }}"
+    proto: tcp
+    comment: "Prometheus scrape - DMARC exporter"
+  become: true
+  tags: [monitoring]
+
+# Vaut pour un Prometheus CO-LOCALISÉ, cas de papanglabs où `mail` et
+# `prometheus1` sont la même machine : le conteneur atteint l'exporter par le
+# bridge, donc le paquet arrive en INPUT avec une source 172.x et la règle
+# ci-dessus — qui vise l'IP publique de l'hôte — ne matche jamais. Sans cette
+# seconde règle la cible reste injoignable, ce qui ne se manifeste que par un
+# TargetDown permanent qu'on finit par ignorer.
+- name: Allow Prometheus container network to scrape exporter port {{ dmarc_exporter_port }}
+  community.general.ufw:
+    rule: allow
+    src: "{{ dmarc_exporter_docker_bridge_cidr }}"
+    port: "{{ dmarc_exporter_port }}"
+    proto: tcp
+    comment: "Prometheus scrape (conteneur) - DMARC exporter"
+  become: true
+  when: dmarc_exporter_docker_bridge_cidr | length > 0
+  tags: [monitoring]

@@ -1,0 +1,32 @@
+---
+# Pose de l'unité systemd, isolée pour être rejouable SEULE :
+#   include_role: { name: astar-install, tasks_from: unit }
+#
+# `main.yml` télécharge la dernière version publiée sur l'API GitHub. Changer un
+# ARGUMENT du nœud ne doit pas emporter un changement de VERSION du binaire :
+# le 14/08/2026, un simple redémarrage a suffi à révéler une option jamais
+# éprouvée et à mettre le collator en boucle de crash. Faire coïncider cela avec
+# une montée de version rendrait tout diagnostic impossible — on ne saurait plus
+# lequel des deux changements a cassé quoi.
+#
+# Le rejeu est sans risque : le gabarit est idempotent et le service n'est
+# redémarré que si le fichier d'unité change réellement.
+
+- name: Deploy systemd service file
+  ansible.builtin.template:
+    src: astar.service.j2
+    dest: /etc/systemd/system/astar.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: restart astar
+
+- name: Reload systemd daemon
+  ansible.builtin.systemd:
+    daemon_reload: yes
+
+- name: Enable and start astar service
+  ansible.builtin.systemd:
+    name: astar
+    enabled: yes
+    state: started

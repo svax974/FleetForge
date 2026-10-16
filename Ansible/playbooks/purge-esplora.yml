@@ -1,0 +1,6 @@
+---
+- name: Purge Esplora (DESTRUCTIVE — removes the built index, re-import needed)
+  hosts: esplora1
+  remote_user: "{{ remote_username }}"
+  roles:
+    - esplora-purge

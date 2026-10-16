@@ -1,0 +1,55 @@
+---
+# Backup WordPress files + MySQL database from remote host, then fetch locally
+#
+# Produces in {{ wp_local_backup_dir }}/:
+#   wordpress_files_<timestamp>.tar.gz
+#   wordpress_db_<timestamp>.sql.gz
+
+- name: Set backup timestamp
+  set_fact:
+    # `now()` et NON `ansible_date_time`, qui est mis en cache : deux
+    # sauvegardes lancées dans la même fenêtre de cache porteraient le MÊME
+    # horodatage, donc le même nom de fichier — la seconde écraserait la
+    # première. Heure locale, comme `iso8601_basic_short` qu'elle remplace.
+    wp_backup_ts: "{{ now(fmt='%Y%m%dT%H%M%S') }}"
+
+# --- Database dump ---
+- name: Dump WordPress database
+  ansible.builtin.shell: >
+    mysqldump -u{{ wp_dbuser }} -p'{{ wp_dbpass }}' -h{{ wp_dbhost }}
+    {{ wp_dbname }} | gzip > /tmp/wordpress_db_{{ wp_backup_ts }}.sql.gz
+  args:
+    creates: /tmp/wordpress_db_{{ wp_backup_ts }}.sql.gz
+
+# --- Files archive ---
+- name: Archive WordPress files
+  ansible.builtin.archive:
+    path: "{{ wp_remote_path }}"
+    dest: "/tmp/wordpress_files_{{ wp_backup_ts }}.tar.gz"
+    format: gz
+
+# --- Fetch to local ---
+- name: Fetch database dump
+  ansible.builtin.fetch:
+    src: "/tmp/wordpress_db_{{ wp_backup_ts }}.sql.gz"
+    dest: "{{ wp_local_backup_dir }}/wordpress_db_{{ wp_backup_ts }}.sql.gz"
+    flat: true
+
+- name: Fetch files archive
+  ansible.builtin.fetch:
+    src: "/tmp/wordpress_files_{{ wp_backup_ts }}.tar.gz"
+    dest: "{{ wp_local_backup_dir }}/wordpress_files_{{ wp_backup_ts }}.tar.gz"
+    flat: true
+
+# --- Cleanup remote temp files ---
+- name: Remove temp backup files from remote
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "/tmp/wordpress_db_{{ wp_backup_ts }}.sql.gz"
+    - "/tmp/wordpress_files_{{ wp_backup_ts }}.tar.gz"
+
+- name: Show backup location
+  ansible.builtin.debug:
+    msg: "Backup saved to {{ wp_local_backup_dir }}/wordpress_{db,files}_{{ wp_backup_ts }}.*"

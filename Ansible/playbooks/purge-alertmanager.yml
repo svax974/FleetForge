@@ -1,0 +1,6 @@
+---
+- name: Purge Alertmanager (DESTRUCTIVE — removes config with SMTP credentials)
+  hosts: alertmanager1
+  remote_user: "{{ remote_username }}"
+  roles:
+    - alertmanager-purge

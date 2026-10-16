@@ -1,0 +1,15 @@
+---
+# Dupliqué depuis sync-server-install/-remove : ce rôle lit ces valeurs dans SES
+# PROPRES tâches (motif agenthub-purge/rotki-purge).
+sync_container: "sync-{{ sync_instance }}"
+sync_home: "/home/{{ remote_username }}/sync-{{ sync_instance }}"
+sync_data_dir: "{{ sync_home }}/data"
+sync_hostname: "sync-{{ sync_instance }}.{{ domain_name }}"
+sync_server_image: web3c-sync-server
+sync_server_build_dir: "/home/{{ remote_username }}/sync-src"
+
+# Une sauvegarde plus récente que ceci (jours) rend la purge « couverte » ;
+# sinon une confirmation supplémentaire est exigée (sync_purge_no_backup=yes).
+sync_purge_backup_max_age_days: 7
+sync_backup_dest_host: backup-sync
+sync_backup_dir: "{{ backup_root }}/sync-{{ sync_instance }}"

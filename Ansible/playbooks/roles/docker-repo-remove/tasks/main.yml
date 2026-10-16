@@ -1,0 +1,22 @@
+---
+# Remove private Docker registry container.
+# Registry data (images) is preserved. Use docker-repo-purge to delete it.
+
+- name: Stop and remove registry container
+  community.docker.docker_container:
+    name: registry
+    state: absent
+  ignore_errors: true
+
+# ── Supervision ────────────────────────────────────────────────────────────
+# Convention `-monitoring` (CLAUDE.md) : c'est le rôle de suppression du
+# service qui retire sa sonde. Une sonde laissée en place publierait
+# `service_up 0` indéfiniment et ferait sonner `ServiceDown` sur un service
+# volontairement désinstallé — l'alerte qu'on apprend à ignorer, et qui finit
+# par masquer les vraies.
+- name: Remove the svcprobe check
+  ansible.builtin.file:
+    path: "/etc/svcprobe/checks.d/docker-repo.json"
+    state: absent
+  become: true
+  tags: [monitoring]

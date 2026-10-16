@@ -1,0 +1,12 @@
+{
+  "service": "nginx",
+  "up": {"kind": "systemd", "unit": "{{ proxymon_unit }}"},
+  "extra_checks": [
+    {"name": "https", "kind": "tcp", "host": "127.0.0.1", "port": 443}
+  ],
+  "metrics_command": [
+    "{{ svcprobe_lib_dir }}/nginx-metrics.sh",
+    "{{ proxymon_status_url }}", "nginx", "{{ proxymon_cert_dir }}"
+  ],
+  "metrics_timeout": 15
+}

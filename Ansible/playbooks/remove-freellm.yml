@@ -1,0 +1,27 @@
+---
+# Retire FreeLLMAPI : conteneur, sonde, filtrage du port et vhost sur les
+# proxies. Conserve la configuration, l'ENCRYPTION_KEY et les clés fournisseur
+# importées (voir purge-freellm.yml).
+#
+#   ./play.sh web3c remove-freellm.yml
+- name: Remove FreeLLMAPI
+  hosts: freellm
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - freellm-remove
+
+# Symétrique de la play « Vhost FreeLLMAPI sur les proxies » de
+# deploy-freellm.yml : retire SEULEMENT ce fichier, reload seulement si
+# nécessaire — sans quoi le vhost survivrait au service et renverrait 502.
+- name: Retire le vhost FreeLLMAPI des proxies
+  hosts: proxies
+  remote_user: "{{ remote_username }}"
+  become: true
+  tasks:
+    - name: Remove the FreeLLMAPI vhost
+      ansible.builtin.include_role:
+        name: proxy-update-web3c
+        tasks_from: remove-one-site
+      vars:
+        site: freellm.conf

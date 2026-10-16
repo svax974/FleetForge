@@ -1,0 +1,9 @@
+---
+- name: Update SSH security rules
+  hosts: backsindicators
+  remote_user: "{{ remote_username }}"
+  become: true
+  become_method: sudo
+
+  roles:
+    - back-security

@@ -1,0 +1,76 @@
+---
+# Purge llama.cpp — removes the binary, every instance, ALL downloaded models,
+# and cleans up the Prometheus target/firewall rule for every discovered instance.
+# WARNING: all GGUF models are deleted and must be re-downloaded.
+
+- name: Discover installed llama.cpp instances
+  ansible.builtin.service_facts:
+
+- name: Set discovered instance ids
+  ansible.builtin.set_fact:
+    llamacpp_found_instances: "{{ ansible_facts.services.keys() | select('match', '^llamacpp-.*\\.service$') | map('regex_replace', '^llamacpp-(.*)\\.service$', '\\1') | list }}"
+
+- name: Stop and disable llama.cpp instances
+  ansible.builtin.systemd:
+    name: "llamacpp-{{ item }}"
+    state: stopped
+    enabled: false
+  loop: "{{ llamacpp_found_instances }}"
+  ignore_errors: true
+
+- name: Remove llama.cpp instance systemd unit files
+  ansible.builtin.file:
+    path: "/etc/systemd/system/llamacpp-{{ item }}.service"
+    state: absent
+  loop: "{{ llamacpp_found_instances }}"
+
+- name: Reload systemd daemon
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+- name: Remove llama-server binary
+  ansible.builtin.file:
+    path: /usr/local/bin/llama-server
+    state: absent
+
+- name: Remove llama.cpp home directory (source, build, all models)
+  ansible.builtin.file:
+    path: "{{ llamacpp_home }}"
+    state: absent
+
+- name: Remove llamacpp system user
+  ansible.builtin.user:
+    name: "{{ llamacpp_user }}"
+    state: absent
+    remove: true
+
+- name: Set prometheus home on monitoring host
+  ansible.builtin.set_fact:
+    prometheus_home: "/home/{{ remote_username }}/prometheus"
+
+- name: Remove Prometheus target files for all discovered instances
+  ansible.builtin.file:
+    path: "{{ prometheus_home }}/prometheus-configs/node-llamacpp/{{ inventory_hostname }}-{{ item }}.json"
+    state: absent
+  loop: "{{ llamacpp_found_instances }}"
+  delegate_to: "{{ prometheus_host }}"
+  ignore_errors: true
+
+- name: Reload Prometheus container
+  community.docker.docker_container:
+    name: prometheus
+    state: started
+    restart: yes
+  delegate_to: "{{ prometheus_host }}"
+  ignore_errors: true
+
+- name: Close UFW rules for discovered instance ports
+  community.general.ufw:
+    rule: allow
+    src: "{{ hostvars[prometheus_host]['ansible_host'] }}"
+    port: "{{ llamacpp_base_port + (item | int - 1) }}"
+    proto: tcp
+    delete: true
+  loop: "{{ llamacpp_found_instances }}"
+  become: yes
+  ignore_errors: true

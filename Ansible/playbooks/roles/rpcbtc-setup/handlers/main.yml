@@ -1,0 +1,10 @@
+---
+# Sauté quand l'écart « bitcoind hors unité » est explicitement assumé (voir le
+# garde-fou en tête de tasks/main.yml) : redémarrer l'unité tuerait le processus
+# manuel en cours.
+- name: restart bitcoind
+  ansible.builtin.service:
+    name: bitcoind
+    scope: user
+    state: restarted
+  when: not (allow_unmanaged_bitcoind | default(false) | bool)

@@ -1,0 +1,12 @@
+---
+# BRK serves on localhost only; deny external access to its port as defense in
+# depth. The co-located ETL reaches it via localhost (not subject to UFW).
+
+- name: Deny external access to the BRK API port
+  community.general.ufw:
+    rule: deny
+    port: "{{ brk_port }}"
+    proto: tcp
+    comment: "BRK API - localhost only"
+  become: true
+  ignore_errors: true

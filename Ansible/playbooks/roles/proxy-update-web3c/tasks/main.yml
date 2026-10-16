@@ -1,0 +1,108 @@
+---
+########### Copy and customize config files for proxied servers
+
+# Le parc n'est pas homogène : proxy1 est en 1.30.0, proxy2 en 1.24.0 (paquet
+# Ubuntu). Certaines directives ont changé de forme entre les deux et la forme
+# invalide n'est pas ignorée — elle empêche nginx de DÉMARRER. Les gabarits qui
+# en dépendent testent cette variable (cf. `http2` dans searxng.conf).
+- name: Collect the installed nginx version
+  ansible.builtin.command: nginx -v
+  register: nginx_version_raw
+  changed_when: false
+  check_mode: false
+
+- name: Set the nginx version fact
+  ansible.builtin.set_fact:
+    nginx_version: "{{ ((nginx_version_raw.stderr | default('')) ~ (nginx_version_raw.stdout | default(''))) | regex_search('nginx/([0-9.]+)', '\\1') | first }}"
+
+# Delete and recreate directories
+- name: Delete sites directory
+  ansible.builtin.file:
+    path: /etc/nginx/sites-enabled
+    state: absent
+- name: Delete streams directory
+  ansible.builtin.file:
+    path: /etc/nginx/streams-enabled
+    state: absent
+- name: Delete sites directory
+  ansible.builtin.file:
+    path: /etc/nginx/sites-available
+    state: absent
+- name: Delete streams directory
+  ansible.builtin.file:
+    path: /etc/nginx/streams-available
+    state: absent
+- name: Creates sites directory
+  ansible.builtin.file:
+    path: /etc/nginx/sites-enabled
+    state: directory
+- name: Creates streams directory
+  ansible.builtin.file:
+    path: /etc/nginx/streams-enabled
+    state: directory
+- name: Creates sites directory
+  ansible.builtin.file:
+    path: /etc/nginx/sites-available
+    state: directory
+- name: Creates streams directory
+  ansible.builtin.file:
+    path: /etc/nginx/streams-available
+    state: directory
+
+- name: Copy nginx conf
+  template:
+    src: nginx.conf
+    dest: /etc/nginx/nginx.conf
+    owner: root
+    group: root
+
+# Journaux dédiés (et leur rotation 7 jours) des vhosts web3c-sync : le
+# répertoire DOIT exister avant la copie des vhosts, sans quoi `nginx` refuse de
+# démarrer (open() failed sur access_log/error_log).
+- name: Prepare the dedicated sync access-log directory and rotation
+  ansible.builtin.include_tasks: sync-logs.yml
+
+- name: Copy nginx sites enabled confs
+  template:
+    src: "{{ item }}"
+    dest: /etc/nginx/sites-enabled/{{ item | basename }}
+    owner: root
+    group: root
+  with_fileglob:
+    - ../templates/sites-enabled/*
+  # `_*` : fichiers partiels inclus par d'autres gabarits (_sync-vhost.inc),
+  # jamais des vhosts — les déployer ferait inclure leur contenu deux fois.
+  when: not (item | basename).startswith('_')
+- name: Copy nginx streams enabled confs
+  template:
+    src: "{{ item }}"
+    dest: /etc/nginx/streams-enabled/{{ item | basename }}
+    owner: root
+    group: root
+  with_fileglob:
+    - ../templates/streams-enabled/*
+- name: Copy nginx sites available confs
+  template:
+    src: "{{ item }}"
+    dest: /etc/nginx/sites-available/{{ item | basename }}
+    owner: root
+    group: root
+  with_fileglob:
+    - ../templates/sites-available/*
+- name: Copy nginx streams available confs
+  template:
+    src: "{{ item }}"
+    dest: /etc/nginx/streams-available/{{ item | basename }}
+    owner: root
+    group: root
+  with_fileglob:
+    - ../templates/streams-available/*
+
+- name: Reload systemd daemon
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+- name: Restart Nginx service
+  ansible.builtin.systemd:
+    state: restarted
+    name: nginx

@@ -1,0 +1,243 @@
+---
+# Installe opencode : un binaire pour la machine, une configuration par compte.
+# Voir defaults/main.yml pour le choix d'une installation système plutôt que du
+# script officiel, qui écrit dans le HOME et réécrit les fichiers de shell.
+
+- name: Install the packages needed to fetch the release
+  ansible.builtin.apt:
+    name: "{{ opencode_packages }}"
+    state: present
+    update_cache: true
+  become: true
+
+# ── Cible de compilation ───────────────────────────────────────────────────
+# Les releases sont publiées par couple OS/arch, avec une variante `-baseline`
+# pour les processeurs x86 sans AVX2. Poser la variante normale sur une telle
+# machine donne un binaire qui s'installe parfaitement et meurt en SIGILL au
+# premier lancement — panne d'autant plus déroutante qu'elle ne ressemble pas
+# à un problème d'installation.
+- name: Map the host architecture to the release naming
+  ansible.builtin.set_fact:
+    opencode_arch: "{{ {'x86_64': 'x64', 'aarch64': 'arm64'}[ansible_facts.architecture] | default('') }}"
+
+- name: Fail on an unsupported architecture
+  ansible.builtin.fail:
+    msg: >-
+      Architecture {{ ansible_facts.architecture }} non publiée par opencode.
+      Les cibles disponibles sont linux-x64 et linux-arm64.
+  when: opencode_arch | length == 0
+
+- name: Check whether the CPU supports AVX2
+  ansible.builtin.command: grep -qw avx2 /proc/cpuinfo
+  register: opencode_avx2
+  changed_when: false
+  failed_when: false
+  when: opencode_arch == 'x64'
+
+- name: Build the release asset name
+  ansible.builtin.set_fact:
+    opencode_asset: >-
+      opencode-linux-{{ opencode_arch }}{{ '-baseline'
+        if (opencode_arch == 'x64' and opencode_avx2.rc | default(0) != 0)
+        else '' }}.tar.gz
+
+# ── Version ────────────────────────────────────────────────────────────────
+- name: Resolve the latest published version
+  ansible.builtin.uri:
+    url: "https://api.github.com/repos/{{ opencode_github_repo }}/releases/latest"
+    headers:
+      Accept: "application/vnd.github+json"
+    return_content: true
+  register: opencode_release
+  when: opencode_version == 'latest'
+
+- name: Set the version to install
+  ansible.builtin.set_fact:
+    opencode_target_version: >-
+      {{ (opencode_release.json.tag_name | regex_replace('^v', ''))
+         if opencode_version == 'latest'
+         else (opencode_version | regex_replace('^v', '')) }}
+
+# Comparer la version INSTALLÉE, pas la présence du fichier : sans cela un
+# `opencode_version` figé ne redescendrait jamais après une installation en
+# `latest`, et le rôle mentirait sur ce qui tourne réellement.
+- name: Read the installed version
+  ansible.builtin.command: "{{ opencode_binary }} --version"
+  register: opencode_installed
+  changed_when: false
+  failed_when: false
+
+- name: Download the opencode release archive
+  ansible.builtin.get_url:
+    url: "https://github.com/{{ opencode_github_repo }}/releases/download/v{{ opencode_target_version }}/{{ opencode_asset }}"
+    dest: "/tmp/{{ opencode_asset }}"
+    mode: "0644"
+    timeout: 120
+  when: opencode_installed.stdout | default('') | trim != opencode_target_version
+  register: opencode_download
+
+- name: Extract the archive
+  ansible.builtin.unarchive:
+    src: "/tmp/{{ opencode_asset }}"
+    dest: /tmp
+    remote_src: true
+  when: opencode_download.changed
+
+- name: Install the binary system-wide
+  ansible.builtin.copy:
+    src: /tmp/opencode
+    dest: "{{ opencode_binary }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0755"
+  become: true
+  when: opencode_download.changed
+
+- name: Clean up the download
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "/tmp/{{ opencode_asset }}"
+    - /tmp/opencode
+  when: opencode_download.changed
+
+# ── Configuration par compte ───────────────────────────────────────────────
+# Le HOME est LU sur la machine et non déduit de `/home/<compte>` : `root` n'y
+# est pas, et un compte de service peut vivre ailleurs. Une configuration
+# écrite dans un répertoire que le compte ne lit pas ne produit aucune erreur —
+# opencode démarre simplement avec ses propres défauts.
+- name: Resolve the home directory of each target account
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ item }}"
+    fail_key: false
+  loop: "{{ opencode_users }}"
+  register: opencode_passwd
+  become: true
+
+- name: Fail when a target account does not exist
+  ansible.builtin.fail:
+    msg: >-
+      Compte absent de cet hôte : {{ item.item }}. Corriger `opencode_users`,
+      ou créer le compte avant de rejouer.
+  loop: "{{ opencode_passwd.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: item.ansible_facts.getent_passwd[item.item] is not defined
+        or item.ansible_facts.getent_passwd[item.item] is none
+
+- name: Build the (account, home) pairs
+  ansible.builtin.set_fact:
+    opencode_targets: >-
+      {{ opencode_targets | default([])
+         + [{'user': item.item, 'home': item.ansible_facts.getent_passwd[item.item][4]}] }}
+  loop: "{{ opencode_passwd.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+# La clé rejoint les options du fournisseur `opencode` (OpenCode Zen). Fusion
+# récursive : un `opencode_providers` qui redéfinit déjà ce fournisseur garde
+# ses autres options.
+- name: Build the provider block
+  ansible.builtin.set_fact:
+    opencode_provider_block: >-
+      {{ opencode_providers | combine({'opencode': {'options': {'apiKey': opencode_zen_api_key}}}, recursive=true)
+         if (opencode_zen_api_key | length > 0) else opencode_providers }}
+  no_log: "{{ opencode_zen_api_key | length > 0 }}"
+
+- name: Build the opencode configuration
+  ansible.builtin.set_fact:
+    opencode_config: >-
+      {{ {'$schema': 'https://opencode.ai/config.json', 'model': opencode_model}
+         | combine({'small_model': opencode_small_model} if (opencode_small_model | length > 0) else {})
+         | combine({'provider': opencode_provider_block} if (opencode_provider_block | length > 0) else {}) }}
+  no_log: "{{ opencode_zen_api_key | length > 0 }}"
+
+- name: Create the opencode configuration directory
+  ansible.builtin.file:
+    path: "{{ item.home }}/.config/opencode"
+    state: directory
+    owner: "{{ item.user }}"
+    group: "{{ item.user }}"
+    mode: "0755"
+  become: true
+  loop: "{{ opencode_targets }}"
+  loop_control:
+    label: "{{ item.user }}"
+
+# 0600 sans condition : le fichier porte une clé d'API dès que
+# `opencode_zen_api_key` est renseignée, et un mode qui dépend d'une variable
+# est un mode qu'on oublie de resserrer le jour où la variable arrive.
+- name: Deploy the opencode configuration
+  ansible.builtin.copy:
+    content: "{{ opencode_config | to_nice_json }}\n"
+    dest: "{{ item.home }}/.config/opencode/opencode.json"
+    owner: "{{ item.user }}"
+    group: "{{ item.user }}"
+    mode: "0600"
+  become: true
+  loop: "{{ opencode_targets }}"
+  loop_control:
+    label: "{{ item.user }}"
+  no_log: "{{ opencode_zen_api_key | length > 0 }}"
+
+- name: Verify the binary answers
+  ansible.builtin.command: "{{ opencode_binary }} --version"
+  register: opencode_check
+  changed_when: false
+
+# ── Contrôle de bout en bout ───────────────────────────────────────────────
+# `failed_when: false` puis échec explicite : le message du module `uri` sur un
+# 429 ne dit pas ce qu'il faut en conclure, et c'est ici que se joue la
+# distinction entre « offre gratuite terminée » et « sortie réseau filtrée ».
+- name: Call the model once to prove it answers
+  ansible.builtin.uri:
+    url: "{{ opencode_zen_completions_url }}"
+    method: POST
+    headers:
+      User-Agent: "{{ opencode_user_agent }}"
+    body_format: json
+    body:
+      model: "{{ opencode_model | regex_replace('^opencode/', '') }}"
+      max_tokens: 8
+      messages:
+        - role: user
+          content: "ping"
+    timeout: 60
+  register: opencode_smoke
+  failed_when: false
+  when: opencode_smoke_test and opencode_model.startswith('opencode/')
+
+- name: Fail when the model does not answer
+  ansible.builtin.fail:
+    msg: >-
+      {{ opencode_model }} ne répond pas (HTTP {{ opencode_smoke.status | default('pas de réponse') }}).
+      {{ "429 : palier gratuit épuisé, ou offre terminée — vérifier le catalogue https://opencode.ai/zen/v1/models et changer de modèle avec update-opencode-model.yml."
+         if opencode_smoke.status | default(0) == 429
+         else ("401 : identifiant de modèle inconnu du palier gratuit, ou modèle payant sans `opencode_zen_api_key`. Mesuré le 13/08/2026 : un modèle inexistant répond 401 et non 404."
+               if opencode_smoke.status | default(0) == 401
+               else "Sortie réseau de l'hôte vers opencode.ai à vérifier.") }}
+      opencode est installé et la configuration est en place : seul l'accès au
+      modèle est en cause.
+  when: not (opencode_smoke.skipped | default(false))
+        and (opencode_smoke.status | default(0) != 200
+             or opencode_smoke.json.choices | default([]) | length == 0)
+
+- name: Report the installed version and model
+  ansible.builtin.debug:
+    msg: >-
+      opencode {{ opencode_check.stdout | trim }} — modèle par défaut
+      {{ opencode_model }} pour {{ opencode_targets | map(attribute='user') | join(', ') }}.
+
+- name: Stamp the host
+  ansible.builtin.include_role:
+    name: host-preflight
+    tasks_from: stamp
+  vars:
+    stamp_name: opencode
+    stamp_detail: >-
+      opencode {{ opencode_check.stdout | trim }} ({{ opencode_binary }}),
+      modèle {{ opencode_model }}, comptes :
+      {{ opencode_targets | map(attribute='user') | join(', ') }}

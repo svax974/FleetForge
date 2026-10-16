@@ -1,0 +1,77 @@
+---
+# Voir defaults/main.yml pour le pourquoi : ufw ne voit pas le trafic vers un
+# port publié par Docker, seul DOCKER-USER le filtre.
+
+# Créé même sans règle : un rôle de service peut y déposer une autorisation
+# avant que la machine n'ait de `docker_ports_rules`, et le répertoire absent
+# ferait échouer son `copy` sans rapport apparent avec la cause.
+- name: Create the drop-in sources directory
+  ansible.builtin.file:
+    path: /etc/docker-ports/sources.d
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  become: true
+
+- name: Deploy the Docker ports firewall script
+  ansible.builtin.template:
+    src: docker-ports-firewall.sh.j2
+    dest: /usr/local/sbin/docker-ports-firewall.sh
+    owner: root
+    group: root
+    mode: '0750'
+  become: true
+  when: docker_ports_rules | length > 0
+  notify: reapply docker ports firewall
+
+- name: Deploy the Docker ports firewall unit
+  ansible.builtin.template:
+    src: docker-ports-firewall.service
+    dest: /etc/systemd/system/docker-ports-firewall.service
+    owner: root
+    group: root
+    mode: '0644'
+  become: true
+  when: docker_ports_rules | length > 0
+  notify: reapply docker ports firewall
+
+- name: Enable and start the Docker ports firewall unit
+  ansible.builtin.systemd:
+    name: docker-ports-firewall
+    state: started
+    enabled: true
+    daemon_reload: true
+  become: true
+  when: docker_ports_rules | length > 0
+
+# Le rôle ne rend la main qu'une fois la chaîne RECONSTITUÉE, pas simplement
+# « fichier déposé » : le script et l'unité n'ont notifié qu'un handler, qui ne
+# tournerait qu'en fin de play. Un appelant qui lirait `iptables -S DOCKER-USER`
+# juste après l'inclusion verrait alors l'ancienne chaîne et conclurait à tort
+# qu'une règle manque. `state: started` ne suffit pas : l'unité est un oneshot
+# `RemainAfterExit=yes`, déjà active, donc il ne la relance pas.
+#
+# Le contrôle du dépôt (agenthub-security) s'appuie sur cet ordre ; les
+# rôles qui lisent la chaîne eux-mêmes (freellm-security, searxng-security)
+# rejouent leur propre script avant de lire.
+- name: Apply the pending Docker port rules now
+  ansible.builtin.meta: flush_handlers
+
+# …mais un handler peut être PERDU, et c'est arrivé : un play qui échoue avant
+# sa fin n'exécute jamais ses handlers (pas de `force_handlers`). Déployé le
+# 22/09/2026, l'unité « active (exited) » depuis cinq jours, script à jour sur
+# disque, chaîne jamais reposée — et le rejeu ne corrigeait RIEN puisque plus
+# rien ne changeait, donc plus aucun handler n'était notifié (impasse
+# vérifiée sur ctdapi, ports 4700/4701 d'AgentHub).
+#
+# D'où une réapplication INCONDITIONNELLE : le script est idempotent (il purge
+# puis repose les règles de chaque port), relit ses drop-ins à chaque exécution,
+# et guérit ainsi toute chaîne décalée en arrière — handler abandonné,
+# `iptables -F` manuel, réinitialisation de DOCKER-USER par un redémarrage de
+# Docker. Un rejeu qui ne changerait plus jamais rien reste donc garanti.
+- name: Apply the rules now
+  ansible.builtin.command: /usr/local/sbin/docker-ports-firewall.sh
+  when: docker_ports_rules | length > 0
+  become: true
+  changed_when: false

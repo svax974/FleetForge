@@ -1,0 +1,30 @@
+---
+- name: Creates directory for container
+  ansible.builtin.file:
+    path: ~/pgdatabase/
+    state: directory
+    mode: '0750'
+- name: Creates directory for PG data
+  ansible.builtin.file:
+    path: "{{ ansible_env.HOME }}/pgdatabase/data"
+    state: directory
+    mode: '0750'
+    owner: 70
+  become: true
+
+# Copy needed files on servers : docker-compose.yml and init script
+- name: Copy docker-compose.yml for backup
+  template:
+    src: docker-compose_backup.yml
+    dest: ~/pgdatabase/docker-compose.yml
+- name: Copy entrypoint-backup.sh for backup
+  template:
+    src: entrypoint-backup.sh
+    mode: '0750'
+    dest: ~/pgdatabase/entrypoint-backup.sh
+
+# Start container and wait for the server to be up
+- name: Start postgres
+  community.docker.docker_compose_v2:
+    project_src: ~/pgdatabase/
+    state: present

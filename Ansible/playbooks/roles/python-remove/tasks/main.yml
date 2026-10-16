@@ -1,0 +1,10 @@
+---
+# Remove Python 3 and pip.
+# WARNING: other roles/services depending on Python may break.
+
+- name: Remove Python 3 and pip
+  ansible.builtin.apt:
+    pkg:
+      - python3
+      - python3-pip
+    state: absent

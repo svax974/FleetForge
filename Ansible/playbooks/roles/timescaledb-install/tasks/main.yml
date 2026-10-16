@@ -1,0 +1,69 @@
+---
+# Deploy self-hosted TimescaleDB (Docker) for PapangMetrics indicators.
+
+- name: Create TimescaleDB directory
+  ansible.builtin.file:
+    path: "{{ tsdb_dir }}"
+    state: directory
+    mode: '0750'
+
+- name: Create PG data directory (owned by alpine postgres uid 70)
+  ansible.builtin.file:
+    path: "{{ tsdb_dir }}/data"
+    state: directory
+    mode: '0750'
+    owner: 70
+  become: true
+
+# Tagué `config` pour pouvoir ne rejouer que les paramètres du moteur, sans
+# repasser par le bootstrap de la machine (phase 1 du playbook) :
+#   ./play.sh papanglabs deploy-timescaledb-standalone.yml --tags config
+# ATTENTION : un changement de docker-compose.yml REDÉMARRE PostgreSQL.
+- name: Copy docker-compose.yml
+  ansible.builtin.template:
+    src: docker-compose.yml
+    dest: "{{ tsdb_dir }}/docker-compose.yml"
+    mode: '0640'
+  notify: restart timescaledb
+  tags: [config]
+
+- name: Copy init.sql
+  ansible.builtin.template:
+    src: init.sql
+    dest: "{{ tsdb_dir }}/init.sql"
+    mode: '0640'
+  tags: [config]
+
+- name: Start TimescaleDB
+  community.docker.docker_compose_v2:
+    project_src: "{{ tsdb_dir }}"
+    state: present
+  tags: [config]
+
+- name: Wait max 2'30" for the container to be running
+  community.docker.docker_container_info:
+    name: papangmetrics-timescaledb
+  register: tsdb_info
+  until: tsdb_info.container.State.Status == "running"
+  retries: 30
+  delay: 5
+  tags: [config]
+
+# La sauvegarde N'EST PLUS ICI : elle appartient au rôle
+# `timescaledb-backup-install`, joué juste après par
+# `deploy-timescaledb-standalone.yml`. Elle en a été sortie parce que sa
+# destination est devenue une donnée d'inventaire (hôte `backup-timescale`) et
+# non plus un chemin local — condition pour pouvoir la déporter sur un serveur
+# tiers sans toucher au rôle qui installe le moteur.
+
+- name: Deploy disk watchdog script
+  ansible.builtin.template:
+    src: disk-watchdog.sh
+    dest: "{{ tsdb_dir }}/disk-watchdog.sh"
+    mode: '0750'
+
+- name: Schedule disk watchdog cron (compresses chunks if free disk < threshold)
+  ansible.builtin.cron:
+    name: "papangmetrics-timescaledb disk-watchdog"
+    minute: "*/2"
+    job: "{{ tsdb_dir }}/disk-watchdog.sh"

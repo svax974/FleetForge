@@ -1,0 +1,55 @@
+---
+# Full purge: stop + remove both services AND the deployed code dir. DESTRUCTIVE.
+# (Does not touch the TimescaleDB — purge that separately.)
+
+- name: Stop and disable services
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: stopped
+    enabled: false
+  loop:
+    - papangmetrics-api
+    - papangmetrics-etl
+  become: true
+  ignore_errors: true
+
+- name: Remove systemd units
+  ansible.builtin.file:
+    path: "/etc/systemd/system/{{ item }}.service"
+    state: absent
+  loop:
+    - papangmetrics-api
+    - papangmetrics-etl
+  become: true
+
+- name: Reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+  become: true
+
+- name: Remove deployed code directory
+  ansible.builtin.file:
+    path: "{{ pm_dir }}"
+    state: absent
+  become: true
+
+# Cibles Prometheus : sans ce nettoyage, une purge laisse deux cibles orphelines
+# qui feraient sonner `TargetDown` en permanence.
+- name: Remove papangmetrics Prometheus targets
+  ansible.builtin.file:
+    path: "/home/{{ remote_username }}/prometheus/prometheus-configs/{{ item }}/{{ inventory_hostname }}.json"
+    state: absent
+  loop:
+    - papangmetrics-api
+    - papangmetrics-etl
+  delegate_to: "{{ prometheus_host }}"
+  become: true
+  ignore_errors: true
+
+- name: Remove the disk-watchdog cron
+  ansible.builtin.cron:
+    name: "papangmetrics disk-watchdog"
+    state: absent
+    user: "{{ pm_user }}"
+  become: true
+  ignore_errors: true

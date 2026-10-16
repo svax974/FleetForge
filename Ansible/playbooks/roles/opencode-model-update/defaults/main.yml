@@ -1,0 +1,57 @@
+---
+# Change le modèle par défaut d'une installation opencode existante, sans
+# retélécharger le binaire ni toucher au reste de la configuration.
+#
+# `opencode_model` n'a VOLONTAIREMENT pas de valeur par défaut ici : elle vit
+# dans `opencode-install/defaults` (ou dans l'inventaire, qui l'emporte sur les
+# deux). Une deuxième valeur par défaut à cet endroit finirait par diverger de
+# la première, et ce rôle réécrirait alors la configuration avec un modèle que
+# personne n'a demandé.
+#
+# Deux usages :
+#   • ponctuel   : ./play.sh web3c update-opencode-model.yml --limit hub \
+#                    -e opencode_model=opencode/deepseek-v4-flash-free
+#   • permanent  : poser `opencode_model` dans group_vars/host_vars, puis
+#                  rejouer ce playbook — l'installation suivante posera la même
+#                  valeur, sans écart entre les deux rôles.
+
+# Comptes dont la configuration est mise à jour.
+opencode_users:
+  - "{{ remote_username }}"
+
+# ── Sélection mémorisée par le TUI ─────────────────────────────────────────
+# `~/.local/state/opencode/model.json` conserve le dernier modèle choisi dans
+# l'interface, et le TUI le repropose au lancement suivant. Sur un compte qui a
+# DÉJÀ utilisé opencode, changer le défaut de la configuration ne suffit donc
+# pas toujours à changer ce que l'utilisateur obtient — ce serait exactement le
+# genre d'écart silencieux qu'on ne découvre qu'à la panne, le jour où le
+# modèle gratuit mémorisé est retiré du catalogue.
+#
+# `true` supprime cette mémoire pour que le modèle de la configuration
+# reprenne la main. Le fichier porte aussi les favoris et les variantes du
+# compte : à n'activer que lorsqu'on impose un modèle, pas par confort.
+opencode_model_reset_selection: false
+opencode_state_model_file: ".local/state/opencode/model.json"
+
+# Contrôle du modèle contre le catalogue OpenCode Zen avant écriture.
+# Ne s'applique qu'aux modèles `opencode/…` — un fournisseur maison a son
+# propre catalogue, que cet hôte n'a aucune raison de savoir interroger.
+#
+# Ce contrôle est la raison d'être du rôle autant que l'écriture elle-même :
+# les modèles gratuits de Zen sont des offres promotionnelles qui disparaissent
+# du catalogue sans préavis, et un modèle absent ne se voit pas au déploiement
+# — opencode démarre normalement et échoue au premier appel, chez
+# l'utilisateur.
+opencode_model_verify: true
+opencode_zen_models_url: "https://opencode.ai/zen/v1/models"
+
+# Appel réel au modèle AVANT d'écrire la configuration : figurer au catalogue
+# ne prouve pas que le palier gratuit répond encore. L'ordre compte — un modèle
+# muet ne doit jamais atterrir dans la configuration.
+opencode_smoke_test: true
+opencode_zen_completions_url: "https://opencode.ai/zen/v1/chat/completions"
+
+# Le palier gratuit ne se filtre pas sur une clé mais sur le User-Agent : toute
+# valeur ne contenant pas « opencode » reçoit un 429 FreeUsageLimitError, y
+# compris celui de curl. Voir opencode-install/defaults pour la mesure.
+opencode_user_agent: "opencode"

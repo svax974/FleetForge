@@ -1,0 +1,30 @@
+# Allow connections from proxies and whitelist
+- name: Allow RPC connections on "{{ docker_repo_port }}" from vpns
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ hostvars[item].ansible_host }}"
+    port: "{{ docker_repo_port }}"
+  loop: "{{ groups['vpns'] | default([]) }}"
+- name: Allow RPC connections on "{{ docker_repo_port }}" from fronts
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ hostvars[item].ansible_host }}"
+    port: "{{ docker_repo_port }}"
+  loop: "{{ groups['fronts'] | default([]) }}"
+- name: Allow RPC connections on "{{ docker_repo_port }}" from backs
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ hostvars[item].ansible_host }}"
+    port: "{{ docker_repo_port }}"
+  loop: "{{ groups['backs'] | default([]) }}"
+- name: Allow connections from whitelist
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ item }}"
+    port: "{{ docker_repo_port }}"
+  with_items:
+    "{{ whitelist }}"

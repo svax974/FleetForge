@@ -1,0 +1,15 @@
+---
+# Usage: ./play.sh web3c restore-wordpress.yml --limit <target_host> \
+#   -e wp_restore_db_file=../backups/wordpress/wordpress_db_XXXXX.sql.gz \
+#   -e wp_restore_files_file=../backups/wordpress/wordpress_files_XXXXX.tar.gz
+- name: Restore WordPress to remote host
+  hosts: all
+  remote_user: "{{ remote_username }}"
+  become: true
+  become_method: sudo
+
+  vars:
+    wp_remote_path: /var/www/html/wordpress
+
+  roles:
+    - wordpress-restore

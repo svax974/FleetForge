@@ -1,0 +1,38 @@
+---
+# `apt_repository` est deprecie (retrait annonce en ansible-core 2.25) au profit
+# de `deb822_repository`, dont le parametre `signed_by` accepte directement
+# l'URL de la cle : plus besoin de la telecharger au prealable dans
+# trusted.gpg.d, un repertoire que Debian deconseille desormais (une cle qui y
+# figure signe TOUS les depots, pas seulement le sien).
+- name: Add Terraform signing key and repo
+  block:
+    - name: terraform | python-debian is required by deb822_repository
+      ansible.builtin.apt:
+        pkg:
+          - python3-debian
+        state: present
+
+    - name: terraform | drop the legacy .list and the global trusted.gpg.d key
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/apt/sources.list.d/apt_releases_hashicorp_com.list
+        - /etc/apt/trusted.gpg.d/hashicorp.gpg
+
+    - name: terraform | apt source
+      ansible.builtin.deb822_repository:
+        name: hashicorp
+        types: [deb]
+        uris: https://apt.releases.hashicorp.com
+        suites: ["{{ ansible_distribution_release }}"]
+        components: [main]
+        architectures: [amd64]
+        signed_by: https://apt.releases.hashicorp.com/gpg
+        state: present
+
+- name: Update repositories cache and install pritunl + mongodb
+  ansible.builtin.apt:
+    pkg:
+    - terraform
+    update_cache: yes

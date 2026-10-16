@@ -1,0 +1,66 @@
+global:
+  resolve_timeout: {{ alertmanager_resolve_timeout }}
+  smtp_smarthost: '{{ alertmanager_smtp_host }}:{{ alertmanager_smtp_port }}'
+  smtp_from: '{{ alertmanager_smtp_from }}'
+  smtp_auth_username: '{{ alertmanager_smtp_user }}'
+  smtp_auth_password: '{{ alertmanager_smtp_pass }}'
+  smtp_require_tls: {{ alertmanager_smtp_require_tls | lower }}
+
+route:
+  receiver: 'email'
+  # Regroupe par alerte et par JOB, et non par instance.
+  #
+  # `instance` était trop fin : plusieurs instances décrivent souvent un seul
+  # processus. Le collator Astar de hub expose deux cibles — `hub` (parachaîne)
+  # et `hub-polkadot` (relais) — servies par le MÊME binaire ; quand il tombe,
+  # les deux tombent ensemble et produisaient deux messages strictement
+  # simultanés. Sur les 257 messages du 12 au 15/08/2026, 111 disaient `hub` et
+  # 109 `hub-polkadot` : le même incident, compté deux fois.
+  #
+  # `job` regroupe ce qui tombe ensemble tout en gardant séparés des services
+  # sans rapport. Une alerte dépourvue de ce label (DmarcReportsStale n'a que
+  # `domain`) se groupe sous la valeur vide, sans erreur.
+  group_by: ['alertname', 'job']
+  group_wait: {{ alertmanager_group_wait }}
+  group_interval: {{ alertmanager_group_interval }}
+  repeat_interval: {{ alertmanager_repeat_interval }}
+
+inhibit_rules:
+  # Une cible injoignable rend ses alertes applicatives redondantes : inutile de
+  # signaler « BRK figé » quand tout l'hôte est down.
+  - source_matchers: [ 'alertname = TargetDown' ]
+    target_matchers: [ 'severity =~ "warning|critical"' ]
+    equal: ['instance']
+
+  # Un avertissement sur une instance qui porte déjà une alerte critique
+  # n'ajoute rien : il décrit le même incident vu de plus loin. SearXNG en est
+  # l'illustration — l'IP de sortie bannie par les moteurs amont lève
+  # `SearxngNoResults` (critique) ET `SearxngEnginesUnresponsive`
+  # (avertissement), soit 16 + 6 messages pour une cause unique.
+  #
+  # Cette règle est délibérément large : elle peut masquer l'avertissement d'un
+  # service SANS rapport hébergé sur la même instance. C'est assumé — le
+  # critique appelle de toute façon une intervention sur cette machine, et
+  # l'avertissement masqué reste visible dans l'interface Alertmanager. Il
+  # ressortira par mail dès la résolution du critique s'il persiste.
+  - source_matchers: [ 'severity = critical' ]
+    target_matchers: [ 'severity = warning' ]
+    equal: ['instance']
+
+receivers:
+  - name: 'email'
+{% if alertmanager_email_to | length > 0 %}
+    email_configs:
+{% for addr in alertmanager_email_to %}
+      - to: '{{ addr }}'
+        send_resolved: true
+        headers:
+          {# `{% raw %}` plutôt que l'échappement `{{ '{{' }}` : le gabarit Go
+             ci-dessous en contient une vingtaine, illisibles autrement. #}
+{% raw %}
+          Subject: '[{{ .Status | toUpper }}{{ if eq .Status "firing" }}:{{ .Alerts.Firing | len }}{{ end }}] {{ .CommonLabels.alertname }}{{ with .CommonLabels.instance }} — {{ . }}{{ else }}{{ with .CommonLabels.service }} — {{ . }}{{ else }}{{ with .CommonLabels.domain }} — {{ . }}{{ else }}{{ with $.GroupLabels.job }} — {{ . }}{{ end }}{{ end }}{{ end }}{{ end }}'
+{% endraw %}
+{% endfor %}
+{% else %}
+    # Aucun destinataire configuré : renseigner `alertmanager_email_to`.
+{% endif %}

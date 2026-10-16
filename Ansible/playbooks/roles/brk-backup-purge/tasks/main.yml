@@ -1,0 +1,69 @@
+---
+# Purge complète du dispositif de sauvegarde BRK : tout ce que fait `-remove`,
+# PLUS les sauvegardes elles-mêmes sur la destination, la clé SSH dédiée et son
+# autorisation. DESTRUCTIF — après cette purge il n'existe plus aucune copie du
+# magasin BRK, et une corruption imposerait une réindexation complète (des
+# dizaines d'heures).
+
+- name: Refuse to purge without explicit confirmation
+  ansible.builtin.assert:
+    that:
+      - (confirm | default('')) == 'yes'
+    fail_msg: >-
+      Purge refusée. Cette opération SUPPRIME les sauvegardes du magasin BRK sur
+      {{ brk_backup_dest_host }} ({{ brk_backup_dest_dir }}) — il ne resterait
+      aucune copie. Relance avec -e confirm=yes en connaissance de cause.
+
+- name: Read the backup public key (to revoke it on the destination)
+  ansible.builtin.slurp:
+    src: "{{ brk_backup_ssh_key_path }}.pub"
+  register: brk_backup_pubkey
+  become: true
+  failed_when: false
+
+- name: Remove the backup cron job
+  ansible.builtin.cron:
+    name: "brk backup"
+    user: "{{ brk_user }}"
+    state: absent
+  become: true
+
+- name: Remove backup and restore scripts
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ brk_home }}/brk-backup.sh"
+    - "{{ brk_home }}/brk-restore.sh"
+    - "{{ brk_home }}/brk-backup.log"
+    - /etc/logrotate.d/brk-backup
+    - "{{ node_exporter_textfile_dir }}/backup_brk.prom"
+  become: true
+
+- name: Remove the dedicated SSH key pair
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ brk_backup_ssh_key_path }}"
+    - "{{ brk_backup_ssh_key_path }}.pub"
+  become: true
+
+# Révoquée sur la destination, sinon une clé privée supprimée d'un côté laisse
+# une autorisation orpheline de l'autre — et personne ne saura plus, dans six
+# mois, à quoi elle correspondait ni s'il est sûr de la retirer.
+- name: Revoke the key on the destination host
+  ansible.posix.authorized_key:
+    user: "{{ brk_backup_dest_user }}"
+    state: absent
+    key: "{{ brk_backup_pubkey.content | b64decode | trim }}"
+  delegate_to: "{{ brk_backup_dest_host }}"
+  become: true
+  when: brk_backup_pubkey.content is defined
+
+- name: Remove the backup data on the destination host
+  ansible.builtin.file:
+    path: "{{ brk_backup_dest_dir }}"
+    state: absent
+  delegate_to: "{{ brk_backup_dest_host }}"
+  become: true

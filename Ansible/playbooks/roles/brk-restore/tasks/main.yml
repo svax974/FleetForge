@@ -1,0 +1,87 @@
+---
+# Rend l'hôte courant capable de restaurer le magasin BRK depuis
+# `{{ brk_backup_dest_host }}` — y compris sur une machine de REMPLACEMENT
+# vierge. C'est précisément ce que `brk-backup-install` ne peut pas faire : il
+# refuse un hôte sans `.brk` (poule-et-œuf lors d'une reprise) et pose un cron
+# de sauvegarde dont on ne veut pas pendant une restauration.
+#
+# Idempotent sur l'hôte de sauvegarde courant (il refait ce que
+# brk-backup-install a déjà posé — même clé, même autorisation) ; bootstrap
+# complet sur un hôte neuf. Aucune garde « .brk doit exister » : le but est
+# justement de recréer ce magasin.
+
+- name: Fail if the backup source host is not in the inventory
+  ansible.builtin.fail:
+    msg: >-
+      La source de restauration `{{ brk_backup_dest_host }}` est absente de
+      l'inventaire. Ajoute-la au groupe `backups`.
+  when: brk_backup_dest_host not in hostvars
+
+# ── Clé SSH dédiée (générée si absente) ────────────────────────────────────
+- name: Generate the dedicated backup/restore SSH key
+  community.crypto.openssh_keypair:
+    path: "{{ brk_backup_ssh_key_path }}"
+    type: ed25519
+    comment: "{{ inventory_hostname }}-brk-restore-from-{{ brk_backup_dest_host }}"
+    owner: "{{ brk_user }}"
+    group: "{{ brk_user }}"
+  become: true
+  register: brk_restore_key
+
+# ── Accès à la destination (autorisation clé + pare-feu + tcpwrappers) ──────
+# La restauration TIRE depuis la destination : c'est l'hôte courant qui s'y
+# connecte. Il faut donc l'autoriser côté destination sur les DEUX couches —
+# ufw ET tcpwrappers (`/etc/hosts.deny` y porte `sshd: ALL`), sans quoi sshd
+# refuse la connexion avant l'authentification. Même piège que pour la
+# sauvegarde (cf. brk-backup-install).
+- name: Authorize the key on the backup host
+  ansible.posix.authorized_key:
+    user: "{{ brk_backup_dest_user }}"
+    state: present
+    key: "{{ brk_restore_key.public_key }}"
+    comment: "{{ inventory_hostname }}-brk-restore"
+  delegate_to: "{{ brk_backup_dest_host }}"
+  become: true
+
+- name: Open SSH on the backup host for this host
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ ansible_host }}"
+    port: "{{ ssh_custom_port }}"
+    comment: "brk restore source {{ inventory_hostname }} - ssh pull"
+  delegate_to: "{{ brk_backup_dest_host }}"
+  become: true
+
+- name: Allow this host through tcpwrappers on the backup host (sshd)
+  ansible.builtin.lineinfile:
+    path: /etc/hosts.allow
+    line: "sshd: {{ ansible_host }}"
+    regexp: "^sshd: {{ ansible_host | regex_escape }}$"
+    create: true
+    owner: root
+    group: root
+    mode: '0644'
+  delegate_to: "{{ brk_backup_dest_host }}"
+  become: true
+
+- name: Refresh the backup host key in known_hosts
+  ansible.builtin.known_hosts:
+    path: "{{ brk_home }}/.ssh/known_hosts"
+    name: "[{{ brk_backup_dest_addr }}]:{{ brk_backup_dest_port }}"
+    key: "{{ lookup('pipe', 'ssh-keyscan -p ' ~ brk_backup_dest_port ~ ' -t ed25519 ' ~ brk_backup_dest_addr ~ ' 2>/dev/null | grep -v \"^#\"') }}"
+    state: present
+  become: true
+  become_user: "{{ brk_user }}"
+
+# ── Script de restauration ─────────────────────────────────────────────────
+# Source unique : le template vit dans `brk-backup-install` (référencé par
+# chemin relatif au playbook) — pas de copie divergente entre les deux rôles.
+- name: Deploy the BRK restore script
+  ansible.builtin.template:
+    src: "{{ playbook_dir }}/roles/brk-backup-install/templates/brk-restore.sh.j2"
+    dest: "{{ brk_home }}/brk-restore.sh"
+    owner: "{{ brk_user }}"
+    group: "{{ brk_user }}"
+    mode: '0750'
+  become: true

@@ -1,0 +1,25 @@
+---
+# Install scripts / aliases
+
+- name: Creates a bin directory
+  ansible.builtin.file:
+    path: "~/bin"
+    state: directory
+
+- name: Add bin to path
+  lineinfile:
+    path: "~/.bashrc"
+    line: 'export PATH=$PATH:~/bin'
+
+- name: Add alias lsports
+  lineinfile:
+    path: "~/.bashrc"
+    line: "alias lsports='lsof -nP -iTCP -sTCP:LISTEN'"
+- name: Add alias l
+  lineinfile:
+    path: "~/.bashrc"
+    line: "alias l='ls -alF'"
+- name: Add alias psg
+  lineinfile:
+    path: "~/.bashrc"
+    line: "alias psg='ps aux | grep'"

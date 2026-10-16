@@ -1,0 +1,15 @@
+---
+# Arrête TimescaleDB sur l'hôte `timescale`. Les données restent sur disque.
+#
+# Ciblait `brk1` alors que la base vit sur `timescale` depuis sa migration : le
+# playbook ne trouvait aucun projet compose et se terminait « ok », donnant
+# l'impression d'avoir arrêté une base qui tournait toujours.
+#
+#   ./play.sh papanglabs remove-timescaledb.yml
+
+- name: Remove PapangMetrics TimescaleDB (keeps data on disk)
+  hosts: timescale
+  remote_user: "{{ remote_username }}"
+  roles:
+    - timescaledb-backup-remove
+    - timescaledb-remove

@@ -1,0 +1,108 @@
+---
+# FleetForge servi dans un navigateur.
+#
+# La machine devient un NŒUD DE CONTRÔLE Ansible : l'application lance de vrais
+# playbooks sur le parc. C'est ce qui distingue ce rôle de tous les autres du
+# dépôt, et ce qui justifie ses garde-fous — le service n'est pas exposé sans
+# authentification, et les secrets de pilotage ne sont pas livrés sans demande
+# explicite (voir `ff_deploy_secrets`).
+
+ff_user: "{{ remote_username }}"
+ff_dir: "/home/{{ remote_username }}/fleetforge"
+
+# Déploiement sous l'ancien nom du projet (InfraManager), repris par
+# tasks/legacy.yml : unités arrêtées et retirées, répertoires renommés.
+ff_legacy_dir: "/home/{{ remote_username }}/infra-manager"
+ff_legacy_units: [infra-manager, infra-manager-agent]
+
+# Source sur le poste de contrôle : la racine du dépôt, déduite du playbook.
+# Pas de chemin absolu en dur — contrairement à `pgb_src`, qui fige
+# /Users/steph et ne vaut donc que sur une machine.
+ff_src: "{{ playbook_dir }}/../.."
+
+# Port applicatif. `/metrics` est servi sur CE port : l'application expose
+# Prometheus nativement, il n'y a donc pas d'exporter séparé ni de sonde
+# svcprobe. Registre des ports : CLAUDE.md.
+ff_port: "{{ app_port | default(9750) }}"
+
+# 0.0.0.0 et non 127.0.0.1 : Prometheus scrape depuis une autre machine, et un
+# proxy peut être ailleurs (proxy2 est derrière le NAT domestique sur web3c).
+#
+# Le port n'est PAS publié par Docker — le service est un binaire natif sous
+# systemd. Les règles ufw d'`fleetforge-security` s'appliquent donc
+# réellement, contrairement à ce qui se passe pour Prometheus ou Alertmanager,
+# dont les règles ufw sont décoratives (cf. docker-ports-security).
+ff_bind: "0.0.0.0"
+
+# ── Authentification ───────────────────────────────────────────────────────
+# Deuxième barrière derrière le filtrage réseau.
+#
+# Le mot de passe est tiré au hasard au PREMIER déploiement et déposé, chiffré,
+# dans playbooks/group_vars/<parc>.yml. La machine, elle, ne reçoit que son
+# empreinte argon2 : rien de ce qui s'y trouve ne permet de s'authentifier —
+# ni ici, ni ailleurs. Le vault est donc le seul endroit d'où le relire.
+#
+# Un rejeu ne le change pas : `ff_web_password` étant alors défini par le
+# group_vars, l'étape de tirage est sautée.
+ff_web_user: "{{ remote_username }}"
+
+# ── Secrets de pilotage (OPT-IN) ───────────────────────────────────────────
+# À `false`, l'application est déployée et fonctionne en LECTURE — inventaires,
+# supervision, diagnostics — mais ne peut lancer aucun playbook : ni clé SSH du
+# parc, ni mot de passe du vault sur la machine.
+#
+# À `true`, le rôle met en place le pilotage réel :
+#   • une clé SSH DÉDIÉE, créée sur le poste au premier déploiement (jamais
+#     régénérée ensuite), protégée par une passphrase elle-même déposée au
+#     vault ;
+#   • cette clé sur la machine, chargée dans un ssh-agent au démarrage ;
+#   • le mot de passe du vault, sans lequel aucun playbook ne s'exécute
+#     (`ansible_become_hash` est chiffré dans les deux parcs) ;
+#   • l'autorisation de la clé sur le parc, par le play `authorize` du
+#     playbook — restreinte à l'adresse de CETTE machine (`from="…"`).
+#
+# C'est une décision, pas un réglage : le défaut ne doit pas la prendre à la
+# place de l'opérateur.
+#   ./play.sh web3c deploy-fleetforge.yml -e ff_deploy_secrets=true
+ff_deploy_secrets: false
+
+# Clé dédiée sur le POSTE DE CONTRÔLE. Nom distinct de celui de la clé
+# personnelle : sur le poste, les deux cohabitent et rien ne doit permettre de
+# les confondre.
+ff_key_path: "{{ lookup('ansible.builtin.env', 'HOME') }}/.ssh/id_fleetforge_{{ ff_fleet | default('fleet') }}"
+
+# Nom du fichier de clé SUR LA MACHINE. Volontairement celui qu'attend
+# l'inventaire du parc : `ansible_ssh_private_key_file` vaut
+# « ~/.ssh/{{ ssh_key }} » sur web3c, avec IdentitiesOnly=true qui interdit à
+# ssh toute identité non déclarée. Même NOM que la clé de l'opérateur, donc,
+# mais pas la même clé — et celle-ci n'est autorisée que depuis cette machine.
+ff_remote_key_name: "{{ ssh_key | default('id_fleetforge') }}"
+
+ff_passphrase_file: "{{ ff_dir }}/.key-passphrase"
+ff_agent_socket: "/run/fleetforge/agent.sock"
+
+# Mot de passe du vault, référencé par `Ansible/ansible.cfg`. Un seul suffit
+# pour les deux parcs (format 1.1, sans étiquette de vault-id).
+ff_vault_pass_src: "{{ lookup('ansible.builtin.env', 'HOME') }}/.config/fleetforge/vault-pass"
+
+# ── Construction ───────────────────────────────────────────────────────────
+# Le frontal est construit sur le POSTE (npm), le serveur sur la MACHINE
+# (cargo). Livrer `dist/` évite d'installer Node sur un serveur qui n'en a pas
+# d'autre usage ; construire le binaire sur place évite la compilation croisée
+# depuis macOS, qui n'est pas une chose qu'on veut entretenir.
+ff_rust_toolchain: stable
+ff_cargo_profile: release
+
+# Ce que rsync ne doit pas emporter. `target` pèse plusieurs gigaoctets et
+# contient des objets compilés pour macOS : les livrer ferait échouer le build
+# sur des artefacts d'une autre plateforme.
+ff_rsync_excludes:
+  - "--exclude=.git"
+  - "--exclude=target"
+  - "--exclude=node_modules"
+  - "--exclude=.DS_Store"
+
+# ── Arbre Ansible livré ────────────────────────────────────────────────────
+# L'application lit les inventaires et lance les playbooks depuis cette copie.
+ff_ansible_dir: "{{ ff_dir }}/Ansible"
+ff_install_ansible: true

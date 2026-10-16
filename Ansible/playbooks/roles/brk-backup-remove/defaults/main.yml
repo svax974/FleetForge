@@ -1,0 +1,3 @@
+---
+brk_user: "{{ remote_username }}"
+brk_home: "/home/{{ remote_username }}"

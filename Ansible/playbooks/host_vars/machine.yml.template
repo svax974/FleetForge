@@ -1,0 +1,47 @@
+# ═════════════════════════════════════════════════════════════════════════════
+# Modèle de host_vars d'une MACHINE — versionné, données fictives.
+#
+# Usage : cp host_vars/machine.yml.template host_vars/<entrée canonique>.yml
+# Les fichiers réels host_vars/*.yml sont gitignorés (Ansible/.gitignore).
+#
+# host_vars porte les variables de MACHINE, une fois par machine, dans le
+# fichier de son entrée CANONIQUE (pas celui d'une entrée dédiée à un service).
+# Toute adresse s'y DÉRIVE de l'inventaire — jamais d'IP recopiée :
+#   groups['proxies'] | map('extract', hostvars, 'ansible_host') | list
+#   hostvars[prometheus_host].ansible_host
+#   hostvars['<entrée>'].ansible_host
+# ═════════════════════════════════════════════════════════════════════════════
+
+# Sources réutilisées par plusieurs règles ci-dessous.
+src_proxies: "{{ groups['proxies'] | map('extract', hostvars, 'ansible_host') | list }}"
+src_prometheus: "{{ [hostvars[prometheus_host].ansible_host] }}"
+
+# ── Ports publiés par Docker (rôle docker-ports-security) ─────────────────────
+# Un conteneur publié avec -p écoute sur 0.0.0.0 et ufw n'y peut RIEN : chaque
+# port publié doit figurer ici, sans quoi il est ouvert à tout Internet.
+# Un port absent de la liste n'est pas filtré.
+docker_ports_rules:
+  # Service exposé par les proxies : proxies + Prometheus + whitelist + vpns.
+  - port: 4300
+    comment: "monapp-front"
+    sources: "{{ src_proxies + src_prometheus }}"
+    allow_whitelist: true          # ajoute `whitelist` (défaut : false)
+    allow_vpns: true               # ajoute les hôtes du groupe `vpns` (défaut : false)
+    # allow_internal: true         # conteneurs voisins, 172.16.0.0/12 (défaut : true)
+
+  # Conteneur publié sur un AUTRE port que celui où il écoute (-p 4302:80) :
+  # DOCKER-USER voit le port du conteneur, published_remap est obligatoire.
+  - port: 4302
+    comment: "monapp-api"
+    sources: ["{{ hostvars['monapp'].ansible_host }}"]   # serveur lié, nommé
+    published_remap: true
+    allow_internal: false
+
+  # Service non exposé (base, cache) : aucune source externe, voisins seuls.
+  - port: 6379
+    comment: "redis — sans authentification, jamais hors de la machine"
+    sources: []
+
+# ── Réglages propres à un service hébergé ici (exemples) ──────────────────────
+# tsdb_allowed_ips:
+#   - "{{ hostvars['brk1'].ansible_host }}"   # client applicatif réel

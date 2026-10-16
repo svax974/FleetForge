@@ -1,0 +1,8 @@
+# Généré par Ansible (rôle prometheus-remotewrite-security) — ne pas éditer.
+#
+# Autorisations DOCKER-USER supplémentaires, lues à l'exécution par
+# /usr/local/sbin/docker-ports-firewall.sh. Format : « <port> <source> ».
+#
+# Service pousseur : {{ prwsec_service }} ({{ inventory_hostname }})
+# Posé le déploiement du back, retiré par son -remove/-purge.
+{{ prwsec_port }} {{ prwsec_source }}

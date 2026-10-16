@@ -1,0 +1,93 @@
+---
+# Restore WordPress files + MySQL database to remote host from local backups
+#
+# Required vars:
+#   wp_restore_db_file    - local path to the .sql.gz dump
+#   wp_restore_files_file - local path to the .tar.gz archive
+
+- name: Ensure restore files are specified
+  ansible.builtin.assert:
+    that:
+      - wp_restore_db_file is defined
+      - wp_restore_files_file is defined
+    fail_msg: "Set wp_restore_db_file and wp_restore_files_file before running this role"
+
+# --- Push backups to remote ---
+- name: Upload database dump
+  ansible.builtin.copy:
+    src: "{{ wp_restore_db_file }}"
+    dest: /tmp/wordpress_db_restore.sql.gz
+
+- name: Upload files archive
+  ansible.builtin.copy:
+    src: "{{ wp_restore_files_file }}"
+    dest: /tmp/wordpress_files_restore.tar.gz
+
+# --- Restore files ---
+- name: Remove existing WordPress directory
+  ansible.builtin.file:
+    path: "{{ wp_remote_path }}"
+    state: absent
+
+- name: Extract WordPress files
+  ansible.builtin.unarchive:
+    src: /tmp/wordpress_files_restore.tar.gz
+    dest: "{{ wp_remote_path | dirname }}"
+    remote_src: true
+
+- name: Set WordPress ownership
+  ansible.builtin.file:
+    path: "{{ wp_remote_path }}"
+    state: directory
+    recurse: true
+    owner: www-data
+    group: www-data
+
+# --- Ensure MySQL server is installed and running ---
+- name: Install MySQL server and client
+  ansible.builtin.apt:
+    pkg:
+      - mysql-server
+      - mysql-client
+      - python3-pymysql
+    update_cache: true
+
+- name: Ensure MySQL is started and enabled
+  ansible.builtin.service:
+    name: mysql
+    state: started
+    enabled: true
+
+- name: Create WordPress database
+  community.mysql.mysql_db:
+    name: "{{ wp_dbname }}"
+    state: present
+    login_unix_socket: /var/run/mysqld/mysqld.sock
+
+- name: Create WordPress database user
+  community.mysql.mysql_user:
+    name: "{{ wp_dbuser }}"
+    password: "{{ wp_dbpass }}"
+    priv: "{{ wp_dbname }}.*:ALL"
+    host: "{{ wp_dbhost }}"
+    state: present
+    login_unix_socket: /var/run/mysqld/mysqld.sock
+
+# --- Restore database ---
+- name: Restore database
+  ansible.builtin.shell: >
+    gunzip -c /tmp/wordpress_db_restore.sql.gz |
+    mysql -u{{ wp_dbuser }} -p'{{ wp_dbpass }}' -h{{ wp_dbhost }} {{ wp_dbname }}
+
+# --- Cleanup remote temp files ---
+- name: Remove temp restore files from remote
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /tmp/wordpress_db_restore.sql.gz
+    - /tmp/wordpress_files_restore.tar.gz
+
+- name: Show restore result
+  ansible.builtin.debug:
+    msg: "WordPress restored from {{ wp_restore_db_file }} and {{ wp_restore_files_file }}"

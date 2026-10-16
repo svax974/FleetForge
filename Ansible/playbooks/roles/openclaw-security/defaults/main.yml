@@ -1,0 +1,16 @@
+---
+# Pare-feu du port OpenClaw. Installation NATIVE (systemd, pas Docker) : le
+# process écoute directement sur l'hôte, ufw filtre donc réellement ce trafic
+# — contrairement à un port publié par Docker (`-p`), qui contourne ufw via
+# ses propres règles DNAT (CLAUDE.md). Modèle : fleetforge-security.
+
+openclaw_port: "{{ app_port | default(18789) }}"
+
+# Réseau domestique partagé par hub/nuc/station/proxy2/vpn1 — proxy2 relaie ce
+# vhost en LAN dans certains cas (voir openclaw.conf, proxy-update-web3c) ;
+# garde-fou pour les tests locaux depuis une autre machine du même réseau.
+openclaw_lan_cidr: "192.168.1.0/24"
+
+# IP/CIDR bruts à autoriser en plus de `whitelist`/proxies/LAN (dépannage). À
+# garder vide : chaque entrée est une exception qui survit à celui qui l'a posée.
+openclaw_extra_allowed_cidrs: []

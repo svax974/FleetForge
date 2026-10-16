@@ -1,0 +1,7 @@
+---
+- name: restart papangmetrics-etl
+  ansible.builtin.systemd:
+    name: papangmetrics-etl
+    state: restarted
+    daemon_reload: true
+  become: true

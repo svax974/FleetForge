@@ -1,0 +1,15 @@
+---
+# Arrête nginx sur les proxies ciblés (famille `proxy`). Vhosts et certificats
+# conservés : `purge-proxy.yml` les supprime.
+#
+#   ./play.sh web3c remove-proxy.yml --limit proxy2
+#
+# `--limit` vivement recommandé : sans lui, TOUS les proxies du parc s'arrêtent
+# et chaque nom public servi derrière eux tombe avec.
+
+- name: Désinstallation du proxy (configuration conservée)
+  hosts: proxies
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - proxy-remove

@@ -1,0 +1,8 @@
+---
+# CVE-2026-31431 "Copy Fail" — kernel local privilege escalation
+
+# Mettre à jour le kernel via le gestionnaire de paquets (correctif définitif)
+copyfail_upgrade_kernel: true
+
+# Redémarrer automatiquement après patch (OBLIGATOIRE sur RedHat/Suse pour activer la mitigation)
+copyfail_reboot: false

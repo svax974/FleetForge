@@ -1,0 +1,419 @@
+global:
+  scrape_interval: 60s
+  evaluation_interval: 60s
+
+# Sans ces deux sections, Prometheus collecte sans jamais rien évaluer ni
+# notifier : c'était l'état de ce parc, qui accumulait des métriques depuis
+# huit semaines sans qu'aucune alerte ne puisse partir.
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - '{{ hostvars[alertmanager_host]['ansible_host'] if alertmanager_host in hostvars else alertmanager_host }}:{{ alertmanager_port }}'
+
+scrape_configs:
+  - job_name: 'prometheus'
+    scrape_interval: 10s
+    scrape_timeout: 10s
+    static_configs:
+      - targets: ['localhost:9090']
+    basic_auth:
+      username: '{{ prometheus_user }}'
+      password: '{{ prometheus_pass }}'
+
+  - job_name: 'exporter'
+    metrics_path: /metrics
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        target_label: __name__
+        regex: (node_cpu_seconds_total|node_memory_MemAvailable_bytes|node_memory_MemTotal_bytes|node_filesystem_free_bytes|node_filesystem_size_bytes)
+        action: keep
+    file_sd_configs:
+    - files:
+      - 'prometheus-configs/exporter/*.json'
+
+  - job_name: 'node-geth'
+    metrics_path: /debug/metrics/prometheus
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        target_label: __name__
+        regex: (up|p2p_peers|chain_head_header|chain_head_block)
+        action: keep
+      - source_labels: [__name__]
+        target_label: __name__
+        regex: "p2p_peers"
+        replacement: "peers"
+      - source_labels: [__name__]
+        target_label: __name__
+        regex: "chain_head_header"
+        replacement: "last_header"
+      - source_labels: [__name__]
+        target_label: __name__
+        regex: "chain_head_block"
+        replacement: "last_block"
+    file_sd_configs:
+    - files:
+      - 'prometheus-configs/node-geth/*.json'
+
+  - job_name: 'node-op'
+    metrics_path: /
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        target_label: __name__
+        regex: (up|process_start_time_seconds)
+        action: keep
+      - source_labels: [__name__]
+        target_label: __name__
+        regex: "process_start_time_seconds"
+        replacement: "uptime"
+    file_sd_configs:
+    - files:
+      - 'prometheus-configs/node-op/*.json'
+
+  - job_name: "node-avalanche"
+    metrics_path: "/ext/metrics"
+    scheme: "https"
+    tls_config:
+      insecure_skip_verify: true
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        target_label: __name__
+        regex: (up|juneomcn_BCH1_vm_process_start_time_seconds)
+        action: keep
+      - source_labels: [__name__]
+        target_label: __name__
+        regex: "juneomcn_BCH1_vm_process_start_time_seconds"
+        replacement: "uptime"
+    file_sd_configs:
+    - files:
+      - 'prometheus-configs/node-avalanche/*.json'
+
+  - job_name: 'node-besu'
+    metrics_path: /metrics
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        target_label: __name__
+        regex: (up|p2p_peers|chain_head_header|chain_head_block)
+        action: keep
+      - source_labels: [__name__]
+        target_label: __name__
+        regex: "p2p_peers"
+        replacement: "peers"
+      - source_labels: [__name__]
+        target_label: __name__
+        regex: "chain_head_header"
+        replacement: "last_header"
+      - source_labels: [__name__]
+        target_label: __name__
+        regex: "chain_head_block"
+        replacement: "last_block"
+    file_sd_configs:
+    - files:
+      - 'prometheus-configs/node-besu/*.json'
+
+  - job_name: 'node-tendermint'
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        target_label: __name__
+        regex: (up|p2p_peers|consensus_height|chain_head_block|process_start_time_seconds)
+        action: keep
+      - source_labels: [__name__]
+        target_label: __name__
+        regex: "p2p_peers"
+        replacement: "peers"
+      - source_labels: [__name__]
+        target_label: __name__
+        regex: "consensus_height"
+        replacement: "last_header"
+      - source_labels: [__name__]
+        target_label: __name__
+        regex: "chain_head_block"
+        replacement: "last_block"
+      - source_labels: [__name__]
+        target_label: __name__
+        regex: "process_start_time_seconds"
+        replacement: "uptime"
+    file_sd_configs:
+    - files:
+      - 'prometheus-configs/node-tendermint/*.json'
+
+  - job_name: 'node-0Gstorage'
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        target_label: __name__
+        regex: (up|p2p_peers|consensus_height)
+        action: keep
+      - source_labels: [__name__]
+        target_label: __name__
+        regex: "p2p_peers"
+        replacement: "peers"
+      - source_labels: [__name__]
+        target_label: __name__
+        regex: "consensus_height"
+        replacement: "last_header"
+    file_sd_configs:
+    - files:
+      - 'prometheus-configs/node-0Gstorage/*.json'
+
+  - job_name: 'node-chainbase'
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        target_label: __name__
+        regex: (up|process_start_time_seconds)
+        action: keep
+      - source_labels: [__name__]
+        target_label: __name__
+        regex: "process_start_time_seconds"
+        replacement: "uptime"
+    file_sd_configs:
+    - files:
+      - 'prometheus-configs/node-chainbase/*.json'
+
+  - job_name: 'node-huddle01'
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        target_label: __name__
+        regex: (up|momo_process_start_time_seconds)
+        action: keep
+      - source_labels: [__name__]
+        target_label: __name__
+        regex: "momo_process_start_time_seconds"
+        replacement: "uptime"
+    file_sd_configs:
+    - files:
+      - 'prometheus-configs/node-huddle01/*.json'
+
+  - job_name: 'node-generic'
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        target_label: __name__
+        regex: (up)
+        action: keep
+    file_sd_configs:
+    - files:
+      - 'prometheus-configs/node-generic/*.json'
+
+  - job_name: 'node-tendermint_light'
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        target_label: __name__
+        regex: (up|peers|last_header|chain_height)
+        action: keep
+    file_sd_configs:
+    - files:
+      - 'prometheus-configs/node-tendermint_light/*.json'
+
+  - job_name: 'node-eigenda_holesky'
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        target_label: __name__
+        regex: (up|process_start_time_seconds|eigen_performance_score|node_reachability_status)
+        action: keep
+      - source_labels: [__name__]
+        target_label: __name__
+        regex: "process_start_time_seconds"
+        replacement: "uptime"
+      - source_labels: [__name__]
+        target_label: __name__
+        regex: "eigen_performance_score"
+        replacement: "performance"
+      - source_labels: [__name__]
+        target_label: __name__
+        regex: "node_reachability_status"
+        replacement: "reachability"
+    file_sd_configs:
+    - files:
+      - 'prometheus-configs/node-eigenda_holesky/*.json'
+
+  - job_name: 'node-btc'
+    metrics_path: /debug/metrics/prometheus
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        target_label: __name__
+        regex: (up|bitcoin_peers|bitcoin_uptime|bitcoin_blocks)
+        action: keep
+      - source_labels: [__name__]
+        target_label: __name__
+        regex: "bitcoin_peers"
+        replacement: "peers"
+      - source_labels: [__name__]
+        target_label: __name__
+        regex: "bitcoin_blocks"
+        replacement: "last_header"
+      - source_labels: [__name__]
+        target_label: __name__
+        regex: "bitcoin_peers"
+        replacement: "uptime"
+    file_sd_configs:
+    - files:
+      - 'prometheus-configs/node-btc/*.json'
+
+  - job_name: 'node-hyperlane-validator'
+    metrics_path: /metrics
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        target_label: __name__
+        regex: (up|hyperlane_contract_sync_block_height)
+        action: keep
+      - source_labels: [__name__]
+        target_label: __name__
+        regex: "hyperlane_contract_sync_block_height"
+        replacement: "last_header"
+    file_sd_configs:
+    - files:
+      - 'prometheus-configs/node-hyperlane-validator/*.json'
+
+  - job_name: 'node-hyperlane-relayer'
+    metrics_path: /metrics
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        target_label: __name__
+        regex: (up|hyperlane_contract_sync_block_height)
+        action: keep
+      - source_labels: [__name__]
+        target_label: __name__
+        regex: "hyperlane_contract_sync_block_height"
+        replacement: "last_header"
+    file_sd_configs:
+    - files:
+      - 'prometheus-configs/node-hyperlane-relayer/*.json'
+
+  - job_name: 'node-astar'
+    metrics_path: /metrics
+    metric_relabel_configs:
+      # Rename substrate metrics to normalized names
+      - source_labels: [__name__]
+        target_label: __name__
+        regex: "substrate_block_height"
+        replacement: "block_height"
+      - source_labels: [__name__]
+        target_label: __name__
+        regex: "substrate_sub_libp2p_peers_count"
+        replacement: "peers"
+      - source_labels: [__name__]
+        target_label: __name__
+        regex: "substrate_sync_is_major_syncing"
+        replacement: "syncing"
+      - source_labels: [__name__]
+        target_label: __name__
+        regex: "process_start_time_seconds"
+        replacement: "uptime"
+      # Keep only the useful renamed metrics
+      - source_labels: [__name__]
+        target_label: __name__
+        regex: (up|block_height|peers|syncing|uptime)
+        action: keep
+    file_sd_configs:
+    - files:
+      - 'prometheus-configs/node-astar/*.json'
+
+  # Nœuds Theta Edge — un exporter par hôte (theta-edge-monitoring, 9601),
+  # une série par instance (label `theta_instance`). Noms conservés tels
+  # quels : les renommer en block_height/peers les mêlerait aux séries Astar.
+  - job_name: 'node-theta-edge'
+    metrics_path: /metrics
+    file_sd_configs:
+    - files:
+      - 'prometheus-configs/node-theta-edge/*.json'
+
+  - job_name: 'node-llamacpp'
+    metrics_path: /metrics
+    metric_relabel_configs:
+      # llama-server exposes its native metrics under the "llamacpp:" namespace
+      - source_labels: [__name__]
+        target_label: __name__
+        regex: "llamacpp:kv_cache_usage_ratio"
+        replacement: "kv_cache_usage_ratio"
+      - source_labels: [__name__]
+        target_label: __name__
+        regex: "llamacpp:requests_processing"
+        replacement: "requests_processing"
+      - source_labels: [__name__]
+        target_label: __name__
+        regex: "llamacpp:requests_deferred"
+        replacement: "requests_deferred"
+      - source_labels: [__name__]
+        target_label: __name__
+        regex: "llamacpp:prompt_tokens_total"
+        replacement: "prompt_tokens_total"
+      - source_labels: [__name__]
+        target_label: __name__
+        regex: "llamacpp:tokens_predicted_total"
+        replacement: "tokens_predicted_total"
+      # Keep only the useful renamed metrics plus the scrape health signal
+      - source_labels: [__name__]
+        target_label: __name__
+        regex: (up|kv_cache_usage_ratio|requests_processing|requests_deferred|prompt_tokens_total|tokens_predicted_total)
+        action: keep
+    file_sd_configs:
+    - files:
+      - 'prometheus-configs/node-llamacpp/*.json'
+
+  # Rapports agrégés DMARC. Déposé par `dmarc-exporter-install`. Même job et
+  # mêmes séries que sur papanglabs, pour que les deux parcs se supervisent
+  # de la même façon.
+  - job_name: 'dmarc'
+    metrics_path: /metrics
+    file_sd_configs:
+    - files:
+      - 'prometheus-configs/dmarc/*.json'
+
+  # Sonde de service partagée (port 9110). Chaque rôle `<service>-monitoring`
+  # dépose sa cible dans prometheus-configs/svcprobe ; sans ce job les fichiers
+  # restaient là sans jamais être lus. Constat du 13/08/2026 : `service_up`
+  # n'existait sur AUCUN des deux parcs, donc les groupes d'alertes `services`,
+  # `certificates` et `searxng` étaient chargés, `health=ok`, et n'évaluaient
+  # rien — indiscernables de règles qui veillent.
+  - job_name: 'svcprobe'
+    metrics_path: /metrics
+    file_sd_configs:
+    - files:
+      - 'prometheus-configs/svcprobe/*.json'
+
+  # MTBridge (hôte Windows, groupe mtbridges). Cible déposée par
+  # `mtbridge-monitoring` dans prometheus-configs/mtbridge ; sans ce job le
+  # fichier reste là sans jamais être lu, `up{job="mtbridge"}` n'existe dans
+  # aucune série et `TargetDown` (groupe availability) n'a rien à évaluer —
+  # exactement le défaut qui a laissé tomber MTBridge sans la moindre alerte.
+  - job_name: 'mtbridge'
+    metrics_path: /metrics
+    file_sd_configs:
+    - files:
+      - 'prometheus-configs/mtbridge/*.json'
+
+  # Relais SMTP. `mailserver-setup` dépose sa cible dans prometheus-configs/postfix.
+  # Même job que sur papanglabs.
+  - job_name: 'postfix'
+    metrics_path: /metrics
+    file_sd_configs:
+    - files:
+      - 'prometheus-configs/postfix/*.json'
+
+  # FleetForge — l'application de gestion du parc, qui expose Prometheus
+  # nativement sur son port applicatif. Cible déposée par
+  # `fleetforge-monitoring` ; sans ce job le fichier resterait là sans
+  # jamais être lu, et l'état dégradé propre à ce service
+  # (`fleetforge_ansible_available` à 0 : répond mais ne peut rien
+  # déployer) passerait inaperçu.
+  - job_name: 'fleetforge'
+    metrics_path: /metrics
+    file_sd_configs:
+    - files:
+      - 'prometheus-configs/fleetforge/*.json'
+
+  # Serveurs de synchronisation web3c-sync (iptv, banking, aiteam) : /metrics
+  # natif sur le port `sync_metrics_port` de chaque instance. Cibles déposées par
+  # `sync-server-monitoring` dans prometheus-configs/sync-server (label `job`
+  # imposé par le fichier de cible) ; sans ce job elles resteraient sans jamais
+  # être lues, `sync_up` n'existerait pas et le groupe d'alertes `sync` serait
+  # décoratif. NB : le serveur expose lui-même un label `instance` ("iptv"…) :
+  # Prometheus le renomme `exported_instance` et garde `instance` = nom
+  # d'inventaire (sync-iptv…).
+  - job_name: 'sync-server'
+    metrics_path: /metrics
+    file_sd_configs:
+    - files:
+      - 'prometheus-configs/sync-server/*.json'

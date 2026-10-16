@@ -1,0 +1,8 @@
+{
+  "service": "xbot",
+  "up": {"kind": "docker", "container": "{{ xbotm_front_container }}"},
+  "extra_checks": [
+    {"name": "back", "kind": "docker", "container": "{{ xbotm_back_container }}"},
+    {"name": "front-port", "kind": "tcp", "host": "127.0.0.1", "port": {{ app_port }}}
+  ]
+}

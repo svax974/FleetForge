@@ -1,0 +1,72 @@
+---
+# Supervision du back PapangLabs.
+#
+# Deux mécanismes complémentaires, pour deux besoins qui ne se recouvrent pas :
+#
+# 1. SONDE D'ÉTAT (svcprobe, port 9110) — `service_up{service="papanglabs-back"}`,
+#    obligatoire par la convention `-monitoring`. Elle interroge le répartiteur,
+#    seul point d'entrée HTTP, et l'état des trois conteneurs. C'est elle qui
+#    aurait signalé l'incident du 18/08/2026 : back-lb resté en état `Created`,
+#    API en 502, conteneurs `back` pourtant sains et `docker ps` muet.
+#
+# 2. MÉTRIQUES APPLICATIVES (vmagent, push) — un scrape par CONTENEUR via le
+#    socket Docker, poussé en remote_write. Prometheus ne peut pas les tirer
+#    lui-même : `back` et `back-worker` n'exposent leur port qu'entre
+#    conteneurs, et le seul port publié est celui du répartiteur, qui répartit
+#    justement entre réplicas — un scrape direct tomberait sur un réplica au
+#    hasard et manquerait complètement le worker, qui n'est pas dans l'amont du
+#    répartiteur.
+
+pgb_user: "{{ remote_username }}"
+pgb_dir: "/home/{{ remote_username }}/papanglabs"
+# Même nom que celui calculé par deploy-full.sh (sanitize_identifier : minuscules,
+# tout caractère non alphanumérique remplacé par un tiret, appliqué au NOM d'hôte
+# et non à l'IP). L'aligner permet à un déploiement Ansible de reprendre les
+# conteneurs posés par le script, au lieu d'en créer un second jeu à côté.
+pgb_project_name: "papanglabs-back-{{ hostname | lower | regex_replace('[^a-z0-9]', '-') }}"
+pgb_port: "{{ app_port | default(9741) }}"
+
+# Jeton Bearer protégeant /metrics côté application (MetricsController) ET
+# envoyé par vmagent à chaque scrape. Une seule source de vérité, le vault :
+# c'est la même valeur des deux côtés, la désynchroniser rendrait les cibles
+# muettes en 401.
+#
+# Vide = /metrics SANS AUTHENTIFICATION. Constat du 18/08/2026 :
+# https://backindicators.papanglabs.com/metrics répondait 200 à tout Internet.
+pgb_metrics_token: "{{ papanglabs_metrics_token | default('') }}"
+
+# Destinations remote_write : TOUS les hôtes portant la famille de rôles
+# `prometheus`. Aujourd'hui `prometheus1` seul, et co-localisé avec la préprod ;
+# la liste est calculée pour que l'ajout d'un second Prometheus dans
+# l'inventaire suffise, sans toucher au code ni aux .env.
+#
+# vmagent accepte plusieurs `-remoteWrite.url` et RÉPLIQUE les séries vers
+# chacune (documentation VictoriaMetrics : « vmagent replicates the collected
+# metrics among multiple remote storage instances »). Les flags d'authentifi-
+# cation se correspondent par POSITION, d'où les listes de même longueur
+# construites plus bas.
+# Groupe d'inventaire portant la supervision, et famille de rôles équivalente.
+# Les deux sont réunis : web3c nomme sa stack `monitoring`, papanglabs
+# `prometheus`, et un parc peut avoir l'un sans l'autre.
+pgb_prometheus_group: prometheus
+pgb_prometheus_family: prometheus
+
+# Gabarit d'URL. En direct sur le port Prometheus par défaut : suffisant quand
+# le back et Prometheus partagent la machine (le trafic passe par le bridge
+# Docker). Pour un back DISTANT, préférer un vhost TLS sur le proxy et
+# renseigner `pgb_remote_write_urls` explicitement — pousser des métriques en
+# clair sur Internet exposerait aussi les identifiants basiques.
+pgb_remote_write_scheme: http
+pgb_remote_write_path: /api/v1/write
+
+# Identifiants du remote_write. Ce sont ceux de Prometheus lui-même (web.yml,
+# même authentification basique que l'UI), déjà au vault pour le parc.
+pgb_remote_write_user: "{{ prometheus_user | default('') }}"
+pgb_remote_write_pass: "{{ prometheus_pass | default('') }}"
+
+# Sonde svcprobe.
+pgb_probe_service: papanglabs-back
+# Le répartiteur porte un `container_name:` fixe (${PROJECT_NAME}_back_lb) et
+# échappe donc au préfixe de projet, contrairement aux deux autres conteneurs.
+pgb_lb_container: papanglabs_back_lb
+pgb_probe_url: "http://127.0.0.1:{{ pgb_port }}"

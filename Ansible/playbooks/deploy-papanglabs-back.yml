@@ -1,0 +1,59 @@
+---
+# Déploiement du back PapangLabs (NestJS, conteneurs Docker Compose).
+#
+#   ./play.sh papanglabs deploy-papanglabs-back.yml --limit backindicators1-prod
+#
+# Pour une simple livraison de code (le cas courant), préférer
+# update-papanglabs-back.yml : même code+build+redémarrage, sans rejouer le
+# pare-feu ni la supervision. Réserver ce playbook-ci à un premier déploiement,
+# une machine neuve, ou un changement de pare-feu/supervision.
+#
+# Ne jamais jouer sans `--limit` : le groupe `backsindicators` porte la prod ET
+# la préprod, et les deux se distinguent uniquement par leur fichier .env
+# (`pgb_env_file`, posé en host_vars). Un oubli livrerait la configuration de
+# l'un sur la machine de l'autre.
+#
+# Tags :
+#   --tags code        livre le code et reconstruit l'image, sans redémarrer
+#   --tags config      réécrit les .env seuls
+#   --tags monitoring  rejoue la sonde, vmagent et les destinations Prometheus,
+#                      sans toucher au code ni aux conteneurs
+#   --tags ufw         rejoue les seules ouvertures pare-feu, dont celles posées
+#                      par délégation sur les services amont (API PapangMetrics)
+#
+# ── Accès amont ────────────────────────────────────────────────────────────
+# `papanglabs-back-security` ouvre aussi ce back sur les machines qu'il CONSOMME
+# (`pgb_upstream_services`), par délégation. Sans cela un back déployé sur une
+# machine neuve démarre correctement et échoue à chaque appel : ufw côté service
+# jette ses paquets, l'appel expire en timeout, le proxy renvoie un 504 sans
+# en-têtes CORS et le navigateur accuse le CORS. Cas réel : backindicators1-prod
+# le 20/08/2026.
+#
+# ── Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ───────────────────────
+# Échoue immédiatement si le parc n'a pas d'hôte de supervision utilisable, puis
+# vérifie — et répare — le socle de la machine, node_exporter et sa cible
+# Prometheus. C'est aussi l'équivalent de `setup-server.yml` demandé ici : il
+# cherche le témoin /var/lib/fleetforge/state/setup-server.json et ne rejoue
+# que ce qui MANQUE, par les invariants (binaires présents, port de l'exporter
+# qui répond) et non en rejouant les rôles — `install-tools` fait un
+# `apt upgrade dist`, le déclencher à chaque déploiement serait inacceptable.
+#
+# Une machine VIERGE reste hors de portée : le préflight se connecte avec
+# l'utilisateur de service sur le port SSH du parc, qui n'existent pas encore.
+# Pour celle-là, `setup-server.yml --limit <hôte>` d'abord.
+- name: Contrôle préalable
+  hosts: backsindicators
+  remote_user: "{{ remote_username }}"
+  roles:
+    - role: host-preflight
+      preflight_require_docker: true
+
+- name: Déploiement du back PapangLabs
+  hosts: backsindicators
+  remote_user: "{{ remote_username }}"
+
+  roles:
+    - papanglabs-back-install
+    - papanglabs-back-setup
+    - papanglabs-back-security
+    - papanglabs-back-monitoring

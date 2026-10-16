@@ -1,0 +1,885 @@
+---
+- name: Get inventory hostnames for the same domain
+  ansible.builtin.set_fact:
+    domain_hosts: "{{ groups['all'] | map('extract', hostvars, 'inventory_hostname') | select('match', '.*\\.' + domain_name + '$') | list }}"
+
+- name: Create SQLite database directory
+  ansible.builtin.file:
+    path: /etc/postfix/sqlite
+    state: directory
+    owner: root
+    group: postfix
+    mode: '0750'
+
+- name: Create SQLite database for mail server
+  ansible.builtin.shell:
+    cmd: |
+      sqlite3 /etc/postfix/sqlite/mailserver.db << 'EOF'
+      CREATE TABLE IF NOT EXISTS virtual_domains (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name VARCHAR(50) NOT NULL UNIQUE
+      );
+      
+      CREATE TABLE IF NOT EXISTS virtual_users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        domain_id INTEGER NOT NULL,
+        password VARCHAR(106) NOT NULL,
+        email VARCHAR(120) NOT NULL UNIQUE,
+        FOREIGN KEY (domain_id) REFERENCES virtual_domains(id) ON DELETE CASCADE
+      );
+      
+      CREATE TABLE IF NOT EXISTS virtual_aliases (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        domain_id INTEGER NOT NULL,
+        source VARCHAR(100) NOT NULL,
+        destination VARCHAR(100) NOT NULL,
+        FOREIGN KEY (domain_id) REFERENCES virtual_domains(id) ON DELETE CASCADE
+      );
+      EOF
+    creates: /etc/postfix/sqlite/mailserver.db
+
+- name: Create mail group if it doesn't exist
+  ansible.builtin.group:
+    name: mail
+    state: present
+
+- name: Get dovecot user information
+  ansible.builtin.getent:
+    database: passwd
+    key: dovecot
+  register: dovecot_user_info
+
+- name: Add postfix user to mail group for database access
+  ansible.builtin.user:
+    name: postfix
+    groups: mail
+    append: yes
+  notify: restart postfix
+
+- name: Add dovecot user to mail group for database access
+  ansible.builtin.user:
+    name: dovecot
+    groups: mail
+    append: yes
+  notify: restart dovecot
+
+- name: Ensure SQLite database directory has correct permissions
+  ansible.builtin.file:
+    path: /etc/postfix/sqlite
+    owner: root
+    group: mail
+    mode: '0755'
+    state: directory
+
+- name: Set proper permissions on SQLite database (more permissive)
+  ansible.builtin.file:
+    path: /etc/postfix/sqlite/mailserver.db
+    owner: root
+    group: mail
+    mode: '0664'
+
+- name: Alternative fix - Set dovecot as owner if needed
+  ansible.builtin.file:
+    path: /etc/postfix/sqlite/mailserver.db
+    owner: dovecot
+    group: mail
+    mode: '0660'
+  when: dovecot_user_info is defined
+
+- name: Ensure all users can access SQLite directory
+  ansible.builtin.file:
+    path: /etc/postfix/sqlite
+    owner: root
+    group: mail
+    mode: '2775'
+    state: directory
+
+- name: Force reload systemd daemon and restart services
+  ansible.builtin.systemd:
+    daemon_reload: yes
+
+- name: Restart services to apply group changes
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: restarted
+  loop:
+    - postfix
+    - dovecot
+  
+- name: Wait for services to be ready
+  ansible.builtin.pause:
+    seconds: 5
+
+- name: Test SQLite database access for dovecot user
+  ansible.builtin.shell:
+    cmd: sudo -u dovecot sqlite3 /etc/postfix/sqlite/mailserver.db "SELECT COUNT(*) FROM virtual_domains;"
+  register: sqlite_test
+  ignore_errors: yes
+  changed_when: false
+
+- name: Test SQLite database file permissions
+  ansible.builtin.stat:
+    path: /etc/postfix/sqlite/mailserver.db
+  register: db_permissions
+
+- name: Display detailed SQLite diagnostic
+  ansible.builtin.debug:
+    msg: |
+      📊 SQLite Database Diagnostic:
+      
+      File permissions:
+      - Path: /etc/postfix/sqlite/mailserver.db
+      - Owner: {{ db_permissions.stat.pw_name }}:{{ db_permissions.stat.gr_name }}
+      - Mode: {{ db_permissions.stat.mode }}
+      
+      Access test:
+      {% if sqlite_test.rc == 0 %}
+      ✅ SUCCESS: Dovecot can access the database
+      Domains count: {{ sqlite_test.stdout }}
+      {% else %}
+      ❌ FAILED: Dovecot cannot access the database
+      Error: {{ sqlite_test.stderr | default('Unknown error') }}
+      Return code: {{ sqlite_test.rc }}
+      {% endif %}
+
+- name: Check dovecot processes and users
+  ansible.builtin.shell:
+    cmd: |
+      echo "=== Dovecot Processes ==="
+      ps aux | grep dovecot | grep -v grep
+      echo -e "\n=== User ID 115 ==="
+      getent passwd | grep :115: || echo "No user with UID 115"
+      echo -e "\n=== Dovecot user info ==="
+      id dovecot
+      echo -e "\n=== Dovecot groups ==="
+      groups dovecot
+  register: dovecot_diagnostic
+  changed_when: false
+
+- name: Test direct SQLite access as various users
+  ansible.builtin.shell:
+    cmd: |
+      echo "=== Testing SQLite access ==="
+      echo "As root:"
+      sqlite3 /etc/postfix/sqlite/mailserver.db "SELECT COUNT(*) FROM virtual_domains;" 2>&1 || echo "Failed"
+      echo "As dovecot user:"
+      sudo -u dovecot sqlite3 /etc/postfix/sqlite/mailserver.db "SELECT COUNT(*) FROM virtual_domains;" 2>&1 || echo "Failed"
+      echo "As postfix user:"
+      sudo -u postfix sqlite3 /etc/postfix/sqlite/mailserver.db "SELECT COUNT(*) FROM virtual_domains;" 2>&1 || echo "Failed"
+      echo "=== File permissions ==="
+      ls -la /etc/postfix/sqlite/
+  register: sqlite_access_test
+  changed_when: false
+
+- name: Display comprehensive dovecot diagnostic
+  ansible.builtin.debug:
+    msg: |
+      🔍 Dovecot Diagnostic Information:
+      
+      {{ dovecot_diagnostic.stdout }}
+      
+      {{ sqlite_access_test.stdout }}
+
+- name: Fix SQLite permissions based on dovecot user
+  ansible.builtin.shell:
+    cmd: |
+      # Get dovecot UID
+      DOVECOT_UID=$(id -u dovecot)
+      echo "Dovecot UID: $DOVECOT_UID"
+      
+      # More permissive approach - allow group write
+      chmod 775 /etc/postfix/sqlite/
+      chmod 664 /etc/postfix/sqlite/mailserver.db
+      
+      # Ensure dovecot can read the file
+      chgrp mail /etc/postfix/sqlite/mailserver.db
+      
+      # Add dovecot to postfix group as backup
+      usermod -a -G postfix dovecot
+      
+      echo "Final permissions:"
+      ls -la /etc/postfix/sqlite/
+  register: permission_fix
+  changed_when: true
+
+- name: Display permission fix results
+  ansible.builtin.debug:
+    msg: |
+      🔧 Permission Fix Results:
+      {{ permission_fix.stdout }}
+
+- name: Final restart of mail services after permission fixes
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: restarted
+  loop:
+    - dovecot
+    - postfix
+
+- name: Wait for Dovecot to create sockets
+  ansible.builtin.pause:
+    seconds: 3
+
+- name: Fix Dovecot socket permissions
+  ansible.builtin.file:
+    path: "{{ item }}"
+    mode: '0755'
+  loop:
+    - /var/run/dovecot
+    - /run/dovecot
+  ignore_errors: yes
+
+- name: Fix Dovecot auth socket permissions
+  ansible.builtin.shell:
+    cmd: |
+      # Wait for sockets to be created
+      sleep 2
+      
+      # Fix auth socket permissions if they exist
+      for socket_path in /var/run/dovecot /run/dovecot; do
+        if [ -d "$socket_path" ]; then
+          echo "Fixing permissions in $socket_path"
+          
+          # Make directory accessible
+          chmod 755 "$socket_path"
+          
+          # Fix auth sockets
+          if [ -S "$socket_path/auth-client" ]; then
+            chmod 666 "$socket_path"/auth-*
+            chown dovecot:mail "$socket_path"/auth-*
+            echo "Fixed auth sockets in $socket_path"
+          fi
+          
+          # Fix stats socket
+          if [ -S "$socket_path/stats-writer" ]; then
+            chmod 666 "$socket_path/stats-writer"
+            chown dovecot:mail "$socket_path/stats-writer"
+            echo "Fixed stats socket in $socket_path"
+          fi
+          
+          # Show final permissions
+          ls -la "$socket_path/"
+        fi
+      done
+  register: socket_fix_result
+  ignore_errors: yes
+  changed_when: true
+
+- name: Display socket permission fix results
+  ansible.builtin.debug:
+    msg: |
+      🔧 Socket Permission Fix Results:
+      {{ socket_fix_result.stdout | default('No output') }}
+
+- name: Add system users to mail group for socket access
+  ansible.builtin.shell:
+    cmd: |
+      # Add common system users to mail group for socket access
+      for user in "{{ remote_username }}" root; do
+        if id "$user" >/dev/null 2>&1; then
+          usermod -a -G mail "$user" && echo "Added $user to mail group"
+        fi
+      done
+  register: user_group_result
+  ignore_errors: yes
+  changed_when: true
+
+- name: Final Dovecot restart to apply socket configuration
+  ansible.builtin.systemd:
+    name: dovecot
+    state: restarted
+
+- name: Wait for Dovecot sockets to be recreated
+  ansible.builtin.pause:
+    seconds: 5
+
+- name: Verify final socket permissions
+  ansible.builtin.shell:
+    cmd: |
+      echo "=== Dovecot Socket Status ==="
+      for socket_path in /var/run/dovecot /run/dovecot; do
+        if [ -d "$socket_path" ]; then
+          echo "Directory: $socket_path"
+          ls -la "$socket_path/"
+          echo
+        fi
+      done
+      
+      echo "=== User Groups ==="
+      if id "{{ remote_username }}" >/dev/null 2>&1; then
+        echo "{{ remote_username }} groups: $(groups {{ remote_username }})"
+      fi
+      echo "dovecot groups: $(groups dovecot)"
+  register: final_socket_check
+  changed_when: false
+  ignore_errors: yes
+
+- name: Display final socket verification
+  ansible.builtin.debug:
+    msg: |
+      🔍 Final Socket Verification:
+      {{ final_socket_check.stdout | default('No output') }}
+
+- name: Final SQLite access verification
+  ansible.builtin.shell:
+    cmd: sudo -u dovecot sqlite3 /etc/postfix/sqlite/mailserver.db "SELECT COUNT(*) FROM virtual_domains;"
+  register: final_sqlite_test
+  ignore_errors: yes
+  changed_when: false
+
+- name: Test "{{ remote_username }}" user authentication specifically
+  ansible.builtin.shell:
+    cmd: sudo doveadm auth test {{ remote_username }}@{{ domain_name }} "{{ default_mail_users[0].password }}"
+  register: srvc_auth_test
+  ignore_errors: yes
+  changed_when: false
+  when: default_mail_users is defined and default_mail_users|length > 0
+
+- name: Display "{{ remote_username }}" authentication test result
+  ansible.builtin.debug:
+    msg: |
+      🔐 "{{ remote_username }}" User Authentication Test:
+      {% if srvc_auth_test is defined and srvc_auth_test.rc == 0 %}
+      ✅ SUCCESS: srvc@{{ domain_name }} authentication working
+      {% elif srvc_auth_test is defined %}
+      ❌ FAILED: srvc@{{ domain_name }} authentication failed
+      Return code: {{ srvc_auth_test.rc }}
+      Output: {{ srvc_auth_test.stdout | default('No output') }}
+      Error: {{ srvc_auth_test.stderr | default('No error') }}
+      {% else %}
+      ℹ️ SKIPPED: No srvc user configured
+      {% endif %}
+
+- name: Display final SQLite test result
+  ansible.builtin.debug:
+    msg: |
+      🎯 Final SQLite Access Test:
+      {% if final_sqlite_test.rc == 0 %}
+      ✅ SUCCESS: Dovecot can now access SQLite database
+      Domain count: {{ final_sqlite_test.stdout }}
+      {% else %}
+      ❌ STILL FAILING: Dovecot cannot access SQLite database
+      Error: {{ final_sqlite_test.stderr | default('Unknown error') }}
+      Return code: {{ final_sqlite_test.rc }}
+      {% endif %}
+
+- name: Clean existing mail users before creation (fixes potential corrupted users)
+  ansible.builtin.debug:
+    msg: |
+      🧹 Cleaning existing mail users to ensure fresh creation...
+      This prevents issues with corrupted password hashes or incomplete user data.
+
+- name: Remove existing default mail users to ensure clean creation
+  ansible.builtin.shell:
+    cmd: /usr/local/bin/mail-user-manager delete {{ item.email }}
+  loop: "{{ default_mail_users | default([]) }}"
+  register: user_deletion_results
+  ignore_errors: yes
+  changed_when: false
+
+- name: Create default mail users if specified (clean creation)
+  ansible.builtin.shell:
+    cmd: /usr/local/bin/mail-user-manager add {{ item.email }} {{ item.password }}
+  loop: "{{ default_mail_users | default([]) }}"
+  register: user_creation_results
+  ignore_errors: yes
+  changed_when: "'User added successfully' in user_creation_results.stdout"
+
+- name: Remove existing admin user to ensure clean creation
+  ansible.builtin.shell:
+    cmd: /usr/local/bin/mail-user-manager delete admin@{{ domain_name }}
+  register: admin_user_deletion
+  ignore_errors: yes
+  changed_when: false
+
+- name: Create admin user automatically (clean creation)
+  ansible.builtin.shell:
+    cmd: /usr/local/bin/mail-user-manager add admin@{{ domain_name }} {{ admin_mail_password | default('TempAdmin123!') }}
+  register: admin_user_creation
+  ignore_errors: yes
+  changed_when: "'User added successfully' in admin_user_creation.stdout"
+
+- name: List all created mail users
+  ansible.builtin.shell:
+    cmd: /usr/local/bin/mail-user-manager list
+  register: mail_users_list
+  changed_when: false
+
+- name: Display mail users information
+  ansible.builtin.debug:
+    msg: |
+      📧 Mail Users Status:
+      
+      {% if default_mail_users is defined %}
+      Custom users (delete + recreate):
+      {% for result in user_creation_results.results %}
+      - {{ result.cmd.split()[3] }}: {% if result.rc == 0 %}✅ Recreated successfully{% else %}❌ Failed to recreate ({{ result.stdout | default('Unknown error') }}){% endif %}
+      {% endfor %}
+      {% endif %}
+      
+      Admin user (delete + recreate):
+      {% if admin_user_creation.rc == 0 %}
+      ✅ admin@{{ domain_name }} recreated successfully
+      {% else %}
+      ❌ Failed to recreate admin@{{ domain_name }}: {{ admin_user_creation.stdout | default('Unknown error') }}
+      {% endif %}
+      
+      All users in database:
+      {{ mail_users_list.stdout | default('No users found') }}
+
+- name: Test admin user authentication
+  ansible.builtin.shell:
+    cmd: sudo doveadm auth test admin@{{ domain_name }} {{ admin_mail_password | default('TempAdmin123!') }}
+  register: admin_auth_test
+  ignore_errors: yes
+  changed_when: false
+
+- name: Display admin authentication test
+  ansible.builtin.debug:
+    msg: |
+      🔐 Admin User Authentication Test:
+      {% if admin_auth_test.rc == 0 %}
+      ✅ SUCCESS: admin@{{ domain_name }} authentication working
+      {% else %}
+      ❌ FAILED: admin@{{ domain_name }} authentication failed
+      Output: {{ admin_auth_test.stdout | default('No output') }}
+      {% endif %}
+
+- name: Create default mail aliases if specified  
+  ansible.builtin.shell:
+    cmd: /usr/local/bin/mail-user-manager alias {{ item.source }} {{ item.destination }}
+  loop: "{{ default_mail_aliases | default([]) }}"
+  register: alias_creation_results
+  ignore_errors: yes
+  changed_when: "'Alias added successfully' in alias_creation_results.stdout"
+
+- name: Display mail aliases status
+  ansible.builtin.debug:
+    msg: |
+      📮 Mail Aliases Status:
+      {% if default_mail_aliases is defined %}
+      {% for result in alias_creation_results.results %}
+      - {{ result.cmd.split()[3] }} → {{ result.cmd.split()[4] }}: {% if result.rc == 0 %}✅ Created{% else %}❌ Failed{% endif %}
+      {% endfor %}
+      {% else %}
+      ℹ️ No aliases configured
+      {% endif %}
+
+- name: Insert domain into virtual_domains
+  ansible.builtin.shell:
+    cmd: |
+      sqlite3 /etc/postfix/sqlite/mailserver.db << EOF
+      INSERT OR IGNORE INTO virtual_domains (name) VALUES ('{{ domain_name }}');
+      EOF
+
+- name: Configure Postfix main.cf
+  ansible.builtin.template:
+    src: postfix_main.cf.j2
+    dest: /etc/postfix/main.cf
+    owner: root
+    group: root
+    mode: '0644'
+    backup: yes
+  notify: restart postfix
+
+- name: Configure Postfix master.cf
+  ansible.builtin.template:
+    src: postfix_master.cf.j2
+    dest: /etc/postfix/master.cf
+    owner: root
+    group: root
+    mode: '0644'
+    backup: yes
+  notify: restart postfix
+
+- name: Configure Postfix SQLite lookups
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "/etc/postfix/{{ item }}"
+    owner: root
+    group: postfix
+    mode: '0640'
+  loop:
+    - sqlite-virtual-mailbox-domains.cf
+    - sqlite-virtual-mailbox-maps.cf
+    - sqlite-virtual-alias-maps.cf
+  notify: restart postfix
+
+- name: Configure Dovecot
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "/etc/dovecot/{{ item }}"
+    owner: root
+    group: dovecot
+    mode: '0644'
+    backup: yes
+  loop:
+    - dovecot.conf
+    - conf.d/10-mail.conf
+    - conf.d/10-auth.conf
+    - conf.d/auth-sql.conf.ext
+    - dovecot-sql.conf.ext
+  notify: restart dovecot
+
+- name: Generate DKIM key for domain
+  ansible.builtin.shell:
+    cmd: "opendkim-genkey -t -s mail -d {{ domain_name }}"
+    chdir: "/etc/opendkim/keys"
+    creates: "/etc/opendkim/keys/mail.private"
+
+- name: Configure OpenDKIM
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "/etc/opendkim/{{ item }}"
+    owner: opendkim
+    group: opendkim
+    mode: '0644'
+  loop:
+    - opendkim.conf
+    - TrustedHosts
+    - KeyTable
+    - SigningTable
+  notify: restart opendkim
+
+- name: Configure Fail2ban for mail services
+  ansible.builtin.template:
+    src: jail.local.j2
+    dest: /etc/fail2ban/jail.local
+    owner: root
+    group: root
+    mode: '0644'
+  notify: restart fail2ban
+
+- name: Set proper permissions on DKIM key
+  ansible.builtin.file:
+    path: "/etc/opendkim/keys/mail.private"
+    owner: opendkim
+    group: opendkim
+    mode: '0600'
+
+- name: Create domain hosts access file for Postfix
+  ansible.builtin.template:
+    src: domain_hosts.j2
+    dest: /etc/postfix/domain_hosts
+    owner: root
+    group: postfix
+    mode: '0644'
+  notify: restart postfix
+
+- name: Create whitelist IPs access file for Postfix
+  ansible.builtin.template:
+    src: whitelist_ips.j2
+    dest: /etc/postfix/whitelist_ips
+    owner: root
+    group: postfix
+    mode: '0644'
+  notify: restart postfix
+
+- name: Generate Postfix hash databases
+  ansible.builtin.shell:
+    cmd: "postmap {{ item }}"
+  loop:
+    - /etc/postfix/domain_hosts
+    - /etc/postfix/whitelist_ips
+  notify: restart postfix
+
+- name: Ensure vmail user has correct UID/GID
+  ansible.builtin.user:
+    name: vmail
+    uid: 5000
+    group: vmail
+    home: /var/mail
+    shell: /usr/sbin/nologin
+    system: yes
+
+- name: Ensure vmail group has correct GID
+  ansible.builtin.group:
+    name: vmail
+    gid: 5000
+    system: yes
+
+- name: Set correct ownership on mail directories
+  ansible.builtin.file:
+    path: /var/mail
+    owner: vmail
+    group: vmail
+    mode: '0755'
+    recurse: yes
+
+- name: Deploy mail user management script
+  ansible.builtin.template:
+    src: mail-user-manager.sh.j2
+    dest: /usr/local/bin/mail-user-manager
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Wait for database to be fully ready
+  ansible.builtin.pause:
+    seconds: 3
+
+- name: Remove existing test user to ensure clean creation
+  ansible.builtin.shell:
+    cmd: /usr/local/bin/mail-user-manager delete test@{{ domain_name }}
+  register: test_user_deletion
+  ignore_errors: yes
+  changed_when: false
+
+- name: Create test user for validation (clean creation)
+  ansible.builtin.shell:
+    cmd: /usr/local/bin/mail-user-manager add test@{{ domain_name }} TestPass123
+  register: test_user_creation
+  ignore_errors: yes
+  changed_when: false
+
+- name: Verify test user was created in database
+  ansible.builtin.shell:
+    cmd: sqlite3 /etc/postfix/sqlite/mailserver.db "SELECT email FROM virtual_users WHERE email='test@{{ domain_name }}';"
+  register: user_verification
+  ignore_errors: yes
+  changed_when: false
+
+- name: Test Dovecot configuration
+  ansible.builtin.shell:
+    cmd: doveconf auth_mechanisms
+  register: dovecot_auth_mechanisms
+  ignore_errors: yes
+  changed_when: false
+
+- name: Test Dovecot SQL connection
+  ansible.builtin.shell:
+    cmd: doveadm auth cache flush
+  register: dovecot_cache_flush
+  ignore_errors: yes
+  changed_when: false
+
+- name: Test Dovecot authentication with test user
+  ansible.builtin.shell:
+    cmd: sudo doveadm auth test test@{{ domain_name }} TestPass123
+  register: dovecot_auth_test
+  ignore_errors: yes
+  changed_when: false
+
+- name: Remove test user after validation
+  ansible.builtin.shell:
+    cmd: /usr/local/bin/mail-user-manager delete test@{{ domain_name }}
+  ignore_errors: yes
+  changed_when: false
+
+- name: Display comprehensive authentication test results
+  ansible.builtin.debug:
+    msg: |
+      🔐 Mail Authentication Test Results:
+      
+      User Creation:
+      {% if test_user_creation.rc == 0 %}
+      ✅ Test user created successfully
+      {% else %}
+      ❌ Failed to create test user: {{ test_user_creation.stdout | default('Unknown error') }}
+      {% endif %}
+      
+      Database Verification:
+      {% if user_verification.rc == 0 and user_verification.stdout != '' %}
+      ✅ Test user found in database: {{ user_verification.stdout }}
+      {% else %}
+      ❌ Test user not found in database
+      {% endif %}
+      
+      Dovecot Configuration:
+      - Auth mechanisms: {{ dovecot_auth_mechanisms.stdout | default('Not available') }}
+      
+      Authentication Test:
+      {% if dovecot_auth_test.rc == 0 %}
+      ✅ SUCCESS: Dovecot authentication is working correctly
+      {% else %}
+      ❌ FAILED: Dovecot authentication failed
+      Return code: {{ dovecot_auth_test.rc }}
+      Output: {{ dovecot_auth_test.stdout | default('No output') }}
+      Error: {{ dovecot_auth_test.stderr | default('No error message') }}
+      {% endif %}
+      
+      {% if dovecot_auth_test.rc != 0 %}
+      🔧 Troubleshooting tips:
+      1. Check SQLite permissions: ls -la /etc/postfix/sqlite/mailserver.db
+      2. Verify Dovecot config: doveconf -n | grep -E "(auth|sql)"
+      3. Check Dovecot logs: journalctl -u dovecot --since "5 minutes ago"
+      4. Manual auth test: doveadm auth test username password
+      {% endif %}
+
+- name: Install nginx and PHP for webmail
+  ansible.builtin.apt:
+    pkg:
+      - nginx
+      - php-fpm
+      - php-mysql
+      - php-sqlite3
+      - php-imap
+      - php-mbstring
+      - php-xml
+      - php-zip
+      - php-curl
+      - php-json
+      - php-intl
+      - unzip
+      - wget
+    state: present
+    update_cache: yes
+
+- name: Create webmail directory
+  ansible.builtin.file:
+    path: /var/www/webmail
+    state: directory
+    owner: www-data
+    group: www-data
+    mode: '0755'
+
+- name: Download Roundcube webmail
+  ansible.builtin.get_url:
+    url: https://github.com/roundcube/roundcubemail/releases/download/1.6.5/roundcubemail-1.6.5-complete.tar.gz
+    dest: /tmp/roundcube.tar.gz
+    mode: '0644'
+
+- name: Extract Roundcube
+  ansible.builtin.unarchive:
+    src: /tmp/roundcube.tar.gz
+    dest: /tmp/
+    remote_src: yes
+    creates: /tmp/roundcubemail-1.6.5
+
+- name: Copy Roundcube to webmail directory
+  ansible.builtin.shell:
+    cmd: cp -r /tmp/roundcubemail-1.6.5/* /var/www/webmail/
+    creates: /var/www/webmail/index.php
+
+- name: Set webmail directory permissions
+  ansible.builtin.file:
+    path: /var/www/webmail
+    owner: www-data
+    group: www-data
+    recurse: yes
+
+- name: Set writable permissions for Roundcube temp and logs
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: www-data
+    group: www-data
+    mode: '0755'
+  loop:
+    - /var/www/webmail/temp
+    - /var/www/webmail/logs
+
+- name: Configure Roundcube
+  ansible.builtin.template:
+    src: roundcube_config.inc.php.j2
+    dest: /var/www/webmail/config/config.inc.php
+    owner: www-data
+    group: www-data
+    mode: '0644'
+
+- name: Configure nginx for webmail
+  ansible.builtin.template:
+    src: webmail_nginx.conf.j2
+    dest: /etc/nginx/sites-available/webmail
+    owner: root
+    group: root
+    mode: '0644'
+  notify: restart nginx
+
+- name: Enable webmail site
+  ansible.builtin.file:
+    src: /etc/nginx/sites-available/webmail
+    dest: /etc/nginx/sites-enabled/webmail
+    state: link
+  notify: restart nginx
+
+- name: Remove default nginx site
+  ansible.builtin.file:
+    path: /etc/nginx/sites-enabled/default
+    state: absent
+  notify: restart nginx
+
+- name: Start and enable nginx
+  ansible.builtin.systemd:
+    name: nginx
+    state: started
+    enabled: yes
+
+- name: Create Roundcube directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: www-data
+    group: www-data
+    mode: '0755'
+  loop:
+    - /var/www/webmail/db
+    - /var/www/webmail/temp
+    - /var/www/webmail/logs
+
+- name: Create empty Roundcube database file
+  ansible.builtin.file:
+    path: /var/www/webmail/db/roundcube.db
+    state: touch
+    owner: www-data
+    group: www-data
+    mode: '0644'
+
+- name: Initialize Roundcube database schema
+  ansible.builtin.shell:
+    cmd: |
+      cd /var/www/webmail
+      sqlite3 db/roundcube.db < SQL/sqlite.initial.sql
+    creates: /var/www/webmail/db/.schema_initialized
+
+- name: Mark database initialization as complete
+  ansible.builtin.file:
+    path: /var/www/webmail/db/.schema_initialized
+    state: touch
+    owner: www-data
+    group: www-data
+    mode: '0644'
+
+- name: Set correct ownership for Roundcube database
+  ansible.builtin.file:
+    path: /var/www/webmail/db/roundcube.db
+    owner: www-data
+    group: www-data
+    mode: '0644'
+
+- name: Check available PHP-FPM services
+  ansible.builtin.shell:
+    cmd: "systemctl list-unit-files | grep php.*fpm | head -1 | awk '{print $1}'"
+  register: php_fpm_service
+  changed_when: false
+
+- name: Start and enable PHP-FPM (auto-detected)
+  ansible.builtin.systemd:
+    name: "{{ php_fpm_service.stdout }}"
+    state: started
+    enabled: yes
+  when: php_fpm_service.stdout != ""
+
+- name: Fallback - try common PHP-FPM service names
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: started
+    enabled: yes
+  loop:
+    - php-fpm
+    - php8.3-fpm
+    - php8.2-fpm
+    - php8.1-fpm
+    - php8.0-fpm
+    - php7.4-fpm
+  register: php_fallback_result
+  ignore_errors: yes
+  when: php_fpm_service.stdout == ""
+
+- name: Clean up temporary files
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /tmp/roundcube.tar.gz
+    - /tmp/roundcubemail-1.6.5 

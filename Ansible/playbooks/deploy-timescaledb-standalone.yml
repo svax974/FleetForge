@@ -1,0 +1,50 @@
+---
+# Déploiement d'un VPS NEUF portant la base d'indicateurs.
+#
+#   ./play.sh papanglabs deploy-timescaledb-standalone.yml
+#
+# Différence avec `deploy-timescaledb.yml`, et c'est la SEULE : ce playbook
+# ajoute la phase de bootstrap — connexion en root sur le port 22, migration
+# vers le port SSH du parc, création de l'utilisateur de service. Le
+# déploiement de la base lui-même est importé, il n'est pas recopié.
+#
+# Pourquoi un import et non une copie : les deux fichiers contenaient la même
+# liste de rôles et avaient DÉJÀ divergé — `timescaledb-backup-install` n'avait
+# été ajouté que dans celui-ci. Une base déployée par l'autre chemin se serait
+# donc retrouvée sans sauvegarde, sans que rien ne le signale.
+#
+# Le contrôle préalable `host-preflight` n'est volontairement PAS joué avant la
+# phase 1 : il se connecte avec l'utilisateur de service sur le port SSH du
+# parc, qui n'existent pas encore sur une machine vierge. Il tourne en tête du
+# playbook importé, une fois le bootstrap passé.
+
+# ── Phase 1 : socle de la machine (root, port 22 → port du parc) ─────────────
+- name: Phase 1 — Base server setup
+  hosts: timescale
+  remote_user: root
+  gather_facts: false
+  # Même liste, même ordre et même répartition de `become` que
+  # `setup-server.yml` — voir les commentaires qui les expliquent là-bas.
+  roles:
+    - { role: security-ssh, become: true }
+    - { role: set-hostname, become: true }
+    - { role: install-tools, become: true }
+    - { role: install-python, become: true }
+    - { role: install-docker, become: true }
+    - { role: security-create-user, become: true }
+    - { role: install-scripts, become: true }
+    - { role: exporter-sys-install, become: true }
+
+  post_tasks:
+    # Témoin d'exécution, cherché par `host-preflight` au début de chaque
+    # déploiement pour savoir si la machine a été bootstrapée.
+    - name: Record the bootstrap
+      ansible.builtin.include_role:
+        name: host-preflight
+        tasks_from: stamp
+      vars:
+        stamp_name: setup-server
+        stamp_detail: "bootstrap via deploy-timescaledb-standalone.yml"
+
+# ── Phase 2 : la base, ses sauvegardes et sa supervision ─────────────────────
+- ansible.builtin.import_playbook: deploy-timescaledb.yml

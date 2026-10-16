@@ -1,0 +1,113 @@
+---
+# Node display name — visible on https://telemetry.polkadot.io
+# Override via FleetForge UI extra vars: astar_node_name=MyNode
+astar_node_name: "AstarNode"
+
+# Network chain: astar | shiden | shibuya
+astar_chain: "astar"
+
+# System user that runs the service
+astar_user: "astar"
+
+# Blockchain data directory
+astar_data_dir: "/var/lib/astar"
+
+# Binary install path
+astar_binary: "/usr/local/bin/astar-collator"
+
+# GitHub repository for release fetching
+astar_github_repo: "AstarNetwork/Astar"
+
+# Architecture — change to ubuntu-aarch64 for ARM servers
+astar_arch: "ubuntu-x86_64"
+
+# Ports Prometheus natifs, un par couche : le collator embarque un nœud de
+# relais complet et publie ses métriques séparément. Définis ici et non dans
+# `astar-monitoring` : c'est l'unité systemd qui décide sur quoi le nœud écoute,
+# la supervision ne fait que s'y raccorder. Deux valeurs à tenir alignées à la
+# main, c'est la garantie qu'elles divergeront un jour et que la cible pointera
+# dans le vide.
+#
+# À surcharger dans l'inventaire pour un hôte derrière NAT partagé (hub, nuc) :
+# la machine doit écouter sur le port réellement redirigé vers elle. (node_exporter,
+# lui, écoute toujours sur 9100 et ne distingue que le port de scrape.)
+astar_prometheus_port: 9615
+astar_prometheus_port_relay: 9616
+
+# ── Relais : embarqué ou interrogé par RPC ────────────────────────────────────
+# Vide (défaut) : le collator embarque un nœud de relais COMPLET, qui synchronise
+# et stocke la chaîne Polkadot pour son propre compte.
+# Non vide : `--relay-chain-rpc-urls` — le collator n'embarque plus qu'un nœud de
+# relais minimal et lit les données de relais sur ces endpoints. La description
+# du drapeau est explicite : « Creates a less resource-hungry node ».
+#
+# Ce que cela ne change PAS : la parachaîne Astar garde `--pruning archive` et sa
+# base de 925 Go. L'état historique d'Astar vit là, pas dans le relais — lequel
+# ne sert qu'au consensus et à la finalité. Passer le relais en RPC ne touche
+# donc en rien la garantie d'archive.
+#
+# Pourquoi sur hub (15/08/2026) : le collator était tué par l'OOM killer toutes
+# les ~18 min (90 redémarrages, 14,8 Go de RSS sur 15 Go de RAM). Spirale fermée
+# sur elle-même — le relais n'avait jamais le temps de synchroniser (0 bloc
+# importé en 24 h, 10,5 M de retard), donc la parachaîne ne finalisait plus,
+# donc ses 7,6 M de blocs non finalisés saturaient la RAM, donc OOM. On payait
+# le coût complet d'un nœud de relais sans en tirer le moindre service.
+#
+# Le relais doit rester LÉGER : ne JAMAIS lui passer `--pruning archive`. Sa base
+# sur disque est en `Constrained(256)` et un relais Polkadot en archive pèse
+# plusieurs To, contre 46 Go ici. Le drapeau a d'ailleurs figuré de longue date
+# dans le gabarit sans effet, jusqu'à ce qu'un redémarrage l'active et mette le
+# nœud en boucle de crash :
+#   Error: StateDatabase("Incompatible pruning modes
+#     [stored: Constrained(max_blocks: 256); requested: ArchiveAll]")
+#
+# Quatre opérateurs DISTINCTS, essayés dans l'ordre : la redondance vient de la
+# diversité d'exploitant, pas du nombre d'URL. Tous vérifiés depuis hub par une
+# vraie poignée de main WebSocket (`101 Switching Protocols`) le 15/08/2026 —
+# un `curl` en HTTP/2 répond 405 et ne prouve rien, l'upgrade exige HTTP/1.1.
+# Contrepartie assumée : si TOUS tombent, la parachaîne cesse de progresser.
+astar_relay_rpc_urls: []
+
+# ── Type de pool de transactions ──────────────────────────────────────────────
+# Vide (défaut) : on laisse le binaire choisir — `fork-aware` sur 5.48.
+# `single-state` : pool historique, sans gestion de vues.
+#
+# Pourquoi sur hub (15/08/2026). Une fois l'OOM réglé, le nœud tenait debout
+# mais n'importait RIEN : 4 blocs en 38 min, `best` figé, retard sur la chaîne
+# passant de 106 à 301 blocs — il s'éloignait de ~300 blocs/heure au lieu de
+# rattraper. Le journal donne le poste de coût :
+#   [Parachain] maintain txs=(1, 0) a=2 i=0 views=[...] duration=638.944004593s
+#   [Parachain] maintain txs=(1, 0) a=2 i=1 views=[...] duration=421.104832075s
+# Dix minutes de maintenance du pool pour UNE transaction, et cette maintenance
+# est sérialisée avec l'import : elle cadence tout. Le `views=[...]` désigne le
+# pool fork-aware, dont la gestion de vues doit raisonner sur l'arbre non
+# finalisé — ici 7,6 M de blocs. Le pool historique n'a pas cette notion.
+#
+# Le compromis est très favorable ICI : ce nœud tourne en `Role: FULL`, il ne
+# produit pas de blocs. Son pool de transactions ne lui sert qu'à relayer
+# celles qu'on lui soumet par RPC. Sur un nœud RÉELLEMENT collateur, cet
+# arbitrage serait à réexaminer.
+#
+# Ce défaut était invisible avant : le nœud mourait toutes les 18 min, personne
+# ne pouvait observer qu'il n'importait rien entre deux morts. Le passage du
+# relais en RPC ne l'a pas causé, il l'a rendu mesurable.
+#
+# RÉSULTAT MESURÉ (15/08/2026, 3 h après application) :
+#   import   0,0 bps            -> 8,5 bps, puis `Idle` (à jour, suit la chaîne)
+#   maintain 639 s et 421 s     -> plus AUCUNE ligne journalisée
+#   best     figé à 14 286 454  -> = sync_target
+#   finalized 6 639 809         -> 14 288 654 : les 7,6 M de blocs non finalisés
+#                                  ont été purgés, l'écart est retombé à 5 blocs
+# La finalité s'est débloquée d'elle-même une fois l'import rétabli : c'est lui
+# qui empêchait d'atteindre les hauteurs finalisables, et sa reprise a vidé
+# l'arriéré qui saturait la mémoire.
+#
+# Réserve d'honnêteté : le binaire est passé de 5.48.0 à 5.50.0 dans le même
+# créneau. L'effondrement porte précisément sur la métrique visée par ce
+# drapeau, ce qui plaide fortement pour lui, mais les deux variables n'ont pas
+# été isolées. À garder en tête avant d'en déduire une règle générale.
+#
+# À surveiller : la RSS est remontée à 8,9 Go une fois le nœud réellement au
+# travail (contre 5,2 Go à l'arrêt, 14,8 Go du temps de l'OOM). Vérifier que
+# cela se stabilise et ne redérive pas vers le plafond des 15 Go.
+astar_pool_type: ""

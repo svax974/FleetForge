@@ -1,0 +1,13 @@
+---
+# Remove generic system utilities installed by tools-install.
+
+- name: Remove system utilities
+  ansible.builtin.apt:
+    pkg:
+      - curl
+      - wget
+      - git
+      - htop
+      - unzip
+      - jq
+    state: absent

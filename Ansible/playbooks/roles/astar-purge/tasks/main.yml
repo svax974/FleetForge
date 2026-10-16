@@ -1,0 +1,76 @@
+---
+# Purge Astar node — removes everything including blockchain data.
+# WARNING: the full chain (~500 GB in `--pruning archive`) will need to be
+# re-synced after reinstall, which takes days.
+#
+# Garde-fou explicite : ce rôle détruit des données irrécupérables autrement
+# qu'en resynchronisant. Il refuse de s'exécuter sans confirmation, comme
+# `rpcbtc-purge`.
+#   ./play.sh papanglabs purge-astar.yml -e confirm=yes
+
+- name: Refuse to purge without explicit confirmation
+  ansible.builtin.assert:
+    that:
+      - (confirm | default('')) == 'yes'
+    fail_msg: >-
+      Purge refusée. /var/lib/astar contient la chaîne complète (archive) :
+      sa suppression impose une resynchronisation de plusieurs jours.
+      Relancer avec `-e confirm=yes` si c'est bien l'intention.
+
+- name: Remove the Astar Prometheus target
+  ansible.builtin.file:
+    path: >-
+      /home/{{ remote_username }}/prometheus/prometheus-configs/{{ astarmon_job
+      | default('node-astar') }}/{{ inventory_hostname }}.json
+    state: absent
+  delegate_to: "{{ prometheus_host }}"
+  become: true
+  when: prometheus_host is defined and prometheus_host in hostvars
+
+- name: Stop and disable astar service
+  ansible.builtin.systemd:
+    name: astar
+    state: stopped
+    enabled: no
+  ignore_errors: true
+
+- name: Remove systemd service file
+  ansible.builtin.file:
+    path: /etc/systemd/system/astar.service
+    state: absent
+
+- name: Reload systemd daemon
+  ansible.builtin.systemd:
+    daemon_reload: yes
+
+- name: Remove astar binary
+  ansible.builtin.file:
+    path: /usr/local/bin/astar-collator
+    state: absent
+
+- name: Remove blockchain data directory
+  ansible.builtin.file:
+    path: /var/lib/astar
+    state: absent
+
+- name: Remove astar system user
+  ansible.builtin.user:
+    name: astar
+    state: absent
+    remove: no
+
+# Les deux ports, pas seulement 9615 : le relais est scrapé sur 9616 depuis
+# `astar-monitoring`, et l'ancienne version de ce rôle l'ignorait.
+# `from_ip` est indispensable : la règle a été posée avec une source, un delete
+# sans source ne matche pas et laisse l'ouverture en place.
+- name: Remove the Prometheus scrape rules
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    port: "{{ item }}"
+    from_ip: "{{ hostvars[prometheus_host]['ansible_host'] }}"
+    delete: true
+  loop: ["9615", "9616"]
+  become: true
+  when: prometheus_host is defined and prometheus_host in hostvars
+  ignore_errors: true

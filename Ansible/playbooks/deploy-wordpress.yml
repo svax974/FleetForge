@@ -1,0 +1,54 @@
+---
+# Site public WordPress (www.web3c.cc) : Apache + MySQL + WordPress sur l'entrée
+# `www`, CNAME Cloudflare, pare-feu, vhost sur les proxies et sonde.
+# Le CONTENU du site n'est pas installé ici (WordPress vierge) :
+#   ./play.sh web3c restore-wordpress.yml --limit www -e wp_restore_db_file=… -e wp_restore_files_file=…
+#
+#   ./play.sh web3c deploy-wordpress.yml
+#   ./play.sh web3c deploy-wordpress.yml --tags proxy-conf    # rejouer seulement le vhost
+#   ./play.sh web3c deploy-wordpress.yml --tags monitoring    # réarmer la supervision
+
+# ── Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ───────────────────────
+- name: Contrôle préalable
+  hosts: www
+  remote_user: "{{ remote_username }}"
+  roles:
+    - role: host-preflight
+      preflight_require_docker: false
+
+- name: Install Apache2 + MySQL + WordPress (+ CNAME)
+  hosts: www
+  remote_user: "{{ remote_username }}"
+  become: true
+  become_method: sudo
+  roles:
+    - wordpress-install
+
+# Process natif : ufw filtre RÉELLEMENT le port. Le rôle échoue si ufw est inactif.
+- name: WordPress firewall
+  hosts: www
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - wordpress-security
+
+# Pousse SEULEMENT sites-enabled/www.conf sur chaque proxy (reload).
+- name: Vhost WordPress sur les proxies
+  hosts: proxies
+  remote_user: "{{ remote_username }}"
+  become: true
+  tags: [proxy-conf]
+  tasks:
+    - name: Deploy just the www vhost
+      ansible.builtin.include_role:
+        name: proxy-update-web3c
+        tasks_from: deploy-one-site
+      vars:
+        site: www.conf
+
+# ── Supervision (OBLIGATOIRE, voir CLAUDE.md) ──────────────────────────────
+- name: Supervision du service
+  hosts: www
+  remote_user: "{{ remote_username }}"
+  roles:
+    - wordpress-monitoring

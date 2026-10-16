@@ -1,0 +1,10 @@
+---
+# Retire le service et le binaire. CONSERVE le code livré, l'arbre Ansible, la
+# base de données et le mot de passe d'accès — c'est `fleetforge-purge` qui
+# les supprime.
+ff_user: "{{ remote_username }}"
+ff_dir: "/home/{{ remote_username }}/fleetforge"
+ff_port: "{{ app_port | default(9750) }}"
+ff_job: fleetforge
+ff_remote_key_name: "{{ ssh_key | default('id_fleetforge') }}"
+ff_passphrase_file: "/home/{{ remote_username }}/fleetforge/.key-passphrase"

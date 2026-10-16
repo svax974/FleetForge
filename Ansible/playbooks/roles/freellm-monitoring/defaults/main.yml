@@ -1,0 +1,19 @@
+---
+# Supervision de FreeLLMAPI.
+#
+# FreeLLMAPI n'expose aucun endpoint Prometheus (lu le 18/09/2026,
+# tashfeenahmed/freellmapi) : sonde déclarative pour svcprobe (port 9110),
+# plus un collecteur qui interroge /v1/models — un proxy sans clé fournisseur
+# importée répond parfaitement à /api/ping (le conteneur tourne) et pourtant
+# ne sert plus aucune requête réelle, état qu'aucune sonde binaire ne peut
+# voir.
+
+freellm_install_dir: "/home/{{ remote_username }}/freellmapi"
+# Repli si la découverte (tasks/main.yml) échoue : PROBABLEMENT faux — Compose
+# ne nomme pas le conteneur juste « freellmapi » (v2 : « <projet>-freellmapi-1 »,
+# v1 : « <projet>_freellmapi_1 »). Gardé comme valeur par défaut lisible plutôt
+# que vide, mais tasks/main.yml l'écrase par le nom RÉEL avant de déployer la
+# sonde.
+freellm_container: freellmapi
+freellm_port: "{{ app_port | default(3001) }}"
+freellm_url: "http://127.0.0.1:{{ freellm_port }}"

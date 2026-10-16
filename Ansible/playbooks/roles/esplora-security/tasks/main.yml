@@ -1,0 +1,28 @@
+---
+# Filtre l'API REST Esplora : accessible depuis les hôtes du parc et la
+# whitelist opérateur uniquement (même liste que le vhost proxy, voir
+# CLAUDE.md § « Obligation DNS + vhost » — un jeton applicatif serait un
+# durcissement additionnel, pas un substitut). Jamais ouvert au monde : ni
+# ufw ici, ni le vhost (proxy-update-papang/templates/sites-enabled/esplora.conf)
+# n'appliquent de `allow` plus large.
+
+- name: Allow the Esplora HTTP API from every inventory host
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ hostvars[item].ansible_host }}"
+    port: "{{ esplora_http_port }}"
+    comment: "Esplora API - {{ item }}"
+  loop: "{{ groups['all'] | default([]) }}"
+  when: hostvars[item].ansible_host is defined
+  become: true
+
+- name: Allow the Esplora HTTP API from the operator whitelist
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ item }}"
+    port: "{{ esplora_http_port }}"
+    comment: "Esplora API - whitelist"
+  loop: "{{ whitelist }}"
+  become: true

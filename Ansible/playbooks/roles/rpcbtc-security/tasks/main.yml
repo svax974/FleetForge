@@ -1,0 +1,46 @@
+---
+# Configure BTC Node firewall rules
+# Allow connections on ports "{{ proxy_port_rpc_btc }}" from proxies and whitelist
+- name: Allow RPC connections on BTC RPC ports "{{ proxy_port_rpc_btc }}" from proxies
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ hostvars[item].ansible_host }}"
+    port: "{{ proxy_port_rpc_btc }}"
+  loop: "{{ groups['proxies'] | default([]) }}"
+- name: Allow RPC connections on BTC RPC ports "{{ proxy_port_rpc_btc }}" from DBs
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ hostvars[item].ansible_host }}"
+    port: "{{ proxy_port_rpc_btc }}"
+  loop: "{{ groups['dbs'] | default([]) }}"
+- name: Allow RPC connections on BTC RPC ports "{{ proxy_port_rpc_btc }}" from whitelist
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ item }}"
+    port: "{{ proxy_port_rpc_btc }}"
+  with_items:
+    "{{ whitelist }}"
+
+- name: Allow RPC connections on BTC 8333 port from everywhere to allow checks from https://bitnodes.io/
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    port: "{{ proxy_port_btcd }}"
+#- name: Allow RPC connections on BTC 8333 port from proxies
+#  community.general.ufw:
+#    rule: allow
+#    proto: tcp
+#    from_ip: "{{ hostvars[item].ansible_host }}"
+#    port: "{{ proxy_port_btcd }}"
+#  loop: "{{ groups['proxies'] }}"
+#- name: Allow RPC connections on BTC 8333 from whitelist
+#  community.general.ufw:
+#    rule: allow
+#    proto: tcp
+#    from_ip: "{{ item }}"
+#    port: "{{ proxy_port_btcd }}"
+#  with_items:
+#    "{{ whitelist }}"

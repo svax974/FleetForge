@@ -1,0 +1,12 @@
+---
+# Retire OpenClaw : unité systemd --user, sonde et filtrage ufw du port.
+# Conserve la configuration, le workspace et le jeton de gateway (voir
+# purge-openclaw.yml).
+#
+#   ./play.sh web3c remove-openclaw.yml
+- name: Remove OpenClaw
+  hosts: openclaw
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - openclaw-remove

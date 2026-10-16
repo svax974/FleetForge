@@ -1,0 +1,221 @@
+---
+# Règles d'alerte Prometheus, partagées par les deux parcs.
+#
+# Ce rôle existe parce que les deux stacks de supervision sont installées par
+# des rôles différents — `prometheus-install` (papanglabs) et
+# `monitoring-install` (web3c) — alors que les règles d'alerte, elles, n'ont
+# aucune raison de diverger. Les dupliquer garantissait qu'un correctif posé
+# d'un côté manquerait de l'autre.
+
+prometheus_home: "/home/{{ remote_username }}/prometheus"
+
+# Image utilisée pour la validation `promtool` avant mise en place des règles.
+# Reprend celle de `prometheus-install` ; `monitoring-install` (web3c) fige la
+# même valeur en dur. Valider avec l'image qui SERVIRA les règles est le seul
+# moyen de valider la bonne version de PromQL.
+prometheus_image: "prom/prometheus:latest"
+
+# Groupes de règles chargés sur ce parc. Ne déclarer que ceux dont les
+# métriques existent réellement ici : une règle sans série à évaluer reste
+# `inactive` avec `health=ok`, exactement comme une règle qui veille.
+prom_alert_groups:
+  - availability
+  - resources
+  - dmarc
+
+# ── Seuils ────────────────────────────────────────────────────────────────────
+prom_alert_target_down_for: "5m"
+
+# Rétention anti-battement (`keep_firing_for`, Prometheus ≥ 2.42 — 3.11 ici).
+# Maintient une alerte active pendant cette durée APRÈS le rétablissement de la
+# condition. Un service qui repart puis retombe dans la fenêtre ne produit donc
+# qu'UNE alerte, au lieu d'un couple FIRING/RESOLVED par cycle.
+#
+# Ce n'est pas un confort : le 15/08/2026, le collator Astar de hub était tué
+# par l'OOM killer toutes les ~18 min (9 min hors ligne, 9 min en ligne). Cet
+# unique incident, continu, a produit 220 des 257 messages reçus — 111 pour la
+# parachaîne, 109 pour le relais. Noyées dedans, les six alertes qui portaient
+# une information NEUVE (small2, proxy2, disque de small1, DMARC) étaient
+# illisibles. Une supervision qui crie en permanence ne se lit plus, et c'est
+# une panne de supervision comme une autre.
+#
+# 15 min > la fenêtre de rétablissement observée (9 min) : l'alerte serait
+# restée unique et continue. À rehausser si un battement plus lent apparaît.
+# Le prix est une résolution annoncée avec ce retard — sans conséquence, la
+# valeur d'un RESOLVED n'étant pas dans sa fraîcheur.
+prom_alert_flap_grace: "15m"
+prom_alert_disk_free_pct: 10
+# Plancher absolu, combiné au pourcentage ci-dessus (voir le commentaire dans
+# alerts.yml.j2). En dessous de 50 Go, aucun de nos hôtes n'a de marge réelle,
+# quelle que soit la taille de son disque.
+prom_alert_disk_free_gb: 50
+
+# Types de systèmes de fichiers écartés de DiskSpaceLow. Doublon volontaire de
+# `node_exporter_fs_types_exclude` (rôle exporter-sys-install) : les séries
+# viennent d'exporters déployés à des dates différentes, et un seul en retard
+# suffit à faire sonner l'alerte. Regex PromQL (RE2), ancrée implicitement.
+#
+# Aucun antislash ici : PromQL applique à ses littéraux les règles
+# d'échappement de Go, où `\.` n'existe pas. Un échappement invalide fait
+# échouer le chargement du fichier de règles ENTIER, donc Prometheus refuse de
+# démarrer — pas de dégradation partielle, la supervision s'arrête net.
+# `fuse.*` dit ce qu'on veut, le point y valant n'importe quel caractère.
+prom_alert_disk_fstype_exclude: "tmpfs|overlay|squashfs|ramfs|iso9660|nsfs|fuse.*"
+
+# Occupation CPU moyenne (tous cœurs) au-delà de laquelle la machine est
+# considérée durablement chargée. 90 % laisse passer un pic de build ou de
+# compression ponctuel ; c'est le `for` de 15 min qui filtre le ponctuel, pas
+# le seuil — un seuil plus bas sonnerait sur toute tâche cron un peu lourde.
+prom_alert_cpu_busy_pct: 90
+
+# Mémoire utilisée (1 - MemAvailable/MemTotal) au-delà de laquelle la machine
+# est en pression mémoire durable. MemAvailable, pas MemFree : il tient déjà
+# compte du cache réclamable par le noyau, contrairement à MemFree qui
+# classerait en pénurie une machine dont la RAM libre sert simplement de cache
+# disque — son état normal.
+prom_alert_mem_used_pct: 90
+
+# Fraction du temps où un périphérique bloc a eu au moins une E/S en cours
+# (équivalent de `%util` dans iostat), au-delà de laquelle le disque est
+# considéré durablement saturé — c'est le goulot qui fait ramper tout le reste
+# (requêtes DB lentes, build qui traîne) sans qu'aucun processus ne soit lui-
+# même bloquant.
+prom_alert_disk_busy_pct: 90
+
+# Débit soutenu (réception + émission cumulées) au-delà duquel une interface
+# réseau physique mérite d'être regardée. AUCUNE connaissance de la capacité
+# réelle du lien n'entre ici — contrairement à DiskSpaceLow (pourcentage ET
+# volume absolu), il n'existe pas de "capacité nominale" fiable à interroger
+# pour une interface réseau. C'est donc un plancher absolu unique, choisi
+# nettement en dessous du gigabit qu'offrent la plupart des liens Contabo de ce
+# parc : un avertissement à creuser, pas une alarme de capacité. Un hôte dont
+# le trafic normal dépasse ce seuil (ex. un futur nœud très sollicité) doit le
+# relever en host_vars plutôt que d'apprendre à ignorer l'alerte.
+prom_alert_netdev_mbps: 500
+
+# Unités systemd exclues de l'alerte SystemdUnitFailed.
+# systemd-networkd-wait-online échoue au boot sur la plupart de nos machines
+# (interfaces non gérées par networkd) sans aucune conséquence : la laisser
+# remonter ferait sonner l'alerte en permanence, ce qui apprendrait à l'ignorer.
+prom_alert_systemd_ignored_units: "systemd-networkd-wait-online.service"
+
+# ── BRK / PapangMetrics (groupe `papangmetrics`) ──────────────────────────────
+# Job de référence pour les métriques BRK. L'API et l'ETL exposent les mêmes
+# séries (brk_up, brk_height, etl_block_lag) ; sans ce filtre chaque incident
+# BRK déclenche deux alertes jumelles, donc deux mails. L'ETL fait foi.
+prom_brk_source_job: papangmetrics-etl
+prom_alert_brk_down_for: "10m"
+prom_alert_brk_stalled_for: "30m"
+
+# ── Bases PostgreSQL / TimescaleDB (groupe `database`) ────────────────────────
+# Alimenté par `postgres-metrics.sh`, collecteur svcprobe PARTAGÉ par les rôles
+# timescaledb-monitoring, db-monitoring et dbfront-monitoring — chacun le lance
+# avec un préfixe de métrique différent (timescaledb_*, postgres_*,
+# postgres_front_*) faute de label commun. Les règles ci-dessous combinent donc
+# les trois préfixes par un `or` : celui qu'aucun rôle ne déploie sur le parc
+# courant contribue simplement une série vide, sans rendre la règle inactive
+# pour les deux autres.
+
+# Charge de connexions au-delà de laquelle la base est en risque de saturation.
+# La panne qui arrive sans prévenir : la base répond parfaitement jusqu'au
+# refus de toute connexion nouvelle. 80 % du plafond laisse le temps
+# d'intervenir avant ce mur.
+prom_alert_db_connections_pct: 80
+
+# Retard de rejeu toléré sur un réplica avant alerte. Quelques secondes sont
+# normales sous charge d'écriture ; au-delà de 5 min, un lecteur qui consulte
+# le réplica voit des données significativement périmées.
+prom_alert_db_replication_lag_seconds: 300
+
+# Durée tolérée pour la plus ancienne transaction ouverte. Au-delà, elle
+# bloque le VACUUM et fait gonfler la base sans qu'aucun autre symptôme ne
+# le signale — voir le commentaire de longest_transaction_seconds dans
+# postgres-metrics.sh.
+prom_alert_db_long_transaction_seconds: 3600
+
+# ── Sondes de service (groupes `services` et `certificates`) ─────────────────
+# Marge avant alerte sur une sonde en échec. 10 min laissent passer un
+# redémarrage ordinaire (mise à jour, rotation) sans réveiller personne.
+prom_alert_service_down_for: "10m"
+
+# Certbot renouvelle à 30 jours de l'échéance. Alerter à 21 jours laisse trois
+# semaines pour intervenir tout en prouvant que le renouvellement automatique
+# a bel et bien échoué — alerter à 30 jours sonnerait à chaque cycle normal.
+prom_alert_cert_expiry_seconds: 1814400
+
+# ── DMARC (groupe `dmarc`) ────────────────────────────────────────────────────
+# Messages non alignés tolérés sur la fenêtre glissante de l'exporter avant
+# alerte. 0 convient à un domaine qui ne porte que du courrier automatique émis
+# par un relais unique. Un domaine portant du courrier humain voit passer des
+# échecs légitimes (un transfert casse SPF) : y relever le seuil plutôt que de
+# laisser l'alerte sonner en permanence.
+prom_alert_dmarc_unaligned_threshold: 0
+
+# ── Nœud Bitcoin (groupe `bitcoin`) ───────────────────────────────────────────
+# Âge du dernier bloc validé au-delà duquel le nœud est considéré bloqué.
+# Le réseau produit un bloc toutes les ~10 min en moyenne, mais l'intervalle
+# est exponentiel : des écarts d'une heure sont banals, deux heures rares.
+# 7200 s laisse donc passer la variance normale sans laisser passer une panne.
+prom_alert_btc_block_age_seconds: 7200
+
+# En-têtes connus mais non validés. Quelques blocs d'écart sont normaux pendant
+# la validation ; une dizaine signale une validation qui décroche.
+prom_alert_btc_blocks_behind: 10
+
+# Bitcoin Core ouvre 8 à 10 connexions sortantes en régime normal. En dessous
+# de 3, le nœud est en train de s'isoler.
+prom_alert_btc_min_outbound_peers: 3
+
+# ── Nœud Astar (groupe `astar`) ───────────────────────────────────────────────
+# Écart toléré entre la tête de chaîne et le dernier bloc finalisé. Substrate
+# finalise avec quelques blocs de retard en régime normal ; au-delà de 30, la
+# finalité décroche réellement.
+prom_alert_astar_finality_lag: 30
+
+# Retard d'import toléré face aux blocs déjà connus. Une centaine de blocs se
+# rattrape en quelques minutes ; au-delà, le nœud ne suit plus.
+prom_alert_astar_sync_lag: 100
+
+# Substrate maintient plusieurs dizaines de pairs en régime normal. En dessous
+# de 5, le nœud est en train de s'isoler du réseau.
+prom_alert_astar_min_peers: 5
+
+# ── Nœuds Theta Edge (groupe `theta`) ─────────────────────────────────────────
+# Retard toléré sur la hauteur finalisée du réseau. ~6 s par bloc : 100 blocs
+# font une dizaine de minutes, au-delà le nœud ne suit plus.
+prom_alert_theta_lag_blocks: 100
+
+# ── Sauvegardes (groupe `backups`) ────────────────────────────────────────────
+# Fraîcheur maximale tolérée, en heures. Chaque valeur laisse passer une
+# exécution ratée sans sonner — au-delà, c'est une panne installée.
+# Surchargées par parc dans group_vars.
+backup_max_age_hours_brk: 240
+backup_max_age_hours_tsdb: 96
+
+# Fenêtre d'arrêt de service tolérée pendant une sauvegarde. La sauvegarde BRK
+# arrête l'indexation le temps de sa seconde passe : quelques minutes en régime
+# normal. Une heure signale une dérive (destination lente, magasin qui grossit).
+prom_alert_backup_downtime_seconds: 3600
+
+# Ancienneté tolérée du dernier rapport DMARC reçu. Remonté de 48 h à 72 h le
+# 25/08/2026 : sur mail.papanglabs.com, Google saute des jours (rapports du
+# 19, 21, 22 — pas de 20) sans que ce soit une panne. 48 h faisait flapper
+# l'alerte sur cette seule variabilité de cadence ; 72 h absorbe un jour sauté
+# tout en gardant la détection d'une interruption réelle.
+prom_alert_dmarc_stale_seconds: 259200
+
+# ── Relai SearXNG (groupe `searxng`) ──────────────────────────────────────────
+# Séries alimentées par le collecteur svcprobe du rôle `searxng-monitoring`,
+# qui ne joue une vraie requête qu'une fois toutes les cinq minutes. Les délais
+# ci-dessous sont donc comptés en MULTIPLES de cet intervalle, sinon l'alerte
+# se déclencherait sur un unique échec ponctuel — un moteur amont qui hoquette.
+prom_alert_searxng_failing_for: "15m"
+
+# Le relai répond mais ne rapporte rien : état plus grave que lent, et plus
+# discret. Une demi-heure de résultats vides n'est plus un incident passager.
+prom_alert_searxng_empty_for: "30m"
+
+# Moteurs amont muets tolérés sur une requête. Deux ou trois est la normale
+# d'un métamoteur ; au-delà, la qualité des résultats se dégrade avant toute
+# panne visible.
+prom_alert_searxng_max_unresponsive: 3

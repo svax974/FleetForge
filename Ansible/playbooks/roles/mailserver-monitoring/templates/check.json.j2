@@ -1,0 +1,14 @@
+{
+  "service": "postfix",
+  "up": {"kind": "systemd", "unit": "postfix"},
+  "extra_checks": [
+    {"name": "smtp", "kind": "tcp", "host": "127.0.0.1", "port": {{ mailmon_smtp_port }}},
+    {"name": "submission", "kind": "tcp", "host": "127.0.0.1", "port": {{ mailmon_submission_port }}},
+{% if mailmon_check_dovecot %}
+    {"name": "imaps", "kind": "tcp", "host": "127.0.0.1", "port": {{ mailmon_imap_port }}},
+    {"name": "dovecot", "kind": "systemd", "unit": "dovecot"},
+{% endif %}
+    {"name": "opendkim", "kind": "systemd", "unit": "opendkim"},
+    {"name": "exporter", "kind": "systemd", "unit": "prometheus-postfix-exporter"}
+  ]
+}

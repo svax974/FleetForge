@@ -1,0 +1,47 @@
+---
+# Deploy MTBridge on a Windows host via Task Scheduler.
+# Uploads install.ps1 from the control node (sibling MTBridge repo) and runs it.
+# Variables: mtbridge_github_token (vault, mandatory), mtbridge_api_key (vault, optional),
+#            mtbridge_autologon_password (vault, optional), app_port (inventory).
+
+- name: Ensure C:\Temp exists
+  ansible.windows.win_file:
+    path: C:\Temp
+    state: directory
+
+- name: Copy MTBridge install.ps1 to target host
+  ansible.windows.win_copy:
+    src: "{{ mtbridge_sources_dir }}/install.ps1"
+    dest: 'C:\Temp\mtbridge_install.ps1'
+
+- name: Run MTBridge installer (may take several minutes)
+  ansible.windows.win_powershell:
+    script: |
+      $params = @{
+          GithubToken   = '{{ mtbridge_github_token }}'
+          GithubUser    = '{{ mtbridge_github_user }}'
+          RepoName      = '{{ mtbridge_github_repo }}'
+          Branch        = '{{ mtbridge_github_branch }}'
+          InstallDir    = '{{ mtbridge_install_dir }}'
+          ServiceName   = '{{ mtbridge_service_name }}'
+          Port          = '{{ app_port }}'
+          PythonVersion = '{{ mtbridge_python_version }}'
+          AutoLogonUser = '{{ mtbridge_autologon_user }}'
+      }
+      {% if mtbridge_api_key is defined and mtbridge_api_key %}
+      $params['MtbridgeApiKey'] = '{{ mtbridge_api_key }}'
+      {% endif %}
+      {% if mtbridge_skip_autologon | bool %}
+      $params['SkipAutoLogon'] = $true
+      {% elif mtbridge_autologon_password is defined and mtbridge_autologon_password %}
+      $params['AutoLogonPassword'] = '{{ mtbridge_autologon_password }}'
+      {% endif %}
+      {% if mtbridge_skip_python | bool %}
+      $params['SkipPythonInstall'] = $true
+      {% endif %}
+      & 'C:\Temp\mtbridge_install.ps1' @params
+
+- name: Remove MTBridge installer from target host
+  ansible.windows.win_file:
+    path: 'C:\Temp\mtbridge_install.ps1'
+    state: absent

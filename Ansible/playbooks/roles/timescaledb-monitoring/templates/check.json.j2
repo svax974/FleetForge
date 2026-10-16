@@ -1,0 +1,12 @@
+{
+  "service": "timescaledb",
+  "up": {"kind": "docker", "container": "{{ tsdbmon_container }}"},
+  "extra_checks": [
+    {"name": "port", "kind": "tcp", "host": "127.0.0.1", "port": {{ tsdbmon_port }}}
+  ],
+  "metrics_command": [
+    "{{ svcprobe_lib_dir }}/postgres-metrics.sh",
+    "{{ tsdbmon_container }}", "{{ tsdbmon_user }}", "{{ tsdbmon_db }}", "timescaledb"
+  ],
+  "metrics_timeout": 15
+}

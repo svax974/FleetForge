@@ -1,0 +1,9 @@
+---
+searxng_container: searxng
+searxng_port: 8888
+searxng_home: "/home/{{ remote_username }}/searxng"
+searxng_image: "searxng/searxng:latest"
+# Dupliqué depuis searxng-install/defaults : ce rôle a besoin de cette
+# variable dans SES PROPRES tâches (retrait du CNAME) — même motif
+# qu'agenthub-purge.
+searxng_hostname: "searxng.{{ domain_name }}"

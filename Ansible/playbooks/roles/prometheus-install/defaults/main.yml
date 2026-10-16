@@ -1,0 +1,33 @@
+---
+# Prometheus (Docker) — collecte et stockage des métriques.
+# Contrairement à `monitoring-install` (stack web3c : Prometheus + Grafana sur
+# l'hôte `monitor`), ce rôle installe Prometheus seul, sur son propre hôte, et
+# déclare les règles d'alerte + le lien vers Alertmanager.
+
+prometheus_port: 9090
+prometheus_image: "prom/prometheus:latest"
+prometheus_retention: "90d"
+prometheus_home: "/home/{{ remote_username }}/prometheus"
+prometheus_scrape_interval: "60s"
+prometheus_evaluation_interval: "60s"
+
+# Répertoires de service discovery (un par job). Les rôles `exporter-*` y
+# déposent un JSON par hôte via `delegate_to: {{ prometheus_host }}`.
+prometheus_sd_jobs:
+  - exporter            # node_exporter système
+  - node-btc            # bitcoin exporter
+  - postfix             # prometheus-postfix-exporter (déposé par mailserver-setup)
+  - papangmetrics-api   # /metrics de l'API indicateurs
+  - papangmetrics-etl   # /metrics de l'ETL (porte brk_up et brk_height)
+  - dmarc               # exporter des rapports agrégés DMARC
+  - svcprobe            # sonde de service partagée (port 9110)
+
+# Cible Alertmanager. Même machine aujourd'hui, mais adressée par son nom
+# d'inventaire pour que la séparation reste triviale plus tard.
+alertmanager_host: alertmanager1
+alertmanager_port: 9093
+
+# Les seuils et le contenu des règles d'alerte appartiennent désormais à
+# `prometheus-alerts-update`, partagé avec la stack web3c. Les redéclarer ici
+# créerait deux sources de vérité pour la même valeur, avec une précédence
+# entre défauts de rôles qui n'est pas lisible à l'œil.

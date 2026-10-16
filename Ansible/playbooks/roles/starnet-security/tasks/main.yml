@@ -1,0 +1,130 @@
+---
+# Ordre imposé : ufw évalue ses règles séquentiellement et la première qui
+# matche gagne. Les autorisations doivent précéder le refus par défaut.
+
+- name: Fail early when the whitelist is empty
+  ansible.builtin.fail:
+    msg: >-
+      `whitelist` est vide : StarNet serait déployé avec un DENY sans exception
+      opérateur. Renseigner group_vars/web3c.yml.
+  when: (whitelist | default([])) | length == 0
+
+# Le relai et ce filtrage ne protègent QUE le port publié. Le jeton d'API étant
+# servi dans la page, un sidecar joignable autrement que par la boucle locale
+# serait une station pilotable — shell compris — par qui le trouve. Le code
+# amont écoute en dur sur 127.0.0.1 : ce contrôle garantit qu'une version
+# future ne l'a pas changé sans qu'on le voie.
+- name: Read the sockets bound on the sidecar port
+  ansible.builtin.command: "ss -ltnH 'sport = :{{ starnet_sidecar_port }}'"
+  become: true
+  register: starnet_sidecar_sockets
+  changed_when: false
+  check_mode: false
+
+- name: Verify the sidecar only listens on loopback
+  ansible.builtin.assert:
+    that:
+      - starnet_sidecar_sockets.stdout_lines
+        | map('split') | map(attribute=3)
+        | reject('match', '^(127\.0\.0\.1|\[::1\]|\[::ffff:127\.0\.0\.1\]):')
+        | list | length == 0
+    fail_msg: >-
+      Le sidecar StarNet écoute hors de la boucle locale sur le port
+      {{ starnet_sidecar_port }} : {{ starnet_sidecar_sockets.stdout_lines }}.
+      Ce port n'est couvert par aucune règle de ce rôle. Arrêter le service
+      (systemctl --user stop starnet) et vérifier la version déployée.
+    success_msg: "Sidecar confiné à la boucle locale ({{ starnet_sidecar_port }})."
+
+- name: Allow the StarNet port from the operator whitelist
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    port: "{{ starnet_port }}"
+    from_ip: "{{ item }}"
+    comment: "StarNet - whitelist"
+  loop: "{{ whitelist | default([]) }}"
+  become: true
+
+# Les proxies terminent le TLS et portent la restriction du vhost. Sans cette
+# ouverture le vhost répond 502 — ce qui ressemble à une application tombée.
+- name: Allow the StarNet port from the proxies
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    port: "{{ starnet_port }}"
+    from_ip: "{{ hostvars[item].ansible_host }}"
+    comment: "StarNet - proxy {{ item }}"
+  loop: "{{ groups['proxies'] | default([]) }}"
+  become: true
+
+- name: Allow the StarNet port from the VPNs
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    port: "{{ starnet_port }}"
+    from_ip: "{{ hostvars[item].ansible_host }}"
+    comment: "StarNet - vpn {{ item }}"
+  loop: "{{ groups['vpns'] | default([]) }}"
+  become: true
+
+- name: Allow the StarNet port from Prometheus
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    port: "{{ starnet_port }}"
+    from_ip: "{{ hostvars[prometheus_host].ansible_host }}"
+    comment: "StarNet - prometheus {{ prometheus_host }}"
+  become: true
+
+- name: Allow the StarNet port from the extra allowed CIDRs
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    port: "{{ starnet_port }}"
+    from_ip: "{{ item }}"
+    comment: "StarNet - extra"
+  loop: "{{ starnet_extra_allowed_cidrs }}"
+  become: true
+
+- name: Deny the StarNet port from anywhere else
+  community.general.ufw:
+    rule: deny
+    proto: tcp
+    port: "{{ starnet_port }}"
+    comment: "StarNet - default deny"
+  become: true
+
+# ── Contrôle ───────────────────────────────────────────────────────────────
+# Des règles posées restent décoratives tant qu'ufw est inactif — état qui ne
+# se lit qu'avec `ufw status` (constaté sur `hub` le 09/09/2026, cf.
+# openclaw-security). Ici on ÉCHOUE au lieu d'avertir : le port publié
+# donnerait sinon la main sur la station à tout Internet.
+- name: Check whether ufw is actually active
+  ansible.builtin.command: ufw status
+  become: true
+  register: starnet_ufw_state
+  changed_when: false
+  check_mode: false
+
+- name: Fail when ufw is inactive on this host
+  ansible.builtin.fail:
+    msg: >-
+      ufw est INACTIF sur {{ inventory_hostname }} ({{ ansible_host }}) : les
+      règles StarNet sont enregistrées mais aucune n'est appliquée, le port
+      {{ starnet_port }} est joignable sans filtrage — et la page qu'il sert
+      donne le contrôle complet de la station. Couper le relai
+      (`systemctl stop starnet-relay.socket`) jusqu'à activation d'ufw.
+  when:
+    - "'Status: active' not in starnet_ufw_state.stdout"
+    - not ansible_check_mode
+
+- name: Report the effective rules
+  ansible.builtin.shell: "ufw status numbered | grep -F '{{ starnet_port }}' || true"
+  become: true
+  register: starnet_ufw
+  changed_when: false
+  check_mode: false
+
+- name: Show them
+  ansible.builtin.debug:
+    var: starnet_ufw.stdout_lines

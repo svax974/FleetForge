@@ -1,0 +1,109 @@
+---
+# ÉTABLISSEMENT DE LA CONNEXION — à jouer avant toute autre tâche sur l'hôte.
+#
+# Ces tâches ne supposent RIEN de l'état de la machine : ni utilisateur de
+# service, ni paquet, ni même que le port du parc soit en place. Elles sont donc
+# utilisables aussi bien depuis `setup-server.yml` (machine vierge) que depuis
+# n'importe quel `deploy-*` via `host-preflight` — c'est tout l'objet de leur
+# extraction hors de `security-ssh`, où elles n'étaient atteignables qu'en
+# jouant le bootstrap complet.
+#
+# Trois issues, dans cet ordre :
+#   1. la clé passe                              → rien à faire ;
+#   2. elle échoue ET `initial_ssh_pass` existe  → bascule mot de passe ;
+#   3. elle échoue ET il n'y en a pas            → échec explicite, ici.
+#
+# ── Pourquoi `IdentitiesOnly` dans la bascule ─────────────────────────────────
+# Le premier échec ressemble rarement à « Permission denied » : ssh propose
+# TOUTES les clés de l'agent, et le serveur coupe au bout de son `MaxAuthTries`
+# (6 par défaut) avant même d'annoncer le mot de passe. D'où le message
+# trompeur « Too many authentication failures », qui décrit le trop-plein de
+# clés et non l'absence de la bonne. Vérifié le 19/08/2026 sur une machine
+# neuve, agent chargé de 6 clés :
+#
+#   ssh root@<ip>                      → Disconnected (Too many auth failures)
+#   ssh -o IdentitiesOnly=true root@<ip> → Permission denied (publickey,password)
+#
+# Seul le second atteint l'invite de mot de passe. La bascule force donc les
+# deux options ensemble : `IdentitiesOnly=yes` pour ne plus proposer les clés de
+# l'agent, `PreferredAuthentications=password` pour n'essayer que le mot de
+# passe. La première tentative est alors la bonne, quel que soit le contenu de
+# l'agent — un point qui ne doit dépendre ni du poste, ni de son ordre de clés.
+#
+# ── Pourquoi les TROIS noms de variable ──────────────────────────────────────
+# Le greffon de connexion `ssh` lit son mot de passe dans trois variables, et
+# les évalue DANS L'ORDRE sans s'arrêter au premier trouvé — la dernière définie
+# l'emporte donc :
+#
+#     vars:
+#       - name: ansible_password
+#       - name: ansible_ssh_pass
+#       - name: ansible_ssh_password     ← la plus forte
+#
+# Ce n'est pas la précédence habituelle des variables Ansible : ici un
+# `set_fact` (précédence très haute) sur `ansible_ssh_pass` est battu par un
+# group_vars (précédence basse) portant `ansible_ssh_password`, simplement parce
+# que ce nom-là figure plus bas dans la liste. Or `group_vars/papanglabs.yml`
+# définit précisément `ansible_ssh_password` pour tout le parc : poser le seul
+# `ansible_ssh_pass` revenait à envoyer le mot de passe DU PARC au lieu de celui
+# de l'inventaire, et à conclure « Permission denied » sur une valeur pourtant
+# juste. Diagnostiqué le 19/08/2026 sur backindicators1-prod.
+#
+# On écrase donc les trois d'un coup : quel que soit le nom déjà posé ailleurs,
+# et quel que soit l'ordre retenu par une version future du greffon, c'est bien
+# `initial_ssh_pass` qui part.
+#
+# Ces valeurs sont posées en `set_fact` : elles ne valent que pour cet hôte et
+# pour la durée du play. Rien n'est écrit sur la machine, rien ne subsiste.
+# Le contrôleur a besoin de `sshpass` (déjà présent : /opt/homebrew/bin/sshpass).
+
+- name: Try the key-based connection first
+  ansible.builtin.ping:
+  register: preflight_ping_key
+  ignore_errors: true
+  ignore_unreachable: true
+  # Sans cela la tâche est sautée en --check, `preflight_ping_key` reste sans
+  # verdict exploitable et la bascule ci-dessous ne se déclencherait jamais.
+  check_mode: false
+
+- name: Fall back to password authentication
+  when:
+    - preflight_ping_key is failed or preflight_ping_key is unreachable
+    - initial_ssh_pass is defined
+  block:
+    - name: Force password-only authentication for this host
+      ansible.builtin.set_fact:
+        ansible_password: "{{ initial_ssh_pass }}"
+        ansible_ssh_pass: "{{ initial_ssh_pass }}"
+        ansible_ssh_password: "{{ initial_ssh_pass }}"
+        ansible_ssh_extra_args: "-o IdentitiesOnly=yes -o PreferredAuthentications=password"
+
+    - name: Confirm the password connection works
+      ansible.builtin.ping:
+      check_mode: false
+
+    - name: Note that the host was reached by password
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }} : authentification par CLÉ refusée, bascule
+          sur `initial_ssh_pass`. Attendu sur une machine neuve — anormal
+          ensuite : la clé du parc devrait y être installée, vérifier
+          /root/.ssh/authorized_keys et celui de {{ remote_username }}.
+
+# Le `ping` ci-dessus est en `ignore_errors` + `ignore_unreachable` : sans cette
+# tâche, l'hôte injoignable POURSUIT le rôle, chaque tâche suivante repart en
+# UNREACHABLE, et c'est la première d'entre elles qui porte le message d'erreur
+# — lequel ne parle que de SSH, jamais de la raison.
+- name: Fail explicitly when no authentication method is available
+  ansible.builtin.fail:
+    msg: >-
+      Aucune authentification n'aboutit sur {{ inventory_hostname }}
+      ({{ ansible_host }}:{{ ansible_port }}) et l'inventaire ne définit pas
+      `initial_ssh_pass` pour cet hôte : la bascule vers l'authentification par
+      mot de passe n'a donc pas pu être tentée. Sur une machine neuve, ajouter
+      à son entrée d'inventaire le mot de passe fourni par l'hébergeur, chiffré
+      par le vault :
+      ansible-vault encrypt_string '<mot-de-passe>' --name initial_ssh_pass
+  when:
+    - preflight_ping_key is failed or preflight_ping_key is unreachable
+    - initial_ssh_pass is not defined

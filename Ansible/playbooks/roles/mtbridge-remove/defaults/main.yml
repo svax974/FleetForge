@@ -1,0 +1,3 @@
+---
+mtbridge_service_name: "MTBridge"
+prometheus_home: "/home/{{ remote_username }}/prometheus"

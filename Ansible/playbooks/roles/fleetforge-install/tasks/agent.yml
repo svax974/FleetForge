@@ -1,0 +1,153 @@
+---
+# Clé dédiée sur la machine, et agent SSH qui la porte.
+#
+# La clé est protégée par une passphrase, mais le démon démarre sans personne
+# pour la saisir : la passphrase est donc déposée à côté, en 0600, et un
+# ssh-agent charge la clé au démarrage. Ce dispositif protège contre le VOL DU
+# SEUL FICHIER DE CLÉ (sauvegarde, disque sorti de la machine) ; il ne protège
+# pas contre un accès root à la machine allumée, qui lit les deux fichiers —
+# et qui peut de toute façon parler à l'agent déjà déverrouillé.
+#
+# Ce qui réduit vraiment la portée de cette clé, c'est le `from="…"` posé dans
+# les authorized_keys du parc : volée, elle ne sert que depuis cette machine.
+
+- name: Create the SSH directory
+  ansible.builtin.file:
+    path: "/home/{{ ff_user }}/.ssh"
+    state: directory
+    owner: "{{ ff_user }}"
+    group: "{{ ff_user }}"
+    mode: '0700'
+  become: true
+  tags: [secrets]
+
+# Nom VOLONTAIREMENT celui qu'attend l'inventaire du parc
+# (`ansible_ssh_private_key_file` vaut « ~/.ssh/{{ ssh_key }} » sur web3c, avec
+# IdentitiesOnly=true qui interdit à ssh d'essayer une identité non déclarée).
+# Ce n'est PAS la clé de l'opérateur pour autant : même nom, empreinte
+# différente, et elle n'est autorisée que depuis cette machine.
+- name: Deploy the dedicated private key
+  ansible.builtin.copy:
+    src: "{{ ff_key_path }}"
+    dest: "/home/{{ ff_user }}/.ssh/{{ ff_remote_key_name }}"
+    owner: "{{ ff_user }}"
+    group: "{{ ff_user }}"
+    mode: '0600'
+  become: true
+  notify: restart fleetforge agent
+  tags: [secrets]
+
+# ssh compare la clé publique aux identités que l'agent détient : sans ce
+# fichier, IdentitiesOnly=true écarte la clé de l'agent et la connexion part
+# demander un mot de passe — puis échoue.
+- name: Deploy the dedicated public key
+  ansible.builtin.copy:
+    src: "{{ ff_key_path }}.pub"
+    dest: "/home/{{ ff_user }}/.ssh/{{ ff_remote_key_name }}.pub"
+    owner: "{{ ff_user }}"
+    group: "{{ ff_user }}"
+    mode: '0644'
+  become: true
+  tags: [secrets]
+
+- name: Deploy the key passphrase
+  ansible.builtin.copy:
+    content: "{{ ff_key_passphrase }}\n"
+    dest: "{{ ff_passphrase_file }}"
+    owner: "{{ ff_user }}"
+    group: "{{ ff_user }}"
+    mode: '0600'
+  become: true
+  no_log: true
+  notify: restart fleetforge agent
+  tags: [secrets]
+
+# ssh-add n'accepte pas la passphrase sur son entrée standard : il exige un
+# terminal, ou un programme d'invite. `SSH_ASKPASS_REQUIRE=force` (OpenSSH ≥ 8.4)
+# lève l'exigence d'un DISPLAY, qu'un service systemd n'a pas.
+- name: Deploy the askpass helper
+  ansible.builtin.copy:
+    content: |
+      #!/bin/sh
+      # Fournit la passphrase de la clé dédiée à ssh-add. Appelé par systemd,
+      # jamais à la main.
+      exec cat {{ ff_passphrase_file }}
+    dest: "{{ ff_dir }}/askpass.sh"
+    owner: "{{ ff_user }}"
+    group: "{{ ff_user }}"
+    mode: '0700'
+  become: true
+  tags: [secrets]
+
+- name: Deploy the agent key loader
+  ansible.builtin.template:
+    src: agent-load-key.sh.j2
+    dest: "{{ ff_dir }}/agent-load-key.sh"
+    owner: "{{ ff_user }}"
+    group: "{{ ff_user }}"
+    mode: '0750'
+  become: true
+  notify: restart fleetforge agent
+  tags: [secrets]
+
+- name: Deploy the ssh-agent unit
+  ansible.builtin.template:
+    src: fleetforge-agent.service
+    dest: /etc/systemd/system/fleetforge-agent.service
+    owner: root
+    group: root
+    mode: '0644'
+  become: true
+  notify: restart fleetforge agent
+  tags: [secrets]
+
+- name: Enable and start the ssh-agent
+  ansible.builtin.systemd:
+    name: fleetforge-agent
+    state: started
+    enabled: true
+    daemon_reload: true
+  become: true
+  tags: [secrets]
+
+- name: Flush handlers so the check hits the agent just deployed
+  ansible.builtin.meta: flush_handlers
+  tags: [secrets]
+
+# Un agent démarré mais VIDE laisse l'application dans l'état qu'on cherche
+# précisément à éviter : elle répond, et tout playbook échoue sur une
+# authentification refusée — ce qui ne désigne jamais l'agent.
+- name: Ask the agent what it holds
+  ansible.builtin.command:
+    cmd: ssh-add -l
+  environment:
+    SSH_AUTH_SOCK: "{{ ff_agent_socket }}"
+  become: true
+  become_user: "{{ ff_user }}"
+  register: ff_agent_keys
+  changed_when: false
+  failed_when: false
+  retries: 5
+  delay: 2
+  until: ff_agent_keys.rc == 0
+  tags: [secrets]
+
+# `ssh-add -l` rend 1 quand l'agent est VIDE, ce qui est le cas dangereux :
+# tout se met en place, le service démarre, et chaque playbook échoue plus tard
+# sur une authentification refusée que rien ne rattache à l'agent.
+- name: Fail when the agent is empty
+  ansible.builtin.assert:
+    that: ff_agent_keys.rc == 0
+    fail_msg: >-
+      L'agent SSH ne porte aucune identité. Cause la plus probable : la
+      passphrase du vault ne correspond pas à {{ ff_key_path }} sur le poste —
+      typiquement une clé conservée alors que `ff_key_passphrase` a été
+      régénérée. Supprimer la clé locale ET la valeur du vault pour repartir
+      d'une paire cohérente, puis réautoriser (`--tags authorize`).
+      Détail : {{ ff_agent_keys.stderr | default('') | trim }}
+  tags: [secrets]
+
+- name: Report the loaded key
+  ansible.builtin.debug:
+    msg: "Agent SSH : {{ ff_agent_keys.stdout_lines }}"
+  tags: [secrets]

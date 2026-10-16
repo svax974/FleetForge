@@ -1,0 +1,40 @@
+# Géré par Ansible — rôle `mailserver-setup`. Ne pas éditer à la main.
+#
+# Déposé sous le nom `zz-runtime-dir.conf` : systemd lit les drop-ins dans
+# l'ordre LEXICAL et le dernier l'emporte pour un réglage à valeur unique. Un
+# `10-…` serait écrasé par l'`override.conf` posé à la main sur web3c, qui est
+# précisément ce qu'il s'agit de neutraliser.
+#
+# ── Le défaut ──────────────────────────────────────────────────────────────
+# `override.conf` a ajouté `RuntimeDirectory=opendkim`. systemd supprime alors
+# /run/opendkim à l'arrêt du service et le recrée au démarrage ; l'unité n'ayant
+# pas de `User=`, il le crée root:root. opendkim démarre en root puis abandonne
+# ses privilèges (`UserID opendkim` dans opendkim.conf) et ne peut plus créer sa
+# socket :
+#   OpenDKIM Filter: Unable to bind to port unix:/run/opendkim/opendkim.sock:
+#   Permission denied  →  exit 69/UNAVAILABLE
+#
+# Corriger le propriétaire en `ExecStartPre` ne suffit PAS : systemd réapplique
+# le propriétaire et le mode de `RuntimeDirectory` juste avant `ExecStart`, ce
+# qui défait le chown. Vérifié — les trois ExecStartPre sortent en 0 et le
+# démon échoue quand même.
+#
+# D'où la remise à zéro de `RuntimeDirectory` : le répertoire redevient un
+# répertoire ordinaire, que systemd ne touche plus, et que les ExecStartPre
+# ci-dessous garantissent à chaque démarrage (y compris après un redémarrage
+# machine, /run étant un tmpfs). C'est le comportement de papanglabs, où
+# l'unité d'origine n'a jamais eu de `RuntimeDirectory` et où opendkim tourne.
+#
+# ── Ce que ça coûtait ──────────────────────────────────────────────────────
+# opendkim mort depuis le 20/04/2026 sur web3c sans que rien ne le signale. Et
+# comme Postfix porte `milter_default_action = accept`, le courrier est parti
+# NON SIGNÉ pendant ces quatre mois — pour des domaines dont le DMARC est en
+# `quarantine`.
+#
+# 0750 et groupe `opendkim` : postfix est membre de ce groupe (tâche
+# `Add postfix to the opendkim group`), c'est ce qui lui donne accès à la socket.
+[Service]
+RuntimeDirectory=
+ExecStartPre=/bin/mkdir -p /run/opendkim
+ExecStartPre=/bin/chown opendkim:opendkim /run/opendkim
+ExecStartPre=/bin/chmod 0750 /run/opendkim

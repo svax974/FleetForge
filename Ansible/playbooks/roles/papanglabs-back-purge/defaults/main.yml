@@ -1,0 +1,11 @@
+---
+# Purge : tout ce que `-remove` fait, plus le code livré, les fichiers
+# d'environnement, les volumes et l'image applicative.
+#
+# Ce qui n'est PAS supprimé, volontairement : Docker lui-même, node_exporter,
+# svcprobe et le socle de la machine — ce sont des outils génériques partagés
+# avec les autres services de l'hôte.
+pgb_user: "{{ remote_username }}"
+pgb_dir: "/home/{{ remote_username }}/papanglabs"
+pgb_project_name: "papanglabs-back-{{ hostname | lower | regex_replace('[^a-z0-9]', '-') }}"
+pgb_image: "papanglabs_back:latest"

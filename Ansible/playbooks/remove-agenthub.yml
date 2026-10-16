@@ -1,0 +1,13 @@
+---
+# Retire AgentHub : conteneurs (front/back/postgres) et sonde. Désactive le
+# runner sans le désinstaller. Conserve les volumes de données (voir
+# purge-agenthub.yml). Le filtrage DOCKER-USER et le CNAME DNS ne sont pas
+# retirés automatiquement — voir le message d'agenthub-remove.
+#
+#   ./play.sh web3c remove-agenthub.yml
+- name: Remove the AgentHub app
+  hosts: agenthub
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - agenthub-remove

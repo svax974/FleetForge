@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+# Restaure le magasin BRK depuis {{ brk_backup_dest_host }}
+# ({{ brk_backup_dest_addr }}:{{ brk_backup_dest_dir }}).
+# Généré par Ansible (rôle brk-backup-install) — NE PAS ÉDITER À LA MAIN.
+#
+# Usage :
+#   ~/brk-restore.sh --check              # état des sauvegardes, ne restaure rien
+#   ~/brk-restore.sh --yes                # restaure la dernière (current/)
+#   ~/brk-restore.sh --yes --previous     # restaure l'avant-dernière
+#
+# `--previous` est le cas d'une corruption non détectée : la dernière
+# sauvegarde a fidèlement recopié un magasin déjà abîmé, et la génération
+# précédente est la seule saine.
+#
+# La restauration ARRÊTE BRK, remplace intégralement {{ brk_dir }}, puis le
+# relance. L'ETL PapangMetrics continue de tourner pendant ce temps : il verra
+# BRK injoignable (brk_up = 0, alerte BrkDown au bout de 10 min) et reprendra
+# tout seul ensuite — son curseur d'avancement vit en base, pas ici.
+set -euo pipefail
+
+SRC_DIR="{{ brk_dir }}"
+DEST_HOST="{{ brk_backup_dest_addr }}"
+DEST_PORT="{{ brk_backup_dest_port }}"
+DEST_USER="{{ brk_backup_dest_user }}"
+DEST_DIR="{{ brk_backup_dest_dir }}"
+SSH_KEY="{{ brk_backup_ssh_key_path }}"
+
+GENERATION="current"
+CONFIRMED=no
+CHECK_ONLY=no
+
+for arg in "$@"; do
+  case "${arg}" in
+    --yes)      CONFIRMED=yes ;;
+    --previous) GENERATION="previous" ;;
+    --check)    CHECK_ONLY=yes ;;
+    *) echo "Option inconnue : ${arg}"; exit 2 ;;
+  esac
+done
+
+log() { echo "$(date -Iseconds) $*"; }
+
+ssh_dest() {
+  ssh -p "${DEST_PORT}" -i "${SSH_KEY}" -o BatchMode=yes \
+      -o ServerAliveInterval=60 -o ServerAliveCountMax=10 \
+      "${DEST_USER}@${DEST_HOST}" "$@"
+}
+
+# ── État ───────────────────────────────────────────────────────────────────
+LAST_TS="$(ssh_dest "cat '${DEST_DIR}/last-success' 2>/dev/null" || echo 0)"
+echo "Destination      : ${DEST_USER}@${DEST_HOST}:${DEST_DIR}"
+if [ "${LAST_TS}" != "0" ]; then
+  echo "Dernier succès   : $(date -d "@${LAST_TS}" -Iseconds) ($(( ($(date +%s) - LAST_TS) / 86400 )) j)"
+else
+  echo "Dernier succès   : AUCUN"
+fi
+echo "Générations      : $(ssh_dest "ls -1d '${DEST_DIR}'/{current,previous} 2>/dev/null | xargs -n1 basename | tr '\n' ' '" || echo "aucune")"
+echo "--- manifeste ---"
+ssh_dest "cat '${DEST_DIR}/manifest.txt' 2>/dev/null" || echo "(absent)"
+echo "-----------------"
+
+[ "${CHECK_ONLY}" = "yes" ] && exit 0
+
+# ── Garde-fous ─────────────────────────────────────────────────────────────
+if ! ssh_dest "test -d '${DEST_DIR}/${GENERATION}'"; then
+  echo "ERREUR : la génération '${GENERATION}' n'existe pas sur la destination." >&2
+  exit 1
+fi
+
+if [ "${CONFIRMED}" != "yes" ]; then
+  cat >&2 <<EOF
+
+ERREUR : confirmation requise.
+
+Cette opération va ARRÊTER BRK et REMPLACER INTÉGRALEMENT ${SRC_DIR}
+par la génération '${GENERATION}' ci-dessus. Le magasin actuel sera perdu.
+
+Relance avec --yes une fois le manifeste vérifié.
+EOF
+  exit 1
+fi
+
+# ── Restauration ───────────────────────────────────────────────────────────
+BRK_WAS_ACTIVE=no
+if systemctl is-active --quiet brk; then BRK_WAS_ACTIVE=yes; fi
+
+restore_service() {
+  if [ "${BRK_WAS_ACTIVE}" = "yes" ]; then
+    log "Redémarrage de BRK."
+    sudo systemctl start brk || log "[ERROR] Échec du redémarrage — INTERVENTION REQUISE."
+  fi
+}
+trap restore_service EXIT
+
+log "Arrêt de BRK."
+sudo systemctl stop brk || true
+
+# `--delete` : le magasin doit être un miroir exact de la sauvegarde. Un
+# résidu de l'ancien magasin (fichier d'index orphelin d'une autre génération)
+# suffirait à faire repartir BRK sur un état incohérent — c'est-à-dire à
+# reproduire la panne qu'on répare.
+#
+# `logs/` est exclu de la sauvegarde comme de la suppression : les journaux de
+# la machine n'ont pas à disparaître avec une restauration, ce sont eux qui
+# permettent de comprendre ce qui a mené à l'incident.
+log "Restauration de la génération '${GENERATION}' — cela peut durer plusieurs heures."
+rsync -a --delete --partial --numeric-ids --human-readable \
+      --exclude=logs/ \
+      -e "ssh -p ${DEST_PORT} -i ${SSH_KEY} -o BatchMode=yes -o ServerAliveInterval=60 -o ServerAliveCountMax=10" \
+      "${DEST_USER}@${DEST_HOST}:${DEST_DIR}/${GENERATION}/" "${SRC_DIR}/"
+
+log "Restauration terminée."
+restore_service
+trap - EXIT
+
+log "Vérifie la reprise : journalctl -u brk -f  puis  curl -s localhost:{{ brk_port | default(3110) }}/api/server/sync"

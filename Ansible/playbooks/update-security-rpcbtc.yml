@@ -1,0 +1,9 @@
+---
+- name: Update SSH security rules
+  hosts: rpcsbtc
+  remote_user: "{{ remote_username }}"
+  become: true
+  become_method: sudo
+
+  roles:
+    - rpcbtc-security

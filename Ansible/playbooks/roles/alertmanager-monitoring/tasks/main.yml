@@ -1,0 +1,47 @@
+---
+# Supervision d'Alertmanager : enregistrement de sa cible native.
+
+- name: Fail early when no Prometheus host is defined
+  ansible.builtin.assert:
+    that:
+      - prometheus_host is defined
+      - prometheus_host in hostvars
+    fail_msg: "`prometheus_host` non défini ou absent de l'inventaire."
+  tags: [monitoring]
+
+- name: Create the alertmanager target directory on the Prometheus host
+  ansible.builtin.file:
+    path: "/home/{{ remote_username }}/prometheus/prometheus-configs/{{ amon_job }}"
+    state: directory
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: '0755'
+  delegate_to: "{{ prometheus_host }}"
+  become: true
+  tags: [monitoring]
+
+- name: Deploy the alertmanager Prometheus target
+  ansible.builtin.template:
+    src: prometheus-target.json.j2
+    dest: "/home/{{ remote_username }}/prometheus/prometheus-configs/{{ amon_job }}/{{ inventory_hostname }}.json"
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: '0644'
+  delegate_to: "{{ prometheus_host }}"
+  become: true
+  tags: [monitoring]
+
+# Le port 9093 est publié par Docker : une règle ufw n'aurait AUCUN effet
+# dessus (Docker insère ses DNAT en amont). Le filtrage vit dans la chaîne
+# DOCKER-USER, gérée par `docker-ports-security` depuis
+# host_vars/<hôte canonique>.yml — c'est là qu'il faut autoriser l'IP de
+# Prometheus, pas ici. Constat du 06/08/2026 : 15 règles ufw décoratives sur
+# 9090/9093, API Alertmanager en 200 depuis Internet.
+- name: Reminder — the scrape opening lives in DOCKER-USER, not ufw
+  ansible.builtin.debug:
+    msg: >-
+      Port {{ amon_port }} publié par Docker : vérifier que
+      {{ hostvars[prometheus_host]['ansible_host'] }} est autorisé dans
+      host_vars/{{ inventory_hostname }}.yml (rôle docker-ports-security),
+      sinon la cible restera `down`.
+  tags: [monitoring]

@@ -1,0 +1,110 @@
+---
+# Déploie N nœuds Theta Edge (image officielle, Docker Compose) sur l'hôte.
+#
+# Conforme à la doc officielle (« Run Edge Node with Docker on Linux ») :
+# même image, même `EDGELAUNCHER_CONFIG_PATH`, même `PASSWORD`, même volume
+# monté sur /edgelauncher/data/mainnet. Seul écart : un projet Compose et un
+# répertoire de données PAR instance, et un seul port publié (voir defaults).
+#
+# Docker est un prérequis vérifié par `host-preflight`
+# (`preflight_require_docker`), pas réinstallé ici : l'ancienne condition
+# portait sur `ansible_facts.services`, jamais collecté, et rejouait donc
+# `docker-install` à chaque déploiement.
+
+- name: Fail if theta_passwd is not set
+  ansible.builtin.assert:
+    that:
+      - theta_passwd is defined
+      - theta_passwd | length > 0
+    fail_msg: "theta_passwd est requis (group_vars, vault) : il chiffre la clé de chaque nœud."
+    quiet: true
+
+- name: Compute the instance ids
+  ansible.builtin.set_fact:
+    theta_edge_ids: "{{ range(1, theta_edge_instances | int + 1) | list }}"
+
+- name: Create the base directory
+  ansible.builtin.file:
+    path: "{{ theta_edge_base_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Create the instance data directories
+  ansible.builtin.file:
+    path: "{{ theta_edge_base_dir }}/instance{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  loop: "{{ theta_edge_ids }}"
+
+# Une seule extraction pour toutes les instances. Compose recrée ensuite de
+# lui-même (`recreate: auto`) chaque conteneur dont l'image ou la
+# configuration a changé — d'où l'absence de handler.
+- name: Pull the Theta Edge image
+  community.docker.docker_image:
+    name: "{{ theta_edge_image }}"
+    source: pull
+    force_source: true
+
+# 0600 : le fichier porte `theta_passwd` en clair.
+- name: Deploy the docker-compose file of each instance
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: "{{ theta_edge_base_dir }}/instance{{ theta_edge_id }}/docker-compose.yml"
+    owner: root
+    group: root
+    mode: "0600"
+  loop: "{{ theta_edge_ids }}"
+  loop_control:
+    loop_var: theta_edge_id
+
+- name: Start each instance
+  community.docker.docker_compose_v2:
+    project_name: "theta-edge-{{ item }}"
+    project_src: "{{ theta_edge_base_dir }}/instance{{ item }}"
+    state: present
+  loop: "{{ theta_edge_ids }}"
+
+# ── Réduction du nombre d'instances ────────────────────────────────────────
+# Une instance qui sort du compte mais reste démarrée tournerait sans
+# supervision (l'exporter ne suit que les instances déclarées). On l'arrête ;
+# sa clé reste sur disque — `purge-theta-edge.yml` seul la détruit.
+- name: Find existing instance directories
+  ansible.builtin.find:
+    paths: "{{ theta_edge_base_dir }}"
+    patterns: "instance*"
+    file_type: directory
+  register: theta_edge_existing
+
+- name: Stop instances beyond theta_edge_instances (data kept)
+  community.docker.docker_compose_v2:
+    project_name: "theta-edge-{{ item }}"
+    project_src: "{{ theta_edge_base_dir }}/instance{{ item }}"
+    state: absent
+  loop: >-
+    {{ theta_edge_existing.files | map(attribute='path') | map('basename')
+       | map('regex_replace', '^instance', '') | select('match', '^[0-9]+$')
+       | map('int') | reject('in', theta_edge_ids) | list }}
+  failed_when: false
+
+# Au premier démarrage le launcher génère la clé du nœud avant d'ouvrir le
+# RPC : attendre qu'il réponde avant d'exporter quoi que ce soit.
+- name: Wait for the edgecore RPC of each instance
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ theta_edge_rpc_base_port + (item - 1) * theta_edge_port_step }}/rpc"
+    method: POST
+    body_format: json
+    body: { jsonrpc: "2.0", method: edgecore.GetStatus, params: [], id: 1 }
+  register: theta_edge_rpc
+  until: theta_edge_rpc.status == 200 and theta_edge_rpc.json.result is defined
+  retries: 24
+  delay: 5
+  loop: "{{ theta_edge_ids }}"
+
+# ── Clés ───────────────────────────────────────────────────────────────────
+- name: Export the keys to the control machine
+  ansible.builtin.include_tasks: keys.yml
+  tags: [keys]

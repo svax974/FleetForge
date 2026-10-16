@@ -1,0 +1,144 @@
+#!/usr/bin/env node
+/**
+ * Theta Edge Node — TFuel Sweep
+ *
+ * Reads each configured instance's keystore, checks the TFuel balance via the
+ * Theta mainnet RPC, and transfers available funds (above the keep threshold)
+ * to the destination wallet.
+ *
+ * Run by cron — output goes to /var/log/theta-edge-sweep.log
+ */
+
+'use strict';
+
+const fs   = require('fs');
+const path = require('path');
+const thetajs = require('@thetalabs/theta-js');
+const BigNumber = require('bignumber.js');
+
+const CONFIG_PATH = path.join(__dirname, 'config.json');
+const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+
+const TEN18 = new BigNumber('1000000000000000000');
+// Standard Theta transaction fee (10^12 TFuelWei)
+const FEE_WEI = new BigNumber('1000000000000');
+
+const thresholdWei = new BigNumber(config.threshold_tfuel).multipliedBy(TEN18);
+const keepWei      = new BigNumber(config.keep_tfuel).multipliedBy(TEN18);
+
+function log(msg) {
+  const ts = new Date().toISOString();
+  console.log(`[${ts}] ${msg}`);
+}
+
+function buildProvider() {
+  if (config.rpc_url) {
+    return new thetajs.providers.HttpProvider(thetajs.networks.ChainIds.Mainnet, config.rpc_url);
+  }
+  // Use theta-js built-in mainnet default
+  return new thetajs.providers.HttpProvider(thetajs.networks.ChainIds.Mainnet);
+}
+
+async function sweepInstance(instance) {
+  log(`--- Instance ${instance.id} ---`);
+
+  // 1. Locate keystore file (filename = address without 0x)
+  let files;
+  try {
+    files = fs.readdirSync(instance.keystore_dir).filter(f => !f.startsWith('.'));
+  } catch (err) {
+    log(`Instance ${instance.id}: keystore directory not found: ${instance.keystore_dir} — node may not have started yet`);
+    return;
+  }
+
+  if (files.length === 0) {
+    log(`Instance ${instance.id}: no keystore file found in ${instance.keystore_dir}`);
+    return;
+  }
+
+  const keystoreFile = files[0];
+  const address = keystoreFile.startsWith('0x') ? keystoreFile : '0x' + keystoreFile;
+  const keystoreJson = fs.readFileSync(path.join(instance.keystore_dir, keystoreFile), 'utf8');
+
+  log(`Instance ${instance.id}: address ${address}`);
+
+  // 2. Connect provider and query balance
+  const provider = buildProvider();
+  let account;
+  try {
+    account = await provider.getAccount(address);
+  } catch (err) {
+    log(`Instance ${instance.id}: failed to query account — ${err.message}`);
+    return;
+  }
+
+  const tfuelWei = new BigNumber(account.coins.tfuelwei);
+  const tfuelDisplay = tfuelWei.dividedBy(TEN18).toFixed(4);
+  log(`Instance ${instance.id}: balance ${tfuelDisplay} TFuel (${tfuelWei.toFixed(0)} wei)`);
+
+  // 3. Check threshold
+  if (tfuelWei.isLessThanOrEqualTo(thresholdWei)) {
+    log(`Instance ${instance.id}: below threshold (${config.threshold_tfuel} TFuel) — skipping`);
+    return;
+  }
+
+  // 4. Calculate amount to send
+  const sendWei = tfuelWei.minus(keepWei).minus(FEE_WEI);
+  if (sendWei.isLessThanOrEqualTo(0)) {
+    log(`Instance ${instance.id}: nothing to send after keeping ${config.keep_tfuel} TFuel reserve`);
+    return;
+  }
+
+  const sendDisplay = sendWei.dividedBy(TEN18).toFixed(4);
+  log(`Instance ${instance.id}: sending ${sendDisplay} TFuel to ${config.destination}`);
+
+  // 5. Load wallet from keystore
+  let wallet;
+  try {
+    wallet = await thetajs.Wallet.fromEncryptedJson(keystoreJson, config.password);
+  } catch (err) {
+    log(`Instance ${instance.id}: failed to decrypt keystore — wrong password? (${err.message})`);
+    return;
+  }
+  wallet = wallet.connect(provider);
+
+  // 6. Build and broadcast transaction
+  const tx = new thetajs.transactions.SendTransaction({
+    from: address,
+    outputs: [{
+      address: config.destination,
+      thetaWei: new BigNumber(0),
+      tfuelWei: sendWei,
+    }],
+  });
+
+  let result;
+  try {
+    result = await wallet.sendTransaction(tx);
+  } catch (err) {
+    log(`Instance ${instance.id}: transaction failed — ${err.message}`);
+    return;
+  }
+
+  const hash = result.hash || result.tx_hash || JSON.stringify(result);
+  log(`Instance ${instance.id}: SUCCESS — tx hash ${hash}`);
+}
+
+async function main() {
+  log(`=== Theta Edge Sweep started — destination: ${config.destination} ===`);
+
+  for (const instance of config.instances) {
+    try {
+      await sweepInstance(instance);
+    } catch (err) {
+      log(`Instance ${instance.id}: unexpected error — ${err.message}`);
+    }
+  }
+
+  log('=== Sweep complete ===');
+}
+
+main().catch(err => {
+  log(`Fatal: ${err.message}`);
+  process.exit(1);
+});

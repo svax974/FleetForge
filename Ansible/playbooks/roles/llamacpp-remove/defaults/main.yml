@@ -1,0 +1,4 @@
+---
+llamacpp_user: llamacpp
+llamacpp_home: /opt/llamacpp
+llamacpp_src_dir: "{{ llamacpp_home }}/src"

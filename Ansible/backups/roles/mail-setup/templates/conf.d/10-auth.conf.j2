@@ -1,0 +1,25 @@
+# Authentication processes
+
+# Disable LOGIN command and all other plaintext authentications unless
+# SSL/TLS is used (LOGINDISABLED capability). Note that if the remote IP
+# matches the local IP (ie. you're connecting from the same computer), the
+# connection is considered secure and plaintext authentication is allowed.
+disable_plaintext_auth = yes
+
+# Authentication cache size (0 = disabled)
+auth_cache_size = 0
+
+# TTL for cache entries
+auth_cache_ttl = 1 hour
+
+# List of allowed characters in username
+auth_username_chars = abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ01234567890.-_@
+
+# Username format (%Lu = lowercase username)
+auth_username_format = %Lu
+
+# Space separated list of wanted authentication mechanisms:
+auth_mechanisms = plain login
+
+# SQL database configuration
+!include auth-sql.conf.ext 

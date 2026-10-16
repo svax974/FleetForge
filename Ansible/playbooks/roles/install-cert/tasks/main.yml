@@ -1,0 +1,56 @@
+---
+- name: Install certbot and Cloudflare DNS plugin
+  ansible.builtin.apt:
+    pkg:
+      - certbot
+      - python3-certbot-dns-cloudflare
+    update_cache: true
+
+- name: Ensure /etc/letsencrypt exists
+  ansible.builtin.file:
+    path: /etc/letsencrypt
+    state: directory
+    owner: root
+    group: root
+    mode: '0750'
+
+- name: Deploy Cloudflare credentials for each domain
+  ansible.builtin.template:
+    src: cloudflare.ini.j2
+    dest: "/etc/letsencrypt/cloudflare_{{ item }}.ini"
+    owner: root
+    group: root
+    mode: '0600'
+  loop: "{{ domains }}"
+
+- name: Request wildcard certificate for each domain
+  ansible.builtin.command:
+    cmd: >-
+      certbot certonly --non-interactive --agree-tos
+      -m {{ email }}
+      --dns-cloudflare
+      --dns-cloudflare-credentials /etc/letsencrypt/cloudflare_{{ item }}.ini
+      --dns-cloudflare-propagation-seconds 60
+      -d "*.{{ item }}"
+    creates: "/etc/letsencrypt/live/{{ item }}/fullchain.pem"
+  loop: "{{ domains }}"
+
+# ── AgentHub : aperçus des serveurs de dev (docs/preview-origin.md du dépôt AgentHub) ──
+# Le hub sert chaque aperçu sur `<sessionId>-<port>.preview.<domaine>` — DEUX niveaux sous le domaine : le
+# `*.<domaine>` ci-dessus n'en couvre qu'un. Certificat dédié (`--cert-name`), jamais mêlé à celui du parc, pour
+# qu'un échec d'émission ici ne touche pas le renouvellement du wildcard principal. Même jeton Cloudflare,
+# même défi DNS-01. Le DNS `*.preview.<domaine>` (CNAME vers le front des proxies, DNS seul) reste à créer :
+# aucune entrée d'inventaire ne le porte.
+- name: Request the AgentHub preview wildcard certificate for each domain
+  ansible.builtin.command:
+    cmd: >-
+      certbot certonly --non-interactive --agree-tos
+      -m {{ email }}
+      --dns-cloudflare
+      --dns-cloudflare-credentials /etc/letsencrypt/cloudflare_{{ item }}.ini
+      --dns-cloudflare-propagation-seconds 60
+      --cert-name preview.{{ item }}
+      -d "*.preview.{{ item }}"
+    creates: "/etc/letsencrypt/live/preview.{{ item }}/fullchain.pem"
+  # Seul le domaine du hub (pas tradekong.app…) : `agenthub_preview_domains` pour le changer.
+  loop: "{{ agenthub_preview_domains | default(['web3c.cc']) }}"

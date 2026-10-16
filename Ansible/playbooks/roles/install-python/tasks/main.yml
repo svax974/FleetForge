@@ -1,0 +1,11 @@
+---
+# Install and configure python3 stuff
+- name: Update repositories cache and install python3 stuff
+  ansible.builtin.apt:
+    pkg:
+    - python3
+    - python3-pip
+    - python3-requests
+    - python3-docker
+    - python3-venv
+    update_cache: yes

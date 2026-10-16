@@ -1,0 +1,3 @@
+---
+tsdb_dir: "{{ ansible_env.HOME }}/papangmetrics-db"
+node_exporter_textfile_dir: /var/lib/node_exporter/textfile_collector

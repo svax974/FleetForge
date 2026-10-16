@@ -1,0 +1,9 @@
+[
+  {
+    "targets": ["{{ ansible_host }}:{{ llamacpp_port }}"],
+    "labels": {
+      "instance": "{{ inventory_hostname }}-{{ llamacpp_instance_id }}",
+      "model": "{{ llamacpp_model_name | default('unknown') }}"
+    }
+  }
+]

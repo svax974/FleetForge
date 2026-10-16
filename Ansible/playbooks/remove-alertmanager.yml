@@ -1,0 +1,6 @@
+---
+- name: Remove Alertmanager (keeps configuration and state)
+  hosts: alertmanager1
+  remote_user: "{{ remote_username }}"
+  roles:
+    - alertmanager-remove

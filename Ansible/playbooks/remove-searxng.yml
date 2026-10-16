@@ -1,0 +1,11 @@
+---
+# Retire le relai SearXNG : conteneur, sonde et filtrage du port. Conserve la
+# configuration et la clé secrète (voir purge-searxng.yml).
+#
+#   ./play.sh web3c remove-searxng.yml
+- name: Remove the SearXNG relay
+  hosts: station
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - searxng-remove

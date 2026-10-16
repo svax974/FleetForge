@@ -1,0 +1,41 @@
+---
+# Purge l'exporter DMARC : tout ce que fait `dmarc-exporter-remove`, plus
+# l'état accumulé, la configuration (mot de passe IMAP) et l'enregistrement
+# auprès de Prometheus. Python 3 n'est pas désinstallé : outil générique.
+
+- name: Remove service, binary and system user
+  ansible.builtin.include_role:
+    name: dmarc-exporter-remove
+
+- name: Remove dmarc-exporter state and configuration
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ dmarc_exporter_state_dir }}"
+    - "{{ dmarc_exporter_config_dir }}"
+
+- name: Set prometheus home on monitoring host
+  ansible.builtin.set_fact:
+    prometheus_home: "/home/{{ remote_username }}/prometheus"
+
+# Sans cela Prometheus continue de scraper une cible morte et TargetDown sonne
+# indéfiniment pour un service qu'on a volontairement retiré.
+- name: Remove dmarc Prometheus target file on monitoring host
+  ansible.builtin.file:
+    path: "{{ prometheus_home }}/prometheus-configs/dmarc/{{ inventory_hostname }}.json"
+    state: absent
+  delegate_to: "{{ prometheus_host }}"
+  notify: reload prometheus
+
+- name: Remove Prometheus scrape rules for port {{ dmarc_exporter_port }}
+  community.general.ufw:
+    rule: allow
+    src: "{{ item }}"
+    port: "{{ dmarc_exporter_port }}"
+    proto: tcp
+    delete: true
+  become: true
+  loop:
+    - "{{ hostvars[prometheus_host]['ansible_host'] }}"
+    - "{{ dmarc_exporter_docker_bridge_cidr }}"

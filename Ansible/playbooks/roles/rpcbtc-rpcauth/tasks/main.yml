@@ -1,0 +1,29 @@
+---
+# Setup authentication
+- name: Set RPC auth string
+  ansible.builtin.lineinfile:
+    path: "~/bitcoin/bitcoin.conf"
+    regexp: '[#|]rpcauth=.*'
+    line: "rpcauth={{ rpcbtcauth }}"
+- name: Set custom RPC port
+  ansible.builtin.lineinfile:
+    path: "~/bitcoin/bitcoin.conf"
+    regexp: '[#|]rpcport=.*'
+    line: "rpcport={{ proxy_port_rpc_btc }}"
+- name: Listen to all interfaces
+  ansible.builtin.lineinfile:
+    path: "~/bitcoin/bitcoin.conf"
+    regexp: '[#|]rpcbind=.*'
+    line: "rpcbind=0.0.0.0"
+- name: Allow access from everywhere, ufw filters
+  ansible.builtin.lineinfile:
+    path: "~/bitcoin/bitcoin.conf"
+    regexp: '[#|]rpcallowip=.*'
+    line: "rpcallowip=0.0.0.0/0"
+
+- name: Restart bitcoind service
+  ansible.builtin.service:
+    name: bitcoind
+    scope: user
+    state: restarted
+  when: not (allow_unmanaged_bitcoind | default(false) | bool)

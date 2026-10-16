@@ -1,0 +1,48 @@
+---
+# Dépose un témoin d'exécution sur l'hôte.
+#
+# Appelé avec :
+#   - ansible.builtin.include_role:
+#       name: host-preflight
+#       tasks_from: stamp
+#     vars:
+#       stamp_name: setup-server
+#       stamp_detail: "roles: security-ssh, set-hostname, install-tools…"
+#
+# Le témoin est un FICHIER SUR L'HÔTE, et pas une entrée dans une base côté
+# poste : c'est la machine elle-même qui doit pouvoir répondre, y compris
+# quand on y arrive en SSH sans le dépôt sous la main, et y compris après un
+# changement de poste d'administration.
+
+- name: Take over the legacy state directory
+  ansible.builtin.include_tasks: legacy.yml
+
+- name: Ensure the state directory exists
+  ansible.builtin.file:
+    path: "{{ preflight_state_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  become: true
+
+# `applied_at` vient de `now()` et NON de `ansible_facts.date_time`, qui est mis
+# en cache (cf. ansible.cfg). Ce témoin répond à « ce playbook a-t-il tourné
+# ici, et QUAND ? » : une date figée par le cache lui ferait dire n'importe
+# quoi, et c'est précisément la question qu'il existe pour trancher.
+- name: Write the {{ stamp_name }} stamp
+  ansible.builtin.copy:
+    dest: "{{ preflight_state_dir }}/{{ stamp_name }}.json"
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      {
+        "name": "{{ stamp_name }}",
+        "host": "{{ inventory_hostname }}",
+        "address": "{{ ansible_host | default('') }}",
+        "applied_at": "{{ now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ') }}",
+        "applied_from": "{{ lookup('env', 'USER') }}@{{ lookup('pipe', 'hostname') }}",
+        "detail": "{{ stamp_detail | default('') }}"
+      }
+  become: true

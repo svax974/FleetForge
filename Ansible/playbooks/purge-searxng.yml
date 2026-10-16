@@ -1,0 +1,11 @@
+---
+# Supprime le relai SearXNG ET ses données : conteneur, image, configuration et
+# clé secrète. Destructif.
+#
+#   ./play.sh web3c purge-searxng.yml
+- name: Purge the SearXNG relay
+  hosts: station
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - searxng-purge

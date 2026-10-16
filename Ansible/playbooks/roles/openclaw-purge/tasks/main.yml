@@ -1,0 +1,54 @@
+---
+# Supprime OpenClaw ET ses données : binaire, Node embarqué, configuration,
+# workspace, secrets et jeton de gateway. Destructif — toute conversation et
+# tout accès distribué au Control UI sont perdus.
+
+- name: Remove the service, its probe and its firewall rules
+  ansible.builtin.include_role:
+    name: openclaw-remove
+
+- name: Remove the OpenClaw install (binary, embedded Node, config, workspace, token)
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  become: true
+  loop:
+    - "{{ openclaw_prefix }}"
+    - "{{ openclaw_home }}/.openclaw/bin/fleet-watch.py"
+    - "{{ openclaw_home }}/.openclaw/bin/fleet-watch.json"
+    - "{{ openclaw_home }}/.openclaw/state/fleet-watch.json"
+    - "{{ openclaw_home }}/.gateway_token"
+    - "{{ openclaw_home }}/.openclaw.env"
+    - "{{ openclaw_home }}/.provider-batch.json"
+    - "{{ openclaw_home }}/.config/systemd/user/openclaw-gateway.service"
+    - "{{ openclaw_home }}/.config/systemd/user/openclaw-gateway.service.d"
+
+# Désactivé par défaut (voir defaults/main.yml) : ne pas retirer un réglage
+# dont d'autres services `srvc` pourraient dépendre sans confirmation
+# explicite.
+- name: Disable lingering for srvc
+  ansible.builtin.command:
+    cmd: "loginctl disable-linger {{ openclaw_user }}"
+  become: true
+  when: openclaw_disable_linger | bool
+  changed_when: true
+  failed_when: false
+
+# ── DNS : retirer le CNAME public ───────────────────────────────────────────
+# Symétrique de la publication (cloudflare-dns-update/tasks/cnames.yml, via
+# `proxy_hostname` de l'entrée d'inventaire `openclaw`) : le nom public
+# disparaît avec le service.
+# ATTENTION : l'entrée d'inventaire porteuse de `proxy_hostname` doit être
+# retirée EN MÊME TEMPS (ou son attribut supprimé) — sinon la prochaine
+# synchronisation (update-cloudflare-dns.yml) republierait le record.
+- name: Remove the OpenClaw CNAME
+  community.general.cloudflare_dns:
+    api_token: "{{ cloudflare_token }}"
+    zone: "{{ domain_name }}"
+    record: "{{ openclaw_hostname }}"
+    type: CNAME
+    state: absent
+  delegate_to: localhost
+  become: false
+  run_once: true
+  when: cloudflare_token | default('') | length > 0

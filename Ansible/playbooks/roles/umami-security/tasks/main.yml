@@ -1,0 +1,18 @@
+---
+# Firewall for Umami. Reachable only from the reverse proxy (which is on a different host and
+# terminates TLS for the public analytics.{{ domain_name }} vhost) — never directly from the
+# internet, and never from the whitelist/app-backs group (nothing but the proxy needs it).
+
+- name: Allow Umami port from proxies
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ hostvars[item].ansible_host }}"
+    port: "{{ umami_port }}"
+    comment: "umami - proxy"
+  loop: "{{ groups['proxies'] | default([]) }}"
+  become: true
+  when: ansible_host != hostvars[item].ansible_host
+
+# Co-located-with-proxy case (e.g. umami1 deployed on the same box as proxy1): the proxy_pass
+# then goes over loopback, already reachable without a firewall rule — nothing to add.

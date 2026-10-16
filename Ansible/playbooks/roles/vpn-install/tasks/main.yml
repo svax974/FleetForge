@@ -1,0 +1,109 @@
+---
+- name: Uninstall pritunl + mongodb if installed and remove config files + DB
+  block:
+    - name: Uninstall pritunl and mongodb
+      ansible.builtin.apt:
+        pkg:
+        - pritunl
+        - mongodb-org
+        - mongodb-org-server
+        - mongodb-org-mongos
+        - mongodb-org-shell
+        - mongodb-org-tools
+        - mongodb-org-database
+        - mongodb-org-database-tools
+        - mongodb-org-database-tools-extra
+        state: absent
+        purge: yes
+        update_cache: yes
+    - name: Remove pritunlconfig file
+      ansible.builtin.file:
+        path: /etc/pritunl.conf
+        state: absent
+    - name: Remove Pritunl dump
+      ansible.builtin.file:
+        path: /root/pritunl.dump
+        state: absent
+    - name: Remove mongodb config file
+      ansible.builtin.file:
+        path: /etc/mongod.conf
+        state: absent
+    - name: Remove mongodb database
+      ansible.builtin.file:
+        path: /var/lib/mongodb
+        state: absent
+
+- name: Install gnupg and needed python stuff
+  ansible.builtin.apt:
+    pkg:
+    - gnupg
+    - python3
+    - python3-pip
+    # Requis par `deb822_repository`, qui remplace plus bas le couple
+    # `apt_key` + `apt_repository`, tous deux deprecies (retrait annonce en
+    # ansible-core 2.25).
+    - python3-debian
+    state: present
+
+- name: Install pymongo python package
+  ansible.builtin.pip:
+    name: pymongo==4.9.1
+    break_system_packages: true # Needed because pymongo is often 3.x in recent distributions and we need 4.x
+
+- name: Detect distribution details
+  ansible.builtin.set_fact:
+    is_ubuntu: "{{ ansible_distribution == 'Ubuntu' }}"
+    is_debian: "{{ ansible_distribution == 'Debian' }}"
+    ubuntu_version: "{{ ansible_distribution_version }}"
+    debian_version: "{{ ansible_distribution_version }}"
+
+# `apt_key` et `apt_repository` sont tous deux deprecies, retrait annonce en
+# ansible-core 2.25. `deb822_repository` remplace le couple : son parametre
+# `signed_by` accepte directement l'URL de la cle, la telecharge et l'inscrit
+# dans le fichier .sources — il n'y a donc plus de trousseau separe a poser
+# sous /usr/share/keyrings, ni de tache dediee a la cle.
+#
+# Les anciens fichiers .list poses par `apt_repository` sont retires
+# explicitement : ils coexisteraient sinon avec les .sources et apt signalerait
+# chaque depot en double a chaque `update`.
+- name: Remove legacy .list repositories superseded by the .sources files
+  ansible.builtin.file:
+    path: "/etc/apt/sources.list.d/{{ item }}"
+    state: absent
+  loop:
+    # Noms derives par `apt_repository` faute de `filename:` explicite : URI
+    # sans le schema, tout caractere non alphanumerique remplace par « _ ».
+    - repo_mongodb_org_apt_ubuntu.list
+    - repo_mongodb_org_apt_debian.list
+    - repo_pritunl_com_stable_apt.list
+
+- name: Add MongoDB repository
+  ansible.builtin.deb822_repository:
+    name: mongodb-org-8.0
+    types: [deb]
+    # Meme sous Noble (24.04) on installe la version jammy, comme le prescrit
+    # la documentation Pritunl.
+    uris: "https://repo.mongodb.org/apt/{{ 'ubuntu' if is_ubuntu else 'debian' }}"
+    suites: ["{{ 'jammy' if is_ubuntu else 'bookworm' }}/mongodb-org/8.0"]
+    components: ["{{ 'multiverse' if is_ubuntu else 'main' }}"]
+    architectures: [amd64]
+    signed_by: https://www.mongodb.org/static/pgp/server-8.0.asc
+    state: present
+
+- name: Add Pritunl repository
+  ansible.builtin.deb822_repository:
+    name: pritunl
+    types: [deb]
+    uris: https://repo.pritunl.com/stable/apt
+    suites: ["{{ ansible_distribution_release }}"]
+    components: [main]
+    architectures: [amd64]
+    signed_by: https://raw.githubusercontent.com/pritunl/pgp/master/pritunl_repo_pub.asc
+    state: present
+
+- name: Update repositories cache and install pritunl + mongodb
+  ansible.builtin.apt:
+    pkg:
+    - pritunl
+    - mongodb-org
+    update_cache: yes

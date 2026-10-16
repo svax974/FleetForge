@@ -1,0 +1,59 @@
+---
+# Arrête et supprime le conteneur Rotki et sa sonde. Conserve les volumes de
+# données/logs — leur suppression relève de `rotki-purge`.
+#
+# Contrairement à searxng-remove/freellm-remove, aucune tâche de pare-feu
+# ici : le filtrage vit dans `docker_ports_rules` (host_vars/ctdapi.yml —
+# l'hôte CANONIQUE de la machine `ctdapi`, pas `rotki` lui-même), une
+# liste par MACHINE, pas par service (CLAUDE.md). ATTENTION : si cette
+# entrée est la SEULE règle du fichier, la retirer vide `docker_ports_rules`
+# — et `docker-ports-security` ne fait alors RIEN (ses tâches sont gardées
+# par `when: docker_ports_rules | length > 0`, constaté le 2026-09-22) : le
+# script déjà déployé sur la machine reste tel quel, la règle DROP/ALLOW
+# survit. Un flush manuel (`iptables -D DOCKER-USER ...`) est alors
+# nécessaire — voir le message ci-dessous.
+
+- name: Stop and remove the Rotki container
+  community.docker.docker_container:
+    name: "{{ rotki_container }}"
+    state: absent
+  become: true
+  ignore_errors: true
+
+# ── Supervision ────────────────────────────────────────────────────────────
+# La sonde part avec le service : laissée en place, elle publierait
+# `service_up 0` indéfiniment et ferait sonner une alerte sur un service
+# volontairement désinstallé.
+#
+# La CIBLE Prometheus de svcprobe n'est pas retirée : elle vaut pour la
+# MACHINE et porte les sondes des autres services qui y tournent.
+- name: Remove the Rotki probe
+  ansible.builtin.file:
+    path: "{{ svcprobe_checks_dir | default('/etc/svcprobe/checks.d') }}/rotki.json"
+    state: absent
+  become: true
+  tags: [monitoring]
+
+# Le drop-in ouvrait 4302 à l'hôte Prometheus ; il part avec le service. La
+# règle n'est effacée d'iptables qu'au prochain passage du script (voir la note
+# ci-dessous sur la dernière règle d'un hôte).
+- name: Remove the Prometheus access drop-in
+  ansible.builtin.file:
+    path: /etc/docker-ports/sources.d/rotki.conf
+    state: absent
+  become: true
+  tags: [monitoring]
+
+- name: Remind the operator to update docker_ports_rules
+  ansible.builtin.debug:
+    msg: >-
+      Rotki supprimé. Le port {{ rotki_port | default(4302) }} reste dans
+      docker_ports_rules (playbooks/host_vars/ctdapi.yml) tant qu'il n'est
+      pas retiré à la main — sans conséquence tant que rien n'écoute dessus,
+      mais à nettoyer avant de réattribuer ce port à un autre service. Si
+      c'est la SEULE règle du fichier, rejouer `docker-ports-security` après
+      édition NE SUFFIT PAS (voir la note en tête de ce fichier) : flusher
+      la règle DOCKER-USER à la main sur la machine (`iptables -D
+      DOCKER-USER <n° de la règle dpt:4302>`, ou reposer/vider
+      /usr/local/sbin/docker-ports-firewall.sh) avant de considérer le port
+      vraiment libéré.

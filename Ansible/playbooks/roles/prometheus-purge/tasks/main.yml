@@ -1,0 +1,33 @@
+---
+# Supprime Prometheus ET ses données : conteneur, image, TSDB, configuration,
+# règles d'alerte et cibles de service discovery. Destructif et irréversible —
+# l'historique des métriques est perdu.
+
+- name: Stop and remove Prometheus container
+  community.docker.docker_container:
+    name: prometheus
+    state: absent
+  become: true
+  ignore_errors: true
+
+- name: Remove Prometheus firewall rules
+  community.general.ufw:
+    rule: "{{ item }}"
+    proto: tcp
+    port: "{{ prometheus_port }}"
+    delete: true
+  loop: [allow, deny]
+  become: true
+  ignore_errors: true
+
+- name: Remove Prometheus image
+  community.docker.docker_image_remove:
+    name: "prom/prometheus:latest"
+  become: true
+  ignore_errors: true
+
+- name: Remove Prometheus directory (TSDB, config, rules, targets)
+  ansible.builtin.file:
+    path: "{{ prometheus_home }}"
+    state: absent
+  become: true

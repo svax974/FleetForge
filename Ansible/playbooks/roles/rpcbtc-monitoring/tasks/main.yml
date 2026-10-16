@@ -1,0 +1,154 @@
+---
+# Déploie l'exporter Bitcoin, enregistre sa cible et ouvre le pare-feu.
+#
+# Structure imposée par la convention `-monitoring` (voir CLAUDE.md) :
+#   • une sonde `bitcoin_up` ;
+#   • des métriques révélant un état dégradé ;
+#   • une cible Prometheus déposée sur `prometheus_host`, taguée `monitoring` ;
+#   • une ouverture ufw pour le scrape, taguée `monitoring` elle aussi.
+
+- name: Fail early when no Prometheus host is defined
+  ansible.builtin.assert:
+    that:
+      - prometheus_host is defined
+      - prometheus_host in hostvars
+    fail_msg: >-
+      `prometheus_host` n'est pas défini ou absent de l'inventaire. Un exporter
+      que personne ne scrape ne supervise rien : le rôle refuse de s'installer.
+  tags: [monitoring]
+
+# Utilisateur dédié, sans shell : l'exporter détient les identifiants RPC du
+# nœud et n'a besoin de rien d'autre. Le faire tourner en root — ce que faisait
+# `exporter-btc` — donnait à un service exposé sur le réseau les droits de la
+# machine entière.
+- name: Create the exporter system user
+  ansible.builtin.user:
+    name: "{{ btcexp_user }}"
+    system: true
+    shell: /usr/sbin/nologin
+    create_home: false
+  become: true
+
+- name: Create the exporter configuration directory
+  ansible.builtin.file:
+    path: "{{ btcexp_dir }}"
+    state: directory
+    owner: root
+    group: "{{ btcexp_user }}"
+    mode: '0750'
+  become: true
+
+- name: Deploy the exporter
+  ansible.builtin.copy:
+    src: bitcoin-exporter.py
+    dest: "{{ btcexp_bin }}"
+    owner: root
+    group: root
+    mode: '0755'
+  become: true
+  notify: restart bitcoin-exporter
+
+# 0640 root:bitcoin-exporter — le fichier porte le mot de passe RPC du nœud,
+# qui donne accès à toutes les commandes RPC.
+- name: Deploy the exporter configuration
+  ansible.builtin.template:
+    src: config.json.j2
+    dest: "{{ btcexp_dir }}/config.json"
+    owner: root
+    group: "{{ btcexp_user }}"
+    mode: '0640'
+  become: true
+  notify: restart bitcoin-exporter
+
+- name: Deploy the exporter systemd unit
+  ansible.builtin.template:
+    src: bitcoin-exporter.service
+    dest: /etc/systemd/system/bitcoin-exporter.service
+    owner: root
+    group: root
+    mode: '0644'
+  become: true
+  notify: restart bitcoin-exporter
+
+- name: Enable and start the exporter
+  ansible.builtin.systemd:
+    name: bitcoin-exporter
+    state: started
+    enabled: true
+    daemon_reload: true
+  become: true
+
+# L'unité peut être `active` alors que l'exporter ne joint pas le nœud : c'est
+# précisément le cas que `bitcoin_up` doit rendre visible, et il faut donc
+# vérifier que la métrique EXISTE, pas seulement que le service tourne.
+- name: Verify the exporter answers and publishes bitcoin_up
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ btcexp_port }}/metrics"
+    return_content: true
+  register: btcexp_probe
+  retries: 6
+  delay: 5
+  until: btcexp_probe.status is defined and btcexp_probe.status == 200
+  changed_when: false
+
+- name: Fail if bitcoin_up is absent from the exposition
+  ansible.builtin.assert:
+    that:
+      - "'bitcoin_up ' in btcexp_probe.content"
+    fail_msg: "L'exporter répond mais n'expose pas `bitcoin_up` — exposition inattendue."
+
+- name: Report the node state seen by the exporter
+  ansible.builtin.debug:
+    msg: >-
+      {{ btcexp_probe.content.split('\n')
+         | select('match', '^(bitcoin_up|bitcoin_blocks|bitcoin_peers|bitcoin_latest_block_age_seconds) ')
+         | list }}
+
+# ── Pare-feu ───────────────────────────────────────────────────────────────
+# Tagué `monitoring` comme l'enregistrement de la cible : sans ouverture, la
+# cible apparaît dans Prometheus et reste `down`, ce qui ressemble à une panne
+# du nœud alors que c'est un pare-feu.
+- name: Allow Prometheus to scrape the exporter
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ hostvars[prometheus_host]['ansible_host'] }}"
+    port: "{{ btcexp_port }}"
+    comment: "Prometheus scrape - bitcoin-exporter"
+  become: true
+  when: ansible_host != hostvars[prometheus_host]['ansible_host']
+  tags: [monitoring]
+
+- name: Allow the Prometheus Docker bridge to scrape (monitor is local)
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "172.17.0.0/16"
+    port: "{{ btcexp_port }}"
+    comment: "Prometheus Docker scrape - bitcoin-exporter"
+  become: true
+  when: ansible_host == hostvars[prometheus_host]['ansible_host']
+  tags: [monitoring]
+
+# ── Enregistrement de la cible ─────────────────────────────────────────────
+- name: Create the node-btc target directory on the Prometheus host
+  ansible.builtin.file:
+    path: "/home/{{ remote_username }}/prometheus/prometheus-configs/{{ btcexp_job }}"
+    state: directory
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: '0755'
+  delegate_to: "{{ prometheus_host }}"
+  become: true
+  tags: [monitoring]
+
+- name: Deploy the node-btc Prometheus target
+  ansible.builtin.template:
+    src: prometheus-target.json.j2
+    dest: "/home/{{ remote_username }}/prometheus/prometheus-configs/{{ btcexp_job }}/{{ inventory_hostname }}.json"
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: '0644'
+  delegate_to: "{{ prometheus_host }}"
+  become: true
+  tags: [monitoring]

@@ -1,0 +1,87 @@
+---
+# Purge le nœud Bitcoin : tout ce que fait `-remove`, PLUS la chaîne elle-même.
+# DESTRUCTIF au sens fort — ~887 Go et PLUSIEURS JOURS de synchronisation
+# initiale, suivis d'une réindexation complète de BRK (des dizaines d'heures)
+# avant que le pipeline d'indicateurs ne reprenne.
+#
+# Le rôle visait `~/.bitcoin`, chemin qui n'existe pas sur ces machines : le
+# datadir est `~/bitcoin/data` (voir rpcbtc-install). La purge ne purgeait donc
+# rien et se terminait « ok ».
+
+- name: Refuse to purge without explicit confirmation
+  ansible.builtin.assert:
+    that:
+      - (confirm | default('')) == 'yes'
+    fail_msg: >-
+      Purge refusée. Cette opération SUPPRIME la chaîne (~887 Go sur rpcbtc1) :
+      plusieurs jours d'IBD puis une réindexation complète de BRK avant que les
+      indicateurs ne reprennent. Si l'objectif est de réinstaller le démon, c'est
+      `rpcbtc-remove` qu'il faut — il préserve les données. Sinon, relance avec
+      -e confirm=yes en connaissance de cause.
+
+- name: Stop bitcoind user service
+  ansible.builtin.systemd:
+    name: bitcoind
+    scope: user
+    state: stopped
+    enabled: false
+  ignore_errors: true
+
+- name: Remove systemd user service file
+  ansible.builtin.file:
+    path: "~/.config/systemd/user/bitcoind.service"
+    state: absent
+
+- name: Reload user systemd daemon
+  ansible.builtin.command: systemctl --user daemon-reload
+  ignore_errors: true
+  changed_when: false
+
+# ── Supervision ────────────────────────────────────────────────────────────
+- name: Stop and disable the Bitcoin exporter
+  ansible.builtin.systemd:
+    name: bitcoin-exporter
+    state: stopped
+    enabled: false
+  become: true
+  ignore_errors: true
+
+- name: Remove the exporter files
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/systemd/system/bitcoin-exporter.service
+    - /usr/local/bin/bitcoin-exporter
+    - /etc/bitcoin-exporter
+  become: true
+
+- name: Remove the exporter system user
+  ansible.builtin.user:
+    name: bitcoin-exporter
+    state: absent
+    remove: false
+  become: true
+
+- name: Reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+  become: true
+
+- name: Remove the Prometheus target
+  ansible.builtin.file:
+    path: "/home/{{ remote_username }}/prometheus/prometheus-configs/{{ exporter_job | default('node-btc') }}/{{ inventory_hostname }}.json"
+    state: absent
+  delegate_to: "{{ prometheus_host }}"
+  become: true
+  when: prometheus_host is defined and prometheus_host in hostvars
+  tags: [monitoring]
+
+# ── Données ────────────────────────────────────────────────────────────────
+# `~/bitcoin` en entier : binaires, configuration ET datadir. C'est le seul
+# endroit du dépôt où cette suppression est légitime, parce qu'elle est
+# explicitement demandée et protégée par la confirmation ci-dessus.
+- name: Remove the whole Bitcoin directory (binaries + config + chain data)
+  ansible.builtin.file:
+    path: ~/bitcoin
+    state: absent

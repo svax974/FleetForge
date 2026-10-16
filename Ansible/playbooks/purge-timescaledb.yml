@@ -1,0 +1,18 @@
+---
+# Supprime TimescaleDB sur l'hôte `timescale`, données comprises. DESTRUCTIF.
+#
+# Ciblait `brk1` alors que la base vit sur `timescale` : la purge ne purgeait
+# rien et se terminait « ok ».
+#
+# `timescaledb-backup-purge` est joué EN PREMIER et exige `-e confirm=yes` :
+# supprimer la base sans supprimer ses sauvegardes est un état légitime
+# (réinstallation suivie d'une restauration), l'inverse ne l'est jamais.
+#
+#   ./play.sh papanglabs purge-timescaledb.yml -e confirm=yes
+
+- name: Purge PapangMetrics TimescaleDB (DESTRUCTIVE — removes data + backups)
+  hosts: timescale
+  remote_user: "{{ remote_username }}"
+  roles:
+    - timescaledb-backup-purge
+    - timescaledb-purge

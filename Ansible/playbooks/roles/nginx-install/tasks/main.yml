@@ -1,0 +1,26 @@
+---
+- name: Gather only ansible_distribution
+  ansible.builtin.setup:
+    filter: "ansible_distribution"
+
+- name: Gather only ansible_distribution_release
+  ansible.builtin.setup:
+    filter: "ansible_distribution_release"
+
+# Install latest stable nginx from nginx official repo
+- name: nginx | apt source
+  ansible.builtin.deb822_repository:
+    name: nginx
+    types: deb
+    uris: "http://nginx.org/packages/{{ ansible_facts['distribution'] | lower }}"
+    suites: "{{ ansible_facts['distribution_release'] }}"
+    components: nginx
+    architectures: amd64
+    signed_by: https://nginx.org/keys/nginx_signing.key
+    state: present
+    install_python_debian: true
+- name: Update repositories cache and install nginx
+  ansible.builtin.apt:
+    pkg:
+    - nginx
+    update_cache: yes

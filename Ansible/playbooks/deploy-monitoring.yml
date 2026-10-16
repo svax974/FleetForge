@@ -1,0 +1,39 @@
+---
+# Stack de supervision de web3c (famille `monitoring`) : Prometheus en conteneur
+# sur `monitor` et règles d'alerte. Ex-`deploy-monitor.yml`, renommé le
+# 11/10/2026 pour que le nom de la famille soit celui du playbook. Côté
+# papanglabs : deploy-prometheus.yml.
+#
+#   ./play.sh web3c deploy-monitoring.yml
+
+- name: Install and update monitor configuration
+  hosts: monitor
+  remote_user: "{{ remote_username }}"
+  become: true
+  become_method: sudo
+
+  roles:
+    - monitoring-install
+    - prometheus-alerts-update
+    #- monitoring-security
+    #- monitoring-update
+    
+
+# ── Supervision ────────────────────────────────────────────────────────────
+# `grafana-monitoring` n'est PAS joué : Grafana n'est pas installé sur cet
+# hôte. Ni paquet, ni /var/lib/grafana, ni conteneur — `monitoring-install` ne
+# déploie que Prometheus, contrairement à ce que laissait entendre son nom.
+# La sonde y publiait donc `service_up{service="grafana"} 0` en permanence,
+# soit une alerte `ServiceDown` continue pour un service absent : le meilleur
+# moyen d'apprendre à ignorer la seule alerte qui compte le jour venu.
+#
+# Le rôle est conservé, prêt à servir : le jour où Grafana est déployé ici,
+# remettre la ligne ci-dessous. L'obligation `-monitoring` de CLAUDE.md porte
+# sur les services DÉPLOYÉS — il n'y en a pas à superviser tant que Grafana
+# n'existe pas.
+#
+#- name: Supervision de Grafana
+#  hosts: monitor
+#  remote_user: "{{ remote_username }}"
+#  roles:
+#    - grafana-monitoring

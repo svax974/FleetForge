@@ -1,0 +1,104 @@
+---
+
+- name: Validate required variables
+  ansible.builtin.assert:
+    that:
+      - domain_name | length > 0
+      - email | length > 0
+      - bind9_rfc2136_secret | length > 0
+    fail_msg: "domain_name, email et bind9_rfc2136_secret doivent être définis avant d'exécuter proxy-certs-bind9"
+
+- name: Install bind9, certbot and dependencies
+  ansible.builtin.apt:
+    pkg:
+      - bind9
+      - bind9utils
+      - bind9-dnsutils
+      - certbot
+      - python3-certbot-dns-rfc2136
+    update_cache: true
+
+- name: Gather installed packages facts
+  ansible.builtin.package_facts:
+    manager: auto
+
+- name: Indicate whether nginx is installed
+  ansible.builtin.set_fact:
+    proxy_certs_bind9_has_nginx: "{{ 'nginx' in (ansible_facts.packages | default({})) }}"
+
+- name: Ensure BIND zones directory exists
+  ansible.builtin.file:
+    path: /etc/bind/zones
+    state: directory
+    owner: root
+    group: bind
+    mode: '0750'
+  notify: reload bind9
+
+- name: Configure BIND key and zone for {{ domain_name }}
+  ansible.builtin.blockinfile:
+    path: /etc/bind/named.conf.local
+    create: true
+    marker: "# {mark} ANSIBLE MANAGED BLOCK FOR {{ domain_name }}"
+    block: |
+      key "{{ bind9_rfc2136_key_name }}" {
+          algorithm {{ bind9_rfc2136_algorithm }};
+          secret "{{ bind9_rfc2136_secret }}";
+      };
+
+      zone "{{ domain_name }}" {
+          type master;
+          file "/etc/bind/zones/db.{{ domain_name }}";
+          allow-update { key {{ bind9_rfc2136_key_name }}; };
+      };
+  notify: reload bind9
+
+- name: Deploy zone file
+  ansible.builtin.template:
+    src: db.zone.j2
+    dest: "/etc/bind/zones/db.{{ domain_name }}"
+    owner: root
+    group: bind
+    mode: '0640'
+  notify: reload bind9
+
+- name: Ensure bind9 service is enabled and running
+  ansible.builtin.service:
+    name: bind9
+    state: started
+    enabled: true
+
+- name: Ensure /etc/letsencrypt exists
+  ansible.builtin.file:
+    path: /etc/letsencrypt
+    state: directory
+    owner: root
+    group: root
+    mode: '0750'
+
+- name: Deploy RFC2136 credentials for certbot
+  ansible.builtin.template:
+    src: rfc2136.ini.j2
+    dest: /etc/letsencrypt/rfc2136.ini
+    owner: root
+    group: root
+    mode: '0600'
+
+- name: Appliquer les changements BIND avant certbot
+  ansible.builtin.meta: flush_handlers
+
+- name: Request wildcard certificate via RFC2136
+  ansible.builtin.command: >-
+    certbot certonly --non-interactive --agree-tos
+    --email {{ email }}
+    --dns-rfc2136
+    --dns-rfc2136-credentials /etc/letsencrypt/rfc2136.ini
+    --dns-rfc2136-propagation-seconds {{ bind9_certbot_propagation_seconds }}
+    -d {{ domain_name }} -d *.{{ domain_name }}
+  args:
+    creates: "/etc/letsencrypt/live/{{ domain_name }}/fullchain.pem"
+
+- name: Install certificate into nginx if available
+  ansible.builtin.command: >-
+    certbot install --nginx --cert-name {{ domain_name }} --non-interactive
+  when: proxy_certs_bind9_has_nginx | bool

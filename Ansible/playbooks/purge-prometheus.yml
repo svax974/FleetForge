@@ -1,0 +1,6 @@
+---
+- name: Purge Prometheus (DESTRUCTIVE — removes the whole metrics history)
+  hosts: prometheus1
+  remote_user: "{{ remote_username }}"
+  roles:
+    - prometheus-purge

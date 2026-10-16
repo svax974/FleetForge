@@ -1,0 +1,24 @@
+---
+# Theta Edge node — periodic TFuel sweep to a destination wallet.
+#
+# theta_passwd  : keystore password shared by all instances — defined in group_vars
+# theta_wallet  : destination wallet address — defined in group_vars
+#
+# Only tweak these if the defaults don't fit:
+
+# Instances à vider : toutes celles déclarées sur l'hôte. `theta_edge_instances`
+# est repris de l'inventaire (host_vars), comme pour theta-edge-install.
+theta_edge_instances: 1
+theta_edge_sweep_instance_ids: "{{ range(1, theta_edge_instances | int + 1) | list }}"
+
+# Minimum TFuel balance to trigger a sweep
+theta_edge_sweep_threshold_tfuel: 10
+
+# Amount to keep on the node after sweep (covers fees + small buffer)
+theta_edge_sweep_keep_tfuel: 0.1
+
+# Cron schedule (default: daily at 02:00)
+theta_edge_sweep_schedule: "0 2 * * *"
+
+# Theta mainnet RPC — leave empty to use theta-js library default
+theta_edge_sweep_rpc_url: ""

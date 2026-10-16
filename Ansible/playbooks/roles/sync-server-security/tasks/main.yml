@@ -1,0 +1,114 @@
+---
+# Joué sur `ctdapi` (hôte canonique de la machine partagée), pas sur les entrées
+# `sync-*` — voir defaults/main.yml. Modèle : agenthub-security.
+
+- name: Fail when the sync_servers group is empty
+  ansible.builtin.assert:
+    that:
+      - sync_security_ports | length > 0
+    fail_msg: >-
+      Le groupe `sync_servers` est vide ou ses entrées n'ont ni `app_port` ni
+      `sync_metrics_port` : il n'y a aucun port à filtrer.
+    quiet: true
+  tags: [always]
+
+- name: Apply the machine's Docker port rules
+  ansible.builtin.include_role:
+    name: docker-ports-security
+
+# Une machine dont host_vars/ctdapi.yml ignorerait un de ces ports le publierait
+# sur 0.0.0.0 sans aucun filtre, et `ufw status` afficherait néanmoins des DENY
+# rassurants (constat du 06/08/2026 sur `prometheus1`).
+- name: Fail when a sync port is not declared in docker_ports_rules
+  ansible.builtin.assert:
+    that:
+      - (docker_ports_rules | default([]) | selectattr('port', 'equalto', item | int) | list | length) > 0
+    fail_msg: >-
+      Le port {{ item }} (serveur de synchronisation) est publié par Docker mais
+      absent de `docker_ports_rules` : il serait joignable depuis Internet sans
+      filtre, et ufw n'y peut rien. Ajouter une entrée dans
+      playbooks/host_vars/ctdapi.yml (service : sources = proxies ; métriques :
+      sources vides, l'hôte Prometheus est autorisé par sync-server-monitoring).
+    success_msg: "Port {{ item }} déclaré dans docker_ports_rules."
+    quiet: true
+  loop: "{{ sync_security_ports }}"
+
+# Les ports de SERVICE ne doivent être autorisés qu'aux proxies : ni whitelist,
+# ni VPN, ni réseau interne. Un `allow_*` ajouté par erreur à cette entrée
+# ouvrirait le service à des sources que le vhost public ne mentionne pas.
+- name: Fail when a service port allows more than the proxies
+  ansible.builtin.assert:
+    that:
+      - not (rule.allow_internal | default(true) | bool)
+      - not (rule.allow_whitelist | default(false) | bool)
+      - not (rule.allow_vpns | default(false) | bool)
+    fail_msg: >-
+      Le port {{ item }} (service sync) autorise plus que les proxies
+      (allow_internal/allow_whitelist/allow_vpns) — voir host_vars/ctdapi.yml.
+    quiet: true
+  vars:
+    rule: "{{ docker_ports_rules | selectattr('port', 'equalto', item | int) | first }}"
+  loop: "{{ sync_security_service_ports }}"
+
+# `docker-ports-security` rend la main une fois la chaîne reconstituée (flush des
+# handlers + réapplication inconditionnelle) : la lecture ci-dessous porte donc
+# sur l'état réel et non sur l'ancien.
+- name: Read back the DOCKER-USER chain
+  ansible.builtin.command: iptables -S DOCKER-USER
+  become: true
+  register: sync_chain
+  changed_when: false
+  check_mode: false
+
+- name: Verify every sync port is really dropped by default
+  ansible.builtin.assert:
+    that:
+      # Motif et non égalité : `iptables -S` intercale `-m tcp` et réordonne les
+      # options selon la version (cf. agenthub-security).
+      - sync_chain.stdout is search('--dport ' ~ item ~ '.*-j DROP')
+    fail_msg: >-
+      Le port {{ item }} est publié sur 0.0.0.0 mais aucun DROP ne le protège
+      dans DOCKER-USER : il serait joignable depuis Internet en contournant TLS
+      et le vhost des proxies. Vérifier `systemctl status docker-ports-firewall`
+      et `iptables -S DOCKER-USER` sur {{ inventory_hostname }}.
+    success_msg: "Port {{ item }} filtré dans DOCKER-USER (DROP par défaut)."
+    quiet: true
+  loop: "{{ sync_security_ports }}"
+  when: not ansible_check_mode
+
+# Même garantie en IPv6 : Docker publie aussi sur `[::]` quand ip6tables est
+# actif, et des règles IPv4 seules laisseraient la chaîne ip6tables vide.
+# Chaîne absente = Docker en IPv4 seul : rien à vérifier.
+- name: Read back the IPv6 DOCKER-USER chain
+  ansible.builtin.command: ip6tables -S DOCKER-USER
+  become: true
+  register: sync_chain6
+  changed_when: false
+  check_mode: false
+  failed_when: false
+
+- name: Verify every sync port is dropped in IPv6 too
+  ansible.builtin.assert:
+    that:
+      - sync_chain6.stdout is search('--dport ' ~ item ~ '.*-j DROP')
+    fail_msg: >-
+      Port {{ item }} non protégé en IPv6 : la chaîne ip6tables DOCKER-USER
+      existe mais ne porte aucun DROP. Vérifier `ip6tables -S DOCKER-USER`
+      sur {{ inventory_hostname }}.
+    success_msg: "Port {{ item }} filtré aussi en IPv6."
+    quiet: true
+  loop: "{{ sync_security_ports }}"
+  when:
+    - not ansible_check_mode
+    - sync_chain6.rc == 0
+
+- name: Report the exposure
+  ansible.builtin.debug:
+    msg: >-
+      Ports de service {{ sync_security_service_ports | join('/') }} (proxies
+      uniquement) et de métriques {{ sync_security_metrics_ports | join('/') }}
+      (hôte Prometheus uniquement, autorisé par sync-server-monitoring) filtrés
+      dans DOCKER-USER sur {{ ansible_host }}. Contrôle depuis une machine
+      tierce (hors proxies/Prometheus) : `nc -zv -w5 {{ ansible_host }}
+      {{ (sync_security_ports | first) }}` doit échouer, pour CHACUN de ces
+      ports.

@@ -1,0 +1,8 @@
+---
+# Remove a specific Ollama model from the server.
+# Requires variable: ollama_model_name
+
+- name: Remove Ollama model
+  ansible.builtin.command: "ollama rm {{ ollama_model_name }}"
+  register: result
+  failed_when: result.rc != 0 and 'not found' not in result.stderr

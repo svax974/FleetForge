@@ -1,0 +1,242 @@
+---
+- name: Stop and disable mail services
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: stopped
+    enabled: no
+  loop:
+    - postfix
+    - dovecot
+    - opendkim
+    - spamd
+    - spamassassin
+    - clamav-daemon
+    - clamav-freshclam
+    - fail2ban
+    - nginx
+  ignore_errors: yes
+
+- name: Stop and disable PHP-FPM services
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: stopped
+    enabled: no
+  loop:
+    - php-fpm
+    - php8.3-fpm
+    - php8.2-fpm
+    - php8.1-fpm
+    - php8.0-fpm
+    - php7.4-fpm
+  ignore_errors: yes
+
+- name: Remove UFW mail firewall rules
+  community.general.ufw:
+    rule: deny
+    port: "{{ item.port }}"
+    proto: "{{ item.proto }}"
+    from_ip: "{{ item.from_ip }}"
+    delete: yes
+  loop:
+    - { port: '465', proto: 'tcp', from_ip: 'any' }
+    - { port: '587', proto: 'tcp', from_ip: 'any' }
+    - { port: '993', proto: 'tcp', from_ip: 'any' }
+    - { port: '995', proto: 'tcp', from_ip: 'any' }
+    - { port: '143', proto: 'tcp', from_ip: 'any' }
+    - { port: '110', proto: 'tcp', from_ip: 'any' }
+    - { port: '80', proto: 'tcp', from_ip: 'any' }
+    - { port: '22', proto: 'tcp', from_ip: 'any' }
+  ignore_errors: yes
+
+- name: Reset UFW to defaults
+  community.general.ufw:
+    state: reset
+  ignore_errors: yes
+
+- name: Remove mail packages
+  ansible.builtin.apt:
+    pkg:
+      - postfix
+      - postfix-sqlite
+      - dovecot-core
+      - dovecot-imapd
+      - dovecot-pop3d
+      - dovecot-lmtpd
+      - dovecot-sqlite
+      - sqlite3
+      - opendkim
+      - opendkim-tools
+      - spamassassin
+      - spamc
+      - clamav
+      - clamav-daemon
+      - clamav-freshclam
+      - fail2ban
+      - nginx
+      - nginx-common
+      - roundcube
+      - roundcube-core
+      - roundcube-sqlite3
+    state: absent
+    purge: yes
+    autoremove: yes
+  ignore_errors: yes
+
+- name: Remove PHP and related packages
+  ansible.builtin.apt:
+    pkg:
+      - php
+      - php-fpm
+      - php-cli
+      - php-sqlite3
+      - php-curl
+      - php-gd
+      - php-intl
+      - php-json
+      - php-mbstring
+      - php-xml
+      - php-zip
+      - php-pear
+      - php-auth-sasl
+      - php-mail-mime
+      - php8.3-fpm
+      - php8.2-fpm
+      - php8.1-fpm
+      - php8.0-fpm
+      - php7.4-fpm
+    state: absent
+    purge: yes
+    autoremove: yes
+  ignore_errors: yes
+
+- name: Remove mail configuration directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/postfix
+    - /etc/dovecot
+    - /etc/opendkim
+    - /etc/spamassassin
+    - /etc/clamav
+    - /etc/fail2ban/jail.local
+    - /etc/nginx/sites-available/webmail
+    - /etc/nginx/sites-enabled/webmail
+    - /etc/nginx/sites-enabled/default
+    - /var/www/webmail
+    - /var/mail/domains
+    - /var/mail/vmail
+    - /var/spool/postfix
+    - /var/lib/dovecot
+    - /var/lib/opendkim
+    - /var/lib/spamassassin
+    - /var/lib/clamav
+    - /var/log/mail.log
+    - /var/log/mail.err
+    - /var/log/mail.warn
+    - /var/log/mail.info
+
+- name: Remove mail user and group
+  ansible.builtin.user:
+    name: vmail
+    state: absent
+    remove: yes
+    force: yes
+  ignore_errors: yes
+
+- name: Remove vmail group
+  ansible.builtin.group:
+    name: vmail
+    state: absent
+  ignore_errors: yes
+
+- name: Remove mail-user-manager script
+  ansible.builtin.file:
+    path: /usr/local/bin/mail-user-manager
+    state: absent
+
+- name: Remove Roundcube database and directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /var/www/webmail/db/roundcube.db
+    - /var/www/webmail/db/.schema_initialized
+    - /var/www/webmail/temp
+    - /var/www/webmail/logs
+    - /var/www/webmail/db
+
+- name: Remove DKIM keys
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/opendkim/keys/mail.private
+    - /etc/opendkim/keys/mail.txt
+    - /etc/opendkim/keys
+
+- name: Remove mail storage directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /var/mail/domains/{{ domain_name }}
+    - /var/mail/domains
+    - /var/mail
+
+- name: Restore default nginx site (if backup exists)
+  ansible.builtin.file:
+    src: /etc/nginx/sites-available/default
+    dest: /etc/nginx/sites-enabled/default
+    state: link
+  ignore_errors: yes
+
+- name: Clean package cache
+  ansible.builtin.apt:
+    autoclean: yes
+    autoremove: yes
+
+- name: Remove residual configuration files
+  ansible.builtin.shell:
+    cmd: "dpkg -l | grep '^rc' | awk '{print $2}' | xargs dpkg --purge"
+  ignore_errors: yes
+  changed_when: false
+
+- name: Restart networking (to clear any mail-related network config)
+  ansible.builtin.systemd:
+    name: networking
+    state: restarted
+  ignore_errors: yes
+
+- name: Display uninstall completion message
+  ansible.builtin.debug:
+    msg: |
+      ================================================
+      MAIL SERVER UNINSTALL COMPLETE
+      ================================================
+      
+      Removed components:
+      - All mail services (Postfix, Dovecot, OpenDKIM, SpamAssassin, ClamAV)
+      - Roundcube webmail interface
+      - All configuration files and directories
+      - Mail storage directories and databases
+      - UFW firewall rules for mail services
+      - Mail user accounts and system users
+      - PHP-FPM and related packages
+      - Nginx webmail configuration
+      
+      Remaining tasks (manual):
+      1. Remove DNS records (MX, A, DKIM)
+      2. Update proxy configurations to remove webmail
+      3. Verify no mail-related processes are running:
+         ps aux | grep -E "(postfix|dovecot|opendkim|spam|clam)"
+      4. Check for any remaining mail-related files:
+         find /etc /var -name "*mail*" -o -name "*postfix*" -o -name "*dovecot*" 2>/dev/null
+      
+      System status:
+      - UFW firewall reset to defaults
+      - All packages removed and purged
+      - Configuration directories cleaned
+      - Mail storage completely removed
+      
+      ================================================ 

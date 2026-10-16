@@ -1,0 +1,20 @@
+---
+# Rapatriement périodique (cron) du TFuel de chaque nœud Theta Edge de l'hôte
+# vers `theta_wallet` (group_vars).
+#
+#   ./play.sh web3c deploy-theta-edge-sweep.yml --limit <hôte>
+#
+# Vide l'adresse du NŒUD de chaque instance (la clé du keystore). Le wallet
+# interne de l'edgecore n'est pas concerné : son solde est suivi par
+# `theta_edge_balance_tfuel{account="wallet"}`.
+
+- name: Sweep TFuel Theta Edge
+  hosts: all
+  remote_user: "{{ remote_username }}"
+  become: true
+  pre_tasks:
+    - name: Skip hosts that do not carry the theta-edge family
+      ansible.builtin.meta: end_host
+      when: "'theta-edge' not in ansible_roles | default([])"
+  roles:
+    - theta-edge-sweep-install

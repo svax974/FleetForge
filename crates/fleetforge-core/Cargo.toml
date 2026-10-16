@@ -1,0 +1,22 @@
+[package]
+name = "fleetforge-core"
+description = "Cœur métier partagé par les deux interfaces de FleetForge (GUI Tauri et TUI)."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+# Aucune dépendance d'interface ici — ni tauri, ni ratatui. C'est ce qui garantit
+# que les deux façades voient exactement le même domaine.
+# Contrôle : `cargo tree -p fleetforge-core | grep -E 'tauri|ratatui'` doit être vide.
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+dirs.workspace = true
+reqwest.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+thiserror.workspace = true
+tokio.workspace = true

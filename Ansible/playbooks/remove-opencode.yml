@@ -1,0 +1,21 @@
+---
+# Supprime le binaire opencode en conservant configuration et sessions.
+#
+#   ./play.sh web3c remove-opencode.yml --limit hub
+#
+# Conserve `~/.config/opencode` (configuration, agents, commandes) et
+# `~/.local/share/opencode` (`opencode.db` : sessions et identifiants des
+# fournisseurs) : une réinstallation les retrouve en place. Pour tout
+# supprimer : `purge-opencode.yml`.
+#
+# Le rôle signale, sans y toucher, les installations personnelles laissées par
+# le script officiel dans `~/.opencode/bin` — elles masqueraient le binaire
+# système dans le PATH et survivraient à cette suppression.
+#
+# `--limit` est OBLIGATOIRE.
+
+- name: Suppression d'opencode (configuration et sessions conservées)
+  hosts: all
+  remote_user: "{{ remote_username }}"
+  roles:
+    - opencode-remove

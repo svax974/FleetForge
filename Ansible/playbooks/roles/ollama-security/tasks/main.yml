@@ -1,0 +1,71 @@
+---
+# Ordre imposé : ufw évalue ses règles séquentiellement et la première qui
+# matche gagne. Les autorisations doivent donc être posées AVANT le refus par
+# défaut, sinon le refus les couvre toutes et le service devient injoignable.
+# `community.general.ufw` ajoute en queue, l'ordre des tâches suffit.
+
+- name: Allow the Ollama API from proxies, vpns, Prometheus and whitelist
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    port: "{{ ollamasec_port }}"
+    from_ip: "{{ item }}"
+    comment: "Ollama API"
+  loop: "{{ ollamasec_sources | unique }}"
+  become: true
+
+- name: Deny the Ollama API from anywhere else
+  community.general.ufw:
+    rule: deny
+    proto: tcp
+    port: "{{ ollamasec_port }}"
+    comment: "Ollama API - default deny"
+  become: true
+
+# Le refus ci-dessus ne protège rien si Ollama venait à tourner en conteneur
+# avec `-p 11434:11434` : Docker insère ses DNAT en amont d'ufw et le port
+# resterait ouvert (voir CLAUDE.md). `ollama-install` utilise le paquet natif
+# et son unité systemd, pas Docker — on vérifie que c'est toujours le cas
+# plutôt que de le supposer.
+- name: Check that Ollama is not published by Docker
+  ansible.builtin.shell: >-
+    docker ps --format '{% raw %}{{.Ports}}{% endraw %}' 2>/dev/null
+    | grep -c ':{{ ollamasec_port }}->' || true
+  args:
+    executable: /bin/bash
+  register: ollamasec_docker
+  changed_when: false
+  check_mode: false
+  become: true
+
+- name: Warn when the port is published by a container
+  ansible.builtin.fail:
+    msg: >-
+      Le port {{ ollamasec_port }} est publié par un conteneur : les règles ufw
+      posées ci-dessus n'ont AUCUN effet dessus. Le filtrage doit passer par la
+      chaîne DOCKER-USER — ajouter l'entrée dans
+      host_vars/{{ inventory_hostname }}.yml et jouer `docker-ports-security`.
+  when: (ollamasec_docker.stdout | default('0') | trim | int) > 0
+
+# ── Contrôle ───────────────────────────────────────────────────────────────
+# Les règles ci-dessus restent DÉCORATIVES tant qu'ufw est inactif — l'état de
+# la machine hub depuis le 09/09/2026, par décision opérateur (voir
+# openclaw-security). Avec la redirection 11434 du routeur nécessaire au vhost,
+# l'API serait alors joignable sans filtre depuis Internet : on le signale à
+# chaque déploiement plutôt que d'activer ufw à l'aveugle.
+- name: Check whether ufw is actually active
+  ansible.builtin.command: ufw status
+  become: true
+  register: ollamasec_ufw_state
+  changed_when: false
+  check_mode: false
+
+- name: Warn when ufw is inactive on this host
+  ansible.builtin.debug:
+    msg: >-
+      ufw est INACTIF sur {{ inventory_hostname }} : les règles Ollama sont
+      enregistrées mais AUCUNE n'est appliquée. Si le routeur redirige
+      {{ ollamasec_port }} vers cette machine, l'API (sans authentification) est
+      ouverte à Internet. Activer ufw après avoir vérifié les autres services
+      de la machine.
+  when: "'Status: active' not in ollamasec_ufw_state.stdout"

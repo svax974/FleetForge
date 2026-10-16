@@ -1,0 +1,27 @@
+---
+# Allow connections from proxies and whitelist
+- name: Allow connections on "{{ proxy_back_port }}" from proxies
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ hostvars[item].ansible_host }}"
+    port: "{{ hostvars[item].port }}"
+  loop: "{{ groups['backsindicators'] | default([]) }}"
+
+- name: Allow connections from whitelist
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ item }}"
+    port: "{{ hostvars['backindicators1'].port }}"
+  with_items:
+    "{{ whitelist }}"
+
+- name: Allow connections from cloudflare IPs
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ item }}"
+    port: "{{ hostvars['backindicators1'].port }}"
+  with_items:
+    "{{ cloudflare_ips }}"

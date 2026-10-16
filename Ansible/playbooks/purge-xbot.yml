@@ -1,0 +1,12 @@
+---
+# Purge de la supervision de xbot (identique à remove — pas de sauvegarde à
+# purger, xbot n'a pas de base de données). Ne touche pas à la stack
+# docker-compose, hors Ansible.
+#
+#   ./play.sh web3c purge-xbot.yml -e confirm=yes
+
+- name: Purge de la supervision
+  hosts: xbot
+  remote_user: "{{ remote_username }}"
+  roles:
+    - xbot-purge

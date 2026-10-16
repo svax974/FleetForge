@@ -1,0 +1,65 @@
+---
+# Purge complète : tout ce que fait `-remove`, PLUS les dumps sur la
+# destination et la clé SSH dédiée. DESTRUCTIF.
+
+- name: Refuse to purge without explicit confirmation
+  ansible.builtin.assert:
+    that:
+      - (confirm | default('')) == 'yes'
+    fail_msg: >-
+      Purge refusée. Cette opération SUPPRIME les dumps de {{ pgbak_db }} sur
+      {{ pgbak_dest_host }} ({{ pgbak_dest_dir }}). Relance avec
+      -e confirm=yes en connaissance de cause.
+
+- name: Read the backup public key (to revoke it on the destination)
+  ansible.builtin.slurp:
+    src: "{{ pgbak_ssh_key_path }}.pub"
+  register: pgbak_pubkey
+  failed_when: false
+
+- name: Remove the backup cron job
+  ansible.builtin.cron:
+    name: "{{ pgbak_name }} postgres backup"
+    state: absent
+
+- name: Remove backup and restore scripts
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ pgbak_dir }}/postgres-backup.sh"
+    - "{{ pgbak_dir }}/postgres-restore.sh"
+    - "{{ pgbak_dir }}/backup.log"
+
+- name: Remove the logrotate configuration and the Prometheus metric
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "/etc/logrotate.d/postgres-backup-{{ pgbak_name }}"
+    - "{{ node_exporter_textfile_dir }}/backup_{{ pgbak_name }}.prom"
+  become: true
+
+- name: Remove the dedicated SSH key pair
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ pgbak_ssh_key_path }}"
+    - "{{ pgbak_ssh_key_path }}.pub"
+
+- name: Revoke the key on the destination host
+  ansible.posix.authorized_key:
+    user: "{{ pgbak_dest_user }}"
+    state: absent
+    key: "{{ pgbak_pubkey.content | b64decode | trim }}"
+  delegate_to: "{{ pgbak_dest_host }}"
+  become: true
+  when: pgbak_pubkey.content is defined
+
+- name: Remove the backup data on the destination host
+  ansible.builtin.file:
+    path: "{{ pgbak_dest_dir }}"
+    state: absent
+  delegate_to: "{{ pgbak_dest_host }}"
+  become: true

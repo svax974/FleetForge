@@ -1,0 +1,194 @@
+---
+# Installe la sonde partagée, enregistre sa cible, ouvre le pare-feu.
+# Idempotent et conçu pour être inclus par chaque rôle `<service>-monitoring` :
+#
+#   - ansible.builtin.include_role:
+#       name: svcprobe-install
+#       public: true
+#
+# `public: true` est OBLIGATOIRE, et son oubli ne se voit qu'à l'exécution :
+# `include_role` vaut `public: no` par défaut, ce qui confine les defaults
+# ci-dessous (svcprobe_checks_dir, svcprobe_lib_dir, svcprobe_listen_port) aux seules
+# tâches de CE rôle. Le rôle appelant échoue alors sur « svcprobe_lib_dir is
+# undefined » à la tâche suivante — constaté le 13/08/2026 sur
+# searxng-monitoring, les douze rôles `-monitoring` du dépôt portaient le même
+# défaut.
+#
+# Ne dépose AUCUNE sonde : c'est le rôle `-monitoring` appelant qui écrit son
+# fichier dans {{ svcprobe_checks_dir }}.
+
+- name: Fail early when no Prometheus host is defined
+  ansible.builtin.assert:
+    that:
+      - prometheus_host is defined
+      - prometheus_host in hostvars
+    fail_msg: >-
+      `prometheus_host` n'est pas défini ou absent de l'inventaire. Une sonde
+      que personne ne scrape ne supervise rien.
+  tags: [monitoring]
+
+# TOUTES les tâches de ce rôle portent `tags: [monitoring]`, pas seulement
+# l'enregistrement de la cible et les ouvertures ufw exigés par CLAUDE.md.
+# Les tâches d'INSTALLATION en étaient dépourvues : sur un hôte où svcprobe
+# n'existait pas encore, le rejeu documenté `--tags monitoring` les sautait
+# toutes, puis échouait chez l'appelant sur « /etc/svcprobe/checks.d does not
+# exist ». Réarmer la supervision imposait alors de rejouer tout le
+# déploiement du service — ce que la convention `-monitoring` existe justement
+# pour éviter. Constaté le 13/08/2026 sur le relais mail de papanglabs.
+- name: Create the svcprobe directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  loop:
+    - "{{ svcprobe_dir }}"
+    - "{{ svcprobe_checks_dir }}"
+    - "{{ svcprobe_lib_dir }}"
+  become: true
+  tags: [monitoring]
+
+- name: Deploy svcprobe
+  ansible.builtin.copy:
+    src: svcprobe.py
+    dest: "{{ svcprobe_bin }}"
+    owner: root
+    group: root
+    mode: '0755'
+  become: true
+  notify: restart svcprobe
+  tags: [monitoring]
+
+# Collecteurs partagés, déposés ici plutôt que dans chaque rôle `-monitoring` :
+# trois rôles PostgreSQL (timescaledb, db, dbfront) utilisent le MÊME
+# collecteur, et un script recopié trois fois ne serait corrigé qu'une seule
+# le jour où il faudra le corriger. Les rôles `-monitoring` se contentent de
+# l'appeler avec leurs paramètres.
+- name: Deploy the shared metric collectors
+  ansible.builtin.copy:
+    src: "collectors/{{ item }}"
+    dest: "{{ svcprobe_lib_dir }}/{{ item }}"
+    owner: root
+    group: root
+    mode: '0755'
+  loop:
+    - postgres-metrics.sh
+    - nginx-metrics.sh
+    - openvpn-metrics.sh
+  become: true
+  tags: [monitoring]
+
+- name: Deploy the svcprobe systemd unit
+  ansible.builtin.template:
+    src: svcprobe.service
+    dest: /etc/systemd/system/svcprobe.service
+    owner: root
+    group: root
+    mode: '0644'
+  become: true
+  notify: restart svcprobe
+  tags: [monitoring]
+
+- name: Enable and start svcprobe
+  ansible.builtin.systemd:
+    name: svcprobe
+    state: started
+    enabled: true
+    daemon_reload: true
+  become: true
+  tags: [monitoring]
+
+# ── Pare-feu ───────────────────────────────────────────────────────────────
+- name: Allow Prometheus to scrape svcprobe
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ hostvars[prometheus_host]['ansible_host'] }}"
+    port: "{{ svcprobe_listen_port }}"
+    comment: "Prometheus scrape - svcprobe"
+  become: true
+  when: ansible_host != hostvars[prometheus_host]['ansible_host']
+  tags: [monitoring]
+
+- name: Allow the Prometheus Docker bridge to scrape svcprobe (monitor is local)
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "172.17.0.0/16"
+    port: "{{ svcprobe_listen_port }}"
+    comment: "Prometheus Docker scrape - svcprobe"
+  become: true
+  when: ansible_host == hostvars[prometheus_host]['ansible_host']
+  tags: [monitoring]
+
+# ── Cible Prometheus ───────────────────────────────────────────────────────
+# Une seule cible par MACHINE, pas par entrée d'inventaire. Sur ce parc, neuf
+# entrées partagent `prometheus1` (proxy1, prometheus1, alertmanager1, mail,
+# vpn1, dbfmaster, backindicators1, front1) : enregistrer par
+# `inventory_hostname` produirait neuf cibles visant le même `prometheus1`:9110,
+# donc neuf copies de chaque `service_up` sous des `instance` différents — et
+# neuf alertes identiques à chaque panne.
+#
+# svcprobe est de toute façon une sonde d'HÔTE : elle expose tout ce qui est
+# déclaré dans /etc/svcprobe/checks.d, quel que soit le rôle qui l'y a déposé.
+
+- name: Look for an existing svcprobe target for this MACHINE
+  ansible.builtin.shell: >-
+    grep -l '"{{ ansible_host }}:{{ svcprobe_port }}"'
+    /home/{{ remote_username }}/prometheus/prometheus-configs/{{ svcprobe_job }}/*.json
+    2>/dev/null || true
+  args:
+    executable: /bin/bash
+  delegate_to: "{{ prometheus_host }}"
+  register: svcprobe_existing_target
+  changed_when: false
+  check_mode: false
+  tags: [monitoring]
+
+- name: Create the svcprobe target directory on the Prometheus host
+  ansible.builtin.file:
+    path: "/home/{{ remote_username }}/prometheus/prometheus-configs/{{ svcprobe_job }}"
+    state: directory
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: '0755'
+  delegate_to: "{{ prometheus_host }}"
+  become: true
+  tags: [monitoring]
+
+- name: Deploy the svcprobe Prometheus target
+  ansible.builtin.template:
+    src: prometheus-target.json.j2
+    dest: "/home/{{ remote_username }}/prometheus/prometheus-configs/{{ svcprobe_job }}/{{ inventory_hostname }}.json"
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: '0644'
+  delegate_to: "{{ prometheus_host }}"
+  become: true
+  when: (svcprobe_existing_target.stdout | default('')) | length == 0
+  tags: [monitoring]
+
+- name: Note the inventory name carrying the svcprobe scrape
+  ansible.builtin.debug:
+    msg: >-
+      {{ ansible_host }} est déjà scrapé sous
+      « {{ svcprobe_existing_target.stdout_lines | first | basename | splitext | first }} » :
+      les sondes déposées par {{ inventory_hostname }} y sont incluses, aucune
+      seconde cible n'est créée.
+  when: (svcprobe_existing_target.stdout | default('')) | length > 0
+  tags: [monitoring]
+
+# Les handlers ne sont vidés qu'en FIN de play. Or ce rôle est inclus par les
+# `<service>-monitoring`, qui interrogent la sonde immédiatement après pour
+# vérifier qu'elle répond — donc AVANT que le redémarrage notifié n'ait eu lieu.
+# Tant que rien ne change dans l'unité, l'ordre passe inaperçu ; le jour où le
+# port change, la vérification interroge le nouveau port pendant que le
+# processus écoute encore l'ancien, échoue, et interrompt le play — ce qui
+# empêche définitivement le handler de s'exécuter. La sonde reste alors sur son
+# ancien port, et sa cible Prometheus, elle, a bien été réécrite avec le
+# nouveau : elle reste `down` sans que rien n'indique pourquoi.
+# Constaté le 15/08/2026 sur proxy2, passé de 9113 à 9110.
+- name: Flush handlers so the probe is live before its caller verifies it
+  ansible.builtin.meta: flush_handlers
+  tags: [monitoring]

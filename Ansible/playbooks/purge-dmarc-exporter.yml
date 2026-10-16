@@ -1,0 +1,12 @@
+---
+# Purge l'exporter DMARC : service, binaire, utilisateur système, état
+# accumulé, configuration (mot de passe IMAP) et enregistrement Prometheus.
+# Destructif — l'historique des rapports déjà agrégés est perdu.
+- name: Purge DMARC aggregate report exporter
+  hosts: mail:mail1
+  remote_user: "{{ remote_username }}"
+  become: yes
+  gather_facts: yes
+
+  roles:
+    - dmarc-exporter-purge

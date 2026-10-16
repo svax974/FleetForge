@@ -1,0 +1,3 @@
+---
+# Node.js runtime (NodeSource) for PapangMetrics API + ETL.
+nodejs_major: "22"

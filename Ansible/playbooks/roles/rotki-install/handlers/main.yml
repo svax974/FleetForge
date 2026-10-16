@@ -1,0 +1,7 @@
+---
+- name: restart rotki
+  community.docker.docker_container:
+    name: "{{ rotki_container }}"
+    state: started
+    restart: true
+  become: true

@@ -1,0 +1,51 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Tauri
+src-tauri/target
+
+# Sorties de compilation Rust — à tous les niveaux (racine du workspace ET
+# apps/gui/src-tauri). 5,4 Go + 1,6 Go au 15/08/2026 : un `git add -A` sans
+# cette règle les grave définitivement dans l'historique, où rien ne les enlève.
+target/
+
+# Bytecode Python. Les exporters Ansible sont écrits en Python et se lancent
+# sur le serveur : un `__pycache__` compilé sur le POSTE ne vaut que pour la
+# version de l'interpréteur du poste. Un .pyc 3.14 était versionné depuis le
+# 25/08/2026 à côté de dmarc_exporter.py.
+__pycache__/
+*.pyc
+
+# Contexte agent propre au parc réel (registre des ports, adresses) : importé
+# par CLAUDE.md, jamais publié.
+CLAUDE.local.md
+
+# Instructions des agents : conventions internes au parc réel, non publiées.
+# AGENTS.md est un lien vers CLAUDE.md.
+CLAUDE.md
+AGENTS.md
+
+# Tests contre les inventaires RÉELS (topologie du parc) : locaux uniquement.
+crates/fleetforge-core/tests/real_inventories.rs

@@ -1,0 +1,134 @@
+---
+# ── Un seul certbot par machine ───────────────────────────────────────────────
+# Ce rôle gère le certbot APT. Un certbot installé en parallèle par snap partage
+# le même /etc/letsencrypt et écrit ses configurations de renouvellement au
+# format de SA version : sur proxy2, le snap en 5.x avait écrit
+# `version = 5.1.0` dans un fichier que l'apt en 2.9.0 ne sait pas relire.
+#
+# Deux timers s'ensuivent — `certbot.timer` et `snap.certbot.renew.timer` — qui
+# renouvellent les mêmes lignées sans se concerter. Constat du 16/08/2026 sur
+# proxy2 : `snap.certbot.renew.service` était en état `failed`, et une unité de
+# montage orpheline (`snap-certbot-4965.mount`) traînait depuis une révision
+# antérieure. proxy1, qui n'a que l'apt, n'a jamais connu ce problème.
+#
+# On retire donc le snap. Le paquet apt fournit déjà tout le nécessaire
+# (`python3-certbot-dns-cloudflare`, `python3-certbot-nginx`), et c'est lui qui
+# répond dans le PATH — donc celui que ce rôle et l'opérateur utilisent.
+- name: Detect a snap-installed certbot
+  ansible.builtin.command:
+    cmd: snap list certbot
+  register: certinstall_snap
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+# `community.general.snap` avec `state: absent` a été écarté : il RETIRE bien le
+# snap (`snaps_removed: ["certbot"]` dans sa sortie) puis échoue sur une étape
+# suivante appliquée à un snap devenu absent, et remonte donc `failed` après une
+# opération réussie. Une tâche qui ment sur son résultat est pire qu'une tâche
+# qui échoue : elle interrompt le play alors que tout s'est bien passé.
+#
+# `--purge` refuse de terminer tant que les répertoires de données du snap ne
+# sont pas vides ; on les retire donc d'abord. Ils ne contiennent QUE de l'état
+# propre au snap — les certificats vivent dans /etc/letsencrypt, que ce rôle ne
+# touche pas ici (certbot est un snap `classic`, il écrit directement là-bas).
+#
+# Le nettoyage des unités de montage orphelines n'est pas cosmétique : sur
+# proxy2 traînait `snap-certbot-4965.mount` daté de septembre 2025, en état
+# `failed`, pour une révision depuis longtemps disparue.
+- name: Remove the competing snap certbot
+  ansible.builtin.shell:
+    cmd: |
+      set -e
+      rm -rf /root/snap/certbot /var/snap/certbot
+      snap remove --purge certbot
+      rm -f /etc/systemd/system/snap-certbot-*.mount
+      rmdir /snap/certbot/* /snap/certbot 2>/dev/null || true
+      systemctl daemon-reload
+      systemctl reset-failed || true
+  when: certinstall_snap.rc == 0
+  changed_when: true
+
+- name: Install certbot and Cloudflare DNS plugin
+  ansible.builtin.apt:
+    pkg:
+      - certbot
+      - python3-certbot-dns-cloudflare
+    update_cache: true
+
+- name: Ensure /etc/letsencrypt exists
+  ansible.builtin.file:
+    path: /etc/letsencrypt
+    state: directory
+    owner: root
+    group: root
+    mode: '0750'
+
+- name: Deploy Cloudflare credentials for each domain
+  ansible.builtin.template:
+    src: cloudflare.ini.j2
+    dest: "/etc/letsencrypt/cloudflare_{{ item }}.ini"
+    owner: root
+    group: root
+    mode: '0600'
+  loop: "{{ domains }}"
+
+- name: Request wildcard certificate for each domain
+  ansible.builtin.command:
+    cmd: >-
+      certbot certonly --non-interactive --agree-tos
+      -m {{ email }}
+      --dns-cloudflare
+      --dns-cloudflare-credentials /etc/letsencrypt/cloudflare_{{ item }}.ini
+      --dns-cloudflare-propagation-seconds 60
+      -d "*.{{ item }}"
+    creates: "/etc/letsencrypt/live/{{ item }}/fullchain.pem"
+  loop: "{{ domains }}"
+
+# ── Contrôle : aucune lignée invalide ─────────────────────────────────────────
+# La tâche ci-dessus est gardée par `creates:` — un `fullchain.pem` PRÉSENT mais
+# ingérable la fait sauter en silence. C'est exactement ce qui s'est produit sur
+# proxy2 : les entrées de `live/web3c.cc/` avaient été remplacées par des copies
+# réelles au lieu des liens symboliques vers `archive/`, et certbot refuse de
+# gérer une telle lignée :
+#   Renewal configuration file /etc/letsencrypt/renewal/web3c.cc.conf produced an
+#   unexpected error: expected /etc/letsencrypt/live/web3c.cc/cert.pem to be a
+#   symlink. Skipping.
+# Le mot qui compte est « Skipping » : le renouvellement s'est exécuté chaque
+# jour pendant huit mois en ignorant ce seul certificat, sans erreur, sans code
+# de retour non nul, sans rien. Le certificat a expiré le 02/03/2026 et
+# quatorze vhosts ont servi un certificat périmé jusqu'au 16/08/2026.
+#
+# On interroge donc certbot sur ce qu'il SAIT gérer, plutôt que de se fier à la
+# présence des fichiers. Réparation : sauvegarder la lignée, retirer
+# live/<domaine>, archive/<domaine> et renewal/<domaine>.conf, puis rejouer ce
+# rôle — la garde `creates:` laissera alors passer l'émission.
+- name: Read what certbot actually manages
+  ansible.builtin.command:
+    cmd: certbot certificates
+  register: certinstall_state
+  changed_when: false
+  check_mode: false
+
+- name: Fail when certbot reports an unusable renewal configuration
+  ansible.builtin.assert:
+    that:
+      - "'were invalid' not in certinstall_state.stdout"
+      - "'unexpected error' not in certinstall_state.stdout"
+    fail_msg: >-
+      certbot signale au moins une configuration de renouvellement inutilisable.
+      Ces certificats ne sont PAS renouvelés et expireront sans alerte de
+      certbot. Sortie : {{ certinstall_state.stdout }}
+  tags: [monitoring]
+
+# Un domaine attendu mais absent de la sortie n'est pas renouvelé non plus —
+# cas d'une lignée retirée à la main sans réémission.
+- name: Fail when an expected domain is not managed at all
+  ansible.builtin.assert:
+    that:
+      - "item in certinstall_state.stdout"
+    fail_msg: >-
+      Aucun certificat géré pour « {{ item }} ». Le rôle a cru le trouver sur
+      disque (garde `creates:`) sans que certbot ne le connaisse.
+  loop: "{{ domains }}"
+  tags: [monitoring]

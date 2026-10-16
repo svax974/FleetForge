@@ -1,0 +1,80 @@
+---
+# Active le runner AgentHub sur cet hôte. Le runner est DÉJÀ installé
+# (T7.1, 09-implementation-plan.md Phase 7) mais volontairement laissé
+# ARRÊTÉ/DÉSACTIVÉ, avec un HUB_URL/RUNNER_TOKEN de TEST (tunnel SSH éphémère
+# utilisé pendant T7.1, voir runner/README.md « Activer le service quand le
+# hub sera déployé ») tant que le hub n'était pas déployé sur ce VPS — c'est
+# précisément ce que le reste de ce rôle vient de faire.
+#
+# Idempotent avec CET état précis : `deploy-runner.sh` (appelé ci-dessous)
+# rebuild/repack le runner et fusionne les nouvelles valeurs dans
+# /etc/agenthub-runner.env — SANS jamais écraser une clé pour laquelle
+# aucune nouvelle valeur n'est passée (install.sh §5), mais EN écrasant
+# HUB_URL/RUNNER_TOKEN puisqu'on les passe explicitement ici avec les vraies
+# valeurs de prod, remplaçant le tunnel de test. `install.sh` active et
+# (re)démarre le service lui-même en toute fin de script (`KillMode=process` :
+# un redémarrage ne tue aucune session tmux d'agent en cours) — rien d'autre à
+# faire côté Ansible après cet appel.
+
+- name: Fail early without a runner token
+  ansible.builtin.assert:
+    that:
+      - agenthub_runner_token | default('') | length > 0
+    fail_msg: >-
+      `agenthub_runner_token` est vide. Ce jeton est émis par le HUB
+      LUI-MÊME, une fois déployé (page « Nouveau runner », affiché UNE SEULE
+      FOIS) — donc seulement après que les tâches précédentes de ce rôle aient
+      démarré l'app avec succès. Une fois obtenu :
+        ansible-vault encrypt_string --stdin-name 'agenthub_runner_token'
+      coller le résultat dans group_vars/web3c.yml, puis rejouer :
+        ./play.sh web3c deploy-agenthub.yml --tags runner
+  delegate_to: localhost
+  become: false
+  run_once: true
+  # Sauté quand l'auto-provisionnement est actif (défaut) : le hook
+  # provision-hub-runner.sh de deploy-full.sh a déjà apparié le runner colocqué
+  # pendant le déploiement. Chemin manuel (runners distants) : poser
+  # `agenthub_runner_autoprovision: false` + le token vaulté.
+  when: not (agenthub_runner_autoprovision | default(true))
+
+# `no_log` sur TOUTE la tâche : `argv` contiendrait le jeton en clair dans les
+# logs Ansible (et dans un historique de runs persisté par FleetForge,
+# CLAUDE.md) sans cette protection — même précaution que freellm-install pour
+# la clé API unifiée.
+- name: Deploy/activate the AgentHub runner with the real hub URL and token
+  ansible.builtin.command:
+    argv:
+      - runner/scripts/deploy-runner.sh
+      - "root@{{ hostvars['agenthub'].ansible_host }}"
+      - --port
+      - "{{ agenthub_runner_ssh_port }}"
+      - --name
+      - "{{ agenthub_runner_name }}"
+      - --hub-url
+      - "{{ agenthub_runner_hub_url }}"
+      - --token
+      - "{{ agenthub_runner_token }}"
+      - --roots
+      - "{{ agenthub_runner_roots }}"
+      - --workspace-root
+      - "{{ agenthub_workspace_root }}"
+  args:
+    chdir: "{{ agenthub_src }}"
+  delegate_to: localhost
+  become: false
+  no_log: true
+  register: agenthub_runner_deploy
+  changed_when: true
+  # Ne tourne qu'avec un jeton manuel (chemin runners distants) : en
+  # auto-provisionnement (défaut), le hook de deploy-full.sh a déjà tout fait.
+  when: agenthub_runner_token | default('') | length > 0
+
+- name: Report the runner state
+  ansible.builtin.debug:
+    msg: >-
+      Runner AgentHub (re)installé et activé sur
+      {{ hostvars['agenthub'].ansible_host }} avec
+      HUB_URL={{ agenthub_runner_hub_url }}. Vérifier :
+      ssh -p {{ agenthub_runner_ssh_port }} root@{{ hostvars['agenthub'].ansible_host }}
+      systemctl status agenthub-runner — puis authentifier les CLI sous
+      l'utilisateur `agents` (voir runner/README.md, « Authentifier les CLI »).

@@ -1,0 +1,35 @@
+---
+# Firewall Prometheus : accès à l'UI/API réservé à la whitelist et aux VPN.
+#
+# Volontairement ADDITIF : pas de `state: enabled` ni de `policy: deny` ici.
+# prometheus1 partage sa machine avec proxy1, front1, dbfmaster et
+# backindicators1 — réinitialiser la politique par défaut couperait ces
+# services. Le durcissement global reste du ressort de `firewall-security`.
+
+- name: Allow Prometheus access from whitelist
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    port: "{{ prometheus_port }}"
+    from_ip: "{{ item }}"
+    comment: "Prometheus UI/API - whitelist"
+  loop: "{{ whitelist }}"
+  become: true
+
+- name: Allow Prometheus access from VPNs
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    port: "{{ prometheus_port }}"
+    from_ip: "{{ hostvars[item].ansible_host }}"
+    comment: "Prometheus UI/API - VPN"
+  loop: "{{ groups['vpns'] | default([]) }}"
+  become: true
+
+- name: Deny all other external access to Prometheus
+  community.general.ufw:
+    rule: deny
+    proto: tcp
+    port: "{{ prometheus_port }}"
+    comment: "Prometheus UI/API - deny external"
+  become: true

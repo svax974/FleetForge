@@ -1,0 +1,12 @@
+---
+# Suppression du back PapangLabs : conteneurs, sonde d'état et agent de
+# collecte. Le code livré, les fichiers d'environnement et les volumes RESTENT
+# — c'est `purge-papanglabs-back.yml` qui les emporte.
+#
+#   ./play.sh papanglabs remove-papanglabs-back.yml --limit <hôte>
+- name: Suppression du back PapangLabs
+  hosts: backsindicators
+  remote_user: "{{ remote_username }}"
+
+  roles:
+    - papanglabs-back-remove

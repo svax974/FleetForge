@@ -1,0 +1,113 @@
+---
+# Push the PapangMetrics code to the box, install deps, build, write .env.
+# Shared by the API and ETL service roles.
+
+- name: Create app directory
+  ansible.builtin.file:
+    path: "{{ pm_dir }}"
+    state: directory
+    owner: "{{ pm_user }}"
+    group: "{{ pm_user }}"
+    mode: '0750'
+  become: true
+
+- name: Create certs directory (for the service JWT public key)
+  ansible.builtin.file:
+    path: "{{ pm_dir }}/certs"
+    state: directory
+    owner: "{{ pm_user }}"
+    group: "{{ pm_user }}"
+    mode: '0750'
+  become: true
+
+- name: Sync source code to the box
+  ansible.posix.synchronize:
+    src: "{{ pm_src }}"
+    dest: "{{ pm_dir }}/"
+    delete: true
+    rsync_opts:
+      - "--exclude=node_modules"
+      - "--exclude=.git"
+      - "--exclude=dist"
+      - "--exclude=.env"
+      - "--exclude=certs"
+      - "--exclude=terraform/.terraform"
+
+- name: Install dependencies (npm ci)
+  ansible.builtin.command:
+    cmd: npm ci
+    chdir: "{{ pm_dir }}"
+  become: true
+  become_user: "{{ pm_user }}"
+
+# Le build produit `dist/`, que les services chargent au démarrage. Sans ces
+# notifications, `state: started` des rôles *-install laisse tourner l'ancien
+# binaire : le 10/08/2026 le branchement des recalculs de formules a été livré
+# et compilé sans jamais s'exécuter, l'ETL tournant encore sur le build de la
+# veille. `npm run build` est toujours `changed`, donc le redémarrage suit
+# chaque livraison de code — c'est bien l'intention.
+- name: Build
+  ansible.builtin.command:
+    cmd: npm run build
+    chdir: "{{ pm_dir }}"
+  become: true
+  become_user: "{{ pm_user }}"
+  notify:
+    - restart papangmetrics-api
+    - restart papangmetrics-etl
+
+- name: Write .env
+  ansible.builtin.template:
+    src: env.j2
+    dest: "{{ pm_dir }}/.env"
+    owner: "{{ pm_user }}"
+    group: "{{ pm_user }}"
+    mode: '0640'
+  become: true
+
+- name: Run SQL migrations
+  ansible.builtin.command:
+    cmd: npm run migration:run
+    chdir: "{{ pm_dir }}"
+  become: true
+  become_user: "{{ pm_user }}"
+
+- name: Check for the local service JWT public key
+  ansible.builtin.stat:
+    path: "{{ pm_src }}certs/service-jwt.pub"
+  delegate_to: localhost
+  register: pm_jwt_local
+
+- name: Deploy service JWT public key to the box
+  ansible.builtin.copy:
+    src: "{{ pm_src }}certs/service-jwt.pub"
+    dest: "{{ pm_dir }}/certs/service-jwt.pub"
+    owner: "{{ pm_user }}"
+    group: "{{ pm_user }}"
+    mode: '0644'
+  become: true
+  when: pm_jwt_local.stat.exists
+
+- name: Warn if the service JWT public key is missing
+  ansible.builtin.stat:
+    path: "{{ pm_dir }}/certs/service-jwt.pub"
+  register: pm_jwt_key
+
+- name: Notice — drop the JWT public key to enable API auth
+  ansible.builtin.debug:
+    msg: "service-jwt.pub absent in {{ pm_dir }}/certs — the API will fail to start until it is provided."
+  when: not pm_jwt_key.stat.exists
+
+- name: Make disk-watchdog executable
+  ansible.builtin.file:
+    path: "{{ pm_dir }}/scripts/disk-watchdog.sh"
+    mode: '0750'
+  become: true
+
+- name: Schedule disk-watchdog cron (stops backfill if free disk < 5 GB)
+  ansible.builtin.cron:
+    name: "papangmetrics disk-watchdog"
+    minute: "*/2"
+    job: "{{ pm_dir }}/scripts/disk-watchdog.sh"
+    user: "{{ pm_user }}"
+  become: true

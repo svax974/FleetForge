@@ -1,0 +1,18 @@
+{
+  "destination": "{{ theta_wallet }}",
+  "password": "{{ theta_passwd }}",
+  "threshold_tfuel": {{ theta_edge_sweep_threshold_tfuel }},
+  "keep_tfuel": {{ theta_edge_sweep_keep_tfuel }},
+{% if theta_edge_sweep_rpc_url != "" %}
+  "rpc_url": "{{ theta_edge_sweep_rpc_url }}",
+{% endif %}
+  "instances": [
+{% for inst_id in theta_edge_sweep_instance_ids %}
+    {
+      "id": {{ inst_id }},
+      "keystore_dir": "/opt/theta-edge/instance{{ inst_id }}/edgecore/key/encrypted"
+    }{% if not loop.last %},{% endif %}
+
+{% endfor %}
+  ]
+}

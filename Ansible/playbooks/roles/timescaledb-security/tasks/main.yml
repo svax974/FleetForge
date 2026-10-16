@@ -1,0 +1,100 @@
+---
+# Pare-feu de l'hôte TimescaleDB.
+#
+# Deux plans distincts, et c'est le point important :
+#   • le SSH (et tout service non conteneurisé) se filtre avec ufw ;
+#   • le port 5432, publié par Docker, ÉCHAPPE à ufw et se filtre dans
+#     la chaîne `DOCKER-USER`.
+# Mélanger les deux — c'est-à-dire écrire une règle ufw pour 5432 — produit une
+# configuration qui a l'air correcte et ne protège rien.
+#
+# Le SSH n'est PAS géré ici : il appartient à `security-ssh-update`, qui
+# s'applique à tout l'inventaire. Les poser aux deux endroits créait un doublon
+# par exécution (commentaires différents ⇒ ufw les voit comme deux règles).
+
+# ── Activation d'ufw ───────────────────────────────────────────────────────
+
+- name: Install ufw
+  ansible.builtin.apt:
+    name: ufw
+    state: present
+    update_cache: true
+  become: true
+  when: tsdb_manage_ufw
+
+- name: Check that an SSH allow rule already exists
+  ansible.builtin.command: ufw show added
+  become: true
+  changed_when: false
+  failed_when: false
+  register: tsdb_ufw_added
+  when: tsdb_manage_ufw
+
+# Activer la politique `deny incoming` sans qu'aucune règle n'autorise le port
+# SSH coupe l'accès à une machine distante, sans recours autre que la console
+# du fournisseur. Le contrôle porte sur les règles réellement enregistrées, pas
+# sur la configuration : c'est la seule vérification qui protège vraiment.
+- name: Refuse to enable ufw while no SSH rule is registered
+  ansible.builtin.assert:
+    that:
+      - ssh_custom_port | string in (tsdb_ufw_added.stdout | default(''))
+    fail_msg: >-
+      Aucune règle ufw n'autorise le port {{ ssh_custom_port }} sur cet hôte.
+      Activer la politique deny couperait tout accès SSH. Joue d'abord
+      `security-ssh-update` (via update-ufw-all.yml), puis relance ce rôle.
+  when: tsdb_manage_ufw
+
+- name: Enable ufw with default deny incoming
+  community.general.ufw:
+    state: enabled
+    policy: deny
+    direction: incoming
+  become: true
+  when: tsdb_manage_ufw
+
+- name: Enable ufw logging
+  community.general.ufw:
+    logging: 'on'
+  become: true
+  when: tsdb_manage_ufw
+
+# ── Port de la base (conteneur Docker) ─────────────────────────────────────
+#
+# Ni ufw ni `iptables-persistent` ne conviennent ici :
+#   • ufw ne voit pas le trafic vers un port publié par Docker ;
+#   • `iptables-persistent` est en conflit de paquet avec ufw sur cette
+#     distribution (installer l'un désinstalle l'autre — constaté le 06/08/2026),
+#     et restaurerait de toute façon les règles avant que Docker n'ait recréé
+#     la chaîne DOCKER-USER, donc pour rien.
+# D'où un script + une unité systemd ordonnée après docker.service.
+
+- name: Deploy the DB port firewall script
+  ansible.builtin.template:
+    src: timescaledb-firewall.sh.j2
+    dest: /usr/local/sbin/timescaledb-firewall.sh
+    owner: root
+    group: root
+    mode: '0750'
+  become: true
+  when: tsdb_manage_docker_rules
+  notify: reapply timescaledb firewall
+
+- name: Deploy the DB port firewall unit
+  ansible.builtin.template:
+    src: timescaledb-firewall.service
+    dest: /etc/systemd/system/timescaledb-firewall.service
+    owner: root
+    group: root
+    mode: '0644'
+  become: true
+  when: tsdb_manage_docker_rules
+  notify: reapply timescaledb firewall
+
+- name: Enable and start the DB port firewall unit
+  ansible.builtin.systemd:
+    name: timescaledb-firewall
+    state: started
+    enabled: true
+    daemon_reload: true
+  become: true
+  when: tsdb_manage_docker_rules

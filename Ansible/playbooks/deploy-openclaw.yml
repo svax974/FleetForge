@@ -1,0 +1,50 @@
+---
+# OpenClaw (https://openclaw.ai) — assistant IA auto-hébergé, installé
+# NATIVEMENT (CLI officiel, `install-cli.sh`, auto-suffisant) sur la machine
+# hub (entrée d'inventaire `openclaw`), sous le compte `srvc` avec démon en systemd --user. Bootstrap
+# entièrement non interactif : jeton de gateway généré une fois sur l'hôte,
+# clé fournisseur lue depuis l'environnement du process, pas de canal de
+# discussion connecté.
+#
+# Idempotent : si OpenClaw est déjà installé et onboardé, seuls la
+# configuration des proxies de confiance et le contrôle de santé rejouent. Le
+# pare-feu et la supervision, eux, sont TOUJOURS rejoués : ce sont les étapes
+# annexes que ce playbook garantit à chaque exécution, install ou pas.
+#
+# Entrée dédiée `openclaw` (service publié par les proxies, CLAUDE.md § 2) :
+# même adresse, port SSH et ports de scrape que l'entrée `hub`, dont elle
+# décrit la machine. Celle-ci partage le NAT domestique avec
+# station/nuc/proxy2/vpn1 ; host-preflight retrouve node_exporter/svcprobe
+# déjà enregistrés par adresse + port de scrape.
+#
+#   ./play.sh web3c deploy-openclaw.yml
+#   ./play.sh web3c deploy-openclaw.yml --tags monitoring   # réarmer la supervision
+
+# ── Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ───────────────────────
+- name: Contrôle préalable
+  hosts: openclaw
+  remote_user: "{{ remote_username }}"
+  roles:
+    - host-preflight
+
+- name: Deploy OpenClaw
+  hosts: openclaw
+  remote_user: "{{ remote_username }}"
+  roles:
+    - openclaw-install
+
+# Installation native sous systemd : ufw filtre RÉELLEMENT ce port (pas de
+# publication Docker à contourner ici, contrairement à l'ancienne install).
+- name: OpenClaw firewall
+  hosts: openclaw
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - openclaw-security
+
+# ── Supervision (OBLIGATOIRE, voir CLAUDE.md) ──────────────────────────────
+- name: Supervision du service
+  hosts: openclaw
+  remote_user: "{{ remote_username }}"
+  roles:
+    - openclaw-monitoring

@@ -1,0 +1,186 @@
+---
+# Redéploiement COMPLET du pipeline d'indicateurs, dans l'ordre :
+#
+#   nœud Bitcoin  →  BRK  →  ETL PapangMetrics  →  TimescaleDB  →  API
+#
+# Ce playbook existe parce que l'ordre est une contrainte réelle et qu'il ne
+# vivait nulle part : `brk-install` refuse de démarrer sur un nœud non
+# synchronisé, `papangmetrics-deploy` joue ses migrations SQL contre une base
+# qui doit déjà tourner, et les cibles Prometheus ne se posent qu'une fois les
+# services en place. Reconstituer cet enchaînement de mémoire, un jour
+# d'incident, c'est le moment le plus sûr de se tromper.
+#
+#   ./play.sh papanglabs deploy-btc-pipeline.yml
+#   ./play.sh papanglabs deploy-btc-pipeline.yml --tags monitoring   # supervision seule
+#
+# ── Ce que ce playbook NE fait PAS ─────────────────────────────────────────
+#   • le bootstrap des machines (`setup-server.yml`, une fois par machine) ;
+#   • la synchronisation initiale du nœud, qui dure plusieurs JOURS et n'est
+#     pas pilotable par Ansible — `brk-install` échoue franchement tant qu'elle
+#     n'est pas terminée, ce qui est le comportement voulu ;
+#   • l'installation de Prometheus/Alertmanager (`deploy-prometheus.yml`,
+#     `deploy-alertmanager.yml`), à jouer AVANT si la supervision est neuve —
+#     leurs répertoires `file_sd` repartent vides et les cibles doivent être
+#     reposées après, d'où le tag `monitoring` ci-dessus.
+#
+# ── Prérequis hors dépôt ───────────────────────────────────────────────────
+#   • le code PapangMetrics sur le poste, en {{ '{{ pm_src }}' }}
+#     (défaut : /Users/steph/Dev/Projects/PapangLabs/PapangMetrics/) ;
+#   • la clé publique du JWT de service, en <pm_src>/certs/service-jwt.pub —
+#     sans elle l'API ne démarre pas, et le rôle se contente d'un avertissement.
+
+# ── 0. Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ───────────────────
+# Échoue immédiatement si le parc n'a pas d'hôte de supervision utilisable,
+# puis vérifie — et répare — le socle de la machine, node_exporter et sa cible
+# Prometheus. Un service déployé sans supervision est un service dont personne
+# ne saura qu'il est tombé.
+# Les contrôles bloquants portent le tag `always` : ils s'appliquent même à un
+# rejeu ciblé par `--tags`.
+- name: Contrôle préalable
+  hosts: rpcbtc1:brk1:papangmetrics1:timescale
+  remote_user: "{{ remote_username }}"
+  roles:
+    - role: host-preflight
+      preflight_require_docker: true
+
+# ── 1. Nœud Bitcoin ────────────────────────────────────────────────────────
+- name: Nœud Bitcoin — binaires
+  hosts: rpcbtc1
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - install-python
+
+- name: Nœud Bitcoin — installation et configuration
+  hosts: rpcbtc1
+  remote_user: "{{ remote_username }}"
+  become: false
+  roles:
+    - rpcbtc-install
+    - rpcbtc-setup
+    - rpcbtc-rpcauth
+
+- name: Nœud Bitcoin — pare-feu
+  hosts: rpcbtc1
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - rpcbtc-security
+
+# ── 2. BRK ─────────────────────────────────────────────────────────────────
+# Les prérequis bitcoind (server=1, ZMQ, prune=0) sont déjà posés par la section
+# « Nœud Bitcoin » ci-dessus (`rpcbtc-setup` sur rpcbtc1). BRK vit sur son propre
+# hôte d'inventaire `brk1` (même machine que le nœud aujourd'hui).
+- name: BRK
+  hosts: brk1
+  remote_user: "{{ remote_username }}"
+  roles:
+    - brk-install
+    - brk-security
+    - brk-monitoring
+
+# ── 3. Base d'indicateurs ──────────────────────────────────────────────────
+# Avant l'ETL et l'API : `papangmetrics-deploy` joue `npm run migration:run`,
+# qui exige une base joignable. Dans l'ordre inverse, le déploiement échoue au
+# milieu, code livré mais schéma absent.
+- name: Base d'indicateurs TimescaleDB
+  hosts: timescale
+  remote_user: "{{ remote_username }}"
+  roles:
+    - timescaledb-install
+    - timescaledb-security
+    - timescaledb-backup-install
+    - timescaledb-monitoring
+
+# ── 4. ETL + API ───────────────────────────────────────────────────────────
+- name: PapangMetrics — code, services, pare-feu
+  hosts: papangmetrics1
+  remote_user: "{{ remote_username }}"
+  roles:
+    - nodejs-install
+    - { role: papangmetrics-deploy, tags: [code] }
+    - papangmetrics-api-install
+    - papangmetrics-etl-install
+    - papangmetrics-api-security
+
+# ── 5. Sauvegardes ─────────────────────────────────────────────────────────
+- name: Sauvegarde du magasin BRK
+  hosts: brk1
+  remote_user: "{{ remote_username }}"
+  roles:
+    - brk-backup-install
+
+- name: Pare-feu des destinations de sauvegarde
+  hosts: backup-brk:backup-timescale
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - backup-security
+
+# ── 6. Supervision ─────────────────────────────────────────────────────────
+# Le nœud lui-même. Jusqu'au 11/08/2026 il n'avait AUCUNE métrique propre :
+# `exporter-btc` cumulait trois défauts indépendants (variable
+# `proxy_address_rpc_btc` définie nulle part, binaire en 403, écoute sur
+# 127.0.0.1 sans cible enregistrée), d'où un répertoire
+# `prometheus-configs/node-btc/` vide. `rpcbtc-monitoring` le remplace.
+- name: Supervision du nœud Bitcoin
+  hosts: rpcbtc1
+  remote_user: "{{ remote_username }}"
+  roles:
+    - rpcbtc-monitoring
+
+- name: node_exporter (dont collecteur textfile pour les sauvegardes)
+  hosts: rpcbtc1:timescale
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - exporter-sys-install
+
+- name: Règles d'alerte
+  hosts: prometheus1:monitor
+  remote_user: "{{ remote_username }}"
+  roles:
+    - prometheus-alerts-update
+
+# ── 7. Contrôle de bout en bout ────────────────────────────────────────────
+# Une règle d'alerte `inactive` avec `health=ok` peut simplement n'avoir aucune
+# série à évaluer : le seul contrôle qui prouve quelque chose porte sur les
+# données, pas sur l'état des règles.
+- name: Contrôle du pipeline
+  hosts: papangmetrics1
+  remote_user: "{{ remote_username }}"
+  gather_facts: false
+  tags: [always]
+  tasks:
+    - name: Interroger l'ETL
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ papangmetrics_etl_metrics_port }}/metrics"
+        return_content: true
+      register: pipeline_metrics
+      retries: 12
+      delay: 10
+      until: pipeline_metrics.status == 200
+
+    - name: Extraire les métriques clés
+      ansible.builtin.set_fact:
+        pipeline_lines: >-
+          {{ pipeline_metrics.content.split('\n')
+             | select('match', '^(brk_up|brk_height|etl_block_lag) ')
+             | list }}
+
+    - name: Résultat
+      ansible.builtin.debug:
+        msg:
+          - "{{ pipeline_lines }}"
+          - "brk_up doit valoir 1 et etl_block_lag rester faible."
+          - "Côté Prometheus, vérifier que les séries existent réellement :"
+          - "  count(brk_up{job=\"papangmetrics-etl\"})  — doit être non nul"
+          - "  count(backup_last_success_timestamp_seconds)  — doit valoir 2"
+
+    - name: Échouer si BRK est injoignable depuis l'ETL
+      ansible.builtin.fail:
+        msg: >-
+          brk_up = 0 : l'ETL ne joint pas l'API BRK. Le pipeline est déployé
+          mais n'ingère rien. Vérifier `systemctl status brk` et
+          ~/.brk/logs/*_error.txt.
+      when: pipeline_lines | select('search', '^brk_up 0') | list | length > 0

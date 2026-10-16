@@ -1,0 +1,290 @@
+---
+# Installe StarNet NATIVEMENT sous srvc : Node embarqué, checkout partiel du
+# tag épinglé, dépendances de production, unité systemd --user pour le
+# sidecar (127.0.0.1) et relai systemd pour le port publié. Voir
+# defaults/main.yml pour les contraintes du code amont qui dictent ce montage.
+
+# git : checkout ; xz-utils : archive Node ; build-essential/python3 : repli
+# node-gyp si `node-pty` n'a pas de binaire précompilé pour cette plateforme.
+- name: Install required packages
+  ansible.builtin.apt:
+    name: [git, xz-utils, build-essential, python3]
+    state: present
+  become: true
+
+- name: Check that systemd ships the socket relay
+  ansible.builtin.stat:
+    path: "{{ starnet_socket_proxyd }}"
+  register: starnet_proxyd_bin
+
+- name: Fail early without systemd-socket-proxyd
+  ansible.builtin.assert:
+    that: starnet_proxyd_bin.stat.exists
+    fail_msg: >-
+      {{ starnet_socket_proxyd }} est introuvable : sans lui le sidecar, qui
+      n'écoute que sur 127.0.0.1, ne peut pas être publié pour les proxies.
+      Corriger `starnet_socket_proxyd` (chemin réel : `dpkg -L systemd | grep
+      socket-proxyd`).
+
+# UID de srvc, nécessaire à chaque appel `systemctl --user` hors session
+# interactive (même motif qu'openclaw-install).
+- name: Look up the srvc UID
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ starnet_user }}"
+
+- name: Set the XDG runtime dir fact
+  ansible.builtin.set_fact:
+    starnet_xdg_runtime_dir: "/run/user/{{ ansible_facts.getent_passwd[starnet_user][1] }}"
+
+# Sans lingering, systemd-logind tue les unités --user de srvc à la
+# déconnexion SSH : le sidecar s'arrêterait à la fin du run Ansible.
+- name: Enable lingering for srvc
+  ansible.builtin.command:
+    cmd: "loginctl enable-linger {{ starnet_user }}"
+    creates: "/var/lib/systemd/linger/{{ starnet_user }}"
+  become: true
+
+# ── Node.js embarqué ───────────────────────────────────────────────────────
+- name: Create the embedded Node directory
+  ansible.builtin.file:
+    path: "{{ starnet_node_dir }}"
+    state: directory
+    owner: "{{ starnet_user }}"
+    group: "{{ starnet_user }}"
+    mode: '0755'
+  become: true
+
+- name: Check for the embedded Node binary
+  ansible.builtin.stat:
+    path: "{{ starnet_node_dir }}/bin/node"
+  register: starnet_node_bin
+
+# Somme de contrôle vérifiée contre SHASUMS256.txt du même dépôt officiel :
+# une archive tronquée ou altérée échoue ici, pas au démarrage du service.
+- name: Download the Node.js release
+  ansible.builtin.get_url:
+    url: "https://nodejs.org/dist/v{{ starnet_node_version }}/node-v{{ starnet_node_version }}-linux-{{ starnet_node_arch }}.tar.xz"
+    dest: "/tmp/node-v{{ starnet_node_version }}-linux-{{ starnet_node_arch }}.tar.xz"
+    checksum: "sha256:https://nodejs.org/dist/v{{ starnet_node_version }}/SHASUMS256.txt"
+    mode: '0644'
+  become: true
+  become_user: "{{ starnet_user }}"
+  when: not starnet_node_bin.stat.exists
+
+- name: Unpack Node.js
+  ansible.builtin.unarchive:
+    src: "/tmp/node-v{{ starnet_node_version }}-linux-{{ starnet_node_arch }}.tar.xz"
+    dest: "{{ starnet_node_dir }}"
+    remote_src: true
+    extra_opts: [--strip-components=1]
+    creates: "{{ starnet_node_dir }}/bin/node"
+  become: true
+  become_user: "{{ starnet_user }}"
+  notify: restart starnet
+
+# ── Code de l'application ──────────────────────────────────────────────────
+# Clone SUPERFICIEL (--depth 1), PARTIEL (--filter=blob:none) et CREUX
+# (sparse-checkout) : seuls les blobs des répertoires utiles sont téléchargés
+# (voir `starnet_sparse_paths`). `ansible.builtin.git` ne sait pas faire de
+# sparse-checkout, d'où le script. Rejouable : un changement de
+# `starnet_version` récupère le nouveau tag et s'y place ; le script imprime
+# sur sa dernière ligne si HEAD a bougé.
+- name: Fetch the pinned StarNet release (shallow, sparse)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    DIR={{ starnet_app_dir | quote }}
+    VER={{ starnet_version | quote }}
+    BEFORE=$(git -C "$DIR" rev-parse HEAD 2>/dev/null || echo none)
+    if [ ! -d "$DIR/.git" ]; then
+      git clone --quiet --filter=blob:none --no-checkout --depth 1 \
+        --branch "$VER" {{ starnet_repo | quote }} "$DIR"
+    else
+      git -C "$DIR" fetch --quiet --depth 1 --filter=blob:none origin \
+        "refs/tags/$VER:refs/tags/$VER"
+    fi
+    git -C "$DIR" sparse-checkout set --cone {{ starnet_sparse_paths | map('quote') | join(' ') }}
+    git -C "$DIR" checkout --quiet --force --detach "$VER"
+    AFTER=$(git -C "$DIR" rev-parse HEAD)
+    [ "$BEFORE" = "$AFTER" ] && echo unchanged || echo changed
+  args:
+    executable: /bin/bash
+  become: true
+  become_user: "{{ starnet_user }}"
+  environment:
+    HOME: "{{ starnet_home }}"
+  register: starnet_checkout
+  changed_when: starnet_checkout.stdout_lines | last == 'changed'
+  notify: restart starnet
+
+- name: Check for installed dependencies
+  ansible.builtin.stat:
+    path: "{{ starnet_app_dir }}/node_modules"
+  register: starnet_node_modules
+
+# Dépendances de PRODUCTION seulement (voix, terminal) : le cœur du sidecar
+# n'utilise que les modules natifs de Node, les devDependencies (CLI Tauri,
+# canvas de test) ne servent qu'au build desktop. `npm ci` respecte le
+# package-lock du tag : mêmes versions que la release.
+- name: Install the production dependencies
+  ansible.builtin.command:
+    cmd: "{{ starnet_node_dir }}/bin/npm ci --omit=dev --no-audit --no-fund"
+    chdir: "{{ starnet_app_dir }}"
+  become: true
+  become_user: "{{ starnet_user }}"
+  environment:
+    HOME: "{{ starnet_home }}"
+    PATH: "{{ starnet_node_dir }}/bin:/usr/local/bin:/usr/bin:/bin"
+  when: starnet_checkout is changed or not starnet_node_modules.stat.exists
+  notify: restart starnet
+
+# ── Configuration et secrets ───────────────────────────────────────────────
+- name: Create the data and config directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ starnet_user }}"
+    group: "{{ starnet_user }}"
+    mode: '0700'
+  loop:
+    - "{{ starnet_workspaces }}"
+    - "{{ starnet_config_dir }}"
+  become: true
+
+# Clé AES-256 des secrets de connecteurs (MCP/OAuth) chiffrés au repos par le
+# sidecar (sidecar/connector-vault.js, 64 caractères hexadécimaux). Tirée UNE
+# fois sur l'hôte et jamais régénérée : une nouvelle clé rendrait illisibles
+# tous les connecteurs déjà enregistrés, sans autre symptôme qu'une
+# reconnexion demandée partout. Jamais lue par Ansible.
+- name: Generate the connector encryption key on first run
+  ansible.builtin.shell:
+    cmd: >-
+      umask 077 &&
+      printf 'STARNET_CONNECTOR_ENCRYPTION_KEY=%s\n' "$(openssl rand -hex 32)"
+      > {{ starnet_config_dir }}/connector.env
+    creates: "{{ starnet_config_dir }}/connector.env"
+  become: true
+  become_user: "{{ starnet_user }}"
+
+# `| trim` sur la clé : un encrypt_string alimenté par un here-string bash
+# embarque le `\n` final (constaté sur openclaw, 10/09/2026).
+- name: Deploy the StarNet environment file
+  ansible.builtin.copy:
+    dest: "{{ starnet_config_dir }}/starnet.env"
+    owner: "{{ starnet_user }}"
+    group: "{{ starnet_user }}"
+    mode: '0600'
+    content: |
+      STARNET_PORT={{ starnet_sidecar_port }}
+      STARNET_WORKSPACES={{ starnet_workspaces }}
+      {% if starnet_openrouter_key | length > 0 %}
+      STARNET_OPENROUTER_KEY={{ starnet_openrouter_key | trim }}
+      {% endif %}
+  become: true
+  no_log: true
+  notify: restart starnet
+
+# ── Sidecar : unité systemd --user ─────────────────────────────────────────
+- name: Create the systemd --user unit directory
+  ansible.builtin.file:
+    path: "{{ starnet_home }}/.config/systemd/user"
+    state: directory
+    owner: "{{ starnet_user }}"
+    group: "{{ starnet_user }}"
+    mode: '0755'
+  become: true
+
+- name: Deploy the StarNet unit
+  ansible.builtin.template:
+    src: starnet.service.j2
+    dest: "{{ starnet_home }}/.config/systemd/user/starnet.service"
+    owner: "{{ starnet_user }}"
+    group: "{{ starnet_user }}"
+    mode: '0644'
+  become: true
+  notify: restart starnet
+
+- name: Enable and start StarNet
+  ansible.builtin.systemd:
+    scope: user
+    name: starnet
+    state: started
+    enabled: true
+    daemon_reload: true
+  become: true
+  become_user: "{{ starnet_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "{{ starnet_xdg_runtime_dir }}"
+
+# ── Relai : port publié → boucle locale ────────────────────────────────────
+- name: Deploy the relay units
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "/etc/systemd/system/{{ item }}"
+    owner: root
+    group: root
+    mode: '0644'
+  loop:
+    - starnet-relay.socket
+    - starnet-relay.service
+  become: true
+  notify: restart starnet relay
+
+- name: Enable and start the relay socket
+  ansible.builtin.systemd:
+    name: starnet-relay.socket
+    state: started
+    enabled: true
+    daemon_reload: true
+  become: true
+
+# Applique maintenant un changement de version, de clé ou de port : les
+# contrôles ci-dessous doivent porter sur ce qui vient d'être déployé.
+- name: Apply pending restarts now
+  ansible.builtin.meta: flush_handlers
+
+# /api/health est le seul point d'entrée exempté du jeton (sidecar/apiauth.js) :
+# 200 « ok », ou 503 avec la raison quand le sidecar est dégradé (boucle de
+# crash, workspace verrouillé par un autre process).
+- name: Wait for the sidecar to answer
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ starnet_sidecar_port }}/api/health"
+    status_code: [200]
+  register: starnet_ready
+  until: starnet_ready.status | default(0) == 200
+  retries: 24
+  delay: 5
+
+# Même requête À TRAVERS le relai : prouve que le port publié aboutit
+# réellement au sidecar (Host 127.0.0.1:<port> accepté, le port est ignoré).
+- name: Check the relay end to end
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ starnet_port }}/api/health"
+    status_code: [200]
+  register: starnet_relay_ready
+  until: starnet_relay_ready.status | default(0) == 200
+  retries: 6
+  delay: 5
+
+# ── DNS : alias CNAME vers le front des proxies ─────────────────────────────
+# `proxy_hostname` sur l'entrée d'inventaire `starnet` ; même portée réduite
+# que freellm-install/agenthub-install pour garantir le CNAME dès le premier
+# déploiement.
+- name: Ensure the service CNAME to the canonical proxy front
+  ansible.builtin.include_role:
+    name: cloudflare-dns-update
+    tasks_from: cnames
+  vars:
+    cfdns_cname_scope:
+      - "{{ inventory_hostname }}"
+
+- name: Report how the service is exposed
+  ansible.builtin.debug:
+    msg: >-
+      StarNet {{ starnet_version }} en écoute sur 127.0.0.1:{{ starnet_sidecar_port }}
+      (unité systemd --user de {{ starnet_user }}), publié sur
+      {{ starnet_port }} par starnet-relay — filtré par ufw
+      (starnet-security). Interface : https://{{ starnet_hostname }}/ après
+      `deploy-starnet.yml` complet (vhost sur les proxies).
+      {{ '' if starnet_openrouter_key | length > 0 else
+         'Aucune clé fournisseur posée : la saisir dans l’interface (SETTINGS → PROVIDERS).' }}

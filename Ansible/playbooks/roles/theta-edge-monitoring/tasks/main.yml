@@ -1,0 +1,137 @@
+---
+# Déploie l'exporter Theta Edge, enregistre sa cible et ouvre le pare-feu.
+#
+# Convention `-monitoring` (CLAUDE.md § 2) :
+#   • une sonde `theta_edge_up` par instance ;
+#   • des métriques d'état dégradé (hauteur, retard sur la chaîne, pairs) ;
+#   • une cible Prometheus sur `prometheus_host`, taguée `monitoring` ;
+#   • une ouverture ufw pour le scrape, taguée `monitoring` elle aussi.
+
+- name: Fail early when no Prometheus host is defined
+  ansible.builtin.assert:
+    that:
+      - prometheus_host is defined
+      - prometheus_host in hostvars
+    fail_msg: >-
+      `prometheus_host` n'est pas défini ou absent de l'inventaire. Un exporter
+      que personne ne scrape ne supervise rien : le rôle refuse de s'installer.
+  tags: [monitoring]
+
+- name: Create the exporter configuration directory
+  ansible.builtin.file:
+    path: "{{ theta_edge_exporter_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  become: true
+
+- name: Deploy the exporter
+  ansible.builtin.copy:
+    src: theta-edge-exporter.py
+    dest: "{{ theta_edge_exporter_bin }}"
+    owner: root
+    group: root
+    mode: "0755"
+  become: true
+  notify: restart theta-edge-exporter
+
+- name: Deploy the exporter configuration
+  ansible.builtin.template:
+    src: config.json.j2
+    dest: "{{ theta_edge_exporter_dir }}/config.json"
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+  notify: restart theta-edge-exporter
+
+- name: Deploy the exporter systemd unit
+  ansible.builtin.template:
+    src: theta-edge-exporter.service
+    dest: /etc/systemd/system/theta-edge-exporter.service
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+  notify: restart theta-edge-exporter
+
+- name: Enable and start the exporter
+  ansible.builtin.systemd:
+    name: theta-edge-exporter
+    state: started
+    enabled: true
+    daemon_reload: true
+  become: true
+
+- name: Flush handlers so the checks below see the current exporter
+  ansible.builtin.meta: flush_handlers
+
+# L'unité peut être `active` sans qu'aucune instance ne réponde : c'est
+# précisément ce que `theta_edge_up` doit montrer. On vérifie donc qu'il y a
+# UNE série par instance déclarée, et qu'elles valent 1.
+- name: Verify the exporter publishes theta_edge_up for every instance
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ theta_edge_exporter_port }}/metrics"
+    return_content: true
+  register: theta_edge_probe
+  retries: 6
+  delay: 5
+  until: >-
+    theta_edge_probe.status | default(0) == 200 and
+    (theta_edge_probe.content.split('\n') | select('match', '^theta_edge_up[{].*[}] 1$') | list | length)
+    == theta_edge_instances | int
+  changed_when: false
+
+- name: Report the node state seen by the exporter
+  ansible.builtin.debug:
+    msg: >-
+      {{ theta_edge_probe.content.split('\n')
+         | select('match', '^theta_edge_(up|block_height|peers|network_height|balance_tfuel)')
+         | list }}
+
+# ── Pare-feu ───────────────────────────────────────────────────────────────
+- name: Allow Prometheus to scrape the exporter
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ hostvars[prometheus_host]['ansible_host'] }}"
+    port: "{{ theta_edge_exporter_port }}"
+    comment: "Prometheus scrape - theta-edge-exporter"
+  become: true
+  when: ansible_host != hostvars[prometheus_host]['ansible_host']
+  tags: [monitoring]
+
+- name: Allow the Prometheus Docker bridge to scrape (monitor is local)
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "172.17.0.0/16"
+    port: "{{ theta_edge_exporter_port }}"
+    comment: "Prometheus Docker scrape - theta-edge-exporter"
+  become: true
+  when: ansible_host == hostvars[prometheus_host]['ansible_host']
+  tags: [monitoring]
+
+# ── Enregistrement de la cible ─────────────────────────────────────────────
+- name: Create the target directory on the Prometheus host
+  ansible.builtin.file:
+    path: "/home/{{ remote_username }}/prometheus/prometheus-configs/{{ theta_edge_job }}"
+    state: directory
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: "0755"
+  delegate_to: "{{ prometheus_host }}"
+  become: true
+  tags: [monitoring]
+
+- name: Deploy the Prometheus target
+  ansible.builtin.template:
+    src: prometheus-target.json.j2
+    dest: "/home/{{ remote_username }}/prometheus/prometheus-configs/{{ theta_edge_job }}/{{ inventory_hostname }}.json"
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: "0644"
+  delegate_to: "{{ prometheus_host }}"
+  become: true
+  tags: [monitoring]

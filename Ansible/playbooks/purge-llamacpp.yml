@@ -1,0 +1,8 @@
+---
+- name: Purge llama.cpp (engine, all instances, all models, Prometheus targets)
+  hosts: all
+  remote_user: "{{ remote_username }}"
+  become: true
+
+  roles:
+    - llamacpp-purge

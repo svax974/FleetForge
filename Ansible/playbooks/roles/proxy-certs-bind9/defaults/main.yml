@@ -1,0 +1,17 @@
+---
+bind9_dns_server: 127.0.0.1
+bind9_dns_port: 53
+bind9_rfc2136_key_name: certbot-key
+bind9_rfc2136_secret: ""
+bind9_rfc2136_algorithm: HMAC-SHA512
+bind9_certbot_propagation_seconds: 120
+bind9_zone_ttl: 3600
+bind9_zone_contact: hostmaster@{{ domain_name }}
+bind9_zone_ipv4: "{{ ansible_default_ipv4.address | default('127.0.0.1') }}"
+# `now()` et NON `ansible_date_time` : ce fait est mis en cache (cf.
+# ansible.cfg), et un sérial figé est le pire cas pour une zone DNS — les
+# secondaires ne rechargent que si le sérial AUGMENTE. La zone serait
+# republiée sans que rien ne se propage, et sans la moindre erreur.
+# `now(fmt='%s')` sans `utc` : avec, strftime interprète un datetime naïf en
+# heure locale et rend un epoch décalé de la durée du fuseau.
+bind9_zone_serial: "{{ now(fmt='%s') }}"

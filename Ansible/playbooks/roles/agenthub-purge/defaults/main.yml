@@ -1,0 +1,9 @@
+---
+# Dupliqués depuis agenthub-remove/defaults plutôt que hérités via
+# `include_role` (qui exigerait `public: true` pour les exposer ici) : ce
+# rôle a besoin de ces variables dans SES PROPRES tâches (volumes, CNAME), pas
+# seulement dans celles d'agenthub-remove qu'il inclut.
+agenthub_src: "/Users/steph/Dev/Apps/AgentHub/agent-hub/"
+agenthub_hostname: "agenthub.{{ domain_name }}"
+agenthub_front_port: "{{ hostvars['agenthub'].app_port | default(4700) }}"
+agenthub_back_port: "{{ hostvars['agenthub'].back_port | default(4701) }}"

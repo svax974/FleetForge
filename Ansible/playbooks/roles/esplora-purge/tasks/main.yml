@@ -1,0 +1,89 @@
+---
+# Purge complète : tout ce que fait `-remove`, PLUS l'index construit et les
+# sources clonées. DESTRUCTIF — un re-import complet depuis le nœud prend des
+# heures. Garde-fou explicite, comme rpcbtc-purge/astar-purge.
+#   ./play.sh papanglabs purge-esplora.yml -e confirm=yes
+
+- name: Refuse to purge without explicit confirmation
+  ansible.builtin.assert:
+    that:
+      - (confirm | default('')) == 'yes'
+    fail_msg: >-
+      Purge refusée. {{ esplora_db_dir | default('~/.electrs/db') }} contient
+      l'index complet d'adresses/transactions : sa suppression impose un
+      ré-import de plusieurs heures depuis le nœud. Relancer avec
+      -e confirm=yes si c'est bien l'intention.
+
+- name: Stop and disable Esplora service
+  ansible.builtin.systemd:
+    name: esplora
+    state: stopped
+    enabled: false
+  become: true
+  ignore_errors: true
+
+- name: Remove Esplora systemd unit
+  ansible.builtin.file:
+    path: /etc/systemd/system/esplora.service
+    state: absent
+  become: true
+
+- name: Reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+  become: true
+
+- name: Remove the electrs binary
+  ansible.builtin.file:
+    path: "{{ esplora_bin }}"
+    state: absent
+  become: true
+
+- name: Remove the Esplora working directory (config + index db)
+  ansible.builtin.file:
+    path: "{{ esplora_dir }}"
+    state: absent
+  become: true
+
+- name: Remove the cloned source tree
+  ansible.builtin.file:
+    path: "{{ esplora_src_dir }}"
+    state: absent
+  become: true
+
+- name: Remove the installed-version marker
+  ansible.builtin.shell: "rm -f {{ esplora_home }}/.installed-esplora-*"
+  args:
+    executable: /bin/bash
+  become: true
+  changed_when: false
+
+# ── Supervision ────────────────────────────────────────────────────────────
+- name: Remove the Esplora Prometheus target
+  ansible.builtin.file:
+    path: "/home/{{ remote_username }}/prometheus/prometheus-configs/{{ esploramon_job | default('node-esplora') }}/{{ inventory_hostname }}.json"
+    state: absent
+  delegate_to: "{{ prometheus_host }}"
+  become: true
+  when: prometheus_host is defined and prometheus_host in hostvars
+  tags: [monitoring]
+
+# ── DNS : retirer le CNAME public ───────────────────────────────────────────
+# Symétrique de la publication (esplora-install inclut
+# cloudflare-dns-update/tasks/cnames.yml, via `proxy_hostname` de
+# l'entrée d'inventaire `esplora1`) : le nom public disparaît avec le
+# service.
+# ATTENTION : l'entrée d'inventaire porteuse de `proxy_hostname` doit être
+# retirée EN MÊME TEMPS (ou son attribut supprimé) — sinon la prochaine
+# synchronisation (update-cloudflare-dns.yml) republierait le record.
+- name: Remove the Esplora CNAME
+  community.general.cloudflare_dns:
+    api_token: "{{ cloudflare_token }}"
+    zone: "{{ domain_name }}"
+    record: "{{ esplora_hostname }}"
+    type: CNAME
+    state: absent
+  delegate_to: localhost
+  become: false
+  run_once: true
+  when: cloudflare_token | default('') | length > 0

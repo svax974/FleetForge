@@ -1,0 +1,41 @@
+---
+########### Setup nginx
+# Copy config
+- name: Copy nginx gobal configuration
+  template: src=nginx.conf dest=/etc/nginx/nginx.conf
+- name: Copy cloudflare configuration
+  template: src=cloudflare.conf dest=/etc/nginx/cloudflare.conf
+# Clean up directories in case they already exist
+- name: Delete sites directory
+  ansible.builtin.file:
+    path: /etc/nginx/sites-enabled
+    state: absent
+- name: Delete streams directory
+  ansible.builtin.file:
+    path: /etc/nginx/streams-enabled
+    state: absent
+
+- name: Creates http empty directory
+  ansible.builtin.file:
+    path: /var/www/html
+    state: directory
+- name: Copy empty index.html
+  template: src=index.html dest=/var/www/html/index.html
+
+# Create directories
+- name: Creates sites directory
+  ansible.builtin.file:
+    path: /etc/nginx/sites-enabled
+    state: directory
+- name: Creates streams directory
+  ansible.builtin.file:
+    path: /etc/nginx/streams-enabled
+    state: directory
+- name: Creates sites directory
+  ansible.builtin.file:
+    path: /etc/nginx/sites-available
+    state: directory
+- name: Creates streams directory
+  ansible.builtin.file:
+    path: /etc/nginx/streams-available
+    state: directory

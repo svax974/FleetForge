@@ -1,0 +1,51 @@
+---
+# ── Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ───────────────────────
+# Échoue immédiatement si le parc n'a pas d'hôte de supervision utilisable,
+# puis vérifie — et répare — le socle de la machine, node_exporter et sa cible
+# Prometheus. Un service déployé sans supervision est un service dont personne
+# ne saura qu'il est tombé.
+# Les contrôles bloquants portent le tag `always` : ils s'appliquent même à un
+# rejeu ciblé par `--tags`.
+- name: Contrôle préalable
+  hosts: dbfmaster:dbfbackup
+  remote_user: "{{ remote_username }}"
+  roles:
+    - role: host-preflight
+      preflight_require_docker: true
+
+- name: Security settings for DB server
+  hosts: dbfmaster, dbfbackup
+  remote_user: "{{ remote_username }}"
+  gather_facts: false
+  become: true
+
+  roles:
+    - db-security
+
+- name: Install aliases + Postgresql DB / pgadmin containers + security rules
+  hosts: dbfmaster
+  remote_user: "{{ remote_username }}"
+
+  roles:
+    - db-clean
+    - dbfront-install-master
+    - install-scripts
+
+- name: Install aliases + Postgresql DB / pgadmin containers + security rules
+  hosts: dbfbackup
+  remote_user: "{{ remote_username }}"
+
+  roles:
+    - db-clean
+    - dbfront-install-backup
+    - install-scripts
+
+# ── Supervision (OBLIGATOIRE, voir CLAUDE.md) ──────────────────────────────
+# Sonde `service_up` + métriques du service, et enregistrement de la cible
+# auprès de Prometheus. Rejouable seule :
+#   ./play.sh papanglabs deploy-dbfront.yml --tags monitoring
+- name: Supervision du service
+  hosts: dbfmaster:dbfbackup
+  remote_user: "{{ remote_username }}"
+  roles:
+    - dbfront-monitoring

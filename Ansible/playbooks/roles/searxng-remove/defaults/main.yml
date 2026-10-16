@@ -1,0 +1,4 @@
+---
+searxng_container: searxng
+searxng_port: 8888
+searxng_home: "/home/{{ remote_username }}/searxng"

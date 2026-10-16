@@ -1,0 +1,9 @@
+[
+  {
+    "targets": ["{{ ansible_host }}:{{ dmarc_exporter_port }}"],
+    "labels": {
+      "instance": "{{ inventory_hostname }}",
+      "node": "dmarc"
+    }
+  }
+]

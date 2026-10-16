@@ -1,0 +1,166 @@
+#!/bin/bash
+# Mail User Management Script for SQLite backend
+# Domain: {{ domain_name }}
+
+DB_PATH="/etc/postfix/sqlite/mailserver.db"
+DOMAIN="{{ domain_name }}"
+
+# Check if SQLite database exists
+if [ ! -f "$DB_PATH" ]; then
+    echo "Error: Database not found at $DB_PATH"
+    exit 1
+fi
+
+# Function to generate password hash
+generate_password_hash() {
+    local password="$1"
+    python3 -c "import crypt; print(crypt.crypt('$password', crypt.mksalt(crypt.METHOD_SHA512)))"
+}
+
+# Function to add user
+add_user() {
+    local email="$1"
+    local password="$2"
+    
+    if [ -z "$email" ] || [ -z "$password" ]; then
+        echo "Usage: $0 add <email> <password>"
+        exit 1
+    fi
+    
+    # Get domain ID
+    local domain_id=$(sqlite3 "$DB_PATH" "SELECT id FROM virtual_domains WHERE name='$DOMAIN';")
+    
+    if [ -z "$domain_id" ]; then
+        echo "Error: Domain $DOMAIN not found in database"
+        exit 1
+    fi
+    
+    # Generate password hash
+    local password_hash=$(generate_password_hash "$password")
+    
+    # Insert user
+    sqlite3 "$DB_PATH" "INSERT INTO virtual_users (domain_id, email, password) VALUES ($domain_id, '$email', '$password_hash');"
+    
+    if [ $? -eq 0 ]; then
+        echo "User $email added successfully"
+        
+        # Create maildir
+        local maildir="/var/mail/domains/$DOMAIN/${email%@*}"
+        mkdir -p "$maildir"
+        chown -R vmail:vmail "$maildir"
+        chmod -R 0755 "$maildir"
+        echo "Maildir created at $maildir"
+    else
+        echo "Error: Failed to add user $email"
+    fi
+}
+
+# Function to delete user
+delete_user() {
+    local email="$1"
+    
+    if [ -z "$email" ]; then
+        echo "Usage: $0 delete <email>"
+        exit 1
+    fi
+    
+    sqlite3 "$DB_PATH" "DELETE FROM virtual_users WHERE email='$email';"
+    
+    if [ $? -eq 0 ]; then
+        echo "User $email deleted successfully"
+        
+        # Optionally remove maildir (commented for safety)
+        # local maildir="/var/mail/domains/$DOMAIN/${email%@*}"
+        # rm -rf "$maildir"
+        # echo "Maildir removed: $maildir"
+        echo "Note: Maildir not automatically removed for safety. Remove manually if needed."
+    else
+        echo "Error: Failed to delete user $email"
+    fi
+}
+
+# Function to list users
+list_users() {
+    echo "Users for domain $DOMAIN:"
+    sqlite3 "$DB_PATH" "SELECT email FROM virtual_users vu JOIN virtual_domains vd ON vu.domain_id = vd.id WHERE vd.name='$DOMAIN';"
+}
+
+# Function to change password
+change_password() {
+    local email="$1"
+    local new_password="$2"
+    
+    if [ -z "$email" ] || [ -z "$new_password" ]; then
+        echo "Usage: $0 passwd <email> <new_password>"
+        exit 1
+    fi
+    
+    local password_hash=$(generate_password_hash "$new_password")
+    
+    sqlite3 "$DB_PATH" "UPDATE virtual_users SET password='$password_hash' WHERE email='$email';"
+    
+    if [ $? -eq 0 ]; then
+        echo "Password changed for $email"
+    else
+        echo "Error: Failed to change password for $email"
+    fi
+}
+
+# Function to add alias
+add_alias() {
+    local source="$1"
+    local destination="$2"
+    
+    if [ -z "$source" ] || [ -z "$destination" ]; then
+        echo "Usage: $0 alias <source@domain> <destination@domain>"
+        exit 1
+    fi
+    
+    # Get domain ID
+    local domain_id=$(sqlite3 "$DB_PATH" "SELECT id FROM virtual_domains WHERE name='$DOMAIN';")
+    
+    sqlite3 "$DB_PATH" "INSERT INTO virtual_aliases (domain_id, source, destination) VALUES ($domain_id, '$source', '$destination');"
+    
+    if [ $? -eq 0 ]; then
+        echo "Alias $source -> $destination added successfully"
+    else
+        echo "Error: Failed to add alias"
+    fi
+}
+
+# Main script logic
+case "$1" in
+    add)
+        add_user "$2" "$3"
+        ;;
+    delete)
+        delete_user "$2"
+        ;;
+    list)
+        list_users
+        ;;
+    passwd)
+        change_password "$2" "$3"
+        ;;
+    alias)
+        add_alias "$2" "$3"
+        ;;
+    *)
+        echo "Mail User Manager for $DOMAIN"
+        echo "Usage: $0 {add|delete|list|passwd|alias}"
+        echo ""
+        echo "Commands:"
+        echo "  add <email> <password>           Add a new user"
+        echo "  delete <email>                   Delete a user"
+        echo "  list                             List all users"
+        echo "  passwd <email> <new_password>    Change user password"
+        echo "  alias <source> <destination>     Add email alias"
+        echo ""
+        echo "Examples:"
+        echo "  $0 add user@$DOMAIN mypassword"
+        echo "  $0 delete user@$DOMAIN"
+        echo "  $0 passwd user@$DOMAIN newpassword"
+        echo "  $0 alias admin@$DOMAIN user@$DOMAIN"
+        exit 1
+        ;;
+esac 

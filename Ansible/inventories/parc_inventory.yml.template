@@ -1,0 +1,157 @@
+# ═════════════════════════════════════════════════════════════════════════════
+# Modèle d'inventaire d'un PARC — versionné, données FICTIVES uniquement.
+#
+# Usage :
+#   cp inventories/parc_inventory.yml.template inventories/<parc>_inventory.yml
+#   puis renommer le groupe racine `monparc` en <parc> (doit correspondre à
+#   playbooks/group_vars/<parc>.yml, cf. parc.yml.template) et remplacer les
+#   adresses. Les inventaires réels sont gitignorés.
+#
+# Un parc = l'UNION des fichiers inventories/<parc>_*.yml (CLAUDE.md § 2).
+# Un même nom d'hôte dans deux fichiers d'un parc est interdit.
+#
+# Adresses de documentation (RFC 5737) : 203.0.113.0/24, 198.51.100.0/24.
+#
+# Variables d'hôte reconnues :
+#   ansible_host     adresse de la MACHINE (même adresse = même machine)
+#   ansible_port     port SSH, s'il diffère de `ssh_custom_port` (NAT : un port par machine)
+#   provider         hébergeur — gcp | aws | contabo | ovh | oracle | custom (OBLIGATOIRE, sans défaut)
+#   ansible_roles    familles de service déployées (TOUJOURS une liste)
+#   hostname         nom DNS de la machine (A record) ; `<service>-priv` sur une entrée dédiée
+#   proxy_hostname   nom PUBLIC servi par les proxies (CNAME → proxy.<domaine>)
+#   app_port         port du service publié (unique par entrée)
+#   back_port        port du back d'une application front+back
+#   access_mode      private (défaut) | public — filtrage du vhost (_access.inc)
+#   access_linked    entrées autorisées en plus sur un vhost privé (serveurs liés)
+#   server_type      proxy | monitoring | vpn | db | backup | app | misc (affichage)
+#   monitor_port     port de scrape node_exporter public (NAT domestique)
+#   svcprobe_port    port de scrape svcprobe public (NAT domestique)
+#   monitor: "off"   machine non supervisée
+#   initial_ssh_pass 🔒 mot de passe root d'une machine vierge (vault)
+# ═════════════════════════════════════════════════════════════════════════════
+all:
+  vars:
+    # Défaut obligatoire ici, pas dans group_vars/all.yml (gitignoré).
+    ansible_roles: []
+  children:
+    monparc:
+      children:
+
+        # ── Frontaux nginx : vhosts de tous les services publiés ──────────────
+        proxies:
+          hosts:
+            proxy1:
+              hostname: proxy1.{{ domain_name }}
+              ansible_host: 203.0.113.10
+              provider: contabo
+              server_type: proxy
+              ansible_roles: [proxy]
+            proxy2:
+              hostname: proxy2.{{ domain_name }}
+              ansible_host: 198.51.100.20            # NAT domestique
+              ansible_port: 22
+              provider: custom
+              server_type: proxy
+              ansible_roles: [proxy]
+
+        # ── Supervision : nom à reporter dans `prometheus_host` ───────────────
+        prometheus:
+          hosts:
+            monitor:
+              hostname: monitoring.{{ domain_name }}
+              ansible_host: 203.0.113.10
+              provider: contabo
+              server_type: monitoring
+              app_port: 9090
+              ansible_roles: [monitoring]
+
+        vpns:
+          hosts:
+            vpn1:
+              hostname: vpn1.{{ domain_name }}
+              ansible_host: 198.51.100.20
+              ansible_port: 22
+              provider: custom
+              server_type: vpn
+              proxy_hostname: vpn.{{ domain_name }}
+              ansible_roles: [vpn]
+
+        misc:
+          hosts:
+            # Entrée CANONIQUE d'une machine : ses familles non publiées.
+            alertmanager1:
+              hostname: alertmanager1.{{ domain_name }}
+              ansible_host: 203.0.113.10
+              provider: contabo
+              server_type: monitoring
+              ansible_roles: [alertmanager]
+            mail1:
+              hostname: mail.{{ domain_name }}
+              ansible_host: 203.0.113.10
+              provider: contabo
+              server_type: misc
+              ansible_roles: [mailserver, dmarc-exporter]
+
+            # Machine derrière un NAT domestique : identifiée par adresse + port
+            # SSH, ports de scrape redirigés par le routeur.
+            hub:
+              hostname: hub.srv.{{ domain_name }}
+              ansible_host: 198.51.100.20
+              ansible_port: 1220
+              provider: custom
+              monitor_port: 9101
+              svcprobe_port: 9111
+              ansible_roles: []
+
+            # Entrée DÉDIÉE d'un service publié : identité de la machine
+            # recopiée (ansible_host, ansible_port, provider, ports de scrape).
+            ollama:
+              hostname: ollama-priv.{{ domain_name }}
+              proxy_hostname: ollama.{{ domain_name }}
+              ansible_host: 198.51.100.20
+              ansible_port: 1220
+              provider: custom
+              monitor_port: 9101
+              svcprobe_port: 9111
+              app_port: 11434
+              access_mode: private
+              ansible_roles: [ollama]
+
+            # Machine vierge : le premier setup-server.yml se connecte en root.
+            small1:
+              ansible_host: 203.0.113.30
+              provider: oracle
+              server_type: misc
+              # initial_ssh_pass: !vault |
+              #   $ANSIBLE_VAULT;1.1;AES256 …
+
+        # ── Application front + back, avec sauvegarde PostgreSQL off-host ─────
+        apps:
+          hosts:
+            monapp:
+              hostname: monapp-priv.{{ domain_name }}
+              proxy_hostname: monapp.{{ domain_name }}
+              ansible_host: 203.0.113.40
+              provider: ovh
+              app_port: 4300
+              back_port: 4301
+              server_type: app
+              access_mode: public
+              ansible_roles: [monapp, backup]
+              pgbak_name: monapp                     # label `backup` des métriques
+              pgbak_container: monapp_postgres
+              pgbak_db: monapp
+              pgbak_user: monapp
+              pgbak_dest_host: backup-monapp         # entrée du groupe `backups`
+              pgbak_cron_minute: "10"
+
+        # ── Destinations de sauvegarde (une entrée par sauvegarde) ────────────
+        backups:
+          hosts:
+            backup-monapp:
+              hostname: backup-monapp.{{ domain_name }}
+              ansible_host: 203.0.113.10
+              provider: contabo
+              server_type: backup
+              backup_sources: [monapp]
+              ansible_roles: [backup]

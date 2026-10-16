@@ -1,0 +1,4 @@
+# Identifiants certbot pour le défi DNS-01 — géré par Ansible.
+# La CLÉ `dns_cloudflare_api_token` est imposée par certbot ; la VALEUR vient de
+# la variable Ansible `cloudflare_token`, unique jeton Cloudflare du parc.
+dns_cloudflare_api_token = {{ cloudflare_token }}

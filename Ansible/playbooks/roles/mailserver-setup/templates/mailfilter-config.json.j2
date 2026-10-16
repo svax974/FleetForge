@@ -1,0 +1,9 @@
+{
+{% for domain in mail_domains %}
+  "{{ domain.name }}": {
+    "reply_to": "{{ domain.reply_address }}",
+    "subject_prefix": "{{ domain.subject_prefix }}"
+  }{% if not loop.last %},{% endif %}
+
+{% endfor %}
+}

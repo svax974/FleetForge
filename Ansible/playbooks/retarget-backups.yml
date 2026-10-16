@@ -1,0 +1,183 @@
+---
+# Repointe les sauvegardes sur un nouveau serveur de destination.
+#
+# ── Procédure ──────────────────────────────────────────────────────────────
+#   1. Modifier `ansible_host` de `backup-brk` et/ou `backup-timescale` dans
+#      inventories/papanglabs_inventory.yml.
+#   2. Si la nouvelle machine est neuve, la préparer d'abord :
+#        ./play.sh papanglabs setup-server.yml --limit backup-brk
+#   3. ./play.sh papanglabs retarget-backups.yml
+#
+# Ce playbook refait TOUT ce qui dépend de l'adresse : clé SSH autorisée sur la
+# nouvelle destination, ouverture du pare-feu, entrée known_hosts, répertoire de
+# destination, et réécriture des scripts de sauvegarde et de restauration avec
+# la nouvelle adresse. Il vérifie ensuite que la destination répond réellement.
+#
+# ── Les anciennes sauvegardes ne sont PAS recopiées ────────────────────────
+# Volontairement. Recopier 348 Go d'un serveur à l'autre coûterait un transfert
+# complet pour des données que la source détient encore, et plus fraîches : la
+# prochaine exécution reconstitue la destination depuis le magasin vivant. Le
+# seul écart est la génération `previous`, absente le temps de deux cycles.
+# Conséquence à ne pas oublier : L'ANCIEN SERVEUR CONSERVE LES SAUVEGARDES tant
+# qu'on ne le purge pas — c'est un filet pendant la bascule, et une fuite de
+# données si on l'oublie.
+#
+# ── Options ────────────────────────────────────────────────────────────────
+#   -e run_now=true          lance immédiatement les sauvegardes en tâche de
+#                            fond au lieu d'attendre le cron (BRK : plusieurs
+#                            heures, avec un arrêt du service en fin de course)
+#   -e purge_old=<adresse>   révoque les clés et supprime {{ backup_root }} sur
+#                            l'ANCIENNE destination, une fois la nouvelle
+#                            vérifiée. À ne faire qu'après une première
+#                            sauvegarde réussie sur le nouveau serveur.
+
+- name: Préflight — destinations résolues
+  hosts: localhost
+  gather_facts: false
+  connection: local
+  tasks:
+    - name: Afficher les destinations telles que l'inventaire les définit
+      ansible.builtin.debug:
+        msg:
+          - "backup-brk        → {{ hostvars['backup-brk']['ansible_host'] }}"
+          - "backup-timescale  → {{ hostvars['backup-timescale']['ansible_host'] }}"
+          - "racine            → {{ hostvars['backup-brk']['backup_root'] }}"
+
+    # Une destination confondue avec sa source ne protège de rien. Le rôle
+    # `brk-backup-install` refuse déjà ce cas, mais autant l'annoncer ici
+    # plutôt qu'au milieu du déploiement.
+    - name: Refuser une destination BRK confondue avec la source
+      ansible.builtin.fail:
+        msg: >-
+          `backup-brk` pointe sur {{ hostvars['backup-brk']['ansible_host'] }},
+          soit la machine qui produit le magasin. Corrige l'inventaire.
+      when: hostvars['backup-brk']['ansible_host'] == hostvars['brk1']['ansible_host']
+
+- name: Repointage de la sauvegarde du magasin BRK
+  hosts: brk1
+  remote_user: "{{ remote_username }}"
+  roles:
+    - brk-backup-install
+
+- name: Repointage de la sauvegarde de la base d'indicateurs
+  hosts: timescale
+  remote_user: "{{ remote_username }}"
+  roles:
+    - timescaledb-backup-install
+
+- name: Pare-feu des destinations
+  hosts: backups
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - backup-security
+
+# ── Vérification ───────────────────────────────────────────────────────────
+# Sans elle, le repointage « réussit » même si la destination est injoignable :
+# le premier échec surviendrait au prochain cron, en silence. Les scripts de
+# restauration en mode `--check` sont exactement le bon test — ils empruntent le
+# même chemin réseau, la même clé et le même répertoire que la restauration
+# réelle, qui est le seul usage qui compte.
+- name: Vérification — la destination BRK répond
+  hosts: brk1
+  remote_user: "{{ remote_username }}"
+  tasks:
+    - name: Interroger la destination via brk-restore.sh --check
+      ansible.builtin.command: "/home/{{ remote_username }}/brk-restore.sh --check"
+      changed_when: false
+      register: brk_check
+
+    - name: Afficher l'état
+      ansible.builtin.debug:
+        var: brk_check.stdout_lines
+
+- name: Vérification — la destination des indicateurs répond
+  hosts: timescale
+  remote_user: "{{ remote_username }}"
+  tasks:
+    - name: Interroger la destination via timescaledb-restore.sh --check
+      ansible.builtin.command: "{{ ansible_env.HOME }}/papangmetrics-db/timescaledb-restore.sh --check"
+      changed_when: false
+      register: tsdb_check
+
+    - name: Afficher l'état
+      ansible.builtin.debug:
+        var: tsdb_check.stdout_lines
+
+# ── Première sauvegarde immédiate (optionnelle) ────────────────────────────
+- name: Lancement immédiat des sauvegardes
+  hosts: brk1:timescale
+  remote_user: "{{ remote_username }}"
+  gather_facts: false
+  vars:
+    backup_cmd: >-
+      {{ '/home/' ~ remote_username ~ '/brk-backup.sh'
+         if inventory_hostname == 'brk1'
+         else '/home/' ~ remote_username ~ '/papangmetrics-db/timescaledb-backup.sh' }}
+    backup_log: >-
+      {{ '/home/' ~ remote_username ~ '/brk-backup.log'
+         if inventory_hostname == 'brk1'
+         else '/home/' ~ remote_username ~ '/papangmetrics-db/backup.log' }}
+  tasks:
+    # `async` sans `poll` : la sauvegarde BRK dure des heures. Ansible la lance
+    # et rend la main ; le suivi se fait par le journal et par la métrique
+    # backup_last_success_timestamp_seconds.
+    #
+    # Les scripts s'auto-limitent : si une sauvegarde récente existe déjà sur la
+    # NOUVELLE destination, celle-ci sort sans rien faire. Sur une destination
+    # fraîchement repointée il n'y a rien, donc elle part réellement.
+    - name: Lancer la sauvegarde en tâche de fond
+      ansible.builtin.shell: "{{ backup_cmd }} >> {{ backup_log }} 2>&1"
+      async: 86400
+      poll: 0
+      changed_when: true
+      when: run_now | default(false) | bool
+
+    - name: Rappel de suivi
+      ansible.builtin.debug:
+        msg: "Sauvegarde lancée en tâche de fond. Suivi : tail -f {{ backup_log }}"
+      when: run_now | default(false) | bool
+
+# ── Nettoyage de l'ancienne destination (optionnel) ────────────────────────
+- name: Purge de l'ancienne destination
+  hosts: localhost
+  gather_facts: false
+  connection: local
+  tasks:
+    # Les paramètres de connexion sont repris de `backup-brk` via hostvars, et
+    # non des variables du play : localhost n'appartient à aucun groupe de
+    # l'inventaire et n'a donc accès ni à `ssh_custom_port` ni à
+    # `remote_username`.
+    - name: Déclarer l'ancienne destination comme hôte temporaire
+      ansible.builtin.add_host:
+        name: old-backup-host
+        ansible_host: "{{ purge_old }}"
+        ansible_port: "{{ hostvars['backup-brk']['ansible_port'] }}"
+        ansible_user: "{{ hostvars['backup-brk']['remote_username'] }}"
+        ansible_ssh_common_args: "{{ hostvars['backup-brk']['ansible_ssh_common_args'] | default('') }}"
+        remote_username: "{{ hostvars['backup-brk']['remote_username'] }}"
+        backup_root: "{{ hostvars['backup-brk']['backup_root'] }}"
+        groups: [old_backups]
+      when: purge_old is defined
+      changed_when: false
+
+- name: Révocation et suppression sur l'ancienne destination
+  hosts: old_backups
+  gather_facts: false
+  remote_user: "{{ remote_username }}"
+  tasks:
+    - name: Révoquer les clés de sauvegarde
+      ansible.builtin.lineinfile:
+        path: "/home/{{ remote_username }}/.ssh/authorized_keys"
+        regexp: "{{ item }}"
+        state: absent
+      loop:
+        - '.*-brk-backup$'
+        - '.*-tsdb-backup$'
+      become: true
+
+    - name: Supprimer les sauvegardes
+      ansible.builtin.file:
+        path: "{{ backup_root }}"
+        state: absent
+      become: true

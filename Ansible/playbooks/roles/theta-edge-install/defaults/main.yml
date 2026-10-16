@@ -1,0 +1,37 @@
+---
+# Nœuds Theta Edge — N instances Docker par machine.
+#
+# `theta_passwd` (vault) et `theta_wallet` sont définis dans group_vars.
+#
+# ── Une identité par instance, sans exception ──────────────────────────────
+# Chaque instance génère au premier démarrage sa propre clé de nœud
+# (`edgecore/key/encrypted/<adresse>`). Cette adresse EST l'identité du nœud
+# sur le réseau : `peer_id` P2P, signataire des votes EEN, cible du staking
+# (le « Summary »), adresse sous laquelle l'API de jobs distribue le travail.
+# Deux conteneurs partageant la même clé seraient UN seul nœud vu du réseau,
+# présent deux fois : aucune récompense de plus, des sessions P2P qui se
+# chassent l'une l'autre et des jobs reçus en double. Le « même wallet » se
+# fait en aval : le wallet personnel stake vers le Summary de chaque instance,
+# et `theta-edge-sweep` rapatrie le TFuel de chaque nœud vers `theta_wallet`.
+
+# Nombre d'instances sur l'hôte (host_vars / inventaire). Les instances
+# au-delà de ce nombre, présentes d'un déploiement précédent, sont ARRÊTÉES
+# (données et clé conservées) — jamais supprimées.
+theta_edge_instances: 1
+
+theta_edge_base_dir: /opt/theta-edge
+theta_edge_image: thetalabsorg/edgelauncher_mainnet:latest
+
+# Seul le RPC edgecore (17888 dans le conteneur) est publié, sur 127.0.0.1 :
+# l'exporter et l'export des clés n'ont besoin de rien d'autre. La doc
+# officielle publie aussi 15888 (RPC du launcher) et 17935 (RPC de l'encoder),
+# qui ne servent à aucun outil de ce dépôt — `docker exec` les atteint au
+# besoin. Le P2P (40011/40001) n'est jamais publié : connexions sortantes.
+#
+# Instance N → 17888 + (N-1) × 10 côté hôte.
+theta_edge_rpc_base_port: 17888
+theta_edge_port_step: 10
+
+# Clés rapatriées sur le POSTE de contrôle à la fin de l'installation
+# (tasks/keys.yml) — hors dépôt, à côté du mot de passe du vault.
+theta_edge_keys_dir: "{{ lookup('env', 'HOME') }}/.config/fleetforge/theta-edge"

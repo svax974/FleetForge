@@ -1,0 +1,31 @@
+---
+- name: Stop and disable API service
+  ansible.builtin.systemd:
+    name: papangmetrics-api
+    state: stopped
+    enabled: false
+  become: true
+  ignore_errors: true
+
+- name: Remove API systemd unit
+  ansible.builtin.file:
+    path: /etc/systemd/system/papangmetrics-api.service
+    state: absent
+  become: true
+
+- name: Reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+  become: true
+
+# Contrepartie de l'enregistrement fait par `papangmetrics-api-install`. Sans
+# elle, la cible survit au retrait du service et `TargetDown` sonne pour
+# toujours sur une machine qui n'héberge plus rien. Pas de redémarrage de
+# Prometheus : `file_sd_configs` surveille le répertoire et retire la cible seul.
+- name: Remove papangmetrics-api Prometheus target
+  ansible.builtin.file:
+    path: "/home/{{ remote_username }}/prometheus/prometheus-configs/papangmetrics-api/{{ inventory_hostname }}.json"
+    state: absent
+  delegate_to: "{{ prometheus_host }}"
+  become: true
+  ignore_errors: true

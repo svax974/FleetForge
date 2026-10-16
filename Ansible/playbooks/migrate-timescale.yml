@@ -1,0 +1,144 @@
+---
+# Duplique un serveur « base d'indicateurs » d'une machine SOURCE vers une
+# machine CIBLE (typiquement un nouveau fournisseur) : TimescaleDB ET l'API/ETL
+# PapangMetrics co-localisés — la base et l'app sur le même serveur (choix
+# verrouillé). Bénéfice direct : l'ETL écrit alors dans la base EN LOCAL, ce qui
+# sort le trafic ETL→DB du lien inter-hôtes aujourd'hui dégradé.
+#
+#   ./play.sh papanglabs migrate-timescale.yml -e "src_host=timescale dst_host=timescale2"
+#
+# ── Prérequis ──────────────────────────────────────────────────────────────
+#   1. La CIBLE existe dans l'inventaire (nouvelle IP, `provider:` renseigné) et
+#      appartient aux mêmes groupes que la source (`dbs` pour la base, `api`
+#      pour l'app), pour que les rôles `-security` en dérivent le pare-feu.
+#   2. La CIBLE est bootstrapée UNE fois : `./play.sh papanglabs setup-server.yml
+#      --limit <cible>` (root@22 → port du parc, utilisateur de service, Docker).
+#   3. Un dump récent existe sur `backup-timescale` : c'est de lui que la base
+#      est restaurée (le mécanisme de restore streame le dump depuis cet hôte).
+#
+# ── Ce que fait ce playbook ────────────────────────────────────────────────
+#   • installe TimescaleDB (conteneur Docker), sa sécurité, son dispositif de
+#     dump/restore et sa supervision ;
+#   • RESTAURE la base depuis le dernier dump de `backup-timescale` (la cible
+#     tire le dump via SSH — le rôle de sauvegarde a posé la clé + le pare-feu) ;
+#   • installe l'API + l'ETL PapangMetrics (code, unités systemd, pare-feu) ;
+#   • repose la supervision et contrôle la reprise de l'ingestion.
+#
+# ── Après la migration ─────────────────────────────────────────────────────
+#   • repointer l'ETL/API vers la nouvelle base est inutile (elle est locale),
+#     mais l'URL de l'API BRK doit rester correcte (group_vars) ;
+#   • retarget des sauvegardes vers une destination hors-site
+#     (`retarget-backups.yml`) et bascule de l'inventaire (`timescale` →
+#     nouvelle IP) une fois la cible validée ;
+#   • retirer l'ancien serveur (`remove-papangmetrics.yml`, `timescaledb-remove`).
+
+# ── 0. Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ──────────────────────
+- name: Contrôle préalable
+  hosts: "{{ dst_host }}"
+  remote_user: "{{ remote_username }}"
+  tags: [always]
+  roles:
+    - role: host-preflight
+      preflight_require_docker: true
+
+# ── 1. Base d'indicateurs TimescaleDB ───────────────────────────────────────
+# `timescaledb-backup-install` pose ici, sur la cible, la clé et le script de
+# restore qui savent TIRER le dump depuis `backup-timescale` (SSH, décompression
+# streamée). C'est ce qui rend l'étape 2 possible sur une machine neuve.
+- name: Base d'indicateurs TimescaleDB
+  hosts: "{{ dst_host }}"
+  remote_user: "{{ remote_username }}"
+  tags: [db]
+  roles:
+    - timescaledb-install
+    - timescaledb-security
+    - timescaledb-backup-install
+    - timescaledb-monitoring
+
+# ── 2. Restauration de la base depuis le dernier dump ───────────────────────
+# La base cible est fraîche (vide) : aucun ETL ne tourne encore ici, le
+# DROP DATABASE du restore ne coupe donc aucune écriture. Synchrone (le
+# chargement dure) — prévoir un `tmux` côté poste ou un délai SSH large.
+- name: Restauration de la base
+  hosts: "{{ dst_host }}"
+  remote_user: "{{ remote_username }}"
+  tags: [db]
+  tasks:
+    - name: État des dumps disponibles
+      ansible.builtin.command: "/home/{{ remote_username }}/papangmetrics-db/timescaledb-restore.sh --check"
+      changed_when: false
+      register: tsdb_restore_check
+
+    - name: Afficher l'état
+      ansible.builtin.debug:
+        var: tsdb_restore_check.stdout_lines
+
+    - name: Restaurer le plus récent dump
+      ansible.builtin.command: >-
+        /home/{{ remote_username }}/papangmetrics-db/timescaledb-restore.sh --yes
+      changed_when: true
+      register: tsdb_restore
+
+    - name: Journal de restauration
+      ansible.builtin.debug:
+        var: tsdb_restore.stdout_lines
+
+# ── 3. API + ETL PapangMetrics (co-localisés avec la base) ──────────────────
+# Après la base : `papangmetrics-deploy` joue ses migrations SQL contre une base
+# qui doit déjà tourner (ici déjà restaurée — les migrations sont idempotentes).
+- name: PapangMetrics — code, services, pare-feu
+  hosts: "{{ dst_host }}"
+  remote_user: "{{ remote_username }}"
+  tags: [app]
+  roles:
+    - nodejs-install
+    - { role: papangmetrics-deploy, tags: [code] }
+    - papangmetrics-api-install
+    - papangmetrics-etl-install
+    - papangmetrics-api-security
+
+# ── 4. Supervision ──────────────────────────────────────────────────────────
+- name: node_exporter (dont collecteur textfile)
+  hosts: "{{ dst_host }}"
+  remote_user: "{{ remote_username }}"
+  become: true
+  tags: [monitoring]
+  roles:
+    - exporter-sys-install
+
+- name: Règles d'alerte
+  hosts: prometheus1:monitor
+  remote_user: "{{ remote_username }}"
+  tags: [monitoring]
+  roles:
+    - prometheus-alerts-update
+
+# ── 5. Contrôle de reprise ──────────────────────────────────────────────────
+- name: Contrôle du pipeline
+  hosts: "{{ dst_host }}"
+  remote_user: "{{ remote_username }}"
+  gather_facts: false
+  tags: [always]
+  tasks:
+    - name: Interroger l'ETL
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ papangmetrics_etl_metrics_port }}/metrics"
+        return_content: true
+      register: pipeline_metrics
+      retries: 12
+      delay: 10
+      until: pipeline_metrics.status == 200
+
+    - name: Extraire les métriques clés
+      ansible.builtin.set_fact:
+        pipeline_lines: >-
+          {{ pipeline_metrics.content.split('\n')
+             | select('match', '^(brk_up|brk_height|etl_block_lag) ')
+             | list }}
+
+    - name: Résultat
+      ansible.builtin.debug:
+        msg:
+          - "{{ pipeline_lines }}"
+          - "brk_up doit valoir 1 (l'API BRK distante doit rester joignable)."
+          - "La base est locale : les écritures ETL ne passent plus par le lien inter-hôtes."

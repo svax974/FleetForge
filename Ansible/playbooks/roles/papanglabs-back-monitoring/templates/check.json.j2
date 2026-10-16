@@ -1,0 +1,9 @@
+{
+  "service": "{{ pgb_probe_service }}",
+  "up": {"kind": "http", "url": "{{ pgb_probe_url }}/api/v1/health", "status": [200], "timeout": 10},
+  "extra_checks": [
+    {"name": "lb", "kind": "docker", "container": "{{ pgb_lb_container }}"},
+    {"name": "api", "kind": "docker", "container": "{{ pgb_project_name }}-back-1"},
+    {"name": "worker", "kind": "docker", "container": "{{ pgb_project_name }}-back-worker-1"}
+  ]
+}

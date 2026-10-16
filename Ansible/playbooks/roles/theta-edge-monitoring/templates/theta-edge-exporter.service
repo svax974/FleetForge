@@ -1,0 +1,29 @@
+[Unit]
+Description=Theta Edge Prometheus exporter (all instances)
+# Pas de dépendance sur les conteneurs : l'exporter publie theta_edge_up=0
+# tant qu'une instance ne répond pas, ce qui est l'information voulue.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# `srvc` et non root (CLAUDE.md § 2) : l'exporter ne lit que le RPC local
+# et le RPC public, il n'a besoin d'aucun droit sur /opt/theta-edge.
+User={{ remote_username }}
+Group={{ remote_username }}
+ExecStart=/usr/bin/env python3 {{ theta_edge_exporter_bin }}
+Environment=THETA_EDGE_EXPORTER_CONFIG={{ theta_edge_exporter_dir }}/config.json
+Restart=always
+RestartSec=15
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+MemoryMax=128M
+
+[Install]
+WantedBy=multi-user.target

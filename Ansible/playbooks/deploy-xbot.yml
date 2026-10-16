@@ -1,0 +1,22 @@
+---
+# Supervision de xbot (front, back — pas de base de données), déployée hors
+# Ansible — ce playbook ne pose QUE la sonde svcprobe, il n'installe rien.
+#
+#   ./play.sh web3c deploy-xbot.yml
+#
+# Ex-`deploy-xbot-monitoring.yml`, renommé le 11/10/2026 : le nom de la
+# famille (`xbot`) est celui du playbook, même quand l'application elle-même
+# se déploie hors de ce dépôt.
+
+- name: Contrôle préalable
+  hosts: xbot
+  remote_user: "{{ remote_username }}"
+  roles:
+    - role: host-preflight
+      preflight_require_docker: true
+
+- name: Supervision du service
+  hosts: xbot
+  remote_user: "{{ remote_username }}"
+  roles:
+    - xbot-monitoring

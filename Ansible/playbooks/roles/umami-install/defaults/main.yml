@@ -1,0 +1,8 @@
+---
+umami_data_dir: "/home/{{ remote_username }}/umami"
+umami_app_port: 3400
+umami_db: umami
+umami_db_user: umami
+# umami_db_pass and umami_hash_salt are secrets — defined per-value-vault-encrypted in
+# group_vars/papanglabs.yml (never here, and never plaintext). See that file's comments.
+umami_image: "ghcr.io/umami-software/umami:postgresql-latest"

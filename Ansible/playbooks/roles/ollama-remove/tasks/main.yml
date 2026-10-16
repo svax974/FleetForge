@@ -1,0 +1,42 @@
+---
+# Remove Ollama — stops service and removes binary. Models preserved.
+#
+# Retire aussi la sonde : une sonde laissée en place publie `service_up 0`
+# indéfiniment et fait sonner une alerte sur un service volontairement
+# désinstallé (CLAUDE.md § 2). L'utilisateur système `ollama` est conservé —
+# il possède les modèles dans /usr/share/ollama, que ce rôle préserve.
+
+# svcprobe relit /etc/svcprobe/checks.d à CHAQUE scrape : supprimer le fichier
+# suffit, aucun redémarrage nécessaire.
+- name: Remove the ollama probe
+  ansible.builtin.file:
+    path: /etc/svcprobe/checks.d/ollama.json
+    state: absent
+  become: true
+
+- name: Stop and disable ollama service
+  ansible.builtin.systemd:
+    name: ollama
+    state: stopped
+    enabled: no
+  ignore_errors: true
+
+- name: Remove ollama binary
+  ansible.builtin.file:
+    path: /usr/local/bin/ollama
+    state: absent
+
+- name: Remove systemd service file and drop-in directory
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    # Le répertoire d'override porte l'OLLAMA_HOST=0.0.0.0 posé par
+    # `ollama-install`. L'oublier laisse systemd le réappliquer silencieusement
+    # à la prochaine réinstallation, y compris si elle vise 127.0.0.1.
+    - /etc/systemd/system/ollama.service
+    - /etc/systemd/system/ollama.service.d
+
+- name: Reload systemd daemon
+  ansible.builtin.systemd:
+    daemon_reload: yes

@@ -1,0 +1,16 @@
+---
+# Suppression complète : service, binaire, code livré, arbre Ansible synchronisé,
+# base de données locale et mot de passe d'accès.
+#
+# Ne touche PAS aux outils génériques (Rust, pipx, Ansible, paquets de
+# compilation) : ils sont partagés et leur suppression déborderait de ce
+# service.
+#
+# La clé dédiée, sa passphrase et le mot de passe du vault sont retirés dès le
+# `-remove` : ce sont des secrets propres à CETTE installation, et non ceux de
+# l'opérateur. Ce que ni l'un ni l'autre ne touche, ce sont les valeurs
+# chiffrées du dépôt (`ff_web_password`, `ff_key_passphrase`) : les effacer
+# rendrait un redéploiement incapable de retrouver l'accès qu'il vient de
+# perdre.
+ff_user: "{{ remote_username }}"
+ff_dir: "/home/{{ remote_username }}/fleetforge"

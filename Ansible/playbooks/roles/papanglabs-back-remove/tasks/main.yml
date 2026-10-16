@@ -1,0 +1,56 @@
+---
+# `--profile metrics` est indispensable : sans lui, `down` ignore vmagent, qui
+# resterait à pousser les métriques d'un service supprimé.
+- name: Stop and remove the containers
+  ansible.builtin.command:
+    cmd: >-
+      docker compose --project-name {{ pgb_project_name }}
+      --profile metrics down --remove-orphans
+    chdir: "{{ pgb_dir }}"
+  become: true
+  register: pgb_down
+  changed_when: "'Removed' in pgb_down.stderr"
+  failed_when: false
+
+# Nom de conteneur fixe : il survit à un `down` lancé depuis un autre nom de
+# projet, et bloquerait alors le prochain déploiement sur un conflit de nom.
+- name: Remove the load balancer container left over from another project name
+  community.docker.docker_container:
+    name: "{{ pgb_lb_container }}"
+    state: absent
+  become: true
+  failed_when: false
+
+# Une sonde laissée en place publie `service_up 0` indéfiniment et fait sonner
+# une alerte sur un service volontairement désinstallé — c'est la raison d'être
+# de la règle « pas de rôle -monitoring-remove » du parc : c'est ici que ça se
+# retire.
+- name: Remove the svcprobe check
+  ansible.builtin.file:
+    path: "/etc/svcprobe/checks.d/{{ pgb_probe_service }}.json"
+    state: absent
+  become: true
+
+# Même raison que la sonde : une autorisation de pare-feu laissée derrière un
+# service supprimé ouvre le récepteur Prometheus à une machine qui n'a plus rien
+# à y pousser, et personne ne la retrouvera dans les host_vars — elle n'y est
+# pas.
+- name: Close the remote_write opening on every Prometheus host
+  ansible.builtin.file:
+    path: "/etc/docker-ports/sources.d/{{ pgb_probe_service }}.conf"
+    state: absent
+  become: true
+  delegate_to: "{{ item }}"
+  loop: "{{ groups['prometheus'] | default([]) }}"
+  register: pgb_dropin_removed
+
+- name: Reapply the Docker port rules where the opening was removed
+  ansible.builtin.systemd:
+    name: docker-ports-firewall
+    state: restarted
+  become: true
+  delegate_to: "{{ item.item }}"
+  loop: "{{ pgb_dropin_removed.results | default([]) | selectattr('changed', 'defined') | selectattr('changed') | list }}"
+  loop_control:
+    label: "{{ item.item }}"
+  failed_when: false

@@ -1,0 +1,8 @@
+---
+proxymon_unit: nginx
+# stub_status : à activer côté nginx pour que les métriques de charge
+# remontent. Sans lui la sonde reste valide (unité + ports), seules les
+# métriques de connexions manquent — d'où `nginx_stub_status_available 0`
+# plutôt qu'un silence.
+proxymon_status_url: "http://127.0.0.1/nginx_status"
+proxymon_cert_dir: /etc/letsencrypt/live

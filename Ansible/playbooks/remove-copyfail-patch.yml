@@ -1,0 +1,15 @@
+---
+# CVE-2026-31431 "Copy Fail" — retrait de la mitigation sur tous les hôtes Linux
+#
+# Retire uniquement la mitigation temporaire (blacklist modprobe / grubby).
+# Le kernel n'est PAS rétrogradé.
+# Sur RedHat/Suse : un reboot est nécessaire pour que le retrait prenne effet.
+
+- name: "CVE-2026-31431 Copy Fail — retrait de la mitigation"
+  hosts: all
+  remote_user: "{{ remote_username }}"
+  become: true
+  become_method: sudo
+
+  roles:
+    - copyfail-remove

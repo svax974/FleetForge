@@ -1,0 +1,5 @@
+---
+# Pas de base de données pour xbot — sonde container-only, comme
+# db-monitoring/wordpress-monitoring pour un service sans dépendance PostgreSQL.
+xbotm_front_container: xbot_front
+xbotm_back_container: xbot_back

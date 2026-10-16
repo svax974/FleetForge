@@ -1,0 +1,19 @@
+---
+# Arrête tous les nœuds Theta Edge de l'hôte et retire leur supervision.
+#
+#   ./play.sh web3c remove-theta-edge.yml --limit <hôte>
+#
+# Conserve /opt/theta-edge/instance* (clés des nœuds, base de l'edgecore) :
+# un redéploiement reprend les mêmes identités, donc le stake qui les vise.
+# Pour tout détruire : purge-theta-edge.yml.
+
+- name: Désinstallation des nœuds Theta Edge (clés conservées)
+  hosts: all
+  remote_user: "{{ remote_username }}"
+  become: true
+  pre_tasks:
+    - name: Skip hosts that do not carry the theta-edge family
+      ansible.builtin.meta: end_host
+      when: "'theta-edge' not in ansible_roles | default([])"
+  roles:
+    - theta-edge-remove

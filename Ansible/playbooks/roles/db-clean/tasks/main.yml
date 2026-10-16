@@ -1,0 +1,16 @@
+---
+# Clean stuff before installing
+- name: Check if the docker compose file exists
+  ansible.builtin.stat:
+    path: ~/pgdatabase/docker-compose.yml
+  register: docker_fileinfo
+- name: Stop postgres in case it is running
+  community.docker.docker_compose_v2:
+    project_src: ~/pgdatabase/
+    state: absent
+  when: docker_fileinfo.stat.exists
+- name: Removes data directory
+  ansible.builtin.file:
+    path: "{{ ansible_env.HOME }}/pgdatabase/"
+    state: absent
+  become: yes

@@ -1,0 +1,38 @@
+services:
+  umami-db:
+    image: postgres:15-alpine
+    container_name: umami-db
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB={{ umami_db }}
+      - POSTGRES_USER={{ umami_db_user }}
+      - POSTGRES_PASSWORD={{ umami_db_pass }}
+    volumes:
+      - "{{ umami_data_dir }}/db:/var/lib/postgresql/data"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+  umami:
+    image: "{{ umami_image }}"
+    container_name: umami
+    restart: unless-stopped
+    environment:
+      - DATABASE_URL=postgresql://{{ umami_db_user }}:{{ umami_db_pass }}@umami-db:5432/{{ umami_db }}
+      - HASH_SALT={{ umami_hash_salt }}
+      - DISABLE_TELEMETRY=1
+    depends_on:
+      - umami-db
+    # Bound to all interfaces, not 127.0.0.1: the proxy that fronts this service lives on a
+    # DIFFERENT host (proxy1) and must reach this port over the network — access is restricted
+    # by the umami-security role's firewall rules (proxy1 + prometheus only), not by loopback
+    # binding (unlike theta-edge-install, which has no remote caller at all).
+    ports:
+      - "0.0.0.0:{{ umami_app_port }}:3000"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"

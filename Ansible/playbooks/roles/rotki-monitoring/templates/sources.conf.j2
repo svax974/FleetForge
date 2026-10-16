@@ -1,0 +1,4 @@
+# Géré par Ansible (rotki-monitoring) — ne pas éditer.
+# Accès de l'hôte Prometheus ({{ prometheus_host }}) à Rotki. Format :
+# « <port> <source> », lu par docker-ports-firewall.sh.
+{{ rotki_port }} {{ hostvars[prometheus_host]['ansible_host'] }}

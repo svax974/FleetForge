@@ -1,0 +1,100 @@
+---
+# Esplora — indexeur Bitcoin compatible avec l'API REST Blockstream Esplora
+# (adresses, transactions, mempool, UTXO). Backend : mempool/electrs (Rust),
+# le fork activement maintenu qui sert l'API Esplora — le dépôt d'origine
+# Blockstream/electrs est au ralenti. Comme BRK, il lit directement les
+# fichiers blk*.dat du nœud (en plus du RPC) : il tourne donc sous le MÊME
+# utilisateur que bitcoind (voir brk-install/defaults, même raisonnement), pas
+# sous un compte dédié.
+esplora_user: "{{ remote_username }}"
+esplora_home: "/home/{{ remote_username }}"
+
+# ── Version ────────────────────────────────────────────────────────────────
+# ÉPINGLÉE VOLONTAIREMENT (même raisonnement que brk_version) : mempool/electrs
+# n'est pas publié sur crates.io, on construit donc depuis un TAG git précis,
+# jamais `master`, sans quoi rejouer ce rôle embarquerait silencieusement
+# n'importe quel commit amont du jour.
+#
+# ATTENTION : ce tag n'a PAS été vérifié contre le dépôt distant au moment
+# d'écrire ce rôle (pas d'accès réseau sortant depuis ce poste). Avant le
+# PREMIER déploiement, confirmer qu'il existe bien :
+#   git ls-remote --tags https://github.com/mempool/electrs.git
+# et ajuster cette valeur si besoin — un tag absent fait échouer le clone
+# franchement (`ansible.builtin.git` avec `version:`), jamais silencieusement.
+esplora_version: "v0.5.0"
+esplora_repo: "https://github.com/mempool/electrs.git"
+esplora_src_dir: "{{ esplora_home }}/electrs-src"
+esplora_bin: /usr/local/bin/electrs
+
+# Magasin d'index construit par electrs — DISTINCT du datadir bitcoind, et
+# volumineux — plutôt de l'ordre de 100-200+ Go pour un index complet
+# (adresses + transactions + les métriques additionnelles que consomme l'UI
+# Esplora) sur mainnet, et ça croît avec la chaîne. Chiffre NON VÉRIFIÉ contre
+# une instance réelle au moment d'écrire ce rôle (pas d'accès réseau sortant
+# depuis ce poste) : contrôler l'espace RÉELLEMENT disponible avant le premier
+# déploiement — `ssh -p {{ ssh_custom_port | default(16138) }} {{ remote_username | default('srvc') }}@{{ ansible_host }} df -h /home`.
+# Co-localisée avec rpcbtc1 (chaîne ~887 Go) et brk1 (magasin ~348 Go, cf.
+# brk-install) : la marge sur cette machine n'est pas illimitée.
+esplora_dir: "{{ esplora_home }}/.electrs"
+esplora_db_dir: "{{ esplora_dir }}/db"
+
+# Installation bitcoind écrite par rpcbtc-install (~/bitcoin : bin/, data/,
+# bitcoin.conf — voir rpcbtc-install/tasks). `esplora_daemon_dir` est le
+# DATADIR lui-même (électrs y lit les blocs directement, comme
+# `brk_bitcoindir` pour BRK), distinct de la racine d'installation qui
+# contient aussi les binaires.
+esplora_bitcoin_home: "{{ esplora_home }}/bitcoin"
+esplora_daemon_dir: "{{ esplora_bitcoin_home }}/data"
+
+# Connexion RPC + P2P au nœud CO-LOCALISÉ, toujours en local : electrs n'a
+# aucune raison de passer par l'IP publique ni par le proxy.
+# Le nœud utilise un port RPC et une authentification personnalisés
+# (group_vars/rpcsbtc.yml) : `cookie` (user:pass explicite) plutôt que le
+# fichier .cookie par défaut, exactement comme brk_rpcuser/brk_rpcpassword.
+esplora_daemon_rpc_addr: "127.0.0.1:{{ proxy_port_rpc_btc | default(8332) }}"
+esplora_daemon_p2p_addr: "127.0.0.1:{{ proxy_port_btcd | default(8333) }}"
+
+# ── Ports ──────────────────────────────────────────────────────────────────
+# API REST Esplora — port réservé au registre du CLAUDE.md. Doit rester
+# aligné avec `app_port` de l'entrée d'inventaire `esplora1`
+# (inventories/papanglabs_inventory.yml) : deux consommateurs en dépendent
+# séparément (ce rôle publie le service, le vhost proxy s'y connecte via
+# `hostvars['esplora1'].app_port`), et ils doivent s'accorder sur la même
+# valeur — pas de lecture dynamique croisée, comme rotki_port/freellm_port.
+esplora_http_port: 3010
+# 0.0.0.0 : le proxy (`prometheus1`) est une machine DISTINCTE de esplora1
+# (`brk1`). Filtré par esplora-security (ufw) à la whitelist et aux
+# hôtes de l'inventaire — jamais ouvert au monde, voir CLAUDE.md § « Obligation
+# DNS + vhost ».
+esplora_http_bind: "0.0.0.0"
+
+# Endpoint Prometheus NATIF d'electrs (cas 1 de la convention `-monitoring`,
+# CLAUDE.md § 2) — pas d'exporter dédié à écrire. Port réservé au registre.
+esplora_monitoring_port: 9899
+esplora_monitoring_bind: "0.0.0.0"
+
+# Électrum RPC : protocole non-HTTP (donc pas relayable par le vhost nginx
+# existant, qui ne fait que du reverse-proxy HTTP). Gardé en LOCALHOST
+# uniquement — aucun consommateur identifié à ce jour pour un accès Electrum
+# externe. À ouvrir via un stream nginx (cf. streams-available/rpcbtc_8333.conf)
+# le jour où un client Electrum doit atteindre ce nœud depuis l'extérieur.
+esplora_electrum_addr: "127.0.0.1:50001"
+
+# CNAME Cloudflare public (esplora_hostname → proxy.<domaine>, voir
+# cloudflare-dns-update/tasks/cnames.yml) : nom PUBLIC de l'API, déclaré via
+# `proxy_hostname` sur l'entrée d'inventaire `esplora1` (dont le `hostname`
+# propre, esplora1.papanglabs.com, porte l'identité machine en A). Même
+# mécanisme que freellm_hostname/rotki_hostname : le trafic passe toujours par
+# un proxy, jamais directement sur cet hôte.
+esplora_hostname: "esplora.{{ domain_name }}"
+
+# Vhost servi par TOUS les proxies de l'inventaire par défaut — à restreindre
+# ici si un jour un sous-ensemble seulement doit le porter (cf.
+# freellm_allowed_proxies).
+esplora_allowed_proxies: "{{ groups['proxies'] | default([]) }}"
+
+# Garde-fou anti-boucle de crash — même raisonnement que BRK (brk-install/
+# defaults) : la fenêtre doit rester nettement supérieure à
+# RestartSec × burst, sinon la limite ne se déclenche jamais.
+esplora_start_limit_interval: 1800
+esplora_start_limit_burst: 5

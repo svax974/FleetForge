@@ -1,0 +1,12 @@
+---
+# Retire le sidecar Rotki : conteneur et sonde. Conserve les volumes de
+# données/logs (voir purge-rotki.yml). Le filtrage DOCKER-USER n'est pas
+# retiré automatiquement — voir le message de rotki-remove.
+#
+#   ./play.sh papanglabs remove-rotki.yml
+- name: Remove the Rotki sidecar
+  hosts: rotki
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - rotki-remove

@@ -1,0 +1,19 @@
+---
+# Restriction réseau des serveurs de synchronisation (web3c-sync). Les ports de
+# service ET de métriques de chaque instance sont PUBLIÉS PAR DOCKER : invisibles
+# pour ufw (CLAUDE.md, « Ports publiés par Docker »). Les règles vivent dans
+# `docker_ports_rules` (host_vars/ctdapi.yml — hôte CANONIQUE de la machine
+# partagée `ctdapi`, une liste par MACHINE) et s'appliquent en jouant ce
+# rôle sur `ctdapi` (voir deploy-sync-server.yml) — joué sur `sync-iptv`, qui n'a
+# pas de host_vars, ce serait un no-op silencieux.
+#
+# Ports déduits de l'inventaire (groupe `sync_servers`) : ajouter une instance
+# là-bas suffit à ce que ce rôle exige sa règle dans host_vars/ctdapi.yml.
+
+sync_security_service_ports: >-
+  {{ groups['sync_servers'] | default([])
+     | map('extract', hostvars, 'app_port') | map('int') | list }}
+sync_security_metrics_ports: >-
+  {{ groups['sync_servers'] | default([])
+     | map('extract', hostvars, 'sync_metrics_port') | map('int') | list }}
+sync_security_ports: "{{ sync_security_service_ports + sync_security_metrics_ports }}"

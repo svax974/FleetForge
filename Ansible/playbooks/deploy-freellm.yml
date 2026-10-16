@@ -1,0 +1,110 @@
+---
+# FreeLLMAPI (https://freellmapi.co) — proxy unifié multi-fournisseurs LLM,
+# API OpenAI-compatible sous un jeton bearer unique. Installé via
+# l'installeur officiel (curl -fsSL https://freellmapi.co/install.sh | bash,
+# Docker Compose) sur l'entrée d'inventaire `freellm`, co-localisée avec
+# `proxy1` sur ce parc. Les DEUX proxies sont autorisés
+# (freellm_allowed_proxies, group_vars/web3c.yml) : le port est donc publié en
+# 127.0.0.1 pour proxy1 (local) ET sur 0.0.0.0 filtré à proxy2 (distant) dans
+# DOCKER-USER — freellm-install en décide seul, par comparaison des
+# `ansible_host`, et freellm-security vérifie l'état réel de la chaîne. Le nom
+# public (freellm.web3c.cc) résout en CNAME vers `proxy_hostname`, qui
+# route en round-robin DNS entre les deux — pas vers un proxy nommé en dur.
+# Si le service est un jour déplacé sur une autre machine (comme searxng le
+# 12/09/2026), aucune de ces valeurs n'a besoin de changer : la logique se
+# déduit des `ansible_host` du groupe `proxies`.
+#
+# Le vhost (freellm.web3c.cc, restreint à `whitelist`) est poussé sur les DEUX
+# proxies par ce playbook lui-même (play « Vhost FreeLLMAPI sur les proxies »)
+# — SEULEMENT ce fichier, rechargé (pas redémarré), sans reconstruire tout
+# /etc/nginx comme le ferait update-proxy-web3c.yml (resynchronisation
+# complète des quatre répertoires, redémarrage inconditionnel). Ce dernier
+# reste nécessaire après une modification du GABARIT lui-même
+# (sites-enabled/freellm.conf) ou de nginx.conf — pas pour un redéploiement
+# courant de FreeLLMAPI.
+#
+#   ./play.sh web3c deploy-freellm.yml
+#   ./play.sh web3c deploy-freellm.yml --tags proxy-conf    # rejouer seulement le vhost
+#   ./play.sh web3c deploy-freellm.yml --tags monitoring    # réarmer la supervision
+#   ./play.sh web3c deploy-freellm.yml --tags unified-key   # relire la clé API unifiée
+
+# ── Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ───────────────────────
+# Échoue immédiatement si le parc n'a pas d'hôte de supervision utilisable,
+# puis vérifie — et répare — le socle de la machine, Docker, node_exporter et
+# sa cible Prometheus.
+- name: Contrôle préalable
+  hosts: freellm
+  remote_user: "{{ remote_username }}"
+  roles:
+    - role: host-preflight
+      preflight_require_docker: true
+
+- name: Deploy FreeLLMAPI
+  hosts: freellm
+  remote_user: "{{ remote_username }}"
+  roles:
+    - freellm-install
+
+# Pousse SEULEMENT sites-enabled/freellm.conf sur chaque proxy (les deux
+# rendent le même gabarit : celui-ci se tait tout seul sur un proxy hors de
+# `freellm_allowed_proxies`). Ni restart, ni resynchronisation des autres
+# vhosts — reload, uniquement si ce fichier a changé.
+- name: Vhost FreeLLMAPI sur les proxies
+  hosts: proxies
+  remote_user: "{{ remote_username }}"
+  become: true
+  tags: [proxy-conf]
+  tasks:
+    - name: Deploy just the FreeLLMAPI vhost
+      ansible.builtin.include_role:
+        name: proxy-update-web3c
+        tasks_from: deploy-one-site
+      vars:
+        site: freellm.conf
+
+# Le filtrage vit dans DOCKER-USER et non dans ufw : le port est publié par
+# Docker, qui insère ses DNAT en amont de tout ce que gère ufw. Le rôle
+# vérifie l'état RÉEL de la chaîne après application.
+- name: FreeLLMAPI firewall
+  hosts: freellm
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - freellm-security
+
+# ── Supervision (OBLIGATOIRE, voir CLAUDE.md) ──────────────────────────────
+# Sonde `service_up` + métriques du service, et enregistrement de la cible
+# auprès de Prometheus. Rejouable seule :
+#   ./play.sh web3c deploy-freellm.yml --tags monitoring
+- name: Supervision du service
+  hosts: freellm
+  remote_user: "{{ remote_username }}"
+  roles:
+    - freellm-monitoring
+
+# ── Rappel final ─────────────────────────────────────────────────────────
+# Dernier message du playbook, quel que soit l'ordre des plays précédentes :
+# c'est celui que l'opérateur voit en dernier dans son terminal. Ne redit pas
+# la clé (jamais imprimée, voir freellm-install) — seulement où la trouver, ou
+# comment la récupérer si la lecture automatique a échoué plus haut.
+- name: Rappel de la clé API unifiée
+  hosts: freellm
+  remote_user: "{{ remote_username }}"
+  gather_facts: false
+  tags: [unified-key]
+  tasks:
+    - name: Check whether the local key file exists
+      ansible.builtin.stat:
+        path: "{{ freellm_unified_key_local_path }}"
+      delegate_to: localhost
+      become: false
+      register: freellm_key_file
+
+    - name: Say where the unified API key is
+      ansible.builtin.debug:
+        msg: >-
+          {{ 'Clé API unifiée FreeLLMAPI : ' ~ freellm_unified_key_local_path
+             if freellm_key_file.stat.exists
+             else 'Clé API unifiée introuvable dans ' ~ freellm_unified_key_local_path ~
+                  ' — rejouer ./play.sh web3c deploy-freellm.yml --tags unified-key pour la relire, ' ~
+                  'ou la récupérer dans le tableau de bord (page Keys) : https://' ~ freellm_hostname ~ '/.' }}

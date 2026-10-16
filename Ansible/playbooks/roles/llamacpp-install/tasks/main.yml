@@ -1,0 +1,68 @@
+---
+# Build and install llama.cpp (llama-server) from source for LLM inference serving.
+# Model instances are created separately by the llamacpp-model-install role.
+
+- name: Install build dependencies
+  ansible.builtin.apt:
+    name:
+      - git
+      - cmake
+      - build-essential
+    state: present
+    update_cache: true
+
+- name: Create llamacpp system user
+  ansible.builtin.user:
+    name: "{{ llamacpp_user }}"
+    system: true
+    shell: /usr/sbin/nologin
+    home: "{{ llamacpp_home }}"
+    create_home: false
+
+- name: Create llama.cpp directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ llamacpp_user }}"
+    group: "{{ llamacpp_user }}"
+    mode: '0755'
+  loop:
+    - "{{ llamacpp_home }}"
+    - "{{ llamacpp_models_dir }}"
+
+- name: Check if llama-server is already built
+  ansible.builtin.stat:
+    path: /usr/local/bin/llama-server
+  register: llamacpp_binary
+
+- name: Clone llama.cpp source
+  ansible.builtin.git:
+    repo: https://github.com/ggml-org/llama.cpp.git
+    dest: "{{ llamacpp_src_dir }}"
+    version: "{{ llamacpp_version }}"
+    force: true
+  when: not llamacpp_binary.stat.exists
+
+- name: Configure llama.cpp build
+  ansible.builtin.command: "cmake -B build {{ llamacpp_cmake_extra_flags }}"
+  args:
+    chdir: "{{ llamacpp_src_dir }}"
+  when: not llamacpp_binary.stat.exists
+
+- name: Build llama-server (this can take a while)
+  ansible.builtin.command: >-
+    cmake --build build --config Release --target llama-server
+    -j{{ ansible_processor_vcpus | default(ansible_processor_count) | default(2) }}
+  args:
+    chdir: "{{ llamacpp_src_dir }}"
+  when: not llamacpp_binary.stat.exists
+
+- name: Install llama-server binary
+  ansible.builtin.copy:
+    src: "{{ llamacpp_src_dir }}/build/bin/llama-server"
+    dest: /usr/local/bin/llama-server
+    remote_src: true
+    owner: root
+    group: root
+    mode: '0755'
+  when: not llamacpp_binary.stat.exists

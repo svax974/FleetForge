@@ -1,0 +1,65 @@
+---
+# BRK (Bitcoin Research Kit) — computes indicators locally from the node.
+# Runs as the same user as bitcoind so it can read the datadir (blk*.dat) directly.
+brk_user: "{{ remote_username }}"
+brk_home: "/home/{{ remote_username }}"
+
+# ── Version ────────────────────────────────────────────────────────────────
+# ÉPINGLÉE VOLONTAIREMENT. Le rôle faisait auparavant `cargo install brk_cli`
+# sans contrainte : rejouer le rôle installait donc silencieusement la dernière
+# version publiée sur crates.io, et rien dans le dépôt ne disait quelle version
+# tournait en production. C'est loin d'être théorique — l'amont est passé de
+# 0.3.6 (27/06/2026) à 0.11.0 le 05/08, puis 0.11.1 et 0.11.2 les deux jours
+# suivants. Un simple `--tags` de maintenance aurait embarqué un saut de majeure.
+#
+# Une montée de version doit donc être un commit, pas un effet de bord. Elle
+# implique de vérifier au préalable que l'API REST consommée par PapangMetrics
+# (/api/server/sync, /api/series/<nom>/<index>?start=) reste compatible.
+brk_version: "0.11.2"
+
+# Node datadir written by rpcbtc-install (~/bitcoin/data) and BRK working dir.
+brk_bitcoindir: "/home/{{ remote_username }}/bitcoin/data"
+brk_dir: "/home/{{ remote_username }}/.brk"
+
+# BRK serves its HTTP API on localhost only (consumed by the co-located ETL).
+brk_port: 3110
+
+# Node RPC connection (node uses a custom rpcport + rpcauth — see rpcsbtc.yml).
+brk_rpcconnect: "127.0.0.1"
+brk_rpcport: "{{ proxy_port_rpc_btc | default(8332) }}"
+
+# Native CPU optimizations for the ~4-7h initial sync + continuous compute.
+brk_rustflags: "-C target-cpu=native"
+
+# Garde-fou anti-boucle de crash. La fenêtre DOIT rester nettement supérieure à
+# RestartSec × burst (30 s × 5 = 150 s), sinon la limite ne se déclenche jamais.
+# À 5 échecs en 30 min, l'unité passe en `failed` et devient donc détectable
+# (alerte SystemdUnitFailed côté Prometheus).
+brk_start_limit_interval: 1800
+brk_start_limit_burst: 5
+
+# ── Journalisation ─────────────────────────────────────────────────────────
+# BRK tient ses propres fichiers dans {{ brk_dir }}/logs/. Envoyer en plus sa
+# sortie au journal systemd la recopie dans /var/log/syslog : 24 Go accumulés en
+# quatre jours pendant la phase de calcul du 06/08/2026, pour zéro information
+# supplémentaire.
+#
+# `null` coupe la duplication. Repasser à `journal` le temps d'un diagnostic où
+# l'on veut corréler BRK avec d'autres unités dans journalctl.
+brk_journal_output: "null"
+# La sortie d'erreur reste au journal : peu volumineuse en fonctionnement
+# normal, et c'est elle qui alimente `systemctl status` quand l'unité échoue.
+brk_journal_error: "journal"
+
+# ── Rotation des journaux de BRK ───────────────────────────────────────────
+# Sans rotation, les fichiers de {{ brk_dir }}/logs/ grossissent indéfiniment :
+# le 06/08/2026 le seul fichier d'erreurs du jour atteignait 492 Mo (3,4 M de
+# fois la même panique vecdb) et le répertoire 4,3 Go.
+#
+# `maxsize` et non `size` : la rotation se déclenche sur le passage quotidien
+# SI le fichier dépasse le seuil, ce qui borne aussi bien un jour d'incident
+# qu'une croissance lente. BRK nomme déjà ses fichiers par date et rouvre chaque
+# jour — `copytruncate` évite donc de lui retirer le descripteur en cours.
+brk_logrotate: true
+brk_logrotate_rotate: 7
+brk_logrotate_maxsize: "200M"

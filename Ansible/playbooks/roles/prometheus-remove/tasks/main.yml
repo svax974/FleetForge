@@ -1,0 +1,27 @@
+---
+# Arrête et supprime le conteneur Prometheus.
+# Conserve les données (TSDB), la configuration et les règles d'alerte —
+# la suppression de celles-ci relève de `prometheus-purge`.
+
+- name: Stop and remove Prometheus container
+  community.docker.docker_container:
+    name: prometheus
+    state: absent
+  become: true
+  ignore_errors: true
+
+- name: Remove Prometheus firewall rules
+  community.general.ufw:
+    rule: "{{ item }}"
+    proto: tcp
+    port: "{{ prometheus_port }}"
+    delete: true
+  loop: [allow, deny]
+  become: true
+  ignore_errors: true
+
+- name: Report preserved data
+  ansible.builtin.debug:
+    msg: >-
+      Conteneur supprimé. Données et configuration conservées dans
+      {{ prometheus_home }} — utiliser prometheus-purge pour les supprimer.

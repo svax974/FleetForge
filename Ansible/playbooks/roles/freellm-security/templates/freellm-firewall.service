@@ -1,0 +1,15 @@
+[Unit]
+Description=Restrict the FreeLLMAPI published port to the authorized proxies
+# Docker recrée la chaîne DOCKER-USER vide à chaque démarrage : les règles
+# doivent être reposées APRÈS lui, sans quoi le service est exposé à Internet
+# entre le démarrage de Docker et l'intervention manuelle.
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/freellm-firewall.sh
+
+[Install]
+WantedBy=multi-user.target

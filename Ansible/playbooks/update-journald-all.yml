@@ -1,0 +1,25 @@
+---
+# Applique le plafond du journal systemd sur tout l'inventaire.
+#
+#   ./play.sh papanglabs update-journald-all.yml
+#   ./play.sh web3c update-journald-all.yml --limit small1
+#   ./play.sh web3c update-journald-all.yml --check --diff     # simulation
+#
+# `setup-server.yml` pose déjà le plafond sur une machine neuve : ce playbook
+# sert au rattrapage du parc existant, et au rejeu après un changement de
+# `journald_system_max_use` (group_vars ou host_vars).
+#
+# Plusieurs entrées d'inventaire partagent souvent une machine : le rôle est
+# idempotent, les rejouer ne coûte qu'un aller-retour SSH. Inutile de cibler
+# les machines physiques comme pour `deploy-exporter-sys.yml`, aucune cible
+# Prometheus n'est déposée ici.
+#
+# Les hôtes Windows du parc (mtbridge) échouent sur `become: sudo` : les
+# exclure au besoin avec `--limit '!mtbridge'`.
+
+- name: Cap the systemd journal everywhere
+  hosts: all
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - journald-setup

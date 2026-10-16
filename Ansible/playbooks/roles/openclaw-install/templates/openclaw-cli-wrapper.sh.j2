@@ -1,0 +1,9 @@
+#!/bin/bash
+# Wrapper openclaw — généré par Ansible (openclaw-install), ne pas éditer à la
+# main.
+#
+# Le CLI est installé nativement sous le préfixe de {{ openclaw_user }}
+# ({{ openclaw_prefix }}), pas dans le PATH système : ce wrapper évite de
+# retaper `sudo -u {{ openclaw_user }}` à chaque commande d'administration
+# (devices, dashboard, doctor...).
+exec sudo -u {{ openclaw_user }} -H env HOME={{ openclaw_home }} {{ openclaw_binary }} "$@"

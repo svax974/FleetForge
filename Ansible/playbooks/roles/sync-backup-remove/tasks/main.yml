@@ -1,0 +1,36 @@
+---
+# Désinstalle le dispositif de sauvegarde de l'instance sur la SOURCE (cron,
+# script, journal, métrique). Les archives déjà présentes sur la destination
+# sont CONSERVÉES — elles contiennent les données jusqu'à leur rotation ; pour
+# les supprimer aussi : sync-backup-purge.
+
+- name: Remove the backup cron job
+  ansible.builtin.cron:
+    name: "{{ sync_instance }} sqlite backup"
+    user: root
+    state: absent
+  become: true
+
+- name: Remove the backup script and its logrotate configuration
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ sync_backup_script }}"
+    - "/etc/logrotate.d/sync-backup-{{ sync_instance }}"
+  become: true
+
+# Retirée : laisser la métrique en place ferait sonner BackupStale sur une
+# sauvegarde volontairement arrêtée.
+- name: Remove the Prometheus textfile metric
+  ansible.builtin.file:
+    path: "{{ node_exporter_textfile_dir }}/backup_{{ sync_backup_name }}.prom"
+    state: absent
+  become: true
+
+- name: Notice — destination archives are kept
+  ansible.builtin.debug:
+    msg: >-
+      Sauvegarde de {{ sync_instance }} arrêtée. Les archives de la destination
+      sont conservées (rotation : arrêtée aussi — elles ne sont plus purgées).
+      sync-backup-purge les supprime.

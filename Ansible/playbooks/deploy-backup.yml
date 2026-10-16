@@ -1,0 +1,103 @@
+---
+# Sauvegardes off-host des deux parcs (famille `backup`). Fusion, le 11/10/2026,
+# de `deploy-backups.yml` (papanglabs) et `deploy-backups-web3c.yml` : chaque
+# play vise ses entrées en dur, un nom absent de l'inventaire courant y est
+# simplement ignoré (CLAUDE.md : jamais de variable dans `hosts:`).
+#
+#   papanglabs : magasin BRK (brk1) → `backup-brk`,
+#                base d'indicateurs (timescale) → `backup-timescale`
+#   web3c      : PostgreSQL de tradekong et ctdapi → `backup-tradekong` /
+#                `backup-ctdapi` ; SQLite des serveurs de synchro → `backup-sync`
+#
+# Les destinations sont des ENTRÉES D'INVENTAIRE (groupe `backups`), pas des IP
+# en dur. Changer de serveur = changer `ansible_host` puis jouer
+# `retarget-backups.yml` (papanglabs) / `retarget-backups-web3c.yml` (web3c).
+#
+#   ./play.sh papanglabs deploy-backup.yml
+#   ./play.sh web3c deploy-backup.yml
+#   ./play.sh papanglabs deploy-backup.yml --limit brk1        # une source seule
+#   ./play.sh web3c deploy-backup.yml --tags retarget     # repointage seul
+#
+# ATTENTION à la première exécution de la sauvegarde BRK : elle transfère
+# ~343 Go (seed en flux parallèles) et arrête BRK le temps de sa seconde passe.
+# Le cron la déclenche le dimanche à 2 h ; pour la lancer à un moment choisi,
+# exécuter directement `~/brk-backup.sh` sur brk1 dans un `tmux`.
+#
+# web3c remplace `pg_backup.sh`, un cron hors Ansible sur tradekong : dump local
+# + rotation qui ne s'exécutait qu'après un succès, disque plein après deux
+# échecs consécutifs (incident du 29/08/2026). Ici le dump est streamé vers une
+# autre machine et ne touche jamais le disque de la source.
+
+# ── Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ───────────────────────
+- name: Contrôle préalable (sources natives)
+  hosts: brk1:timescale
+  remote_user: "{{ remote_username }}"
+  roles:
+    - role: host-preflight
+      preflight_require_docker: false
+
+- name: Contrôle préalable (sources Docker)
+  hosts: tradekong:ctdapi:sync_servers
+  remote_user: "{{ remote_username }}"
+  roles:
+    - role: host-preflight
+      preflight_require_docker: true
+
+# ── papanglabs ─────────────────────────────────────────────────────────────
+- name: Sauvegarde du magasin BRK
+  hosts: brk1
+  remote_user: "{{ remote_username }}"
+  roles:
+    - brk-backup-install
+
+- name: Sauvegarde de la base d'indicateurs
+  hosts: timescale
+  remote_user: "{{ remote_username }}"
+  roles:
+    - timescaledb-backup-install
+
+# ── web3c ──────────────────────────────────────────────────────────────────
+- name: Sauvegarde PostgreSQL — tradekong et ctdapi
+  hosts: tradekong:ctdapi
+  remote_user: "{{ remote_username }}"
+  roles:
+    - postgres-backup-install
+
+# Instantané SQLite cohérent (VACUUM INTO) + blobs, poussé en SSH vers
+# `backup-sync`. Cron quotidien 04:xx, rétention 14 générations, métrique
+# backup_last_success_timestamp_seconds{backup="sync-<instance>"} — seuils
+# BackupStale par instance dans `prom_alert_backup_max_age_hours`
+# (group_vars/web3c.yml). Pas de limite de débit : bases de quelques Mio.
+- name: Sauvegarde SQLite — serveurs de synchronisation
+  hosts: sync_servers
+  remote_user: "{{ remote_username }}"
+  roles:
+    - sync-backup-install
+
+# ── Communs ────────────────────────────────────────────────────────────────
+# Reposé explicitement après coup : les rôles d'installation ouvrent le SSH
+# pour LA source qu'ils traitent, ce play couvre toutes les sources déclarées
+# dans l'inventaire (`backup_sources`). Les deux doivent coïncider — s'ils
+# divergent, c'est que l'inventaire est en retard sur la réalité.
+- name: Pare-feu des destinations de sauvegarde
+  hosts: backups
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - backup-security
+
+# Sans les métriques, on ne saurait pas qu'une sauvegarde a cessé de partir.
+# node_exporter n'active le collecteur `textfile` que depuis cette mise à jour :
+# le rôle est rejoué ici pour que les hôtes concernés le portent réellement.
+- name: Collecteur textfile de node_exporter (métriques de sauvegarde)
+  hosts: brk1:timescale
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - exporter-sys-install
+
+- name: Règles d'alerte (groupe `backups`)
+  hosts: prometheus1:monitor
+  remote_user: "{{ remote_username }}"
+  roles:
+    - prometheus-alerts-update

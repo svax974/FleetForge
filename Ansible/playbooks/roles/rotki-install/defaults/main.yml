@@ -1,0 +1,72 @@
+---
+# Rotki (https://rotki.com) — instance auto-hébergée servant de sidecar de
+# valorisation de portefeuille à TradeKong (module `ibkr-integration`/
+# `rotki-integration`, nestcommon/rotki-remote). Déployé en conteneur
+# autonome (`community.docker.docker_container`, pas de Compose) sur une
+# machine SÉPARÉE et DÉDIÉE — l'entrée d'inventaire `rotki`, machine
+# partagée avec `ctdapi`/`dev`/`docker-repo`/`xbot`, PAS avec TradeKong
+# (`tradekong`) lui-même — cf. WalletOptimizer, `docs/rotki-isolated-
+# service.md`, dont ce rôle reprend l'image épinglée et les volumes nommés,
+# mais PAS le mécanisme d'overlay Docker Compose (la stack TradeKong reste
+# déployée hors Ansible par son propre pipeline) ni la co-localisation
+# (décision opérateur, 2026-09-22 : préférence pour une infra externe gérée
+# séparément — cf. mémoire "external infra preference" — et une machine à
+# part limite le rayon d'impact si Rotki (portefeuille, secrets exchange/
+# broker) était compromis, sans le mélanger à l'hôte applicatif TradeKong).
+#
+# Un déploiement du même jour a d'abord atterri PAR ERREUR sur `tradekong`
+# (playbook avec `hosts: tradekong` codé en dur sur 3 des 4 plays) — nettoyé
+# le jour même. Voir `inventories/web3c_inventory.yml`, entrée `ctdapi`, pour
+# le récit complet.
+#
+# Conséquence sur l'exposition réseau : `back`/`back-worker` de TradeKong
+# atteignent Rotki à travers une VRAIE frontière réseau (deux machines
+# distinctes), jamais via 127.0.0.1 ni le bridge Docker local. Le port est
+# donc TOUJOURS publié sur 0.0.0.0, filtré dans DOCKER-USER via
+# `docker_ports_rules` (host_vars/ctdapi.yml — `ctdapi`, pas `rotki`, est
+# l'hôte CANONIQUE de cette machine partagée) avec `allow_internal: false`
+# explicite (rien à autoriser en interne — contrairement au précédent
+# backindicators1/redis, un conteneur voisin sur la MÊME machine) et
+# `sources` limité à TradeKong (appel direct IP:port) plus les deux proxies
+# (relais du vhost public rotki_hostname, ci-dessous).
+
+rotki_container: rotki
+rotki_image: "rotki/rotki:v1.43.2"
+
+# Port interne de l'image — non configurable côté conteneur (imposé par
+# l'entrypoint Rotki, cf. rotki-isolated-service.md de WalletOptimizer).
+rotki_container_port: 80
+
+# Port publié sur l'HÔTE (inventories/web3c_inventory.yml, entrée `rotki`,
+# app_port: 4302). Choisi à l'origine dans la plage réservée à TradeKong
+# (app_port: 4300 / back_port: 4301) avant le passage à une machine séparée
+# — conservé tel quel, vérifié libre sur `ctdapi` (aucune collision
+# avec `ctdapi`/`xbot`/`dev`/`docker-repo`, la même machine).
+rotki_port: 4302
+
+# Toujours 0.0.0.0 — voir la note ci-dessus, pas de cas "boucle locale" ici.
+rotki_bind_address: "0.0.0.0"
+
+# Volumes NOMMÉS (pas de bind-mount hôte) : mêmes noms que l'overlay
+# WalletOptimizer, gérés directement par Docker.
+rotki_data_volume: rotki_data
+rotki_logs_volume: rotki_logs
+
+# CNAME Cloudflare (rotki_hostname → proxy.<domaine>, déclaré via
+# `proxy_hostname` sur l'entrée d'inventaire `rotki`, publié par
+# cloudflare-dns-update) : le nom canonique du front des proxies, en
+# round-robin entre les hôtes du groupe `proxies`. Le nom public ne pointe
+# JAMAIS directement sur l'IP de cet hôte (même raisonnement que freellm) :
+# le trafic passe toujours par un proxy, et un CNAME vers le nom canonique
+# reste correct même si Rotki change un jour de machine. Le vhost lui-même
+# (API token-gated + UI restreinte VPN) vit dans proxy-update-web3c,
+# sites-enabled/rotki.conf — déployé seulement sur les proxies listés dans
+# `rotki_allowed_proxies` (group_vars/web3c.yml).
+rotki_hostname: "rotki.{{ domain_name }}"
+
+# L'image tourne en root (cf. rotki-isolated-service.md : "afin que l'image
+# puisse initialiser et gérer ses volumes conformément à sa documentation").
+# Reproduit tel quel — ce n'est pas une dérogation à "srvc doit pouvoir
+# piloter les services qu'il déploie" (CLAUDE.md § 2) : cette règle vaut pour
+# un service NATIF hors conteneur, pas pour le compte à l'intérieur d'une
+# image tierce.

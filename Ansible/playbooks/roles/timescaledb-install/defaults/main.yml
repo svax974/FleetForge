@@ -1,0 +1,61 @@
+---
+# TimescaleDB (self-hosted, Docker) for PapangMetrics indicators.
+# Alpine-based image -> postgres runs as uid 70 (same convention as db-install-master).
+tsdb_image: "timescale/timescaledb:latest-pg17"
+
+tsdb_dir: "{{ ansible_env.HOME }}/papangmetrics-db"
+tsdb_db: "{{ papangmetrics_db | default('papangmetrics') }}"
+tsdb_user: "{{ papangmetrics_user | default('papangmetrics') }}"
+tsdb_pass: "{{ papangmetrics_pass }}"
+tsdb_port: "{{ papangmetrics_db_port | default(5432) }}"
+
+# Bind to localhost only: ETL + API are co-located on the same host.
+tsdb_bind: "127.0.0.1"
+
+# Tuning — co-tenant with Bitcoin Core + BRK (which needs 12+ GB). Conservative
+# slice of the 50 GB box.
+tsdb_shared_buffers: "4GB"
+tsdb_effective_cache_size: "12GB"
+tsdb_work_mem: "64MB"
+tsdb_maintenance_work_mem: "1GB"
+tsdb_max_connections: 100
+
+# Une transaction pose un verrou PAR CHUNK touché. Les chunks font 7 jours, or
+# une série w1 a un point par semaine depuis 2009 : un seul INSERT de backfill
+# touche donc ~919 chunks, un par point. Avec 10 workers concurrents cela demande
+# ~9 200 créneaux, quand le défaut n'en offre que
+# max_locks_per_transaction × max_connections = 128 × 50 = 6 400.
+# D'où l'échec `out of shared memory` du backfill w1 le 07/08/2026 — m1 passait,
+# avec seulement 212 points donc 212 chunks.
+# 512 × 50 = 25 600 créneaux, pour un coût mémoire négligeable (~170 octets par
+# créneau, soit ~4 Mo).
+tsdb_max_locks_per_transaction: 512
+
+# TimescaleDB defaults to 10 autovacuum workers — too many for this box under
+# sustained backfill write load (was observed running all 10 at once, competing
+# with the 6 backfill insert workers for CPU). Halved as a stopgap.
+tsdb_autovacuum_max_workers: 5
+
+# Default 1GB was far too small under backfill's write volume — checkpoints
+# were firing every ~13s instead of the 5min checkpoint_timeout, hurting write
+# throughput. Bumped now that disk headroom (~1TB) comfortably allows it.
+tsdb_max_wal_size: "16GB"
+
+# Indicators are rebuildable from BRK (see README), so losing the last few
+# uncommitted transactions on a hard crash is a non-issue — trade that durability
+# for write throughput by skipping the WAL fsync wait on every commit.
+tsdb_synchronous_commit: "off"
+
+# Compression policy — compress chunks older than this interval.
+# 92% compression ratio observed on metric_point (46 GB → 3.3 GB).
+tsdb_compress_after: "7 days"
+
+# La sauvegarde logique appartient désormais au rôle
+# `timescaledb-backup-install` : sa destination est un hôte d'inventaire
+# (`backup-timescale`) et non plus un chemin en dur. Les variables
+# `tsdb_backup_remote_*` qui vivaient ici pointaient sur proxy1, qui n'a que
+# ~22 Go libres pour un dump de 22 Go — une destination inutilisable, restée
+# inaperçue parce que le script correspondant n'était jamais planifié.
+
+# Disk watchdog: compress chunks when free disk on this host drops below this.
+tsdb_watchdog_threshold_gb: 15

@@ -1,0 +1,17 @@
+---
+# Retire ce qu'Ansible a déposé sur ctdapi (la sonde svcprobe). Ne touche PAS
+# à la stack docker-compose, déployée hors Ansible.
+
+- name: Remove the svcprobe check file
+  ansible.builtin.file:
+    path: "{{ svcprobe_checks_dir }}/ctdapi.json"
+    state: absent
+  become: true
+
+- name: Notice — the application stack is untouched
+  ansible.builtin.debug:
+    msg: >-
+      Sonde svcprobe retirée. La stack docker-compose de ctdapi (postgres,
+      redis, back, front, répartiteur) n'est pas gérée par Ansible et n'est
+      pas affectée. Utilise ctdapi-purge pour aussi supprimer la sauvegarde
+      PostgreSQL.

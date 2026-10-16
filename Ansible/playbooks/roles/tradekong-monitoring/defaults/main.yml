@@ -1,0 +1,13 @@
+---
+# Sonde principale sur l'endpoint de santé applicatif (confirmé 200 le
+# 2026-08-29 : GET /api/v1/health derrière le répartiteur) plutôt que sur le
+# conteneur du répartiteur lui-même — un répartiteur `running` dont le back
+# est en boucle de crash est exactement la panne que la sonde doit voir.
+tkm_health_url: "http://127.0.0.1:{{ back_port }}/api/v1/health"
+
+# Nom donné par docker compose au projet de déploiement, qui embarque l'adresse
+# de la machine, points remplacés par des tirets : dérivé, jamais recopié.
+tkm_back2_container: "tradekong-back-{{ ansible_host | replace('.', '-') }}-back-2"
+tkm_back_worker_container: "tradekong-back-{{ ansible_host | replace('.', '-') }}-back-worker-1"
+tkm_redis_container: tradekong_redis
+tkm_redis_port: 6379

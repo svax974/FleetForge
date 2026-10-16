@@ -1,0 +1,46 @@
+---
+# Esplora — indexeur Bitcoin compatible avec l'API REST Blockstream Esplora
+# (mempool/electrs), co-localisé sur le nœud Bitcoin déjà déployé par
+# deploy-rpcbtc.yml (entrée d'inventaire dédiée `esplora1`, même machine que
+# `rpcbtc1`/`brk1`). Lit directement les fichiers blk*.dat du
+# nœud, comme BRK — exige donc un nœud FULLY SYNCED (voir esplora-install).
+#
+#   ./play.sh papanglabs deploy-esplora.yml
+#   ./play.sh papanglabs deploy-esplora.yml --tags monitoring   # réarmer la supervision
+#
+# Après le premier déploiement, jouer la mise à jour des proxies pour publier
+# le vhost (CLAUDE.md § « Obligation DNS + vhost » — ce playbook publie le
+# CNAME DNS, pas le vhost lui-même, qui appartient au proxy comme pour
+# rotki/searxng/freellm) :
+#   ./play.sh papanglabs update-proxy-papang.yml
+
+# ── Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ───────────────────────
+- name: Contrôle préalable
+  hosts: esplora1
+  remote_user: "{{ remote_username }}"
+  roles:
+    - role: host-preflight
+      preflight_require_docker: false
+
+# Prérequis bitcoind (server=1, ZMQ, prune=0) : configuration du NŒUD
+# (bitcoind), donc appliquée à `rpcbtc1`, pas à `esplora1` — même raisonnement
+# que deploy-brk.yml. Idempotent, sans effet si déjà posé par BRK.
+- name: Prépare le nœud Bitcoin pour Esplora
+  hosts: rpcbtc1
+  remote_user: "{{ remote_username }}"
+  roles:
+    - rpcbtc-setup
+
+- name: Deploy Esplora (mempool/electrs)
+  hosts: esplora1
+  remote_user: "{{ remote_username }}"
+  roles:
+    - esplora-install
+    - esplora-security
+
+# ── Supervision (OBLIGATOIRE, voir CLAUDE.md) ──────────────────────────────
+- name: Supervision du service
+  hosts: esplora1
+  remote_user: "{{ remote_username }}"
+  roles:
+    - esplora-monitoring

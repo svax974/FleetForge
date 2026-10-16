@@ -1,0 +1,75 @@
+---
+# Enregistrement de la cible node_exporter auprès de Prometheus, plus les
+# ouvertures ufw qui la rendent réellement scrapable. Les deux vont ensemble :
+# une cible sans ouverture apparaît dans Prometheus et reste `down`, ce qui
+# ressemble à une machine en panne alors que c'est un pare-feu.
+
+- name: Set prometheus home on monitor host
+  ansible.builtin.set_fact:
+    prometheus_home: "/home/{{ remote_username }}/prometheus"
+
+- name: Create exporter prometheus-configs directory on monitor host
+  ansible.builtin.file:
+    path: "{{ prometheus_home }}/prometheus-configs/exporter"
+    state: directory
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: "0755"
+  delegate_to: "{{ prometheus_host }}"
+
+# UNE cible par MACHINE, pas par entrée d'inventaire : plusieurs entrées
+# partagent la même adresse (ctdapi, dev, docker-repo, xbot…).
+# Enregistrer par `inventory_hostname` scrapait le même node_exporter autant
+# de fois, sous autant de labels `instance` — métriques système comptées en
+# double et chaque alerte de ressources en double. Même règle que svcprobe-install
+# et host-preflight. La clé est la CIBLE rendue (172.17.0.1:9100 sur l'hôte de
+# supervision lui-même, qui se scrape par le bridge Docker).
+- name: Compute the scrape target of this machine
+  ansible.builtin.set_fact:
+    exporter_scrape_target: >-
+      {{ ('172.17.0.1:' ~ node_exporter_port)
+         if ansible_host == hostvars[prometheus_host]['ansible_host']
+         else (ansible_host ~ ':' ~ node_exporter_scrape_port) }}
+
+- name: Look for an existing node_exporter target for this MACHINE
+  ansible.builtin.shell: >-
+    grep -l '"{{ exporter_scrape_target }}"'
+    {{ prometheus_home }}/prometheus-configs/exporter/*.json
+    2>/dev/null || true
+  args:
+    executable: /bin/bash
+  delegate_to: "{{ prometheus_host }}"
+  register: exporter_existing_target
+  changed_when: false
+  check_mode: false
+
+# Déposé si aucune cible n'existe pour la machine, ou si c'est la nôtre (un
+# rejeu doit pouvoir la mettre à jour). Sinon une AUTRE entrée d'inventaire la
+# porte déjà : on n'en crée pas de seconde.
+- name: Deploy system exporter Prometheus target file on monitor host
+  ansible.builtin.template:
+    src: node_exporter.json
+    dest: "{{ prometheus_home }}/prometheus-configs/exporter/{{ inventory_hostname }}.json"
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: "0644"
+  delegate_to: "{{ prometheus_host }}"
+  notify: reload prometheus
+  when: >-
+    exporter_existing_target.stdout_lines | length == 0
+    or (inventory_hostname ~ '.json') in (exporter_existing_target.stdout_lines | map('basename') | list)
+
+- name: Note the inventory name carrying the node_exporter scrape
+  ansible.builtin.debug:
+    msg: >-
+      {{ ansible_host }} est déjà scrapé sous
+      « {{ exporter_existing_target.stdout_lines | first | basename | splitext | first }} » :
+      aucune seconde cible n'est créée pour {{ inventory_hostname }}.
+  when:
+    - exporter_existing_target.stdout_lines | length > 0
+    - (inventory_hostname ~ '.json') not in (exporter_existing_target.stdout_lines | map('basename') | list)
+
+# Ouvertures de pare-feu — déportées dans firewall.yml pour être rejouables
+# indépendamment de l'installation (cf. update-ufw-all.yml).
+- name: Apply node_exporter firewall rules
+  ansible.builtin.include_tasks: firewall.yml

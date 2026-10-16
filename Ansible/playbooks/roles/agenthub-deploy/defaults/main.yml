@@ -1,0 +1,99 @@
+---
+# Déploiement de l'app AgentHub (front/back/Postgres, Docker Compose,
+# AppTemplate) sur l'hôte `agenthub` — via les scripts DU DÉPÔT APP
+# (scripts/run.sh, scripts/deploy-full.sh, scripts/clean-remote.sh), PAS par
+# un docker_container/docker_compose Ansible. Même choix que pour
+# ctdapi/tradekong (stack déployée hors Ansible, cf. le commentaire sur le
+# groupe `apps` dans l'inventaire) plutôt que la resynchronisation manuelle de
+# papanglabs-back-install/-setup : cette app a déjà son propre outillage de
+# déploiement distant (contexte Docker via SSH, réécriture des chemins de
+# contexte de build, migrations optionnelles, injection SERVER_IP, etc. —
+# scripts/deploy-full.sh, ~1500 lignes) ; le réimplémenter en Ansible
+# dupliquerait cette logique avec un risque réel de divergence (constaté par
+# ce dépôt lui-même : deploy-full.sh pose SES PROPRES règles ufw sur le port
+# publié, qui sont décoratives pour un port Docker — CLAUDE.md — d'où le rôle
+# `agenthub-security` séparé, seul mécanisme qui filtre réellement ici).
+#
+# Ansible se contente d'ORCHESTRER : vérifier que les fichiers d'environnement
+# de PROD existent sur le poste de contrôle (jamais générés ni vaultés ici,
+# voir ci-dessous), lancer le script de déploiement, attendre que le hub
+# réponde, puis activer le runner déjà installé sur cet hôte (T7.1, voir
+# runner/README.md et tasks/runner.yml).
+
+# Dépôt de travail sur le POSTE DE CONTRÔLE (lu/rsyncé par les scripts
+# eux-mêmes, jamais copié par Ansible) — même mécanisme que `pgb_src`
+# (papanglabs-back-install/defaults) pour la localisation, mais le contenu
+# n'est ici jamais transféré par Ansible : les scripts app gèrent leur propre
+# transfert (contexte Docker SSH).
+agenthub_src: "/Users/steph/Dev/Apps/AgentHub/agent-hub/"
+
+# Fichiers d'environnement de PROD attendus par run.sh/deploy-full.sh
+# (BACK_ENV_FILE/FRONT_ENV_FILE par défaut : back/.env, front/.env — "prod"
+# n'a pas de suffixe, contrairement à .env.preprod/.env.dev). Doivent porter
+# à la fois :
+#   - les secrets applicatifs réels (CRYPT_DB_MASTER_KEY,
+#     CRYPT_SESSION_PRIVATE_KEY, DB_PASSWORD, JWT_SECRET/ADMIN_WALLET/
+#     TECH_TOKEN, VITE_REOWN_PROJECT_ID, ...) ;
+#   - les variables de déploiement distant attendues par deploy-full.sh
+#     (REMOTE_HOST=`ctdapi`, REMOTE_USER=root, REMOTE_SSH_PORT=7776,
+#     SSH_KEY_FILE, REMOTE_CONTEXT_NAME, PROJECT_NAME) ;
+#   - NODE_PORT=4701 / FRONT_PORT=4700 / DB_PORT=4702 (voir inventaire,
+#     `app_port`/`back_port` de l'entrée `agenthub`) ;
+#   - PAS d'`INFRA_BIND` (ou explicitement `127.0.0.1`) : le compose du
+#     template ne publie `db`/`redis` sur l'hôte qu'à cette adresse par
+#     défaut. `INFRA_BIND=0.0.0.0` les ouvre à vpns + Prometheus + whitelist :
+#     host_vars/ctdapi.yml filtre 4702/4703 (profil « non exposé »), mais
+#     agenthub-security ne CONTRÔLE que `app_port`/`back_port`.
+#   - REDIS_PORT=4703 : le compose du template publie Redis sur
+#     ${INFRA_BIND:-127.0.0.1}:${REDIS_PORT:-6379} ; 6379 est déjà pris par
+#     `ctdapi_redis` (0.0.0.0:6379) sur CETTE MÊME machine.
+#   - BACK_REPLICAS=1 : l'état temps réel du hub (sockets runners, RPC,
+#     previews) est en mémoire, un seul réplica back.
+# Ce rôle ne génère ni ne vaulte AUCUN de ces fichiers : ils vivent en clair
+# sur le poste de contrôle, gitignorés côté dépôt app (jamais commités) —
+# exactement comme `pgb_env_file` pour PapangLabs. Aucun secret applicatif
+# n'entre donc dans ce dépôt Ansible.
+agenthub_back_env_file: "back/.env"
+agenthub_front_env_file: "front/.env"
+
+# Lancer les migrations TypeORM en plus du déploiement (--migrate,
+# scripts/run.sh). Laissé à `false` par défaut : au tout premier déploiement
+# la base est vide et DB_SCHEMA_MODE=sync (voir back/.env.example)
+# crée déjà le schéma — lancer des migrations par-dessus une base jamais
+# migrée échouerait. Passer `-e agenthub_migrate=true` une fois
+# DB_SCHEMA_MODE=manual dans le .env de prod et une première migration écrite.
+agenthub_migrate: false
+
+agenthub_health_retries: 24
+agenthub_health_delay: 10
+
+# ── Runner (déjà installé, T7.1 — voir runner/README.md) ───────────────────
+# HUB_URL en boucle locale : le hub tourne sur CETTE MÊME machine, le runner
+# parle directement au serveur HTTP Nest du back (D11, WS brut sous
+# /api/v1/agenthub/ws/runner), jamais via le conteneur front — pas besoin
+# de TLS pour une connexion purement interne à la machine
+# (01-architecture.md §5, exemple `HUB_URL=ws://127.0.0.1:4701/...`).
+agenthub_runner_hub_url: "ws://127.0.0.1:{{ hostvars['agenthub'].back_port }}/api/v1/agenthub/ws/runner"
+agenthub_runner_name: agenthub
+agenthub_runner_roots: "/home/agents/projects"
+# 11-workspace-dev-center.md §2/§2.3 — la racine UNIQUE de l'espace de travail (distincte de
+# `agenthub_runner_roots` ci-dessus, liste historique de racines de découverte multiples) : passée à
+# `deploy-runner.sh --workspace-root` → `WORKSPACE_ROOT` côté runner, créée et donnée à `agents` par
+# `install.sh` si absente. Même valeur par défaut que `agenthub_runner_roots` (déploiement systemd,
+# jamais verrouillée — `WORKSPACE_ROOT_LOCKED` est un mécanisme du mode conteneur uniquement, non
+# utilisé par ce rôle qui déploie en systemd via runner/scripts/deploy-runner.sh).
+agenthub_workspace_root: "/home/agents/projects"
+agenthub_runner_ssh_port: "{{ ssh_custom_port }}"
+
+# Jeton émis par le HUB LUI-MÊME (page « Nouveau runner », affiché une seule
+# fois) — impossible à connaître avant le tout premier déploiement réussi de
+# l'app. Volontairement SANS valeur ici : voir tasks/runner.yml pour l'assert
+# et la procédure d'obtention/vault.
+# agenthub_runner_token: (vaulté dans group_vars/web3c.yml une fois obtenu)
+#
+# Depuis l'auto-provisionnement (deploy-full.sh, hook provision-hub-runner.sh,
+# BOOTSTRAP_API_KEY côté back) : le runner colocqué est apparié pendant le
+# déploiement lui-même, sans jeton manuel. `agenthub_runner_autoprovision: true`
+# (défaut) saute alors l'assert et la tâche ci-dessous ; le chemin manuel
+# (token vaulté + --tags runner) reste disponible avec `false`.
+agenthub_runner_autoprovision: true

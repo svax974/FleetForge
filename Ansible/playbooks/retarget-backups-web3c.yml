@@ -1,0 +1,152 @@
+---
+# Repointe les sauvegardes tradekong/ctdapi sur un nouveau serveur de
+# destination.
+#
+# ── Procédure ──────────────────────────────────────────────────────────────
+#   1. Modifier `ansible_host` de `backup-tradekong` et/ou `backup-ctdapi`
+#      dans inventories/web3c_inventory.yml.
+#   2. Si la nouvelle machine est neuve, la préparer d'abord :
+#        ./play.sh web3c setup-server.yml --limit backup-tradekong
+#   3. ./play.sh web3c retarget-backups-web3c.yml
+#
+# Ce playbook refait TOUT ce qui dépend de l'adresse : clé SSH autorisée sur la
+# nouvelle destination, ouverture du pare-feu, entrée known_hosts, répertoire
+# de destination, et réécriture des scripts de sauvegarde et de restauration.
+# Il vérifie ensuite que la destination répond réellement.
+#
+# ── Les anciennes sauvegardes ne sont PAS recopiées ────────────────────────
+# Volontairement : la prochaine exécution reconstitue la destination depuis la
+# base vivante. L'ANCIEN SERVEUR CONSERVE LES SAUVEGARDES tant qu'on ne le
+# purge pas — un filet pendant la bascule, une fuite de données si on l'oublie.
+#
+# ── Options ────────────────────────────────────────────────────────────────
+#   -e run_now=true          lance immédiatement les sauvegardes en tâche de
+#                            fond au lieu d'attendre le cron
+#   -e purge_old=<adresse>   révoque les clés et supprime {{ backup_root }} sur
+#                            l'ANCIENNE destination, une fois la nouvelle
+#                            vérifiée
+
+- name: Préflight — destinations résolues
+  hosts: localhost
+  gather_facts: false
+  connection: local
+  tasks:
+    - name: Afficher les destinations telles que l'inventaire les définit
+      ansible.builtin.debug:
+        msg:
+          - "backup-tradekong → {{ hostvars['backup-tradekong']['ansible_host'] }}"
+          - "backup-ctdapi    → {{ hostvars['backup-ctdapi']['ansible_host'] }}"
+          - "racine           → {{ hostvars['backup-tradekong']['backup_root'] }}"
+
+    - name: Refuser une destination confondue avec sa propre source
+      ansible.builtin.fail:
+        msg: >-
+          `{{ item.dest }}` pointe sur {{ hostvars[item.dest]['ansible_host'] }},
+          soit la machine qui produit la base. Corrige l'inventaire.
+      loop:
+        - { dest: backup-tradekong, src: tradekong }
+        - { dest: backup-ctdapi, src: ctdapi }
+      when: hostvars[item.dest]['ansible_host'] == hostvars[item.src]['ansible_host']
+
+- name: Repointage de la sauvegarde PostgreSQL — tradekong
+  hosts: tradekong
+  remote_user: "{{ remote_username }}"
+  roles:
+    - postgres-backup-install
+
+- name: Repointage de la sauvegarde PostgreSQL — ctdapi
+  hosts: ctdapi
+  remote_user: "{{ remote_username }}"
+  roles:
+    - postgres-backup-install
+
+- name: Pare-feu des destinations
+  hosts: backups
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - backup-security
+
+# ── Vérification ───────────────────────────────────────────────────────────
+- name: Vérification — la destination tradekong répond
+  hosts: tradekong
+  remote_user: "{{ remote_username }}"
+  tasks:
+    - name: Interroger la destination via postgres-restore.sh --check
+      ansible.builtin.command: "{{ pgbak_dir }}/postgres-restore.sh --check"
+      changed_when: false
+      register: tradekong_check
+
+    - name: Afficher l'état
+      ansible.builtin.debug:
+        var: tradekong_check.stdout_lines
+
+- name: Vérification — la destination ctdapi répond
+  hosts: ctdapi
+  remote_user: "{{ remote_username }}"
+  tasks:
+    - name: Interroger la destination via postgres-restore.sh --check
+      ansible.builtin.command: "{{ pgbak_dir }}/postgres-restore.sh --check"
+      changed_when: false
+      register: ctdapi_check
+
+    - name: Afficher l'état
+      ansible.builtin.debug:
+        var: ctdapi_check.stdout_lines
+
+# ── Première sauvegarde immédiate (optionnelle) ────────────────────────────
+- name: Lancement immédiat des sauvegardes
+  hosts: tradekong:ctdapi
+  remote_user: "{{ remote_username }}"
+  gather_facts: false
+  tasks:
+    - name: Lancer la sauvegarde en tâche de fond
+      ansible.builtin.shell: "{{ pgbak_dir }}/postgres-backup.sh >> {{ pgbak_dir }}/backup.log 2>&1"
+      async: 3600
+      poll: 0
+      changed_when: true
+      when: run_now | default(false) | bool
+
+    - name: Rappel de suivi
+      ansible.builtin.debug:
+        msg: "Sauvegarde lancée en tâche de fond. Suivi : tail -f {{ pgbak_dir }}/backup.log"
+      when: run_now | default(false) | bool
+
+# ── Nettoyage de l'ancienne destination (optionnel) ────────────────────────
+- name: Purge de l'ancienne destination
+  hosts: localhost
+  gather_facts: false
+  connection: local
+  tasks:
+    - name: Déclarer l'ancienne destination comme hôte temporaire
+      ansible.builtin.add_host:
+        name: old-backup-host
+        ansible_host: "{{ purge_old }}"
+        ansible_port: "{{ hostvars['backup-tradekong']['ansible_port'] }}"
+        ansible_user: "{{ hostvars['backup-tradekong']['remote_username'] }}"
+        remote_username: "{{ hostvars['backup-tradekong']['remote_username'] }}"
+        backup_root: "{{ hostvars['backup-tradekong']['backup_root'] }}"
+        groups: [old_backups_web3c]
+      when: purge_old is defined
+      changed_when: false
+
+- name: Révocation et suppression sur l'ancienne destination
+  hosts: old_backups_web3c
+  gather_facts: false
+  remote_user: "{{ remote_username }}"
+  tasks:
+    - name: Révoquer les clés de sauvegarde
+      ansible.builtin.lineinfile:
+        path: "/home/{{ remote_username }}/.ssh/authorized_keys"
+        regexp: "{{ item }}"
+        state: absent
+      loop:
+        - '.*-tradekong-backup$'
+        - '.*-ctdapi-backup$'
+      become: true
+
+    - name: Supprimer les sauvegardes
+      ansible.builtin.file:
+        path: "{{ backup_root }}"
+        state: absent
+      become: true

@@ -1,0 +1,23 @@
+---
+# Le sidecar ne relit son environnement et son code qu'au démarrage : sans ce
+# redémarrage, une nouvelle version ou une clé modifiée serait déployée sans
+# jamais prendre effet.
+- name: restart starnet
+  ansible.builtin.systemd:
+    scope: user
+    name: starnet
+    state: restarted
+    daemon_reload: true
+  become: true
+  become_user: "{{ starnet_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "{{ starnet_xdg_runtime_dir }}"
+
+# Redémarrer la SOCKET (pas seulement le service) : c'est elle qui porte le
+# port d'écoute, un changement de `starnet_port` n'est pris qu'ainsi.
+- name: restart starnet relay
+  ansible.builtin.systemd:
+    name: starnet-relay.socket
+    state: restarted
+    daemon_reload: true
+  become: true

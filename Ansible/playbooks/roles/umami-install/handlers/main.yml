@@ -1,0 +1,7 @@
+---
+- name: restart umami
+  community.docker.docker_compose_v2:
+    project_name: umami
+    project_src: "{{ umami_data_dir }}"
+    state: present
+    recreate: always

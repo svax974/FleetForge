@@ -1,0 +1,18 @@
+# Généré par Ansible (starnet-install) — NE PAS ÉDITER SUR L'HÔTE.
+#
+# Relai TCP transparent : il ne réécrit AUCUN en-tête. Le sidecar refuse tout
+# `Host` qui n'est pas la boucle locale — c'est le vhost des proxies
+# (starnet.conf) qui le réécrit. Un accès direct de dépannage doit donc le
+# poser lui-même : curl -H 'Host: 127.0.0.1' http://<hôte>:{{ starnet_port }}/api/health
+[Unit]
+Description=StarNet relay ({{ starnet_port }} -> 127.0.0.1:{{ starnet_sidecar_port }})
+Requires=starnet-relay.socket
+After=starnet-relay.socket
+
+[Service]
+ExecStart={{ starnet_socket_proxyd }} 127.0.0.1:{{ starnet_sidecar_port }}
+DynamicUser=yes
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes

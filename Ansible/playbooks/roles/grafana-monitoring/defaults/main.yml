@@ -1,0 +1,8 @@
+---
+# Grafana expose NATIVEMENT /metrics : cible directe, pas de sonde svcprobe.
+# La sonde /api/health est conservée en secondaire — elle distingue « Grafana
+# répond » de « Grafana répond ET sa base interne est joignable », panne qui
+# laisse l'interface s'afficher et tous les tableaux de bord vides.
+grafmon_port: 3000
+grafmon_job: grafana
+grafmon_health_url: "http://127.0.0.1:3000/api/health"

@@ -1,0 +1,19 @@
+[
+    {
+        "targets": [ "{{ ansible_host }}:{{ astarmon_port_parachain }}" ],
+        "labels": {
+            "job": "{{ astarmon_job }}",
+            "instance": "{{ inventory_hostname }}",
+            "layer": "parachain"
+        }
+    }{% if astarmon_relay_target %},
+    {
+        "targets": [ "{{ ansible_host }}:{{ astarmon_port_relaychain }}" ],
+        "labels": {
+            "job": "{{ astarmon_job }}",
+            "instance": "{{ inventory_hostname }}-{{ astarmon_relay_name | trim }}",
+            "layer": "relaychain"
+        }
+    }
+{% endif %}
+]

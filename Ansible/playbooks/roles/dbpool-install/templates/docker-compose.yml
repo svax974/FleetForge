@@ -1,0 +1,16 @@
+services:
+  dbpool:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    restart: always
+    container_name: pgpool
+    volumes:
+      - ./pgpool.conf:/etc/pgpool/pgpool.conf
+      - ./pcp.conf:/etc/pgpool/pcp.conf
+      - ./pool_passwd:/etc/pgpool/pool_passwd
+      - ./pool_hba.conf:/etc/pgpool/pool_hba.conf
+      - ./follow_master.sh:/etc/pgpool/follow_master.sh
+      - ./failover.sh:/etc/pgpool/failover.sh
+    ports:
+      - '0.0.0.0:{{ postgres_port }}:{{ postgres_port }}'

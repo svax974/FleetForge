@@ -1,0 +1,8 @@
+{
+  "service": "sync-{{ sync_instance }}",
+  "up": {"kind": "http", "url": "{{ sync_mon_health_url }}", "status": [200], "timeout": 10},
+  "extra_checks": [
+    {"name": "container", "kind": "docker", "container": "{{ sync_mon_container }}"},
+    {"name": "metrics", "kind": "http", "url": "{{ sync_mon_url }}/metrics", "status": [200], "timeout": 10}
+  ]
+}

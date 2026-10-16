@@ -1,0 +1,159 @@
+---
+# OpenClaw (https://openclaw.ai) — assistant IA auto-hébergé, installé
+# NATIVEMENT via le script officiel `install-cli.sh` (auto-suffisant : Node
+# embarqué sous le préfixe, aucune dépendance système). Tourne sous
+# `remote_username` (srvc), PAS sous un compte système dédié : srvc doit
+# pouvoir piloter le service directement (CLAUDE.md § 2, « srvc doit pouvoir
+# piloter les services qu'il déploie »). Démon géré par une unité systemd
+# --user (`openclaw gateway install`), pas une unité système — c'est le mode
+# officiellement documenté pour un compte non-root sans accès root permanent.
+
+openclaw_user: "{{ remote_username }}"
+openclaw_home: "/home/{{ openclaw_user }}"
+# Préfixe par défaut d'install-cli.sh : binaire sous <prefix>/bin/openclaw,
+# Node embarqué sous <prefix>/tools/. On garde le défaut plutôt que de forcer
+# --prefix : c'est aussi ce que `openclaw onboard`/`gateway install` attendent
+# comme OPENCLAW_HOME quand rien ne l'override.
+openclaw_prefix: "{{ openclaw_home }}/.openclaw"
+openclaw_binary: "{{ openclaw_prefix }}/bin/openclaw"
+
+# Port sur lequel la gateway écoute DIRECTEMENT sur l'hôte (pas de publication
+# Docker ici) : ufw filtre donc réellement ce port (openclaw-security),
+# contrairement à l'ancienne installation en conteneur (CLAUDE.md — un port
+# publié par Docker contourne ufw, un binaire natif sous systemd non).
+openclaw_port: "{{ app_port | default(18789) }}"
+
+# `lan` fait écouter la gateway sur toutes les interfaces de l'hôte : c'est ce
+# qui la rend joignable depuis les proxies. `loopback` la confinerait à
+# 127.0.0.1, injoignable même en local sur le port ouvert par ufw.
+openclaw_gateway_bind: lan
+
+openclaw_tz: UTC
+
+# IP LAN du réseau domestique partagé par hub/nuc/station/proxy2/vpn1 — sert
+# de garde-fou dans openclaw-security et de repli dans trustedProxies. Aucune
+# tentative de résoudre le cas hairpin NAT de proxy2 ici : proxy1 (IP publique
+# réelle, cf. `openclaw_trusted_proxies`) est le chemin réellement servi pour
+# ce vhost (voir le commentaire dans openclaw.conf, proxy-update-web3c).
+openclaw_lan_cidr: "192.168.1.0/24"
+
+# Proxies de confiance pour `gateway.trustedProxies` : sans conteneur, plus de
+# passerelle de bridge Docker à déclarer — le process voit directement l'IP
+# source réelle de la connexion entrante.
+#
+# UNIQUEMENT proxy1, PAS `groups['proxies']` en entier : DNS ne pointe que sur
+# lui (openclaw.web3c.cc → proxy.web3c.cc → IP de proxy1), proxy2 ne sert
+# jamais ce vhost (cf. openclaw.conf, proxy-update-web3c). Le déclarer quand
+# même serait activement DANGEREUX ici, pas juste inutile : `ansible_host` de
+# proxy2 est derrière LE MÊME NAT domestique que hub/nuc/vpn1. Un
+# visiteur qui teste depuis ce réseau a donc cette adresse comme IP réelle —
+# si elle figure dans trustedProxies, la gateway la voit comme un SAUT DE
+# PROXY supplémentaire plutôt que comme le client final et rejette la requête
+# (« observed unattributable proxy-shaped traffic », proxy_attribution_required),
+# même une fois X-Forwarded-For correctement écrasé côté nginx. Constaté le
+# 10/09/2026.
+openclaw_trusted_proxies: >-
+  {{ [hostvars['proxy1'].ansible_host, openclaw_lan_cidr] }}
+
+# Origines EXACTES (schéma+hôte, PAS de motif générique — imposé par la
+# gateway elle-même) autorisées à charger la Control UI. Le vhost public
+# (openclaw.conf) sert le service sous ce nom : sans cette entrée la Control
+# UI répond « Origine du navigateur non autorisée » même une fois
+# trustedProxies/XFF corrects.
+openclaw_control_ui_allowed_origins:
+  - "https://openclaw.{{ domain_name }}"
+
+# ── Authentification du fournisseur d'inférence ────────────────────────────
+# Valeurs possibles : voir `openclaw onboard --help` (openai-api-key,
+# custom-api-key, ollama, zai-api-key, ...). La clé elle-même
+# (openclaw_openai_api_key) N'A PAS de valeur par défaut : elle est vérifiée
+# par un `assert` en tâche, avec le message expliquant comment la chiffrer.
+openclaw_auth_choice: openai-api-key
+
+# ── Fournisseur de modèles personnalisé (optionnel) ────────────────────────
+# Ajouté via `config set --batch-file` (jamais `--batch-json`/argv pour
+# celui-ci : la clé API y serait lisible par tout compte via `ps`, comme le
+# rappelle déjà CLAUDE.md pour ansible-vault --stdin-name). `config set` ne
+# teste JAMAIS la connectivité au provider au moment de l'écriture (vérifié le
+# 10/09/2026 : `--dry-run` sur une URL bidon passe sans erreur) — des valeurs
+# provisoires ici sont donc sans risque, à corriger ensuite dans l'UI.
+# Fonctionnalité désactivée par défaut : `openclaw_custom_provider_name` vide
+# saute la tâche entièrement.
+openclaw_custom_provider_name: ""
+openclaw_custom_provider_base_url: ""
+openclaw_custom_provider_api: "openai-completions"
+openclaw_custom_provider_models: []
+# Défaut vide (pas absent) : `content:` du fichier de batch est TEMPLATÉ même
+# quand `when:` saute la tâche (Ansible évalue les paramètres avant `when`) —
+# une variable non définie y ferait échouer le rôle même provider désactivé.
+# À surcharger via ansible-vault dans group_vars/web3c.yml pour l'activer,
+# comme openclaw_openai_api_key.
+openclaw_custom_provider_api_key: ""
+
+# ── Onboarding non interactif ───────────────────────────────────────────────
+# Mode « headless » documenté par le projet : jeton de gateway généré une fois
+# sur l'hôte (jamais régénéré, voir tasks/main.yml — un jeton qui change à
+# chaque rejeu invaliderait un accès Control UI sans que rien ne l'explique),
+# clé fournisseur et jeton lus depuis l'ENVIRONNEMENT du process Ansible
+# (--secret-input-mode env), jamais sur la ligne de commande — un secret en
+# argv est lisible par tout compte via `ps`, ce que CLAUDE.md documente déjà
+# pour ansible-vault --stdin-name. Pas de canal de discussion connecté
+# (--skip-channels — aucun n'a été demandé).
+
+# ── Heartbeat : surveillance du parc ────────────────────────────────────────
+# Le heartbeat interroge Alertmanager et Prometheus et signale sur Telegram.
+# Tout ce qui décrit le parc (adresse d'Alertmanager, hôtes et services
+# surveillés) est LU DANS L'INVENTAIRE au rendu du prompt
+# (templates/heartbeat-prompt.j2) : rien n'est écrit en dur, un hôte ou un
+# service ajouté/retiré de l'inventaire change la consigne au déploiement
+# suivant. Aucune exclusion : tout ce qui est ouvert est rapporté.
+#
+# Désactivé tant que `openclaw_heartbeat_to` est vide (sauté entièrement).
+# Ici on ne règle que la ROUTE du heartbeat ; le canal Telegram lui-même
+# (jeton du bot) se pose plus bas (`openclaw_telegram_bot_token`). Sans `accountId`, OpenClaw résout le compte
+# `default` — non configuré — et le heartbeat reste `skipped: no-route`
+# (constaté le 05/10/2026).
+openclaw_heartbeat_to: ""
+openclaw_heartbeat_target: telegram
+# Compte du canal qui porte le bot (multi-comptes Telegram).
+openclaw_heartbeat_account_id: ""
+# Modèle FIXE du heartbeat (`provider/model`, cf. `openclaw models list`).
+# Vide = modèle par défaut de l'agent. À ne JAMAIS laisser sur un routeur
+# `llm-proxy/auto:*` : il change de modèle à CHAQUE appel, y compris d'un tour
+# à l'autre d'une même exécution. Constaté le 09/10/2026 : modèles « flash »
+# qui publient leur raisonnement avant le NO_REPLY, puis un tour de relance
+# routé vers un autre modèle qui, sans contexte, invente un texte (critique de
+# livre, « Good morning ! ») — et c'est ce texte qui part sur Telegram.
+openclaw_heartbeat_model: ""
+
+# ── Veille du parc (`fleet-watch`) ──────────────────────────────────────────
+# Remplace le heartbeat LLM : une automation OpenClaw de type commande (sans
+# modèle) lit Alertmanager toutes les `openclaw_fleetwatch_every`, retire les
+# hôtes `monitor: off` et n'écrit au modèle que si l'ensemble des alertes
+# change ou persiste plus de `openclaw_fleetwatch_renotify_hours`. Le modèle
+# analyse alors et PROPOSE des solutions, sans rien appliquer. Active si
+# `openclaw_heartbeat_to` est renseigné (même route Telegram).
+openclaw_fleetwatch_every: 30m
+openclaw_fleetwatch_renotify_hours: 6
+# Modèle d'analyse (`provider/model`) ; vide = défaut de l'agent. Jamais un
+# routeur `auto:*` (voir ci-dessus).
+openclaw_fleetwatch_model: "{{ openclaw_heartbeat_model }}"
+openclaw_fleetwatch_thinking: low
+openclaw_fleetwatch_timeout: 300
+# Instances ignorées EN PLUS des hôtes `monitor: off` : noms d'instance
+# Prometheus qui ne sont pas des noms d'inventaire (le job `mtbridge` expose
+# `mtbridge1`).
+openclaw_fleetwatch_ignore_extra: [mtbridge1]
+
+# ── Canal Telegram (optionnel) ──────────────────────────────────────────────
+# Jeton du bot, à chiffrer dans group_vars/web3c.yml comme
+# openclaw_openai_api_key (`ansible-vault encrypt_string --stdin-name
+# 'openclaw_telegram_bot_token'`). Vide = canal non géré par Ansible (la
+# tâche est sautée). Le compte est celui visé par le heartbeat par défaut :
+# `openclaw_heartbeat_account_id` doit désigner un compte configuré, sinon
+# OpenClaw résout le compte `default` et le heartbeat reste `no-route`.
+# Défaut vide (pas absent) : `content:` du fichier de batch est TEMPLATÉ même
+# quand `when:` saute la tâche, une variable non définie y ferait échouer le
+# rôle (même piège que openclaw_custom_provider_api_key).
+openclaw_telegram_account: "{{ openclaw_heartbeat_account_id }}"
+openclaw_telegram_bot_token: ""

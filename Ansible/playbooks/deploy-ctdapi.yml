@@ -1,0 +1,22 @@
+---
+# Supervision de ctdapi (postgres, redis, front, back, répartiteur), déployée
+# hors Ansible — ce playbook ne pose QUE la sonde svcprobe, il n'installe rien.
+#
+#   ./play.sh web3c deploy-ctdapi.yml
+#
+# Ex-`deploy-ctdapi-monitoring.yml`, renommé le 11/10/2026 : le nom de la
+# famille (`ctdapi`) est celui du playbook, même quand l'application elle-même
+# se déploie hors de ce dépôt.
+
+- name: Contrôle préalable
+  hosts: ctdapi
+  remote_user: "{{ remote_username }}"
+  roles:
+    - role: host-preflight
+      preflight_require_docker: true
+
+- name: Supervision du service
+  hosts: ctdapi
+  remote_user: "{{ remote_username }}"
+  roles:
+    - ctdapi-monitoring

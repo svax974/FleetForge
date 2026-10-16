@@ -1,0 +1,22 @@
+---
+# Rend un hôte BRK — même VIERGE — capable de RESTAURER le magasin depuis la
+# destination de sauvegarde, sans installer la sauvegarde périodique. Les
+# variables de connectivité reprennent celles de `brk-backup-install` (mêmes
+# valeurs, dérivées de l'inventaire) pour que le rôle soit utilisable seul.
+
+brk_user: "{{ remote_username }}"
+brk_home: "/home/{{ remote_username }}"
+brk_dir: "/home/{{ remote_username }}/.brk"
+
+# Source de restauration = la destination des sauvegardes (groupe `backups`).
+# Nom d'INVENTAIRE, pas une IP : changer de serveur de sauvegarde reste une
+# opération d'inventaire.
+brk_backup_dest_host: backup-brk
+brk_backup_dest_addr: "{{ hostvars[brk_backup_dest_host]['ansible_host'] }}"
+brk_backup_dest_user: "{{ remote_username }}"
+brk_backup_dest_port: "{{ ssh_custom_port }}"
+brk_backup_dest_dir: "{{ backup_root }}/brk"
+
+# Clé dédiée, identique à celle de la sauvegarde : sur l'hôte de sauvegarde
+# courant elle existe déjà (idempotent) ; sur un hôte neuf elle est générée.
+brk_backup_ssh_key_path: "{{ brk_home }}/.ssh/id_ed25519_brkbackup"

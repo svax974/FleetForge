@@ -1,0 +1,23 @@
+[package]
+name = "fleetforge-tui"
+description = "Interface en mode texte de FleetForge."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "fleetforge"
+path = "src/main.rs"
+
+[dependencies]
+fleetforge-core.workspace = true
+fleetforge-providers.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+ratatui = "0.28"
+crossterm = { version = "0.28", features = ["event-stream"] }
+futures = "0.3"

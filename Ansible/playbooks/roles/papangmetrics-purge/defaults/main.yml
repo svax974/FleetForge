@@ -1,0 +1,5 @@
+---
+pm_dir: "/home/{{ remote_username }}/papangmetrics"
+# Propriétaire du cron disk-watchdog posé par `papangmetrics-deploy` — il faut
+# le même utilisateur pour pouvoir le retirer.
+pm_user: "{{ remote_username }}"

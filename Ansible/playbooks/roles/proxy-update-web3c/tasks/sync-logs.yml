@@ -1,0 +1,57 @@
+---
+# Journaux d'accès/erreurs DÉDIÉS aux vhosts web3c-sync (sites-enabled/
+# sync-<instance>.conf) et leur rotation.
+#
+# ENGAGEMENT (web3c-sync spec/PROTOCOL.md §12) : « Les journaux du proxy
+# conservent l'adresse IP 7 jours. » Le serveur lui-même n'écrit aucune IP ; ce
+# sont ces fichiers, et eux seuls, qui en portent (access ET error : nginx y
+# inscrit `client: <ip>` sur ses erreurs). D'où :
+#   • un répertoire à part, /var/log/nginx-sync — HORS de /var/log/nginx/*.log,
+#     que la rotation par défaut de la distribution (/etc/logrotate.d/nginx,
+#     14 jours sur Ubuntu) gère déjà : un même fichier dans deux stanzas
+#     logrotate fait échouer les deux (« duplicate log entry ») ;
+#   • `daily` + `rotate 6` + `maxage 7` : le fichier courant (≤ 1 jour) plus six
+#     générations = 7 jours au plus. `rotate 7` en conserverait huit.
+#
+# Limite connue (à documenter, pas à masquer) : les erreurs survenant AVANT la
+# sélection du vhost (échec de poignée de main TLS sans SNI correspondant…) vont
+# au journal global /var/log/nginx/error.log, conservé 14 jours par la règle de
+# la distribution. Il n'enregistre aucune requête de l'API, seulement des
+# échecs de connexion.
+#
+# Appelé par tasks/main.yml (resynchronisation complète) et par
+# tasks/deploy-one-site.yml (sites `sync-*`). Idempotent.
+
+# Ces tâches s'exécutent sur le proxy (le play porte `become: true`).
+- name: Create the dedicated sync log directory
+  ansible.builtin.file:
+    path: /var/log/nginx-sync
+    state: directory
+    owner: root
+    group: adm
+    mode: '0750'
+
+- name: Rotate the dedicated sync logs (7 days at most)
+  ansible.builtin.copy:
+    dest: /etc/logrotate.d/nginx-sync
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      # Géré par Ansible (proxy-update-web3c, tasks/sync-logs.yml) — ne pas éditer.
+      # Adresses IP des clients web3c-sync : 7 jours au plus (PROTOCOL.md §12).
+      /var/log/nginx-sync/*.log {
+          daily
+          rotate 6
+          maxage 7
+          missingok
+          notifempty
+          compress
+          delaycompress
+          dateext
+          create 0640 www-data adm
+          sharedscripts
+          postrotate
+              if [ -f /run/nginx.pid ]; then kill -USR1 "$(cat /run/nginx.pid)"; fi
+          endscript
+      }

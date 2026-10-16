@@ -1,0 +1,24 @@
+---
+# Rapatrie sur ce poste les clés des nœuds Theta Edge, sans rien redéployer.
+#
+#   ./play.sh web3c export-theta-edge-keys.yml --limit <hôte>
+#
+# Destination : ~/.config/fleetforge/theta-edge/<hôte>/instance<N>/
+#   node-keystore-<adresse>.json  clé du nœud, chiffrée par `theta_passwd`
+#   wallet-mnemonic.txt           12 mots du wallet interne de l'edgecore
+#   info.json                     adresses + Summary de staking
+# Fichiers 0600, hors dépôt. Rien de secret n'est affiché.
+
+- name: Export des clés Theta Edge
+  hosts: all
+  remote_user: "{{ remote_username }}"
+  become: true
+  tasks:
+    - name: Skip hosts that do not carry the theta-edge family
+      ansible.builtin.meta: end_host
+      when: "'theta-edge' not in ansible_roles | default([])"
+
+    - name: Export the keys
+      ansible.builtin.include_role:
+        name: theta-edge-install
+        tasks_from: keys

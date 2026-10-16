@@ -1,0 +1,21 @@
+---
+# Reprend les témoins déposés sous l'ancien nom du projet (InfraManager,
+# /var/lib/infra-manager/state). Sans elle, un hôte bootstrapé avant le
+# renommage paraîtrait n'avoir jamais reçu setup-server.yml.
+#
+# Un simple renommage, et seulement si la destination n'existe pas encore :
+# deux jeux de témoins ne sont jamais fusionnés. Inclus avant toute lecture
+# (tasks/main.yml) ou écriture (tasks/stamp.yml) de témoin.
+
+- name: Take over the state directory of the former project name
+  ansible.builtin.shell: |
+    if [ -d {{ preflight_legacy_state_dir | quote }} ] && [ ! -e {{ preflight_state_dir | quote }} ]; then
+      mkdir -p "$(dirname {{ preflight_state_dir | quote }})"
+      mv {{ preflight_legacy_state_dir | quote }} {{ preflight_state_dir | quote }}
+      rmdir "$(dirname {{ preflight_legacy_state_dir | quote }})" 2>/dev/null || true
+      echo moved
+    fi
+  register: preflight_legacy_state
+  changed_when: "'moved' in preflight_legacy_state.stdout"
+  become: true
+  tags: [always]

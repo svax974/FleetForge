@@ -1,0 +1,4 @@
+---
+prometheus_port: 9090
+prometheus_home: "/home/{{ remote_username }}/prometheus"
+prometheus_host: prometheus1

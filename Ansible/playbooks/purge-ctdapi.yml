@@ -1,0 +1,12 @@
+---
+# Purge complète du périmètre Ansible sur ctdapi : sonde svcprobe ET sauvegarde
+# PostgreSQL (dispositif + dumps sur la destination). DESTRUCTIF. Ne touche
+# pas à la stack docker-compose, hors Ansible.
+#
+#   ./play.sh web3c purge-ctdapi.yml -e confirm=yes
+
+- name: Purge de la supervision et de la sauvegarde
+  hosts: ctdapi
+  remote_user: "{{ remote_username }}"
+  roles:
+    - ctdapi-purge

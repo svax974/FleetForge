@@ -1,0 +1,11 @@
+---
+# Supprime OpenClaw ET ses données : binaire, Node embarqué, configuration,
+# workspace, secrets et jeton de gateway. Destructif.
+#
+#   ./play.sh web3c purge-openclaw.yml
+- name: Purge OpenClaw
+  hosts: openclaw
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - openclaw-purge

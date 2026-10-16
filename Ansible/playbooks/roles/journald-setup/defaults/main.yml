@@ -1,0 +1,34 @@
+---
+# Plafond du journal systemd persistant (/var/log/journal).
+#
+# Sans plafond explicite, journald applique son défaut : 10 % de la taille du
+# système de fichiers, sans limite de rétention. Sur small1 (48 Go) cela
+# autorisait 4,8 Go de journal, dont 3,3 Go déjà consommés par onze mois
+# d'entrées — la moitié de l'espace occupé de la machine, pour du bruit de fond
+# (sysstat toutes les 10 min, sessions PAM d'Ansible, blocages ufw). Sur un
+# disque de 1,4 To le même défaut autoriserait 140 Go.
+#
+# 500 Mo couvrent plusieurs semaines à la cadence observée (~500 lignes/h) tout
+# en restant négligeable sur la plus petite machine du parc. Surchargeable par
+# hôte pour une machine réellement bavarde.
+journald_system_max_use: "500M"
+
+# Marge laissée libre sur le système de fichiers, quoi qu'il arrive. Sert de
+# second plafond : sur une machine dont le disque se remplit pour une autre
+# raison, journald rend la main avant de participer à la saturation.
+journald_system_keep_free: "1G"
+
+# Taille d'un fichier de journal individuel. Le plafond global n'est appliqué
+# qu'à la ROTATION : avec des fichiers de 128 Mo (défaut sur ces machines), le
+# journal dépasse durablement sa limite avant d'être élagué. 50 Mo rendent
+# l'élagage progressif.
+journald_max_file_size: "50M"
+
+# Rétention maximale. Complète le plafond de taille : une machine peu bavarde
+# garderait sinon des entrées d'il y a un an dans ses 500 Mo, sans intérêt et
+# rarement lisibles (les unités qui les ont produites ont changé).
+journald_max_retention: "1month"
+
+# Journal volatile (/run/log/journal), en RAM. Plafonné aussi : il compte dans
+# la mémoire de la machine, et les petites instances Oracle n'ont que 1 Go.
+journald_runtime_max_use: "64M"

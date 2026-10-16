@@ -1,0 +1,30 @@
+---
+- name: restart postfix
+  ansible.builtin.systemd:
+    name: postfix
+    state: restarted
+    daemon_reload: true
+
+- name: reload postfix
+  ansible.builtin.systemd:
+    name: postfix
+    state: reloaded
+
+- name: restart opendkim
+  ansible.builtin.systemd:
+    name: opendkim
+    state: restarted
+    daemon_reload: true
+
+- name: restart postfix-exporter
+  ansible.builtin.systemd:
+    name: prometheus-postfix-exporter
+    state: restarted
+    daemon_reload: true
+
+- name: reload prometheus
+  community.docker.docker_container:
+    name: prometheus
+    state: started
+    restart: yes
+  delegate_to: "{{ prometheus_host }}"

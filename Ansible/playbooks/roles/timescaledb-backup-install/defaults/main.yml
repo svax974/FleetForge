@@ -1,0 +1,56 @@
+---
+# Sauvegarde logique de la base d'indicateurs vers un hôte de destination
+# (groupe `backups` de l'inventaire).
+#
+# Remplace les deux scripts qui vivaient dans `timescaledb-install` :
+#   • backup.sh      — dump local, planifié ;
+#   • backup-ssh.sh  — dump distant, jamais planifié, pointé sur proxy1 qui
+#                      n'a pas la place (~22 Go libres pour un dump de 22 Go).
+# Deux scripts pour un même besoin, dont un mort : la destination est désormais
+# une donnée d'inventaire et un seul script couvre les deux cas.
+
+tsdb_dir: "{{ ansible_env.HOME }}/papangmetrics-db"
+tsdb_db: "{{ papangmetrics_db | default('papangmetrics') }}"
+tsdb_user: "{{ papangmetrics_user | default('papangmetrics') }}"
+tsdb_container: papangmetrics-timescaledb
+
+# ── Destination ────────────────────────────────────────────────────────────
+tsdb_backup_dest_host: backup-timescale
+tsdb_backup_dest_addr: "{{ hostvars[tsdb_backup_dest_host]['ansible_host'] }}"
+tsdb_backup_dest_user: "{{ remote_username }}"
+tsdb_backup_dest_port: "{{ ssh_custom_port }}"
+tsdb_backup_dest_dir: "{{ backup_root }}/papangmetrics"
+
+# Vrai tant que `backup-timescale` désigne la machine qui héberge la base :
+# le dump est alors écrit sur place, sans SSH. C'est l'état actuel, et donc le
+# comportement d'aujourd'hui à l'identique. Le jour où l'inventaire pointe une
+# autre adresse, la même exécution du rôle bascule le script en mode distant —
+# rien d'autre à faire (cf. `retarget-backups.yml`).
+tsdb_backup_is_local: "{{ tsdb_backup_dest_addr == ansible_host }}"
+
+tsdb_backup_ssh_key_path: "{{ ansible_env.HOME }}/.ssh/id_ed25519_tsdbbackup"
+
+# ── Planification ──────────────────────────────────────────────────────────
+# Inchangée : cron quotidien à 4 h, script auto-limité à une exécution tous les
+# 2 jours. Un dump complet prend plusieurs heures sur cette base.
+tsdb_backup_cron_hour: "4"
+tsdb_backup_interval_days: 2
+
+# Générations conservées. 2 pour la même raison que côté BRK : un dump pris sur
+# une base déjà abîmée écraserait la seule copie saine.
+tsdb_backup_keep: 2
+
+# Marge libre exigée sur la destination avant de lancer le dump. Le dump
+# compressé pesait 22 Go au 09/08/2026 pour 9,3 Go de base — la compression
+# TimescaleDB des chunks ne se retrouve pas dans une sauvegarde logique.
+tsdb_backup_min_free_gb: 60
+
+node_exporter_textfile_dir: /var/lib/node_exporter/textfile_collector
+
+# ── Reprise de l'existant ──────────────────────────────────────────────────
+# Déplace le dump déjà en place ({{ tsdb_dir }}/backups) vers la nouvelle
+# arborescence au lieu de repartir de zéro : sans cela, la première exécution
+# du rôle laisserait le parc sans aucune sauvegarde exploitable jusqu'au
+# prochain cron, soit jusqu'à deux jours.
+tsdb_backup_migrate_legacy: true
+tsdb_backup_legacy_dir: "{{ tsdb_dir }}/backups"

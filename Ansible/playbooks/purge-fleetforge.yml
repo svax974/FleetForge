@@ -1,0 +1,14 @@
+---
+# Supprime FleetForge ET ses données : code livré, arbre Ansible synchronisé,
+# base locale (historique des runs, réglages, services suivis) et mot de passe
+# d'accès. Destructif.
+#
+# Ne retire ni Rust, ni pipx, ni Ansible, ni les clés SSH : outils et secrets
+# partagés, dont la suppression déborderait de ce service.
+#
+#   ./play.sh web3c purge-fleetforge.yml
+- name: Purge FleetForge
+  hosts: infras
+  remote_user: "{{ remote_username }}"
+  roles:
+    - fleetforge-purge

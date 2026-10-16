@@ -1,0 +1,30 @@
+---
+# Remove the llama.cpp instance's Prometheus target and firewall rule from the monitoring host.
+
+- name: Set prometheus home on monitoring host
+  ansible.builtin.set_fact:
+    prometheus_home: "/home/{{ remote_username }}/prometheus"
+
+- name: Remove llama.cpp target file from monitoring host
+  ansible.builtin.file:
+    path: "{{ prometheus_home }}/prometheus-configs/node-llamacpp/{{ inventory_hostname }}-{{ llamacpp_instance_id }}.json"
+    state: absent
+  delegate_to: "{{ prometheus_host }}"
+
+- name: Reload Prometheus container
+  community.docker.docker_container:
+    name: prometheus
+    state: started
+    restart: yes
+  delegate_to: "{{ prometheus_host }}"
+  ignore_errors: true
+
+- name: Remove UFW rule for Prometheus scrape port {{ llamacpp_port }}
+  community.general.ufw:
+    rule: allow
+    src: "{{ hostvars[prometheus_host]['ansible_host'] }}"
+    port: "{{ llamacpp_port }}"
+    proto: tcp
+    delete: yes
+  become: yes
+  ignore_errors: true

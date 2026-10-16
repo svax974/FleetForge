@@ -1,0 +1,69 @@
+---
+# Purge complète : tout ce que fait `-remove`, PLUS les dumps sur la
+# destination et la clé SSH dédiée. DESTRUCTIF.
+
+- name: Refuse to purge without explicit confirmation
+  ansible.builtin.assert:
+    that:
+      - (confirm | default('')) == 'yes'
+    fail_msg: >-
+      Purge refusée. Cette opération SUPPRIME les dumps de la base
+      d'indicateurs sur {{ tsdb_backup_dest_host }} ({{ tsdb_backup_dest_dir }}).
+      Relance avec -e confirm=yes en connaissance de cause.
+
+- name: Read the backup public key (to revoke it on the destination)
+  ansible.builtin.slurp:
+    src: "{{ tsdb_backup_ssh_key_path }}.pub"
+  register: tsdb_backup_pubkey
+  failed_when: false
+  when: not (tsdb_backup_is_local | bool)
+
+- name: Remove the backup cron job
+  ansible.builtin.cron:
+    name: "papangmetrics-timescaledb backup"
+    state: absent
+
+- name: Remove backup and restore scripts
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ tsdb_dir }}/timescaledb-backup.sh"
+    - "{{ tsdb_dir }}/timescaledb-restore.sh"
+    - "{{ tsdb_dir }}/backup.log"
+
+- name: Remove the logrotate configuration and the Prometheus metric
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/logrotate.d/timescaledb-backup
+    - "{{ node_exporter_textfile_dir }}/backup_timescale.prom"
+  become: true
+
+- name: Remove the dedicated SSH key pair
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ tsdb_backup_ssh_key_path }}"
+    - "{{ tsdb_backup_ssh_key_path }}.pub"
+  when: not (tsdb_backup_is_local | bool)
+
+- name: Revoke the key on the destination host
+  ansible.posix.authorized_key:
+    user: "{{ tsdb_backup_dest_user }}"
+    state: absent
+    key: "{{ tsdb_backup_pubkey.content | b64decode | trim }}"
+  delegate_to: "{{ tsdb_backup_dest_host }}"
+  become: true
+  when:
+    - not (tsdb_backup_is_local | bool)
+    - tsdb_backup_pubkey.content is defined
+
+- name: Remove the backup data on the destination host
+  ansible.builtin.file:
+    path: "{{ tsdb_backup_dest_dir }}"
+    state: absent
+  delegate_to: "{{ tsdb_backup_dest_host }}"
+  become: true

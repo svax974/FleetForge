@@ -1,0 +1,60 @@
+---
+# Supprime le binaire opencode. Conserve la configuration, ainsi que les
+# sessions et les identifiants — les uns et les autres dans la même base,
+# `~/.local/share/opencode/opencode.db`. Une réinstallation les retrouve en
+# place. Pour tout supprimer : `opencode-purge`.
+#
+# Rien à arrêter ni à désactiver : opencode n'a pas d'unité systemd, pas de
+# port et pas d'utilisateur système (cf. opencode-install/defaults).
+
+- name: Take over the legacy state directory
+  ansible.builtin.include_role:
+    name: host-preflight
+    tasks_from: legacy
+
+- name: Remove the opencode binary
+  ansible.builtin.file:
+    path: "{{ opencode_binary }}"
+    state: absent
+  become: true
+
+# Le témoin affirme « opencode est installé ici » : le laisser après la
+# suppression, c'est exactement le genre d'écart entre l'état déclaré et l'état
+# réel que ce dispositif existe pour éviter.
+- name: Remove the opencode stamp
+  ansible.builtin.file:
+    path: "{{ preflight_state_dir }}/opencode.json"
+    state: absent
+  become: true
+
+# ── Installations parallèles ───────────────────────────────────────────────
+- name: Resolve the home directory of each account
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ item }}"
+    fail_key: false
+  loop: "{{ opencode_users }}"
+  register: opencode_passwd
+  become: true
+
+- name: Look for a per-user install left by the official script
+  ansible.builtin.stat:
+    path: "{{ item.ansible_facts.getent_passwd[item.item][4] }}/{{ opencode_user_install_dir }}/opencode"
+  loop: "{{ opencode_passwd.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: item.ansible_facts.getent_passwd[item.item] is defined
+        and item.ansible_facts.getent_passwd[item.item] is not none
+  register: opencode_user_installs
+  become: true
+
+- name: Report the per-user installs left in place
+  ansible.builtin.debug:
+    msg: >-
+      Binaire personnel conservé : {{ item.stat.path }}. `opencode` reste donc
+      disponible pour ce compte malgré la suppression système. À retirer à la
+      main si ce n'est pas voulu.
+  loop: "{{ opencode_user_installs.results }}"
+  loop_control:
+    label: "{{ item.item.item | default('') }}"
+  when: item.stat.exists | default(false)

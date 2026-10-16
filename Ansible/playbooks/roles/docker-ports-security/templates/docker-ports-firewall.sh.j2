@@ -1,0 +1,132 @@
+#!/bin/bash
+# Filtrage des ports publiés par Docker — géré par Ansible, ne pas éditer.
+#
+# Rejoué au démarrage par docker-ports-firewall.service, APRÈS docker.service :
+# Docker recrée DOCKER-USER vide à chaque démarrage, une sauvegarde
+# iptables-persistent serait donc restaurée trop tôt puis écrasée. (Et sur cette
+# distribution `iptables-persistent` et `ufw` se désinstallent mutuellement.)
+set -euo pipefail
+
+# Sources ajoutées par d'AUTRES rôles, lues à l'EXÉCUTION et non à la génération
+# du script. C'est ce qui les rend durables : `docker-ports-security` peut être
+# rejoué (update-ufw-all.yml, redéploiement…) sans les perdre, alors qu'une
+# fusion faite côté Ansible disparaîtrait au premier rejeu avec les seuls
+# host_vars — en coupant silencieusement un flux qui marchait.
+#
+# Format : une ligne « <port> <source> » par autorisation, commentaires en `#`.
+DROPIN_DIR=/etc/docker-ports/sources.d
+
+# 1 quand le port PUBLIÉ diffère du port du conteneur (`-p 4302:80`) :
+# DOCKER-USER voit les paquets APRÈS le DNAT, `--dport` y vaut le port du
+# conteneur et un DROP écrit pour le port publié ne matche jamais. On filtre
+# alors sur le port d'origine, conservé par conntrack.
+# `--ctdir ORIGINAL` est INDISPENSABLE : le paquet de RÉPONSE (conteneur →
+# client) a lui aussi ctorigdstport=<publié> mais pour source le conteneur ;
+# sans cette restriction il tombe dans le DROP final et la connexion n'aboutit
+# jamais (SYN-ACK jeté), y compris pour les sources autorisées.
+CTORIG=0
+
+port_match() {
+  if [ "${CTORIG}" = 1 ]; then
+    echo "-m conntrack --ctorigdstport $1 --ctdir ORIGINAL"
+  else
+    echo "--dport $1"
+  fi
+}
+
+dropin_sources() {
+  local port="$1"
+  [ -d "${DROPIN_DIR}" ] || return 0
+  cat "${DROPIN_DIR}"/*.conf 2>/dev/null \
+    | sed 's/#.*//' \
+    | awk -v p="${port}" '$1 == p && $2 ~ /^[0-9]/ {print $2}' \
+    | sort -u
+}
+
+# Une source IPv6 confiée à `iptables` tue le script :
+#   iptables v1.8.10 (nf_tables): invalid mask `64' specified
+# et avec `set -e`, au MILIEU d'une règle — les ports suivants restent alors
+# sans aucune règle (constaté sur ctdapi le 2026-09-27 : 4700 laissé avec ses
+# ALLOW mais SANS DROP, 4701 jamais posé ; `whitelist` porte une adresse
+# opérateur en `2a01:…::/64`, sans doute aussi ailleurs via ufw/pg_hba qui,
+# eux, avalent l'IPv6). Chaque famille part donc vers SON outil.
+#
+# La même politique s'applique des DEUX côtés : Docker publie aussi sur `[::]`
+# et pose une chaîne `ip6tables DOCKER-USER` que des règles IPv4 seules
+# laisseraient vide — le port resterait joignable en IPv6 en contournant tout
+# le filtrage. Quand cette chaîne n'existe pas (Docker en IPv4 seul), on
+# n'invente rien : il n'y a rien à filtrer, et `ip6tables` peut être absent.
+apply_family() {
+  local tool="$1"; shift
+  local port="$1"; shift
+  local comment="$1"; shift
+  local sources=("$@")
+
+  # L'awk lit TOUTE la sortie (pas de `exit`) : fermer le tube tôt envoie
+  # SIGPIPE à iptables, et avec `pipefail` le script mourait en rc 141 dès que
+  # la chaîne devenait assez longue (constaté le 08/10/2026, 17 ports).
+  # Purge par NUMÉRO de règle, et non par spécification : réinjecter une spec
+  # contenant `--comment "... - ..."` la fait découper par le shell, et iptables
+  # rejette le tiret isolé (« Bad argument `-' »).
+  while true; do
+    local n
+    n=$("${tool}" -L DOCKER-USER --line-numbers -n 2>/dev/null \
+        | awk -v p="(dpt:|ctorigdstport )${port}( |$)" '$0 ~ p && !done {print $1; done=1}')
+    [ -z "${n}" ] && break
+    "${tool}" -D DOCKER-USER "${n}"
+  done
+
+  # Autorisations d'abord : elles doivent précéder le DROP final.
+  local src
+  for src in "${sources[@]}"; do
+    "${tool}" -A DOCKER-USER -s "${src}" -p tcp $(port_match "${port}") \
+      -m comment --comment "${comment} allow" -j RETURN
+  done
+
+  "${tool}" -A DOCKER-USER -p tcp $(port_match "${port}") \
+    -m comment --comment "${comment} deny" -j DROP
+}
+
+apply_port() {
+  local port="$1"; shift
+  local comment="$1"; shift
+  local sources=("$@")
+
+  # Drop-ins lus à chaque exécution : une autorisation déposée par un autre
+  # rôle survit au rejeu de ce fichier (voir DROPIN_DIR plus haut).
+  local extra
+  while IFS= read -r extra; do
+    [ -n "${extra}" ] && sources+=("${extra}")
+  done < <(dropin_sources "${port}")
+
+  # Séparation des familles : `:` ne peut figurer que dans une adresse IPv6.
+  local v4=() v6=()
+  local s
+  for s in "${sources[@]}"; do
+    case "${s}" in
+      *:*) v6+=("${s}") ;;
+      *)   v4+=("${s}") ;;
+    esac
+  done
+
+  apply_family iptables "${port}" "${comment}" "${v4[@]}"
+  if ip6tables -S DOCKER-USER >/dev/null 2>&1; then
+    apply_family ip6tables "${port}" "${comment}" "${v6[@]}"
+  fi
+}
+
+{% for r in docker_ports_rules %}
+{%   set srcs = [] %}
+{%   if r.allow_internal | default(true) %}{{ srcs.append(docker_ports_internal_cidr) or '' }}{% endif %}
+{%   if r.allow_whitelist | default(false) %}{% for w in whitelist %}{{ srcs.append(w) or '' }}{% endfor %}{% endif %}
+{%   if r.allow_vpns | default(false) %}{% for v in groups['vpns'] | default([]) %}{{ srcs.append(hostvars[v].ansible_host) or '' }}{% endfor %}{% endif %}
+{%   for s in r.sources | default([]) %}{{ srcs.append(s) or '' }}{% endfor %}
+# {{ r.comment | default('port ' ~ r.port) }}
+{# Sources des DEUX familles : le `^[0-9]` d'origine excluait une IPv6
+   commençant par une lettre (`abcd::/48`), et le script répartit ensuite
+   chaque entrée vers iptables/ip6tables selon la présence d'un `:`. -#}
+{%   set v6s = srcs | unique | select('search', ':') | list %}
+{%   set v4s = srcs | unique | reject('search', ':') | select('match', '^[0-9]') | list %}
+CTORIG={{ 1 if r.published_remap | default(false) else 0 }}
+apply_port {{ r.port }} "{{ r.comment | default('docker port ' ~ r.port) }}" {{ (v6s + v4s) | join(' ') }}
+{% endfor %}

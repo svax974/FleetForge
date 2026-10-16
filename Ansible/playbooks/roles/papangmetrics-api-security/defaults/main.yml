@@ -1,0 +1,3 @@
+---
+pm_api_port: "{{ papangmetrics_api_port | default(9743) }}"
+pm_etl_metrics_port: "{{ papangmetrics_etl_metrics_port | default(9611) }}"

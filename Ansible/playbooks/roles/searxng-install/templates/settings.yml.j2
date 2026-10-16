@@ -1,0 +1,56 @@
+# SearXNG — configuration gérée par Ansible (rôle searxng-install).
+# NE PAS ÉDITER SUR L'HÔTE : toute modification est écrasée au prochain jeu.
+#
+# `use_default_settings` : ce fichier ne porte QUE les écarts au réglage amont.
+# Recopier le settings.yml complet de l'image reviendrait à figer la liste des
+# moteurs au jour du déploiement — ils changent à chaque version, et une liste
+# figée se dégrade sans que rien ne le signale.
+use_default_settings: true
+
+general:
+  instance_name: "{{ searxng_instance_name }}"
+  debug: false
+  # Ce n'est pas une instance publique : ni page de contact, ni appel aux dons.
+  contact_url: false
+  donation_url: false
+
+search:
+  # `json` n'est PAS dans les formats par défaut. Sans cette ligne, toute
+  # requête `?format=json` répond 403 et le relai ne sert à rien — c'est la
+  # seule raison d'être de cette instance.
+  formats:
+    - html
+    - json
+  safe_search: {{ searxng_safe_search }}
+  default_lang: "{{ searxng_default_lang }}"
+  # L'autocomplétion fait sortir une requête vers un moteur amont à chaque
+  # frappe. Aucun intérêt pour un client applicatif.
+  autocomplete: ""
+
+server:
+  base_url: "{{ searxng_base_url }}"
+  secret_key: "{{ searxng_secret_key }}"
+  # Le limiteur de débit EXIGE un Redis/Valkey et juge à l'IP du client. Ici
+  # l'accès est déjà restreint aux proxies par le pare-feu (ou par une
+  # publication sur la boucle locale) et au jeton X-Api-Key par nginx :
+  # ajouter un Redis pour re-filtrer ce qui l'est déjà en amont n'apporterait
+  # qu'un composant de plus à surveiller.
+  limiter: false
+  public_instance: false
+  # Le proxy d'images fait transiter les vignettes par l'instance. Un client
+  # JSON ne les affiche pas : c'est de la bande passante et une surface
+  # d'attaque pour rien.
+  image_proxy: false
+  # POST par défaut : un `GET /search?q=…` répond alors 405, ce qui rend le
+  # relai inutilisable pour tout client HTTP ordinaire.
+  method: "GET"
+
+ui:
+  static_use_hash: true
+
+outgoing:
+  request_timeout: {{ searxng_request_timeout }}
+  max_request_timeout: {{ searxng_max_request_timeout }}
+  pool_connections: 100
+  pool_maxsize: 20
+  enable_http2: true

@@ -1,0 +1,42 @@
+---
+# Tout ce que fait `theta-edge-remove`, PLUS la destruction des données et des
+# clés de toutes les instances, du sweep et de l'image.
+#
+# Une clé de nœud détruite, c'est le TFuel qu'elle détient et le stake qui la
+# vise rendus inaccessibles. D'où, dans l'ordre :
+#   1. refus sans `-e confirm=yes` ;
+#   2. rapatriement des clés sur le poste (`theta-edge-install`, keys.yml) —
+#      un échec de rapatriement interrompt la purge AVANT toute suppression ;
+#   3. seulement ensuite, la suppression.
+
+- name: Refuse to purge without explicit confirmation
+  ansible.builtin.assert:
+    that: confirm | default('') == 'yes'
+    fail_msg: >-
+      La purge détruit les clés de tous les nœuds Theta Edge de l'hôte. Relancer
+      avec -e confirm=yes (les clés seront d'abord rapatriées sur ce poste).
+
+- name: Back up the keys to the control machine first
+  ansible.builtin.include_role:
+    name: theta-edge-install
+    tasks_from: keys
+
+- name: Run the remove role
+  ansible.builtin.include_role:
+    name: theta-edge-remove
+
+- name: Remove the TFuel sweep
+  ansible.builtin.include_role:
+    name: theta-edge-sweep-purge
+
+- name: Remove all instance data and keys
+  ansible.builtin.file:
+    path: /opt/theta-edge
+    state: absent
+
+- name: Remove the Theta Edge image
+  community.docker.docker_image:
+    name: thetalabsorg/edgelauncher_mainnet
+    tag: latest
+    state: absent
+  failed_when: false

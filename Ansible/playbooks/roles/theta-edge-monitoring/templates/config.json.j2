@@ -1,0 +1,12 @@
+{
+  "bind_address": "{{ theta_edge_exporter_bind }}",
+  "bind_port": {{ theta_edge_exporter_port }},
+  "rpc_timeout": {{ theta_edge_exporter_rpc_timeout }},
+  "public_rpc_url": "{{ theta_edge_public_rpc_url }}",
+  "public_cache_ttl": {{ theta_edge_public_cache_ttl }},
+  "instances": [
+{% for i in range(1, theta_edge_instances | int + 1) %}
+    { "id": "{{ i }}", "rpc_port": {{ theta_edge_rpc_base_port | int + (i - 1) * theta_edge_port_step | int }} }{{ "," if not loop.last }}
+{% endfor %}
+  ]
+}

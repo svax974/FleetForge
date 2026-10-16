@@ -1,0 +1,6 @@
+---
+- name: restart astar
+  ansible.builtin.systemd:
+    name: astar
+    state: restarted
+    daemon_reload: yes

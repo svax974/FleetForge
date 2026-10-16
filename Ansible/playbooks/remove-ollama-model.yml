@@ -1,0 +1,14 @@
+---
+# Supprime un modèle Ollama, sans toucher au service.
+#
+#   ./play.sh web3c remove-ollama-model.yml -e ollama_model_name=llama3.1:8b
+#
+# Vise l'entrée dédiée `ollama` (machine hub, CLAUDE.md § 2) depuis le
+# 11/10/2026 — plus de `hosts: all` à restreindre par `--limit`.
+
+- name: Suppression d'un modèle Ollama
+  hosts: ollama
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - ollama-model-remove

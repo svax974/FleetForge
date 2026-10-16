@@ -1,0 +1,28 @@
+---
+# Ce sshd a pu être socket-activé par ssh.socket et hériter de son fd d'écoute
+# (lié à l'ANCIEN port) via LISTEN_FDS. Un reload (SIGHUP) se ré-exécute en
+# place mais conserve cet environnement hérité : sshd continue d'écouter sur
+# l'ancien port quoi que dise sshd_config. Seul un vrai stop+start (processus
+# neuf, sans fd hérité) prend en compte le nouveau Port. Cela tue forcément la
+# session SSH qui exécute ce handler — le wait_for du rôle et la reconnexion
+# sur le nouveau port prennent le relais.
+#
+# Pourquoi `systemd-run` et pas `service: state=restarted`, même en async :
+# la commande lancée par Ansible s'exécute DANS le cgroup de l'unité qu'elle
+# redémarre (la session SSH descend du listener sshd). La phase d'arrêt tue
+# donc l'exécutant avant qu'il n'atteigne la phase de démarrage : l'unité
+# reste `inactive`, plus rien n'écoute sur le nouveau port, et le rôle échoue
+# sur son wait_for. Constaté sur small3 le 12/08/2026 — ssh.service
+# `ActiveState=inactive` avec son `MainPID` toujours vivant et lié au 22
+# (`KillMode=process`), un sshd orphelin que plus aucune unité ne pilotait.
+#
+# Le timer transitoire, lui, tourne dans son propre cgroup : il survit à la
+# mort de la session. Le délai lui laisse le temps de se détacher avant que
+# l'arrêt ne coupe la connexion en cours.
+- name: RestartSSHD
+  ansible.builtin.shell:
+    cmd: >-
+      systemctl reset-failed infra-sshd-restart.service infra-sshd-restart.timer 2>/dev/null;
+      systemd-run --collect --unit=infra-sshd-restart --on-active=5
+      /bin/systemctl restart {{ 'ssh' if (ansible_facts['distribution'] == 'Ubuntu' and ansible_facts['distribution_version'] is version('24.04', '>=')) else 'sshd' }}
+  become: true

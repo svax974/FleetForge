@@ -1,0 +1,115 @@
+---
+# Arrête et retire les conteneurs AgentHub (via `scripts/clean-remote.sh`
+# du dépôt app, la contrepartie de `run.sh prod`/`deploy-full.sh` — voir
+# agenthub-deploy/defaults pour le choix de ne pas réimplémenter ce mécanisme
+# en Ansible) et désactive le runner. Conserve les volumes de données
+# (Postgres) — leur suppression relève d'agenthub-purge.
+#
+# Ne retire PAS le filtrage DOCKER-USER (docker_ports_rules vit dans
+# host_vars/ctdapi.yml, une liste par MACHINE, pas par service — voir la
+# limite connue de docker-ports-security documentée dans rotki-remove) ni le
+# CNAME DNS (agenthub-purge s'en charge, destructif).
+
+- name: Fail early when the prod back env file is missing on the control machine
+  ansible.builtin.stat:
+    path: "{{ agenthub_src }}back/.env"
+  delegate_to: localhost
+  become: false
+  register: agenthub_remove_env_stat
+
+- name: Stop and remove the AgentHub containers (front/back/postgres)
+  ansible.builtin.command:
+    cmd: ./scripts/clean-remote.sh
+  args:
+    chdir: "{{ agenthub_src }}"
+  delegate_to: localhost
+  become: false
+  register: agenthub_clean_remote
+  changed_when: true
+  when: agenthub_remove_env_stat.stat.exists
+  failed_when: false
+
+- name: Warn when clean-remote.sh could not run
+  ansible.builtin.debug:
+    msg: >-
+      {{ agenthub_src }}back/.env introuvable sur le poste de contrôle :
+      scripts/clean-remote.sh (lit ce fichier pour REMOTE_HOST/REMOTE_USER/
+      SSH_KEY_FILE/PROJECT_NAME) n'a pas pu être lancé. Retirer les conteneurs
+      `<PROJECT_NAME>_front`/`_back`/`_postgres` à la main sur
+      {{ hostvars['agenthub'].ansible_host }} si nécessaire.
+  when: not agenthub_remove_env_stat.stat.exists
+
+- name: Stop and disable the AgentHub runner (keep it installed)
+  ansible.builtin.systemd:
+    name: agenthub-runner
+    state: stopped
+    enabled: false
+  become: true
+  ignore_errors: true
+
+# One-time legacy of the AgentCenter → AgentHub rename (2026-10-08): the pre-rename unit
+# (`agentcenter-runner.service`, `/etc/agentcenter-runner.env`, `/opt/agentcenter-runner`) is
+# unknown to the new install paths and would linger (enabled, dialing a dead API path).
+# Conditional on the old unit file existing — strict no-op once cleaned.
+- name: Check for the legacy pre-rename runner unit
+  ansible.builtin.stat:
+    path: /etc/systemd/system/agentcenter-runner.service
+  register: agenthub_legacy_unit
+  become: true
+
+- name: Stop and disable the legacy pre-rename runner unit
+  ansible.builtin.systemd:
+    name: agentcenter-runner
+    state: stopped
+    enabled: false
+  become: true
+  ignore_errors: true
+  when: agenthub_legacy_unit.stat.exists
+
+- name: Remove the legacy pre-rename runner files (unit, env, code — user home kept)
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/systemd/system/agentcenter-runner.service
+    - /etc/agentcenter-runner.env
+    - /opt/agentcenter-runner
+  become: true
+  when: agenthub_legacy_unit.stat.exists
+
+- name: Reload systemd after legacy unit removal
+  ansible.builtin.systemd:
+    daemon_reload: true
+  become: true
+  when: agenthub_legacy_unit.stat.exists
+
+- name: Kill the legacy tmux server (pre-rename socket, sessions already doomed by the reinstall)
+  ansible.builtin.command:
+    cmd: sudo -u agents tmux -L agentcenter kill-server
+  become: true
+  register: agenthub_legacy_tmux
+  changed_when: true
+  failed_when: false
+  when: agenthub_legacy_unit.stat.exists
+
+- name: Remove the AgentHub probe
+  ansible.builtin.file:
+    path: "{{ svcprobe_checks_dir | default('/etc/svcprobe/checks.d') }}/agenthub.json"
+    state: absent
+  become: true
+  tags: [monitoring]
+
+- name: Remind the operator about docker_ports_rules and the CNAME
+  ansible.builtin.debug:
+    msg: >-
+      AgentHub arrêté (conteneurs retirés, runner désactivé — pas
+      désinstallé). Les ports {{ agenthub_front_port }}/{{ agenthub_back_port }}
+      restent dans docker_ports_rules (host_vars/ctdapi.yml) et le CNAME
+      {{ agenthub_hostname }} reste publié tant qu'ils ne sont pas retirés à
+      la main (voir agenthub-purge). Si {{ agenthub_front_port }}/
+      {{ agenthub_back_port }} sont les SEULES règles restantes du fichier,
+      rejouer docker-ports-security après édition NE SUFFIT PAS (limite
+      documentée dans rotki-remove) : flusher les règles DOCKER-USER à la
+      main sur {{ hostvars['agenthub'].ansible_host }}
+      (`iptables -D DOCKER-USER <n°>`) avant de considérer les ports vraiment
+      libérés.

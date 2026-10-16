@@ -1,0 +1,92 @@
+---
+# Enregistre l'endpoint Prometheus natif d'electrs et ouvre le scrape. Tout
+# est tagué `monitoring` : réarmer la supervision ne doit jamais imposer de
+# rejouer l'installation (compilation, import initial de l'index).
+#   ./play.sh papanglabs deploy-esplora.yml --tags monitoring
+
+- name: Fail early when no Prometheus host is defined
+  ansible.builtin.assert:
+    that:
+      - prometheus_host is defined
+      - prometheus_host in hostvars
+    fail_msg: >-
+      `prometheus_host` n'est pas défini ou absent de l'inventaire. Un service
+      que personne ne scrape n'est pas supervisé.
+  tags: [monitoring]
+
+# ── Pare-feu ───────────────────────────────────────────────────────────────
+# Sans ouverture, la cible s'enregistre puis reste `down` — ce qui ressemble à
+# un service en panne.
+- name: Allow Prometheus to scrape the Esplora monitoring endpoint
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ hostvars[prometheus_host]['ansible_host'] }}"
+    port: "{{ esploramon_port }}"
+    comment: "Prometheus scrape - esplora"
+  become: true
+  when: ansible_host != hostvars[prometheus_host]['ansible_host']
+  tags: [monitoring]
+
+- name: Allow the Prometheus Docker bridge to scrape (monitor is local)
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "172.17.0.0/16"
+    port: "{{ esploramon_port }}"
+    comment: "Prometheus Docker scrape - esplora"
+  become: true
+  when: ansible_host == hostvars[prometheus_host]['ansible_host']
+  tags: [monitoring]
+
+# ── Cible Prometheus ───────────────────────────────────────────────────────
+- name: Create the node-esplora target directory on the Prometheus host
+  ansible.builtin.file:
+    path: "/home/{{ remote_username }}/prometheus/prometheus-configs/{{ esploramon_job }}"
+    state: directory
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: '0755'
+  delegate_to: "{{ prometheus_host }}"
+  become: true
+  tags: [monitoring]
+
+- name: Deploy the Esplora Prometheus target
+  ansible.builtin.template:
+    src: prometheus-target.json.j2
+    dest: "/home/{{ remote_username }}/prometheus/prometheus-configs/{{ esploramon_job }}/{{ inventory_hostname }}.json"
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: '0644'
+  delegate_to: "{{ prometheus_host }}"
+  become: true
+  tags: [monitoring]
+
+# ── Contrôle ───────────────────────────────────────────────────────────────
+# Une cible enregistrée ne prouve rien : c'est l'exposition qui fait foi.
+# Non bloquant sur le NOMBRE de retries : le premier import peut prendre des
+# heures et l'endpoint de monitoring peut mettre du temps à exposer des
+# valeurs non nulles, mais il doit déjà répondre.
+- name: Read the Esplora monitoring endpoint
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ esploramon_port }}/metrics"
+    return_content: true
+  register: esploramon_exposition
+  retries: 6
+  delay: 10
+  until: esploramon_exposition.status | default(0) == 200
+  changed_when: false
+  check_mode: false
+  tags: [monitoring]
+
+- name: Fail when the reference metric is absent from the exposition
+  ansible.builtin.assert:
+    that:
+      - esploramon_reference_metric in (esploramon_exposition.content | default(''))
+    fail_msg: >-
+      L'endpoint répond mais n'expose pas `{{ esploramon_reference_metric }}` :
+      lire les noms réels dans la sortie ci-dessus (`curl 127.0.0.1:
+      {{ esploramon_port }}/metrics`) et corriger `esploramon_reference_metric`
+      (esplora-monitoring/defaults/main.yml) — sans quoi ce contrôle et les
+      futures règles d'alerte du groupe `esplora` resteraient décoratifs.
+  tags: [monitoring]

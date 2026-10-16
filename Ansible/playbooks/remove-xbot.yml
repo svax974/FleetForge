@@ -1,0 +1,11 @@
+---
+# Retire la sonde svcprobe de xbot. Ne touche pas à la stack docker-compose
+# (hors Ansible).
+#
+#   ./play.sh web3c remove-xbot.yml
+
+- name: Suppression de la supervision
+  hosts: xbot
+  remote_user: "{{ remote_username }}"
+  roles:
+    - xbot-remove

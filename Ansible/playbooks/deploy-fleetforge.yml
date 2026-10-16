@@ -1,0 +1,115 @@
+---
+# FleetForge servi dans un navigateur.
+#
+# La même application que le paquetage de bureau — même frontal React, même
+# cœur `fleetforge-core` — servie en HTTP par le binaire `fleetforge-web`. Le paquetage
+# Tauri n'est pas abandonné pour autant : `npm run tauri:build` continue de
+# produire l'application de bureau, à partir des mêmes sources.
+#
+# PARTICULARITÉ DE CE SERVICE : la machine devient un NŒUD DE CONTRÔLE Ansible.
+# L'application y lance de vrais playbooks sur tout le parc. D'où deux
+# dispositifs qu'aucun autre rôle du dépôt n'a :
+#   • le serveur REFUSE de démarrer sur une interface publique sans mot de
+#     passe — un port ouvert ici est un accès administrateur ;
+#   • les secrets de pilotage (clé SSH du parc, mot de passe du vault) ne sont
+#     PAS livrés par défaut. Sans eux l'application montre le parc mais ne peut
+#     rien déployer. C'est une décision à prendre explicitement.
+#
+# Prérequis sur le POSTE : le frontal doit être construit.
+#   cd apps/gui && npm install && npm run build
+#
+#   ./play.sh web3c deploy-fleetforge.yml
+#   ./play.sh papanglabs deploy-fleetforge.yml
+#   ./play.sh web3c deploy-fleetforge.yml --tags monitoring   # réarmer la supervision
+#   ./play.sh web3c deploy-fleetforge.yml --tags code         # relivrer le code seul
+#
+# Avec pilotage réel du parc (à jouer en connaissance de cause) :
+#   ./play.sh web3c deploy-fleetforge.yml -e ff_deploy_secrets=true
+#
+# Ce mode crée au premier passage une clé SSH DÉDIÉE sur le poste, dépose sa
+# passphrase et le mot de passe d'accès — chiffrés — dans
+# playbooks/group_vars/<parc>.yml, et autorise la clé sur le parc en la
+# restreignant à l'adresse de cette machine. Rien n'est régénéré ensuite : un
+# rejeu réutilise ce que le vault contient déjà. Le fichier de parc modifié est
+# à COMMITTER, faute de quoi un autre clone tirera d'autres secrets.
+#
+# Le vhost (infra.<domaine>, restreint à la whitelist) appartient au proxy :
+#   ./play.sh web3c update-proxy-web3c.yml   /   ./play.sh papanglabs update-proxy-papang.yml
+
+# ── Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ───────────────────────
+- name: Contrôle préalable
+  hosts: infras
+  remote_user: "{{ remote_username }}"
+  roles:
+    - host-preflight
+
+- name: Deploy FleetForge
+  hosts: infras
+  remote_user: "{{ remote_username }}"
+  roles:
+    - fleetforge-install
+
+# Le port n'est pas publié par Docker : les règles ufw s'appliquent réellement,
+# contrairement à ce qui vaut pour Prometheus ou Alertmanager.
+- name: FleetForge firewall
+  hosts: infras
+  remote_user: "{{ remote_username }}"
+  roles:
+    - fleetforge-security
+
+# ── Autorisation de la clé dédiée sur le parc ──────────────────────────────
+# Ne s'exécute qu'avec `ff_deploy_secrets=true`. C'est ce play qui donne sa
+# valeur à la clé dédiée : `from="<adresse d'infra1>"` la rend inutilisable
+# depuis ailleurs, donc révocable et sans portée hors de cette machine — ce
+# qu'une clé personnelle recopiée n'offre pas.
+#
+# `ignore_unreachable` est assumé : le parc contient des entrées volontairement
+# injoignables (docker-repo en xxx.xxx.xxx.xxx). Mais le résultat est RAPPORTÉ
+# hôte par hôte : une autorisation à moitié posée ne doit pas passer pour une
+# autorisation posée.
+#
+#   ./play.sh web3c deploy-fleetforge.yml -e ff_deploy_secrets=true --tags authorize
+- name: Autoriser la clé dédiée sur le parc
+  hosts: all
+  remote_user: "{{ remote_username }}"
+  gather_facts: false
+  ignore_unreachable: true
+  tags: [authorize]
+  tasks:
+    - name: Skip unless the driving secrets were requested
+      ansible.builtin.meta: end_play
+      when: not (ff_deploy_secrets | default(false))
+
+    - name: Authorize the dedicated key, restricted to the FleetForge machine
+      ansible.posix.authorized_key:
+        user: "{{ remote_username }}"
+        state: present
+        key: "{{ hostvars['infra1'].ff_public_key }}"
+        key_options: >-
+          from="{{ hostvars['infra1'].ansible_host }}",no-agent-forwarding,no-port-forwarding,no-X11-forwarding
+      register: ff_authorized
+
+    # Les hôtes injoignables sortent du play : ils n'atteignent pas cette
+    # tâche. Le décompte final ci-dessous est donc le SEUL endroit qui les
+    # nomme — sans lui, une autorisation posée à moitié ressemblerait en tout
+    # point à une autorisation posée.
+    - name: Report the hosts left without the key
+      ansible.builtin.debug:
+        msg: >-
+          Clé autorisée sur {{ ansible_play_hosts | length }} hôte(s).
+          {{ 'Non traités (injoignables) : '
+             ~ (ansible_play_hosts_all | difference(ansible_play_hosts) | join(', '))
+             ~ ' — l_application ne pourra pas les piloter.'
+             if (ansible_play_hosts_all | difference(ansible_play_hosts)) | length > 0
+             else 'Aucun hôte laissé de côté.' }}
+      run_once: true
+
+# ── Supervision (OBLIGATOIRE, voir CLAUDE.md) ──────────────────────────────
+# Cible native sur le port applicatif. Vérifie qu'un `scrape_config` lit
+# réellement le répertoire de cibles — une cible que personne ne lit ne
+# supervise rien, et ne se distingue pas d'une cible qui veille.
+- name: Supervision du service
+  hosts: infras
+  remote_user: "{{ remote_username }}"
+  roles:
+    - fleetforge-monitoring

@@ -1,0 +1,42 @@
+---
+# Remove node_exporter — stops service, removes binary and system exporter target.
+
+- name: Stop and disable node_exporter service
+  ansible.builtin.systemd:
+    name: node_exporter
+    state: stopped
+    enabled: no
+  ignore_errors: true
+
+- name: Remove node_exporter systemd service file
+  ansible.builtin.file:
+    path: /etc/systemd/system/node_exporter.service
+    state: absent
+
+- name: Reload systemd daemon
+  ansible.builtin.systemd:
+    daemon_reload: yes
+
+- name: Remove node_exporter binary
+  ansible.builtin.file:
+    path: /usr/local/bin/node_exporter
+    state: absent
+
+- name: Set prometheus home on monitoring host
+  ansible.builtin.set_fact:
+    prometheus_home: "/home/{{ remote_username }}/prometheus"
+
+- name: Remove system exporter target file from monitoring host
+  ansible.builtin.file:
+    path: "{{ prometheus_home }}/prometheus-configs/exporter/{{ inventory_hostname }}.json"
+    state: absent
+  delegate_to: "{{ prometheus_host }}"
+  ignore_errors: true
+
+- name: Reload Prometheus container
+  community.docker.docker_container:
+    name: prometheus
+    state: started
+    restart: yes
+  delegate_to: "{{ prometheus_host }}"
+  ignore_errors: true

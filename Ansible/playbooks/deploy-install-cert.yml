@@ -1,0 +1,8 @@
+---
+- name: Install certbot and request wildcard certificates via Cloudflare DNS
+  hosts: proxies
+  become: true
+  remote_user: "{{ remote_username }}"
+
+  roles:
+    - install-cert

@@ -1,0 +1,110 @@
+---
+# Convention `<service>-monitoring` (CLAUDE.md) : le rôle dépose une SONDE
+# déclarative pour `svcprobe`, qui expose `service_up{service="rotki"}`.
+# Aucun redémarrage n'est nécessaire — svcprobe relit son répertoire de sondes
+# à chaque scrape.
+
+# ── Ouverture du port pour Prometheus ──────────────────────────────────────
+# 4302 est publié par Docker : une règle ufw n'aurait AUCUN effet (CLAUDE.md).
+# L'autorisation de l'hôte Prometheus est un drop-in de docker-ports-security ;
+# le DROP par défaut du port vient de host_vars/ctdapi.yml.
+- name: Check that the Docker port firewall is installed
+  ansible.builtin.stat:
+    path: "{{ rotki_mon_firewall_script }}"
+  register: rotki_mon_fw
+  tags: [monitoring]
+
+- name: Fail when the Docker port firewall has not been applied yet
+  ansible.builtin.fail:
+    msg: >-
+      {{ rotki_mon_firewall_script }} est absent : docker-ports-security n'a
+      pas encore été joué sur `ctdapi`. Jouer d'abord deploy-rotki.yml en
+      entier.
+  when: not rotki_mon_fw.stat.exists
+  tags: [monitoring]
+
+- name: Allow Prometheus to reach the Rotki port in DOCKER-USER
+  ansible.builtin.template:
+    src: sources.conf.j2
+    dest: "{{ rotki_mon_dropin_dir }}/rotki.conf"
+    owner: root
+    group: root
+    mode: '0644'
+  become: true
+  register: rotki_mon_dropin
+  tags: [monitoring]
+
+# Le drop-in n'est lu qu'à l'application des règles (script idempotent).
+- name: Reapply the Docker port rules
+  ansible.builtin.command: "{{ rotki_mon_firewall_script }}"
+  become: true
+  changed_when: rotki_mon_dropin.changed
+  tags: [monitoring]
+
+# `public: true` n'est PAS un détail de style : sans lui, les defaults du rôle
+# inclus (svcprobe_checks_dir, svcprobe_lib_dir, svcprobe_listen_port) restent
+# confinés à ses propres tâches et les tâches ci-dessous échouent sur une
+# variable indéfinie (comportement documenté d'`include_role`, `public: no`
+# par défaut).
+- name: Ensure the shared probe is installed
+  ansible.builtin.include_role:
+    name: svcprobe-install
+    public: true
+  tags: [monitoring]
+
+- name: Deploy the Rotki probe
+  ansible.builtin.template:
+    src: check.json.j2
+    dest: "{{ svcprobe_checks_dir }}/rotki.json"
+    owner: root
+    group: root
+    mode: '0644'
+  become: true
+  tags: [monitoring]
+
+# Contrôle immédiat : une sonde déposée mais qui répond `service_up 0` alors
+# que le service tourne est une sonde MAL ÉCRITE, et elle ferait sonner une
+# alerte en permanence. Mieux vaut le voir au déploiement.
+- name: Verify the probe answers
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ svcprobe_listen_port }}/metrics"
+    return_content: true
+  register: rotki_probe
+  retries: 6
+  delay: 5
+  until: rotki_probe.status is defined and rotki_probe.status == 200
+  changed_when: false
+  tags: [monitoring]
+
+- name: Fail when the probe reports the service down
+  ansible.builtin.fail:
+    msg: >-
+      La sonde répond mais annonce `service_up{service="rotki"} 0` alors que
+      le déploiement vient de réussir : la sonde est mal écrite ou
+      {{ rotki_url }}/api/1/ping ne répond pas.
+  when: >-
+    'service_up{service="rotki"} 0' in (rotki_probe.content | default(''))
+  tags: [monitoring]
+
+- name: Report the probe result
+  ansible.builtin.debug:
+    msg: >-
+      {{ rotki_probe.content.split('\n')
+         | select('search', 'rotki')
+         | list }}
+  tags: [monitoring]
+
+# Preuve que l'ouverture sert : l'API répond depuis l'hôte Prometheus, à
+# travers DOCKER-USER (la sonde locale, elle, passe par OUTPUT et ne le prouve pas).
+- name: Reach Rotki from the Prometheus host
+  ansible.builtin.uri:
+    url: "http://{{ ansible_host }}:{{ rotki_port }}/api/1/ping"
+    status_code: 200
+  delegate_to: "{{ prometheus_host }}"
+  retries: 3
+  delay: 5
+  register: rotki_mon_remote
+  until: rotki_mon_remote.status | default(0) == 200
+  changed_when: false
+  check_mode: false
+  tags: [monitoring]

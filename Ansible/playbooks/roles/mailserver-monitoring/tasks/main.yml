@@ -1,0 +1,77 @@
+---
+# Supervision du relais SMTP : exporter Postfix (métriques de trafic) plus une
+# sonde svcprobe sur les démons et les ports qui, eux, ne remontent rien.
+
+- name: Fail early when no Prometheus host is defined
+  ansible.builtin.assert:
+    that:
+      - prometheus_host is defined
+      - prometheus_host in hostvars
+    fail_msg: "`prometheus_host` non défini ou absent de l'inventaire."
+  tags: [monitoring]
+
+# ── Exporter Postfix ───────────────────────────────────────────────────────
+- name: Enable and start prometheus-postfix-exporter
+  ansible.builtin.systemd:
+    name: prometheus-postfix-exporter
+    state: started
+    enabled: true
+    daemon_reload: true
+  become: true
+  tags: [monitoring]
+
+- name: Create the postfix target directory on the Prometheus host
+  ansible.builtin.file:
+    path: "/home/{{ remote_username }}/prometheus/prometheus-configs/{{ mailmon_job }}"
+    state: directory
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: '0755'
+  delegate_to: "{{ prometheus_host }}"
+  become: true
+  tags: [monitoring]
+
+- name: Deploy the postfix Prometheus target
+  ansible.builtin.template:
+    src: postfix-exporter-prometheus.json.j2
+    dest: "/home/{{ remote_username }}/prometheus/prometheus-configs/{{ mailmon_job }}/{{ inventory_hostname }}.json"
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: '0644'
+  delegate_to: "{{ prometheus_host }}"
+  become: true
+  tags: [monitoring]
+
+# Prometheus tourne en conteneur : co-localisé avec le relais, sa source est une
+# IP du bridge Docker et non l'IP publique. La comparaison porte sur les IP et
+# non sur les noms d'inventaire — `mail` et `prometheus1` désignent la même
+# machine.
+- name: Allow Prometheus to scrape the postfix exporter
+  community.general.ufw:
+    rule: allow
+    src: >-
+      {{ '172.17.0.0/16'
+         if hostvars[prometheus_host]['ansible_host'] == ansible_host
+         else hostvars[prometheus_host]['ansible_host'] }}
+    port: "{{ mailmon_exporter_port }}"
+    proto: tcp
+    comment: "Prometheus scrape - postfix exporter"
+  become: true
+  tags: [monitoring]
+
+# ── Sonde de disponibilité ─────────────────────────────────────────────────
+- name: Ensure the shared probe is installed
+  ansible.builtin.include_role:
+    name: svcprobe-install
+    public: true
+  tags: [monitoring]
+
+- name: Deploy the mailserver probe
+  ansible.builtin.template:
+    src: check.json.j2
+    dest: "{{ svcprobe_checks_dir }}/mailserver.json"
+    owner: root
+    group: root
+    mode: '0644'
+  become: true
+  tags: [monitoring]

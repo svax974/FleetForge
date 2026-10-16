@@ -1,0 +1,72 @@
+---
+# Arrête TOUTES les instances Theta Edge de l'hôte et retire leur supervision.
+# Données et clés (/opt/theta-edge/instance*) conservées : `theta-edge-purge`
+# seul les détruit.
+#
+# La cible Prometheus et l'exporter partent ici (CLAUDE.md § 2, pas de
+# `-monitoring-remove`) : laissés en place, ils publieraient `up 0` /
+# `theta_edge_up 0` indéfiniment pour un service volontairement arrêté.
+
+- name: Remove the Theta Edge Prometheus target
+  ansible.builtin.file:
+    path: "/home/{{ remote_username }}/prometheus/prometheus-configs/node-theta-edge/{{ inventory_hostname }}.json"
+    state: absent
+  delegate_to: "{{ prometheus_host }}"
+  when: prometheus_host is defined and prometheus_host in hostvars
+
+- name: Stop and disable the exporter
+  ansible.builtin.systemd:
+    name: theta-edge-exporter
+    state: stopped
+    enabled: false
+  failed_when: false
+
+- name: Remove the exporter files
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/systemd/system/theta-edge-exporter.service
+    - /usr/local/bin/theta-edge-exporter
+    - /etc/theta-edge-exporter
+
+- name: Reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+- name: Close the scrape port
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ item }}"
+    port: "9601"
+    delete: true
+  loop:
+    - "{{ (hostvars[prometheus_host | default('')] | default({})).ansible_host | default('') }}"
+    - 172.17.0.0/16
+  when: item | length > 0
+  failed_when: false
+
+# ── Instances ──────────────────────────────────────────────────────────────
+- name: Find the instance directories
+  ansible.builtin.find:
+    paths: /opt/theta-edge
+    patterns: "instance*"
+    file_type: directory
+  register: theta_edge_dirs
+
+- name: Stop and remove each instance container
+  community.docker.docker_compose_v2:
+    project_name: "theta-edge-{{ item | basename | regex_replace('^instance', '') }}"
+    project_src: "{{ item }}"
+    state: absent
+  loop: "{{ theta_edge_dirs.files | map(attribute='path') | list }}"
+  failed_when: false
+
+# Le fichier porte `theta_passwd` en clair : il n'a plus de raison d'exister
+# sans conteneur à démarrer.
+- name: Remove the compose files
+  ansible.builtin.file:
+    path: "{{ item }}/docker-compose.yml"
+    state: absent
+  loop: "{{ theta_edge_dirs.files | map(attribute='path') | list }}"

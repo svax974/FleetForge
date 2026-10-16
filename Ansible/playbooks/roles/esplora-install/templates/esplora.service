@@ -1,0 +1,27 @@
+[Unit]
+Description=Esplora indexer (electrs)
+After=network-online.target
+Wants=network-online.target
+
+# Même garde-fou que BRK (brk.service) : la fenêtre doit rester cohérente
+# avec RestartSec, sinon la limite de redémarrages ne se déclenche jamais.
+StartLimitIntervalSec={{ esplora_start_limit_interval }}
+StartLimitBurst={{ esplora_start_limit_burst }}
+
+[Service]
+Type=simple
+User={{ esplora_user }}
+Group={{ esplora_user }}
+Environment=HOME={{ esplora_home }}
+ExecStart={{ esplora_bin }} --conf {{ esplora_dir }}/config.toml
+Restart=always
+RestartSec=30
+# L'import initial (P2P + construction de l'index d'adresses) est lourd en
+# CPU/IO, comme la synchronisation de BRK.
+Nice=5
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

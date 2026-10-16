@@ -1,0 +1,6 @@
+---
+- name: Purge PapangMetrics (services + code; TimescaleDB untouched)
+  hosts: papangmetrics1
+  remote_user: "{{ remote_username }}"
+  roles:
+    - papangmetrics-purge

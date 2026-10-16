@@ -1,0 +1,65 @@
+---
+# Proxies des deux parcs (famille `proxy`). Remplace `deploy-proxypl.yml`, copie
+# de ce playbook à deux rôles près : vhosts et pare-feu restent propres à chaque
+# parc (`proxy-update-*`, `proxy-security-*`), choisis par le groupe du parc.
+#
+#   ./play.sh web3c deploy-proxy.yml
+#   ./play.sh papanglabs deploy-proxy.yml
+#   ./play.sh web3c deploy-proxy.yml --tags monitoring   # supervision seule
+
+# ── Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ───────────────────────
+# Échoue immédiatement si le parc n'a pas d'hôte de supervision utilisable,
+# puis vérifie — et répare — le socle de la machine, node_exporter et sa cible
+# Prometheus. Un service déployé sans supervision est un service dont personne
+# ne saura qu'il est tombé.
+# Les contrôles bloquants portent le tag `always` : ils s'appliquent même à un
+# rejeu ciblé par `--tags`.
+- name: Contrôle préalable
+  hosts: proxies
+  remote_user: "{{ remote_username }}"
+  roles:
+    - role: host-preflight
+      preflight_require_docker: false
+
+- name: Install proxy
+  hosts: proxies
+  remote_user: "{{ remote_username }}"
+  become: true
+  gather_facts: false
+
+  roles:
+    - install-nginx
+    - install-cert
+    - proxy-install
+  tasks:
+    # `include_role` et non `roles:` : le nom y est résolu à l'exécution, une
+    # fois l'inventaire chargé — dans `roles:`, il le serait avant.
+    - name: Vhosts du parc
+      ansible.builtin.include_role:
+        name: "proxy-update-{{ 'web3c' if 'web3c' in group_names else 'papang' }}"
+
+    - name: Pare-feu du parc
+      ansible.builtin.include_role:
+        name: "proxy-security-{{ 'web3c' if 'web3c' in group_names else 'papang' }}"
+
+# Pas de variable dans un `name:` de play : comme `hosts:`, il est résolu avant
+# le chargement des group_vars, donc `remote_username` y est toujours indéfini.
+# Le playbook devenait invérifiable au --syntax-check. La variable reste
+# légitime dans `remote_user:`, évalué au moment de la connexion.
+- name: Install aliases / tools for the service user
+  hosts: proxies
+  remote_user: "{{ remote_username }}"
+  gather_facts: false
+
+  roles:
+    - install-scripts
+
+# ── Supervision (OBLIGATOIRE, voir CLAUDE.md) ──────────────────────────────
+# Sonde `service_up` + métriques du service, et enregistrement de la cible
+# auprès de Prometheus. Rejouable seule :
+#   ./play.sh web3c deploy-proxy.yml --tags monitoring
+- name: Supervision du service
+  hosts: proxies
+  remote_user: "{{ remote_username }}"
+  roles:
+    - proxy-monitoring

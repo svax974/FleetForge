@@ -1,0 +1,11 @@
+---
+# Retire l'exporter DMARC (service, binaire, utilisateur système).
+# Conserve l'état accumulé, la configuration et la cible Prometheus.
+- name: Remove DMARC aggregate report exporter
+  hosts: mail:mail1
+  remote_user: "{{ remote_username }}"
+  become: yes
+  gather_facts: yes
+
+  roles:
+    - dmarc-exporter-remove

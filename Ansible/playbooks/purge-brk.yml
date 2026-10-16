@@ -1,0 +1,6 @@
+---
+- name: Purge BRK (DESTRUCTIVE — removes computed data, re-sync needed)
+  hosts: brk1
+  remote_user: "{{ remote_username }}"
+  roles:
+    - brk-purge

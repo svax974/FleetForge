@@ -1,0 +1,8 @@
+---
+# Sources autorisées à pousser leurs sauvegardes sur cet hôte de destination.
+# Renseigné par entrée d'inventaire (`backup_sources`), pas en dur : c'est la
+# même liste qui sert au rôle d'installation pour distribuer la clé SSH.
+backup_sources: []
+
+# IP/CIDR bruts à autoriser en plus (dépannage). À garder vide.
+backup_extra_allowed_cidrs: []

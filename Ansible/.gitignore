@@ -1,0 +1,53 @@
+# Clés SSH du parc : ni les PRIVÉES (jamais), ni les PUBLIQUES depuis la
+# publication du dépôt — keys/<parc>/*.pub fait foi pour root et srvc, mais
+# dit qui accède au parc et porte les adresses e-mail des titulaires.
+# Convention : keys/README.md.
+id*
+keys/*
+!keys/README.md
+
+# Variables globales : CIDR Cloudflare et secrets, jamais versionnées.
+all.yml
+
+# Fichiers d'authentification basique générés.
+htpasswd
+
+# ATTENTION — la règle qui figurait ici était `group_vars/*`, et elle ne
+# matchait RIEN : un motif contenant une barre oblique est ancré au répertoire
+# du `.gitignore`, or les fichiers sont sous `playbooks/group_vars/`. Les
+# quatre fichiers de parc étaient donc versionnés avec ~33 secrets en clair,
+# depuis avril 2026, alors que l'intention était manifestement l'inverse.
+#
+# Depuis la publication du dépôt (16/10/2026), ils SONT exclus : une valeur
+# vault reste un secret (chiffrement hors ligne attaquable, et la fuite du
+# mot de passe du vault rendrait tout l'historique lisible d'un coup). Le
+# modèle versionné est `playbooks/group_vars/parc.yml.template`.
+playbooks/group_vars/*
+!playbooks/group_vars/*.template
+
+# Inventaires : adresses de tout le parc + secrets vault (initial_ssh_pass).
+# Modèle versionné : inventories/parc_inventory.yml.template.
+inventories/*
+!inventories/*.template
+
+# host_vars : pare-feu et réglages de chaque machine RÉELLE.
+# Modèle versionné : playbooks/host_vars/machine.yml.template.
+playbooks/host_vars/*
+!playbooks/host_vars/*.template
+
+# Dump Pritunl : clés privées du serveur et des utilisateurs VPN.
+playbooks/roles/vpn-setup/templates/pritunl.dump
+
+# Sauvegardes locales (base et fichiers WordPress).
+backups/wordpress/
+
+# Le mot de passe du vault ne doit jamais entrer dans le dépôt, où qu'il soit.
+vault-pass
+*.vault-pass
+.vault_pass*
+
+# Fichier de clés fournisseur FreeLLMAPI, déposé localement par l'opérateur et
+# importé par freellm-install (FREEAPI_CONFIG_PATH) : il contient des clés API
+# en clair, jamais versionné — contrairement à group_vars, pas de passage par
+# Ansible Vault ici, ce n'est qu'une copie locale vers l'hôte cible.
+playbooks/roles/freellm-install/files/freellmapi-config/*.json

@@ -1,0 +1,56 @@
+---
+# Ollama — serveur d'inférence local.
+#
+#   ./play.sh web3c deploy-ollama.yml
+#   ./play.sh web3c deploy-ollama.yml --tags monitoring   # sonde seule
+#
+# Ce playbook n'existait pas jusqu'au 12/08/2026 : les six rôles `ollama-*`
+# étaient là, mais lancés à la main depuis l'app, un par un. Conséquence
+# visible dans l'historique (`ansible_runs` 26 et 27) : `ollama-install` puis
+# `ollama-model-install` sur `hub`, et rien d'autre — donc Ollama tournait
+# depuis avril sans sonde et avec son API ouverte sur 0.0.0.0.
+#
+# Vise l'entrée dédiée `ollama` (machine hub, CLAUDE.md § 2) depuis le
+# 11/10/2026 — plus de `hosts: all` à restreindre par `--limit`.
+#
+# Publié par les proxies en MODE PRIVÉ : CNAME ollama.web3c.cc posé par
+# ollama-install, vhost ollama.conf par `./play.sh web3c update-proxy-web3c.yml`
+# (à rejouer après le premier déploiement). Le routeur doit rediriger 11434
+# vers hub (hors Ansible).
+#
+# Le modèle n'est PAS déployé ici : voir `deploy-ollama-model.yml`, qui
+# télécharge plusieurs gigaoctets et n'a pas à être rejoué à chaque passage.
+
+# ── Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ───────────────────────
+- name: Contrôle préalable
+  hosts: ollama
+  remote_user: "{{ remote_username }}"
+  roles:
+    - role: host-preflight
+
+- name: Installation d'Ollama
+  hosts: ollama
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - ollama-install
+
+# ── Pare-feu ───────────────────────────────────────────────────────────────
+# `ollama-install` bascule l'écoute sur 0.0.0.0:11434 et l'API n'a aucune
+# authentification : qui joint le port peut lister les modèles, en télécharger
+# (donc remplir le disque) et consommer le GPU. Refermer fait partie du
+# déploiement, pas d'un passage ultérieur.
+- name: Pare-feu
+  hosts: ollama
+  remote_user: "{{ remote_username }}"
+  roles:
+    - ollama-security
+
+# ── Supervision (OBLIGATOIRE, voir CLAUDE.md) ──────────────────────────────
+# La sonde porte sur /api/tags, pas sur le port : le démon accepte les
+# connexions bien avant d'être capable de servir un modèle.
+- name: Supervision du service
+  hosts: ollama
+  remote_user: "{{ remote_username }}"
+  roles:
+    - ollama-monitoring

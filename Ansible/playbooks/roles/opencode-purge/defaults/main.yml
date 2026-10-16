@@ -1,0 +1,28 @@
+---
+opencode_binary: "/usr/local/bin/opencode"
+
+# Comptes dont on efface la configuration, les sessions et les identifiants.
+opencode_users:
+  - "{{ remote_username }}"
+
+# Répertoires par compte supprimés par la purge, relatifs au HOME :
+#   .config/opencode        configuration globale, agents, commandes, prompts
+#   .local/share/opencode   `opencode.db` — l'historique complet des sessions
+#                           (plusieurs gigaoctets après quelques mois) ET les
+#                           identifiants des fournisseurs, qui vivent dans ses
+#                           tables `credential` et `account` depuis qu'opencode
+#                           a abandonné `auth.json` ; plus les journaux et les
+#                           instantanés
+#   .local/state/opencode   modèle sélectionné dans le TUI (`model.json`),
+#                           favoris et historique des saisies
+#   .cache/opencode         caches téléchargés
+#   .opencode               installation personnelle du script officiel
+opencode_purge_paths:
+  - ".config/opencode"
+  - ".local/share/opencode"
+  - ".local/state/opencode"
+  - ".cache/opencode"
+  - ".opencode"
+
+preflight_state_dir: /var/lib/fleetforge/state
+preflight_legacy_state_dir: /var/lib/infra-manager/state

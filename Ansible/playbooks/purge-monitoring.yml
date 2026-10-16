@@ -1,0 +1,13 @@
+---
+# Supprime la stack de supervision de web3c (famille `monitoring`), sa
+# configuration ET tout l'historique des métriques. Côté papanglabs :
+# purge-prometheus.yml.
+#
+#   ./play.sh web3c purge-monitoring.yml
+
+- name: Purge de la supervision (historique compris)
+  hosts: monitor
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - monitoring-purge

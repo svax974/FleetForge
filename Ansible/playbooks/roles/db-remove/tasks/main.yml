@@ -1,0 +1,21 @@
+---
+# Remove PostgreSQL Docker container. Database data preserved. Use db-purge to delete.
+
+- name: Stop and remove PostgreSQL container
+  community.docker.docker_container:
+    name: postgres
+    state: absent
+  ignore_errors: true
+
+# ── Supervision ────────────────────────────────────────────────────────────
+# Convention `-monitoring` (CLAUDE.md) : c'est le rôle de suppression du
+# service qui retire sa sonde. Une sonde laissée en place publierait
+# `service_up 0` indéfiniment et ferait sonner `ServiceDown` sur un service
+# volontairement désinstallé — l'alerte qu'on apprend à ignorer, et qui finit
+# par masquer les vraies.
+- name: Remove the svcprobe check
+  ansible.builtin.file:
+    path: "/etc/svcprobe/checks.d/db.json"
+    state: absent
+  become: true
+  tags: [monitoring]

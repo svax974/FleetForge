@@ -1,0 +1,44 @@
+---
+# ── Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ───────────────────────
+# Échoue immédiatement si le parc n'a pas d'hôte de supervision utilisable,
+# puis vérifie — et répare — le socle de la machine, node_exporter et sa cible
+# Prometheus. Un service déployé sans supervision est un service dont personne
+# ne saura qu'il est tombé.
+# Les contrôles bloquants portent le tag `always` : ils s'appliquent même à un
+# rejeu ciblé par `--tags`.
+- name: Contrôle préalable
+  hosts: rpcbtc1
+  remote_user: "{{ remote_username }}"
+  roles:
+    - role: host-preflight
+      preflight_require_docker: false
+
+- name: Deploy the BTC RPC node
+  hosts: rpcbtc1
+  remote_user: "{{ remote_username }}"
+  become: true
+
+  roles:
+    - install-python
+
+- name: Deploy the BTC RPC node
+  hosts: rpcbtc1
+  remote_user: "{{ remote_username }}"
+  become: false
+
+  roles:
+    - rpcbtc-install
+    - rpcbtc-setup
+    - rpcbtc-rpcauth
+    # La supervision fait partie du déploiement, pas d'une étape ultérieure
+    # qu'on pense à faire. Rejouable seule :
+    #   ./play.sh papanglabs deploy-rpcbtc.yml --tags monitoring
+    - rpcbtc-monitoring
+
+- name: Updating proxies configuration
+  hosts: proxies
+  remote_user: "{{ remote_username }}"
+  become: true
+
+  roles:
+    - proxy-update-papang

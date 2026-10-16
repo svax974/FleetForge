@@ -1,0 +1,12 @@
+{
+  "service": "openvpn",
+  "up": {"kind": "systemd", "unit": "{{ vpnmon_unit }}"},
+  "extra_checks": [
+    {"name": "port", "kind": "tcp", "host": "127.0.0.1", "port": {{ vpnmon_port }}}
+  ],
+  "metrics_command": [
+    "{{ svcprobe_lib_dir }}/openvpn-metrics.sh",
+    "{{ vpnmon_status_file }}", "openvpn"
+  ],
+  "metrics_timeout": 10
+}

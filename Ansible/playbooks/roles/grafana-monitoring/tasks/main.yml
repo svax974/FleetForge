@@ -1,0 +1,59 @@
+---
+# Supervision de Grafana : cible native /metrics + sonde de santé.
+
+- name: Fail early when no Prometheus host is defined
+  ansible.builtin.assert:
+    that:
+      - prometheus_host is defined
+      - prometheus_host in hostvars
+    fail_msg: "`prometheus_host` non défini ou absent de l'inventaire."
+  tags: [monitoring]
+
+- name: Create the grafana target directory on the Prometheus host
+  ansible.builtin.file:
+    path: "/home/{{ remote_username }}/prometheus/prometheus-configs/{{ grafmon_job }}"
+    state: directory
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: '0755'
+  delegate_to: "{{ prometheus_host }}"
+  become: true
+  tags: [monitoring]
+
+- name: Deploy the grafana Prometheus target
+  ansible.builtin.template:
+    src: prometheus-target.json.j2
+    dest: "/home/{{ remote_username }}/prometheus/prometheus-configs/{{ grafmon_job }}/{{ inventory_hostname }}.json"
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: '0644'
+  delegate_to: "{{ prometheus_host }}"
+  become: true
+  tags: [monitoring]
+
+- name: Ensure the shared probe is installed
+  ansible.builtin.include_role:
+    name: svcprobe-install
+    public: true
+  tags: [monitoring]
+
+- name: Deploy the grafana health probe
+  ansible.builtin.template:
+    src: check.json.j2
+    dest: "{{ svcprobe_checks_dir }}/grafana.json"
+    owner: root
+    group: root
+    mode: '0644'
+  become: true
+  tags: [monitoring]
+
+# Grafana écoute sur un port publié par Docker : une règle ufw n'a aucun effet
+# dessus. Le filtrage (et donc l'autorisation du scrape) vit dans DOCKER-USER,
+# géré par `docker-ports-security` depuis host_vars/<hôte canonique>.yml.
+- name: Reminder — the scrape opening lives in DOCKER-USER, not ufw
+  ansible.builtin.debug:
+    msg: >-
+      Port {{ grafmon_port }} publié par Docker : autoriser
+      {{ hostvars[prometheus_host]['ansible_host'] }} dans
+      host_vars/{{ inventory_hostname }}.yml, sinon la cible restera `down`.
+  tags: [monitoring]

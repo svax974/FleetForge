@@ -1,0 +1,19 @@
+# OpenDKIM Trusted Hosts
+
+# Localhost
+127.0.0.1
+::1
+localhost
+
+# Domain name
+{{ domain_name }}
+
+# Domain hosts from inventory
+{% for host in domain_hosts %}
+{{ host }}
+{% endfor %}
+
+# Whitelist IPs
+{% for ip in whitelist | default([]) %}
+{{ ip }}
+{% endfor %} 

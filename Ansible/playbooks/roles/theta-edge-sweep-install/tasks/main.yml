@@ -1,0 +1,73 @@
+---
+# Deploy the Theta Edge TFuel sweep — a Node.js script run by cron that transfers
+# TFuel rewards to theta_wallet whenever the balance exceeds theta_edge_sweep_threshold_tfuel.
+# theta_passwd and theta_wallet are read from group_vars — no extra-vars needed.
+
+- name: Fail if theta_passwd is not set
+  ansible.builtin.fail:
+    msg: "theta_passwd is required. Define it in group_vars."
+  when: theta_passwd is not defined or theta_passwd == ""
+
+- name: Fail if theta_wallet is not set
+  ansible.builtin.fail:
+    msg: "theta_wallet is required. Define it in group_vars."
+  when: theta_wallet is not defined or theta_wallet == ""
+
+- name: Install Node.js
+  ansible.builtin.apt:
+    name:
+      - nodejs
+      - npm
+    state: present
+    update_cache: false
+
+- name: Create sweep directory
+  ansible.builtin.file:
+    path: /opt/theta-edge/sweep
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Deploy package.json
+  ansible.builtin.template:
+    src: package.json.j2
+    dest: /opt/theta-edge/sweep/package.json
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Install theta-js npm dependencies
+  community.general.npm:
+    path: /opt/theta-edge/sweep
+    state: present
+  environment:
+    HOME: /root
+
+- name: Deploy sweep config (contains password — mode 0600)
+  ansible.builtin.template:
+    src: sweep-config.json.j2
+    dest: /opt/theta-edge/sweep/config.json
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Deploy sweep script
+  ansible.builtin.template:
+    src: sweep.js.j2
+    dest: /opt/theta-edge/sweep/sweep.js
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Create cron job for TFuel sweep
+  ansible.builtin.cron:
+    name: "theta-edge-sweep"
+    minute: "{{ theta_edge_sweep_schedule.split(' ')[0] }}"
+    hour: "{{ theta_edge_sweep_schedule.split(' ')[1] }}"
+    day: "{{ theta_edge_sweep_schedule.split(' ')[2] }}"
+    month: "{{ theta_edge_sweep_schedule.split(' ')[3] }}"
+    weekday: "{{ theta_edge_sweep_schedule.split(' ')[4] }}"
+    user: root
+    job: "/usr/bin/node /opt/theta-edge/sweep/sweep.js >> /var/log/theta-edge-sweep.log 2>&1"
+    state: present

@@ -1,0 +1,28 @@
+---
+# Supervision des serveurs de synchronisation (CLAUDE.md, obligation
+# `-monitoring`) — cas 1 de la convention : le serveur expose NATIVEMENT
+# Prometheus (/metrics sur SYNC_METRICS_LISTEN, séries `sync_*` : sync_up,
+# sync_shed_total, sync_auth_failures_total, sync_bytes…). Pas d'exporter à
+# écrire ; ce rôle enregistre la cible, ouvre le scrape et ajoute une sonde
+# svcprobe sur /v1/health (la sonde interne `sync_up` ne voit que la base : elle
+# ne prouve pas que le listener HTTP public répond).
+#
+# Port /metrics par instance (inventaire : `sync_metrics_port`, 9710-9712) —
+# publié par Docker, donc filtré dans DOCKER-USER (sync-server-security) et
+# JAMAIS public ; le vhost des proxies renvoie 404 sur /metrics (et le port
+# n'est de toute façon pas celui que les proxies relaient).
+
+# Job Prometheus : un SEUL job pour les trois instances. Il doit être déclaré
+# dans monitoring-install/templates/prometheus.yml.j2 (relire cette stack avec
+# deploy-monitoring.yml après l'ajout, sinon la cible n'est jamais lue).
+sync_mon_job: sync-server
+sync_mon_port: "{{ sync_metrics_port }}"
+sync_mon_url: "http://127.0.0.1:{{ sync_mon_port }}"
+sync_mon_health_url: "http://127.0.0.1:{{ app_port }}/v1/health"
+sync_mon_container: "sync-{{ sync_instance }}"
+sync_mon_reference_metric: sync_up
+
+# Drop-in lu par docker-ports-firewall.sh à CHAQUE application des règles :
+# l'autorisation survit aux rejeux de docker-ports-security.
+sync_mon_dropin_dir: /etc/docker-ports/sources.d
+sync_mon_firewall_script: /usr/local/sbin/docker-ports-firewall.sh

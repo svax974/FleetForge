@@ -1,0 +1,16 @@
+{
+  "service": "ctdapi",
+  "up": {"kind": "http", "url": "{{ ctm_health_url }}", "status": [200], "timeout": 10},
+  "extra_checks": [
+    {"name": "front", "kind": "docker", "container": "{{ ctm_front_container }}"},
+    {"name": "back-worker", "kind": "docker", "container": "{{ ctm_back_worker_container }}"},
+    {"name": "postgres", "kind": "docker", "container": "{{ pgbak_container }}"},
+    {"name": "redis", "kind": "docker", "container": "{{ ctm_redis_container }}"},
+    {"name": "redis-port", "kind": "tcp", "host": "127.0.0.1", "port": {{ ctm_redis_port }}}
+  ],
+  "metrics_command": [
+    "{{ svcprobe_lib_dir }}/postgres-metrics.sh",
+    "{{ pgbak_container }}", "{{ pgbak_user }}", "{{ pgbak_db }}", "ctdapi"
+  ],
+  "metrics_timeout": 15
+}

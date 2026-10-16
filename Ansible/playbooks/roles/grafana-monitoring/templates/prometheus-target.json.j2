@@ -1,0 +1,9 @@
+[
+    {
+        "targets": [ "{{ ansible_host }}:{{ grafmon_port }}" ],
+        "labels": {
+            "job": "{{ grafmon_job }}",
+            "instance": "{{ inventory_hostname }}"
+        }
+    }
+]

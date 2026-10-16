@@ -1,0 +1,29 @@
+---
+# Install Node.js LTS from NodeSource.
+
+- name: Check installed node version
+  ansible.builtin.command: node --version
+  register: node_check
+  failed_when: false
+  changed_when: false
+
+- name: Add NodeSource setup script
+  ansible.builtin.get_url:
+    url: "https://deb.nodesource.com/setup_{{ nodejs_major }}.x"
+    dest: /tmp/nodesource_setup.sh
+    mode: '0755'
+  become: true
+  when: node_check.rc != 0 or ('v' + nodejs_major) not in (node_check.stdout | default(''))
+
+- name: Run NodeSource setup
+  ansible.builtin.command: bash /tmp/nodesource_setup.sh
+  become: true
+  when: node_check.rc != 0 or ('v' + nodejs_major) not in (node_check.stdout | default(''))
+
+- name: Install Node.js
+  ansible.builtin.apt:
+    name: nodejs
+    state: present
+    update_cache: true
+  become: true
+  when: node_check.rc != 0 or ('v' + nodejs_major) not in (node_check.stdout | default(''))

@@ -1,0 +1,53 @@
+---
+# Install the PapangMetrics API systemd service. Assumes papangmetrics-deploy
+# has already pushed the code + built + written .env.
+
+- name: Deploy API systemd service
+  ansible.builtin.template:
+    src: papangmetrics-api.service
+    dest: /etc/systemd/system/papangmetrics-api.service
+    owner: root
+    group: root
+    mode: '0644'
+  become: true
+  notify: restart papangmetrics-api
+
+- name: Enable and start API
+  ansible.builtin.systemd:
+    name: papangmetrics-api
+    state: started
+    enabled: true
+    daemon_reload: true
+  become: true
+
+# ── Enregistrement de la cible auprès de Prometheus ────────────────────────
+# Sans ce fichier, Prometheus ne scrape rien et les alertes (dont brk_up et
+# brk_height, portées par l'ETL) ne peuvent pas se déclencher.
+#
+# Tag `monitoring` : permet d'armer/réarmer la supervision seule, sans rejouer
+# le rsync + build + migrations de `papangmetrics-deploy` —
+#   ./play.sh papanglabs deploy-papangmetrics.yml --tags monitoring
+# Indispensable quand Prometheus est (re)déployé après le service, cas où les
+# répertoires file_sd repartent vides et où les alertes deviennent muettes.
+
+- name: Create papangmetrics-api target directory on Prometheus host
+  ansible.builtin.file:
+    path: "/home/{{ remote_username }}/prometheus/prometheus-configs/papangmetrics-api"
+    state: directory
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: '0755'
+  delegate_to: "{{ prometheus_host }}"
+  become: true
+  tags: [monitoring]
+
+- name: Deploy papangmetrics-api Prometheus target
+  ansible.builtin.template:
+    src: prometheus-target.json.j2
+    dest: "/home/{{ remote_username }}/prometheus/prometheus-configs/papangmetrics-api/{{ inventory_hostname }}.json"
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: '0644'
+  delegate_to: "{{ prometheus_host }}"
+  become: true
+  tags: [monitoring]

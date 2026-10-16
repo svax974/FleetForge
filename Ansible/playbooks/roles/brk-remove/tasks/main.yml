@@ -1,0 +1,40 @@
+---
+# Stop BRK and remove the service + binary. Keeps the computed data (brkdir).
+
+- name: Stop and disable BRK service
+  ansible.builtin.systemd:
+    name: brk
+    state: stopped
+    enabled: false
+  become: true
+  ignore_errors: true
+
+- name: Remove BRK systemd unit
+  ansible.builtin.file:
+    path: /etc/systemd/system/brk.service
+    state: absent
+  become: true
+
+- name: Reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+  become: true
+
+- name: Remove brk binary
+  ansible.builtin.file:
+    path: "{{ brk_home }}/.cargo/bin/brk"
+    state: absent
+  become: true
+
+# ── Supervision ────────────────────────────────────────────────────────────
+# Convention `-monitoring` (CLAUDE.md) : c'est le rôle de suppression du
+# service qui retire sa sonde. Une sonde laissée en place publierait
+# `service_up 0` indéfiniment et ferait sonner `ServiceDown` sur un service
+# volontairement désinstallé — l'alerte qu'on apprend à ignorer, et qui finit
+# par masquer les vraies.
+- name: Remove the svcprobe check
+  ansible.builtin.file:
+    path: "/etc/svcprobe/checks.d/brk.json"
+    state: absent
+  become: true
+  tags: [monitoring]

@@ -1,0 +1,31 @@
+---
+# Pose sur `ak_user` les clés publiques de Ansible/keys/<parc>/*.pub — le
+# dossier fait foi. `exclusive: true` : toute clé absente du dossier est
+# RETIRÉE du compte, c'est ce qui rend une révocation effective.
+#
+# Appelé par security-ssh (root) et security-create-user (remote_username) :
+# `include_role: security-ssh, tasks_from: authorized_keys` avec `ak_user`.
+# `parc_name` vient de group_vars/<parc>.yml, sans défaut : un parc qui ne le
+# déclare pas doit échouer ici, pas retomber sur un autre dossier de clés.
+
+- name: Check the parc name and its key folder
+  ansible.builtin.assert:
+    that:
+      - parc_name is defined
+      - ak_files | length > 0
+    fail_msg: >-
+      Aucune clé publique dans Ansible/keys/{{ parc_name | default('<parc_name non défini>') }}/*.pub.
+      Un `exclusive: true` sur un dossier vide retirerait TOUTES les clés de
+      {{ ak_user }} : refusé. Déclarer `parc_name` dans group_vars/<parc>.yml
+      et y déposer au moins la clé de contrôle.
+  vars:
+    ak_files: "{{ query('ansible.builtin.fileglob', playbook_dir ~ '/../keys/' ~ (parc_name | default('_')) ~ '/*.pub') }}"
+
+- name: Authorize the keys of the parc for {{ ak_user }}
+  ansible.posix.authorized_key:
+    user: "{{ ak_user }}"
+    state: present
+    exclusive: true
+    key: "{{ query('ansible.builtin.file', *ak_files) | map('trim') | join('\n') }}"
+  vars:
+    ak_files: "{{ query('ansible.builtin.fileglob', playbook_dir ~ '/../keys/' ~ parc_name ~ '/*.pub') | sort }}"

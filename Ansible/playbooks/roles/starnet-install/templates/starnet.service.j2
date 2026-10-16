@@ -1,0 +1,25 @@
+# Généré par Ansible (starnet-install) — NE PAS ÉDITER SUR L'HÔTE.
+# Unité systemd --user de {{ starnet_user }} : `systemctl --user status starnet`,
+# `journalctl --user -u starnet`.
+[Unit]
+Description=StarNet sidecar (UI + agent engine, 127.0.0.1:{{ starnet_sidecar_port }})
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory={{ starnet_app_dir }}
+# Deux fichiers : la clé de chiffrement des connecteurs, tirée UNE fois sur
+# l'hôte et jamais réécrite par Ansible, puis la configuration gérée.
+EnvironmentFile={{ starnet_config_dir }}/connector.env
+EnvironmentFile={{ starnet_config_dir }}/starnet.env
+Environment=PATH={{ starnet_node_dir }}/bin:/usr/local/bin:/usr/bin:/bin
+Environment=NODE_ENV=production
+ExecStart={{ starnet_node_dir }}/bin/node sidecar/index.js
+# Le sidecar a son propre disjoncteur de boucle de crash (process-fault) : il
+# passe en écoute dégradée (/api/health → 503) plutôt que de redémarrer sans
+# fin. RestartSec laisse à ce mécanisme le temps de compter.
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

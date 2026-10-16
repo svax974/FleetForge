@@ -1,0 +1,28 @@
+---
+# Déploie Umami (analytics auto-hébergé) : conteneurs Docker (app + Postgres privé) et pare-feu.
+# Contrairement à PapangMetrics, il n'y a pas de code applicatif à livrer (image officielle
+# Umami) — juste la stack Docker et l'ouverture réseau depuis le proxy.
+#
+# Une fois déployé, l'entrée nginx correspondante doit être appliquée séparément :
+#   ./play.sh papanglabs deploy-umami.yml
+#   ./play.sh papanglabs update-proxy-papang.yml
+#
+# Après ce premier déploiement, l'admin doit se connecter au dashboard Umami
+# (identifiants par défaut admin / umami), changer le mot de passe, créer un site, puis coller
+# l'URL du script + l'ID du site dans AdminTracking.tsx côté app (module `tracking`) — étape
+# manuelle, non automatisée ici (voir le plan pour la raison).
+#
+# ── Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ───────────────────────
+- name: Contrôle préalable
+  hosts: umami1
+  remote_user: "{{ remote_username }}"
+  roles:
+    - role: host-preflight
+      preflight_require_docker: true
+
+- name: Deploy Umami
+  hosts: umami1
+  remote_user: "{{ remote_username }}"
+  roles:
+    - umami-install
+    - umami-security

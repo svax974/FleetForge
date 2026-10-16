@@ -1,0 +1,9 @@
+---
+pm_user: "{{ remote_username }}"
+pm_dir: "/home/{{ remote_username }}/papangmetrics"
+pm_api_port: "{{ papangmetrics_api_port | default(9743) }}"
+
+# Garde-fou anti-boucle de crash (voir brk-install/defaults). La fenêtre doit
+# rester largement supérieure à RestartSec × burst pour être atteignable.
+pm_start_limit_interval: 900
+pm_start_limit_burst: 5

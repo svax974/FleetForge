@@ -1,0 +1,82 @@
+---
+# Firewall for the PapangMetrics API. Internal-only today (service JWT); the
+# rules pre-authorize the proxies + whitelist for when it is exposed publicly.
+
+- name: Allow API port from whitelist
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ item }}"
+    port: "{{ pm_api_port }}"
+    comment: "papangmetrics-api - whitelist"
+  loop: "{{ whitelist }}"
+  become: true
+
+- name: Allow API port from proxies
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ hostvars[item].ansible_host }}"
+    port: "{{ pm_api_port }}"
+    comment: "papangmetrics-api - proxy"
+  loop: "{{ groups['proxies'] | default([]) }}"
+  become: true
+
+# Les backs applicatifs consomment cette API en HTTP (INDICATOR_SOURCE=api) : sans
+# cette ouverture, ufw DROP leurs SYN et le back part en timeout de lecture — vu
+# comme un 504 par le proxy, donc comme une erreur CORS par le navigateur, ce qui
+# ne désigne jamais le pare-feu. La règle a longtemps manqué sans conséquence :
+# le back de préprod partage la machine des proxies (`prometheus1`), déjà
+# autorisée juste au-dessus. Le premier back sur sa propre machine
+# (backindicators1-prod) a rendu le trou visible, le 20/08/2026.
+#
+# `backsindicators` et pas `backs` : ce dernier contient aussi `api` (cette
+# machine) et `backsrpc`, qui n'ont rien à faire dans cette liste.
+- name: Allow API port from the PapangLabs application backs
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ hostvars[item].ansible_host }}"
+    port: "{{ pm_api_port }}"
+    comment: "papangmetrics-api - back {{ item }}"
+  loop: "{{ groups['backsindicators'] | default([]) }}"
+  become: true
+  when: ansible_host != hostvars[item].ansible_host
+  tags: [clients]
+
+# Tagué `monitoring` comme l'enregistrement des cibles : sans cette ouverture,
+# les cibles apparaissent dans Prometheus mais restent `down`. Les deux doivent
+# donc pouvoir être rejouées ensemble, sans redéployer le code.
+- name: Allow Prometheus (monitor) to scrape API + ETL metrics
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ hostvars[prometheus_host]['ansible_host'] }}"
+    port: "{{ item }}"
+    comment: "papangmetrics - prometheus scrape"
+  loop:
+    - "{{ pm_api_port }}"
+    - "{{ pm_etl_metrics_port }}"
+  become: true
+  when: ansible_host != hostvars[prometheus_host]['ansible_host']
+  ignore_errors: true
+  tags: [monitoring]
+
+# Cas Prometheus co-localisé : il tourne en conteneur, les scrapes arrivent donc
+# par le bridge Docker et non par l'IP publique de la machine. Même logique que
+# dans `exporter-sys-install` (le test porte sur l'IP, pas sur le nom d'hôte :
+# plusieurs entrées d'inventaire partagent la même machine).
+- name: Allow Prometheus Docker bridge to scrape API + ETL metrics (monitor is local)
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "172.17.0.0/16"
+    port: "{{ item }}"
+    comment: "papangmetrics - prometheus docker scrape"
+  loop:
+    - "{{ pm_api_port }}"
+    - "{{ pm_etl_metrics_port }}"
+  become: true
+  when: ansible_host == hostvars[prometheus_host]['ansible_host']
+  ignore_errors: true
+  tags: [monitoring]

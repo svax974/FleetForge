@@ -1,0 +1,15 @@
+---
+# Identique à xbot-remove : xbot n'a pas de base de données, donc rien de plus
+# à purger côté Ansible que la sonde svcprobe.
+
+- name: Remove the svcprobe check file
+  ansible.builtin.file:
+    path: "{{ svcprobe_checks_dir }}/xbot.json"
+    state: absent
+  become: true
+
+- name: Notice — the application stack is untouched
+  ansible.builtin.debug:
+    msg: >-
+      Sonde svcprobe retirée. La stack docker-compose de xbot (front, back)
+      n'est pas gérée par Ansible et n'est pas affectée.

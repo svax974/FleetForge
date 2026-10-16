@@ -1,0 +1,19 @@
+---
+# Supervision du relai SearXNG.
+#
+# SearXNG n'expose aucun endpoint Prometheus : sonde déclarative pour
+# `svcprobe` (port 9110), plus un collecteur propre au service pour l'état
+# DÉGRADÉ — un métamoteur qui répond mais ne rapporte plus rien.
+
+searxng_container: searxng
+searxng_port: 8888
+searxng_url: "http://127.0.0.1:{{ searxng_port }}"
+
+# Requête de contrôle. Volontairement banale et sans intérêt commercial : elle
+# part vers de vrais moteurs, elle n'a pas à ressembler à une recherche
+# opérationnelle.
+searxng_probe_query: "open source"
+# Intervalle minimal entre deux requêtes de contrôle réelles (secondes). Voir
+# l'en-tête du collecteur : à la fréquence de scrape, une requête par scrape
+# provoquerait le blocage qu'on cherche à détecter.
+searxng_probe_interval: 300

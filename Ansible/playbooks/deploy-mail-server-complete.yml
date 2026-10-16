@@ -1,0 +1,504 @@
+---
+# ── Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ───────────────────────
+# Échoue immédiatement si le parc n'a pas d'hôte de supervision utilisable,
+# puis vérifie — et répare — le socle de la machine, node_exporter et sa cible
+# Prometheus. Un service déployé sans supervision est un service dont personne
+# ne saura qu'il est tombé.
+# Les contrôles bloquants portent le tag `always` : ils s'appliquent même à un
+# rejeu ciblé par `--tags`.
+- name: Contrôle préalable
+  hosts: mail
+  remote_user: "{{ remote_username }}"
+  roles:
+    - role: host-preflight
+      preflight_require_docker: false
+
+- name: Deploy complete mail server
+  hosts: mail
+  become: yes
+
+  tasks:
+    - name: Stop and cleanup mail services
+      ansible.builtin.include_role:
+        name: mail-stop
+
+    - name: Verify Postfix is stopped
+      ansible.builtin.shell: |
+        if pgrep -x "master" > /dev/null 2>&1; then
+          echo "Postfix still running, forcing stop..."
+          postfix stop 2>/dev/null || true
+          pkill -9 -x "master" 2>/dev/null || true
+          sleep 3
+        fi
+        if pgrep -x "master" > /dev/null 2>&1; then
+          echo "ERROR: Cannot stop Postfix"
+          exit 1
+        fi
+        echo "Postfix stopped"
+
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install required packages
+      ansible.builtin.apt:
+        name:
+          - postfix
+          - postfix-sqlite
+          - dovecot-core
+          - dovecot-sqlite
+          - opendkim
+          - opendkim-tools
+          - sqlite3
+          - python3
+          - python3-pip
+          - libsasl2-modules
+          - sasl2-bin
+          - net-tools
+          - curl
+          - openssl
+        state: present
+
+    - name: Create mail directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+      loop:
+        - /etc/postfix/sqlite
+        - /etc/opendkim
+        - /etc/opendkim/keys
+        - /var/run/opendkim
+
+    - name: Create SQLite database
+      ansible.builtin.shell: |
+        sqlite3 /etc/postfix/sqlite/mailserver.db << 'EOF'
+        CREATE TABLE IF NOT EXISTS virtual_users (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          email TEXT NOT NULL UNIQUE,
+          password TEXT NOT NULL,
+          domain TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS virtual_domains (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          domain TEXT NOT NULL UNIQUE
+        );
+        CREATE INDEX IF NOT EXISTS idx_email ON virtual_users(email);
+        CREATE INDEX IF NOT EXISTS idx_domain ON virtual_users(domain);
+        EOF
+        chown root:root /etc/postfix/sqlite/mailserver.db
+        chmod 644 /etc/postfix/sqlite/mailserver.db
+
+    - name: Generate password hash
+      ansible.builtin.shell: |
+        doveadm pw -s SHA512-CRYPT -p "{{ relay_user_password }}" | tr -d '\n'
+      register: password_hash
+
+    - name: Show generated hash
+      ansible.builtin.debug:
+        msg: "Generated hash: {{ password_hash.stdout }}"
+
+    - name: Add domains and users to database
+      ansible.builtin.shell: |
+        # Create Python script to handle the password properly
+        cat > /tmp/add_users.py << 'PYTHON_EOF'
+        import sqlite3
+        import sys
+
+        password = sys.argv[1]
+        relay_user = sys.argv[2]
+
+        conn = sqlite3.connect('/etc/postfix/sqlite/mailserver.db')
+        cursor = conn.cursor()
+
+        # Add domains
+        cursor.execute("INSERT OR REPLACE INTO virtual_domains (domain) VALUES ('the.web3c.cc')")
+        cursor.execute("INSERT OR REPLACE INTO virtual_domains (domain) VALUES ('the.tradekong.app')")
+
+        # Delete existing users
+        cursor.execute("DELETE FROM virtual_users WHERE email=?", (f'{relay_user}@the.web3c.cc',))
+        cursor.execute("DELETE FROM virtual_users WHERE email=?", (f'{relay_user}@the.tradekong.app',))
+
+        # Add users with password
+        cursor.execute(
+            "INSERT INTO virtual_users (email, password, domain) VALUES (?, ?, 'the.web3c.cc')",
+            (f'{relay_user}@the.web3c.cc', password)
+        )
+        cursor.execute(
+            "INSERT INTO virtual_users (email, password, domain) VALUES (?, ?, 'the.tradekong.app')",
+            (f'{relay_user}@the.tradekong.app', password)
+        )
+
+        conn.commit()
+        conn.close()
+        print("Users added successfully")
+        PYTHON_EOF
+
+        python3 /tmp/add_users.py '{{ password_hash.stdout }}' '{{ relay_user }}'
+        rm -f /tmp/add_users.py
+
+    - name: Configure Postfix main.cf
+      ansible.builtin.copy:
+        dest: /etc/postfix/main.cf
+        content: |
+          # Postfix main configuration
+          myhostname = localhost
+          mydomain = the.web3c.cc
+          myorigin = $mydomain
+          inet_interfaces = all
+          inet_protocols = ipv4
+          mydestination = $myhostname, localhost.$mydomain, localhost
+          relay_domains = the.web3c.cc, the.tradekong.app
+
+          # SASL
+          smtpd_sasl_auth_enable = yes
+          smtpd_sasl_type = dovecot
+          smtpd_sasl_path = private/auth
+          smtpd_sasl_security_options =
+          smtpd_sasl_tls_security_options =
+          smtpd_sasl_local_domain = $myhostname
+          broken_sasl_auth_clients = yes
+
+          # TLS
+          smtpd_tls_cert_file = /etc/letsencrypt/live/the.web3c.cc/fullchain.pem
+          smtpd_tls_key_file = /etc/letsencrypt/live/the.web3c.cc/privkey.pem
+          smtpd_tls_security_level = may
+          smtpd_tls_loglevel = 1
+          smtpd_tls_session_cache_database = btree:${data_directory}/smtpd_scache
+          smtpd_tls_auth_only = no
+
+          # Restrictions
+          smtpd_recipient_restrictions = permit_mynetworks, permit_sasl_authenticated, reject_unauth_destination
+
+          # Milter (OpenDKIM)
+          smtpd_milters = inet:localhost:8891
+          non_smtpd_milters = inet:localhost:8891
+          milter_default_action = accept
+          milter_protocol = 6
+
+          # Misc
+          compatibility_level = 3.6
+          message_size_limit = 10240000
+
+    - name: Configure Postfix master.cf
+      ansible.builtin.copy:
+        dest: /etc/postfix/master.cf
+        content: |
+          smtp      inet  n       -       n       -       -       smtpd
+          submission inet n       -       n       -       -       smtpd
+            -o syslog_name=postfix/submission
+            -o smtpd_tls_security_level=encrypt
+            -o smtpd_sasl_auth_enable=yes
+            -o smtpd_sasl_type=dovecot
+            -o smtpd_sasl_path=private/auth
+            -o smtpd_sasl_security_options=
+            -o smtpd_recipient_restrictions=permit_mynetworks,permit_sasl_authenticated,reject_unauth_destination
+          smtps     inet  n       -       n       -       -       smtpd
+            -o syslog_name=postfix/smtps
+            -o smtpd_tls_wrappermode=yes
+            -o smtpd_sasl_auth_enable=yes
+            -o smtpd_sasl_type=dovecot
+            -o smtpd_sasl_path=private/auth
+            -o smtpd_sasl_security_options=
+            -o smtpd_recipient_restrictions=permit_mynetworks,permit_sasl_authenticated,reject_unauth_destination
+          pickup    unix  n       -       n       60      1       pickup
+          cleanup   unix  n       -       n       -       0       cleanup
+          qmgr      unix  n       -       n       300     1       qmgr
+          tlsmgr    unix  -       -       n       1000?   1       tlsmgr
+          rewrite   unix  -       -       n       -       -       trivial-rewrite
+          bounce    unix  -       -       n       -       0       bounce
+          defer     unix  -       -       n       -       0       bounce
+          trace     unix  -       -       n       -       0       bounce
+          verify    unix  -       -       n       -       1       verify
+          flush     unix  n       -       n       1000?   0       flush
+          proxymap  unix  -       -       n       -       -       proxymap
+          proxywrite unix -       -       n       -       1       proxymap
+          smtp      unix  -       -       n       -       -       smtp
+          relay     unix  -       -       n       -       -       smtp
+          showq     unix  n       -       n       -       -       showq
+          error     unix  -       -       n       -       -       error
+          retry     unix  -       -       n       -       -       error
+          discard   unix  -       -       n       -       -       discard
+          local     unix  -       n       n       -       -       local
+          virtual   unix  -       n       n       -       -       virtual
+          lmtp      unix  -       -       n       -       -       lmtp
+          anvil     unix  -       -       n       -       1       anvil
+          scache    unix  -       -       n       -       1       scache
+          postlog   unix-dgram n  -       n       -       1       postlogd
+
+    - name: Configure Dovecot
+      ansible.builtin.copy:
+        dest: /etc/dovecot/dovecot.conf
+        content: |
+          protocols = none
+          base_dir = /var/run/dovecot/
+          login_greeting = Dovecot ready.
+          disable_plaintext_auth = no
+          auth_mechanisms = plain login
+
+          passdb {
+            driver = sql
+            args = /etc/dovecot/dovecot-sql.conf.ext
+          }
+
+          userdb {
+            driver = sql
+            args = /etc/dovecot/dovecot-sql.conf.ext
+          }
+
+          service auth {
+            unix_listener /var/spool/postfix/private/auth {
+              mode = 0660
+              user = postfix
+              group = postfix
+            }
+          }
+
+          log_path = /var/log/dovecot.log
+          info_log_path = /var/log/dovecot-info.log
+
+    - name: Configure Dovecot SQL
+      ansible.builtin.copy:
+        dest: /etc/dovecot/dovecot-sql.conf.ext
+        content: |
+          driver = sqlite
+          connect = /etc/postfix/sqlite/mailserver.db
+          default_pass_scheme = SHA512-CRYPT
+          password_query = SELECT email AS user, password FROM virtual_users WHERE email='%u'
+          user_query = SELECT email AS user, '/var/mail/%d/%n' AS home, 5000 AS uid, 5000 AS gid FROM virtual_users WHERE email='%u'
+
+    - name: Configure OpenDKIM
+      ansible.builtin.copy:
+        dest: /etc/opendkim.conf
+        content: |
+          Syslog yes
+          SyslogSuccess yes
+          LogWhy yes
+          Socket inet:8891@localhost
+          UserID opendkim:opendkim
+          KeyTable /etc/opendkim/key.table
+          SigningTable /etc/opendkim/signing.table
+          Selector default
+          Domain the.web3c.cc
+          Domain the.tradekong.app
+          SignHeaders From,To,Subject,Date,Message-Id,MIME-Version,Content-Type
+
+    - name: Generate DKIM keys
+      ansible.builtin.shell: |
+        # Generate for the.web3c.cc
+        if [ ! -f /etc/opendkim/keys/the.web3c.cc.private ]; then
+          opendkim-genkey -b 2048 -d the.web3c.cc -s default -D /etc/opendkim/keys/
+          mv /etc/opendkim/keys/default.private /etc/opendkim/keys/the.web3c.cc.private
+          mv /etc/opendkim/keys/default.txt /etc/opendkim/keys/the.web3c.cc.txt
+        fi
+
+        # Generate for the.tradekong.app
+        if [ ! -f /etc/opendkim/keys/the.tradekong.app.private ]; then
+          opendkim-genkey -b 2048 -d the.tradekong.app -s default -D /etc/opendkim/keys/
+          mv /etc/opendkim/keys/default.private /etc/opendkim/keys/the.tradekong.app.private
+          mv /etc/opendkim/keys/default.txt /etc/opendkim/keys/the.tradekong.app.txt
+        fi
+
+        chown -R opendkim:opendkim /etc/opendkim/keys
+        chmod 600 /etc/opendkim/keys/*.private
+
+    - name: Create OpenDKIM tables
+      ansible.builtin.copy:
+        dest: /etc/opendkim/key.table
+        content: |
+          default._domainkey.the.web3c.cc the.web3c.cc:default:/etc/opendkim/keys/the.web3c.cc.private
+          default._domainkey.the.tradekong.app the.tradekong.app:default:/etc/opendkim/keys/the.tradekong.app.private
+
+    - name: Create OpenDKIM signing table
+      ansible.builtin.copy:
+        dest: /etc/opendkim/signing.table
+        content: |
+          *@the.web3c.cc default._domainkey.the.web3c.cc
+          *@the.tradekong.app default._domainkey.the.tradekong.app
+
+    - name: Set permissions on OpenDKIM files
+      ansible.builtin.file:
+        path: "{{ item }}"
+        owner: opendkim
+        group: opendkim
+        mode: '0640'
+      loop:
+        - /etc/opendkim.conf
+        - /etc/opendkim/key.table
+        - /etc/opendkim/signing.table
+
+    - name: Fix SQLite database ownership
+      ansible.builtin.file:
+        path: /etc/postfix/sqlite/mailserver.db
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Create proper systemd service file for Postfix
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/postfix.service
+        content: |
+          [Unit]
+          Description=Postfix Mail Transport Agent
+          Documentation=man:postfix(1)
+          After=network.target
+
+          [Service]
+          Type=forking
+          ExecStartPre=/bin/sh -c 'if [ -f /var/lib/postfix/master.lock ]; then rm -f /var/lib/postfix/master.lock; fi'
+          ExecStartPre=/bin/sh -c 'if pgrep -x master > /dev/null 2>&1; then pkill -9 master; sleep 2; fi'
+          ExecStart=/usr/sbin/postfix start
+          ExecStop=/usr/sbin/postfix stop
+          ExecReload=/usr/sbin/postfix reload
+          PIDFile=/var/spool/postfix/pid/master.pid
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: yes
+
+    - name: Ensure Postfix is completely stopped before starting
+      ansible.builtin.shell: |
+        # Stop postfix completely
+        postfix stop 2>/dev/null || true
+        pkill -9 master 2>/dev/null || true
+        pkill -9 smtpd 2>/dev/null || true
+        # Remove all lock files
+        rm -f /var/lib/postfix/master.lock 2>/dev/null || true
+        rm -f /var/spool/postfix/pid/master.pid 2>/dev/null || true
+        # Wait a moment
+        sleep 2
+        # Verify
+        if pgrep -x "master" > /dev/null 2>&1; then
+          echo "WARNING: master still running"
+        else
+          echo "Postfix stopped successfully"
+        fi
+
+    - name: Start services
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: started
+        enabled: yes
+      loop:
+        - postfix
+        - dovecot
+        - opendkim
+
+    - name: Verify Dovecot auth socket exists
+      ansible.builtin.shell: |
+        # Wait for Dovecot to create the socket
+        for i in 1 2 3 4 5; do
+          if [ -S /var/spool/postfix/private/auth ]; then
+            echo "Socket found"
+            exit 0
+          fi
+          echo "Waiting for socket... attempt $i"
+          sleep 2
+        done
+        # Socket not found, restart Dovecot
+        echo "Socket not found, restarting Dovecot..."
+        systemctl restart dovecot
+        sleep 3
+        if [ -S /var/spool/postfix/private/auth ]; then
+          echo "Socket created after restart"
+        else
+          echo "ERROR: Socket still not found"
+          exit 1
+        fi
+
+    - name: Fix socket permissions
+      ansible.builtin.file:
+        path: /var/spool/postfix/private/auth
+        owner: postfix
+        group: postfix
+        mode: '0660'
+
+    - name: Wait for services
+      ansible.builtin.pause:
+        seconds: 3
+
+    - name: Test SMTP connection
+      ansible.builtin.shell: |
+        (echo EHLO test.local; sleep 1; echo QUIT) | timeout 5 nc localhost 587 2>&1 | head -3
+      register: smtp_test
+      ignore_errors: yes
+
+    - name: Show SMTP test
+      ansible.builtin.debug:
+        var: smtp_test.stdout_lines
+
+    - name: Test AUTH availability
+      ansible.builtin.shell: |
+        timeout 10 openssl s_client -connect localhost:587 -starttls smtp -quiet 2>&1 << 'EOF' | grep -E "(250-AUTH|250 AUTH)"
+        EHLO test.local
+        QUIT
+        EOF
+      register: auth_test
+      ignore_errors: yes
+
+    - name: Show AUTH test
+      ansible.builtin.debug:
+        var: auth_test.stdout_lines
+
+    - name: Test authentication
+      ansible.builtin.shell: |
+        USER=$(echo -n "{{ relay_user }}@the.web3c.cc" | base64)
+        PASS=$(echo -n "{{ relay_user_password }}" | base64)
+        timeout 15 openssl s_client -connect localhost:587 -starttls smtp -quiet 2>&1 << EOF | grep -E "(235|Authentication)"
+        EHLO test.local
+        AUTH LOGIN
+        $USER
+        $PASS
+        QUIT
+        EOF
+      register: auth_result
+      ignore_errors: yes
+
+    - name: Show auth result
+      ansible.builtin.debug:
+        var: auth_result.stdout_lines
+
+    - name: Get server IP
+      ansible.builtin.shell: |
+        curl -s ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}'
+      register: server_ip
+
+    - name: Show deployment summary
+      ansible.builtin.debug:
+        msg: |
+          ===========================================
+          MAIL SERVER DEPLOYMENT COMPLETE
+          ===========================================
+
+          Server IP: {{ server_ip.stdout }}
+
+          SERVICES:
+          - Postfix: Running on ports 25, 465, 587
+          - Dovecot: Running (SQL auth)
+          - OpenDKIM: Running (DKIM signing)
+
+          DOMAINS:
+          - the.web3c.cc
+          - the.tradekong.app
+
+          USERS:
+          - {{ relay_user }}@the.web3c.cc
+          - {{ relay_user }}@the.tradekong.app
+          - Password: {{ relay_user_password }}
+
+          TEST RESULTS:
+          - SMTP: {{ "OK" if smtp_test.rc == 0 else "FAILED" }}
+          - AUTH: {{ "OK" if auth_test.stdout else "FAILED" }}
+          - Authentication: {{ "OK" if "235" in auth_result.stdout else "FAILED" }}
+
+          NEXT STEPS:
+          1. Add DNS records (see /etc/postfix/dns_records.txt)
+          2. Wait for DNS propagation
+          3. Test email sending
+          ===========================================

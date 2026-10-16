@@ -1,0 +1,96 @@
+---
+# Une instance (`theta_edge_id`) — voir keys.yml.
+
+- name: "Instance {{ theta_edge_id }} — local paths"
+  ansible.builtin.set_fact:
+    theta_edge_key_local: "{{ theta_edge_keys_dir }}/{{ inventory_hostname }}/instance{{ theta_edge_id }}"
+    theta_edge_key_rpc: "http://127.0.0.1:{{ theta_edge_rpc_base_port + (theta_edge_id - 1) * theta_edge_port_step }}/rpc"
+
+- name: "Instance {{ theta_edge_id }} — find the node keystore"
+  ansible.builtin.find:
+    paths: "{{ theta_edge_base_dir }}/instance{{ theta_edge_id }}/edgecore/key/encrypted"
+    file_type: file
+  register: theta_edge_keystore
+
+- name: "Instance {{ theta_edge_id }} — query the node (summary, wallet)"
+  ansible.builtin.uri:
+    url: "{{ theta_edge_key_rpc }}"
+    method: POST
+    body_format: json
+    body: { jsonrpc: "2.0", method: "{{ item }}", params: [], id: 1 }
+    timeout: 10
+  register: theta_edge_key_rpc_calls
+  failed_when: false
+  no_log: true   # edgecore.WalletExportKey rend la mnémonique en clair
+  loop:
+    - edgecore.GetEdgeNodeSummary
+    - edgecore.WalletGetAccount
+    - edgecore.WalletExportKey
+
+- name: "Instance {{ theta_edge_id }} — extract the answers"
+  ansible.builtin.set_fact:
+    theta_edge_key_summary: "{{ (theta_edge_key_rpc_calls.results[0].json | default({})).result.Summary | default('') }}"
+    theta_edge_key_wallet: "{{ (theta_edge_key_rpc_calls.results[1].json | default({})).result.account.address | default('') }}"
+    theta_edge_key_mnemonic: "{{ (theta_edge_key_rpc_calls.results[2].json | default({})).result.mnemonic | default('') }}"
+    # Le nom du fichier keystore EST l'adresse du nœud (minuscules, sans 0x).
+    theta_edge_key_address: "{{ ('0x' ~ (theta_edge_keystore.files | first).path | basename) if theta_edge_keystore.files else '' }}"
+  no_log: true
+
+- name: "Instance {{ theta_edge_id }} — create the local directory"
+  ansible.builtin.file:
+    path: "{{ theta_edge_key_local }}"
+    state: directory
+    mode: "0700"
+  delegate_to: localhost
+  become: false
+
+- name: "Instance {{ theta_edge_id }} — fetch the node keystore"
+  ansible.builtin.fetch:
+    src: "{{ (theta_edge_keystore.files | first).path }}"
+    dest: "{{ theta_edge_key_local }}/node-keystore-{{ theta_edge_key_address }}.json"
+    flat: true
+  when: theta_edge_keystore.files | length > 0
+
+- name: "Instance {{ theta_edge_id }} — restrict the keystore copy"
+  ansible.builtin.file:
+    path: "{{ theta_edge_key_local }}/node-keystore-{{ theta_edge_key_address }}.json"
+    mode: "0600"
+  delegate_to: localhost
+  become: false
+  when: theta_edge_keystore.files | length > 0
+
+# Écrit seulement si le nœud a répondu : un rejeu sur nœud arrêté ne doit pas
+# écraser une mnémonique déjà rapatriée par un fichier vide.
+- name: "Instance {{ theta_edge_id }} — save the internal wallet mnemonic"
+  ansible.builtin.copy:
+    content: "{{ theta_edge_key_mnemonic }}\n"
+    dest: "{{ theta_edge_key_local }}/wallet-mnemonic.txt"
+    mode: "0600"
+  delegate_to: localhost
+  become: false
+  no_log: true
+  when: theta_edge_key_mnemonic | length > 0
+
+- name: "Instance {{ theta_edge_id }} — save the public information"
+  ansible.builtin.copy:
+    content: "{{ theta_edge_key_info | to_nice_json }}\n"
+    dest: "{{ theta_edge_key_local }}/info.json"
+    mode: "0600"
+  delegate_to: localhost
+  become: false
+  vars:
+    theta_edge_key_info:
+      host: "{{ inventory_hostname }}"
+      instance: "{{ theta_edge_id }}"
+      node_address: "{{ theta_edge_key_address }}"
+      wallet_address: "{{ theta_edge_key_wallet }}"
+      staking_summary: "{{ theta_edge_key_summary }}"
+  when: theta_edge_key_address | length > 0 or theta_edge_key_wallet | length > 0
+
+- name: "Instance {{ theta_edge_id }} — report"
+  ansible.builtin.debug:
+    msg:
+      - "Nœud     : {{ theta_edge_key_address or 'AUCUN KEYSTORE — instance jamais démarrée ?' }}"
+      - "Wallet   : {{ theta_edge_key_wallet or 'RPC muet — mnémonique non rapatriée' }}"
+      - "Summary  : {{ theta_edge_key_summary or 'RPC muet' }}"
+      - "Fichiers : {{ theta_edge_key_local }}/"

@@ -1,0 +1,20 @@
+---
+# Purge certbot — removes package and all SSL certificates.
+# WARNING: certificates will be deleted. Nginx/services relying on them will break.
+
+- name: Remove certbot package
+  ansible.builtin.apt:
+    name:
+      - certbot
+      - python3-certbot-nginx
+    state: absent
+    purge: yes
+
+- name: Remove Let's Encrypt directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/letsencrypt
+    - /var/lib/letsencrypt
+    - /var/log/letsencrypt

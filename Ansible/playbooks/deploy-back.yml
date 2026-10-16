@@ -1,0 +1,34 @@
+---
+# Pas de variable dans un `name:` de play : comme `hosts:`, il est résolu avant
+# le chargement des group_vars, donc `remote_username` y est toujours indéfini.
+# Le playbook devenait invérifiable au --syntax-check. La variable reste
+# légitime dans `remote_user:`, évalué au moment de la connexion.
+# ── Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ───────────────────────
+# Échoue immédiatement si le parc n'a pas d'hôte de supervision utilisable,
+# puis vérifie — et répare — le socle de la machine, node_exporter et sa cible
+# Prometheus. Un service déployé sans supervision est un service dont personne
+# ne saura qu'il est tombé.
+# Les contrôles bloquants portent le tag `always` : ils s'appliquent même à un
+# rejeu ciblé par `--tags`.
+- name: Contrôle préalable
+  hosts: backs
+  remote_user: "{{ remote_username }}"
+  roles:
+    - role: host-preflight
+      preflight_require_docker: false
+
+- name: Install scripts/aliases for the service user
+  hosts: backs
+  remote_user: "{{ remote_username }}"
+  become: true
+
+  roles:
+    - back-security
+
+#- name: Install scripts for user "{{ remote_username }}"
+#  hosts: backs
+#  remote_user: "{{ remote_username }}"
+#  become: false
+#
+#  roles:
+#    - 

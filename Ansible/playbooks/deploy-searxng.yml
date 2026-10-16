@@ -1,0 +1,61 @@
+---
+# Relai SearXNG (conteneur) — métamoteur interrogé en JSON par les
+# applications, à travers les proxies uniquement.
+#
+# Déployé sur l'entrée d'inventaire `station`, qui désigne la même machine que
+# `proxy2`/`vpn1` (NAT domestique) — déplacé le 12/09/2026 depuis
+# l'entrée `searxng` (co-localisée avec proxy1, purgée avant ce
+# changement). `proxy2` est donc désormais LOCAL : le port lui est publié sur
+# 127.0.0.1. `proxy1`, resté sur l'autre machine, est distant : le port est
+# publié sur 0.0.0.0 et `searxng-security` le restreint à son IP dans la chaîne
+# DOCKER-USER — une règle ufw n'aurait aucun effet sur un port publié par
+# Docker.
+# La bascule est automatique : elle se déduit des `ansible_host` du groupe
+# `proxies` et de `searxng_allowed_proxies`.
+#
+#   ./play.sh web3c deploy-searxng.yml
+#   ./play.sh web3c deploy-searxng.yml --tags monitoring   # réarmer la supervision
+#
+# Le vhost (searxng.web3c.cc, jeton X-Api-Key) appartient au proxy :
+#   ./play.sh web3c update-proxy-web3c.yml
+
+# ── Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ───────────────────────
+# Échoue immédiatement si le parc n'a pas d'hôte de supervision utilisable,
+# puis vérifie — et répare — le socle de la machine, node_exporter et sa cible
+# Prometheus. Un service déployé sans supervision est un service dont personne
+# ne saura qu'il est tombé.
+# Les contrôles bloquants portent le tag `always` : ils s'appliquent même à un
+# rejeu ciblé par `--tags`.
+- name: Contrôle préalable
+  hosts: station
+  remote_user: "{{ remote_username }}"
+  roles:
+    - role: host-preflight
+      preflight_require_docker: true
+
+- name: Deploy the SearXNG relay
+  hosts: station
+  remote_user: "{{ remote_username }}"
+  roles:
+    - searxng-install
+
+# Le filtrage vit dans DOCKER-USER et non dans ufw : le port est publié par
+# Docker, qui insère ses DNAT en amont de tout ce que gère ufw. Le rôle vérifie
+# l'état RÉEL de la chaîne après application — une sécurité déclarée mais non
+# vérifiée est exactement ce qui a laissé l'UI Prometheus ouverte huit semaines.
+- name: SearXNG firewall
+  hosts: station
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - searxng-security
+
+# ── Supervision (OBLIGATOIRE, voir CLAUDE.md) ──────────────────────────────
+# Sonde `service_up` + métriques du service, et enregistrement de la cible
+# auprès de Prometheus. Rejouable seule :
+#   ./play.sh web3c deploy-searxng.yml --tags monitoring
+- name: Supervision du service
+  hosts: station
+  remote_user: "{{ remote_username }}"
+  roles:
+    - searxng-monitoring

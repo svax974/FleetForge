@@ -1,0 +1,23 @@
+---
+# Publication du front PapangLabs sur Cloudflare Pages, branche `main` (= prod).
+#
+#   ./play.sh papanglabs deploy-papanglabs-front.yml
+#   ./play.sh papanglabs deploy-papanglabs-front.yml -e pgf_env_file=front/.env.preprod
+#
+# Aucune machine du parc n'intervient : le front est un bundle statique servi
+# par Cloudflare. Le play tourne donc sur le POSTE DE CONTRÔLE, seul endroit où
+# vivent le dépôt, les dépendances npm et le jeton Cloudflare.
+#
+# Pas de `remove-` ni de `purge-` en contrepartie, contrairement à la règle des
+# playbooks de service : il n'y a rien d'installé sur une machine à retirer, et
+# le seul geste équivalent — supprimer le projet Cloudflare Pages — effacerait
+# le site et tout son historique de déploiements. Cela se fait à la main, en
+# connaissance de cause. Pour revenir en arrière, Cloudflare garde les
+# déploiements précédents : « Rollback » depuis le tableau de bord Pages.
+- name: Publication du front PapangLabs
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  roles:
+    - papanglabs-front-publish

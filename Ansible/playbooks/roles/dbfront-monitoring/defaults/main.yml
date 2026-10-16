@@ -1,0 +1,5 @@
+---
+dbfmon_container: postgres
+dbfmon_port: "{{ postgres_port | default(5432) }}"
+dbfmon_db: "{{ postgres_db_front | default('frontdata') }}"
+dbfmon_user: "{{ postgres_user | default('postgres') }}"

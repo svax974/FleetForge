@@ -1,0 +1,56 @@
+---
+# Convention `<service>-monitoring` (CLAUDE.md) : sonde déclarative pour
+# svcprobe, qui expose `service_up{service="starnet"}` et
+# `service_check_up{check="relay"}` — ce dernier couvre le cas « sidecar sain
+# mais port publié mort », invisible pour la sonde principale et pourtant
+# indiscernable d'une panne pour l'utilisateur.
+
+# `public: true` OBLIGATOIRE : sans lui les defaults de svcprobe-install
+# (svcprobe_checks_dir, svcprobe_lib_dir, svcprobe_listen_port) restent
+# confinés à ses propres tâches.
+- name: Ensure the shared probe is installed
+  ansible.builtin.include_role:
+    name: svcprobe-install
+    public: true
+  tags: [monitoring]
+
+- name: Deploy the StarNet metric collector
+  ansible.builtin.copy:
+    src: starnet-metrics.sh
+    dest: "{{ svcprobe_lib_dir }}/starnet-metrics.sh"
+    owner: root
+    group: root
+    mode: '0755'
+  become: true
+  tags: [monitoring]
+
+- name: Deploy the StarNet probe
+  ansible.builtin.template:
+    src: check.json.j2
+    dest: "{{ svcprobe_checks_dir }}/starnet.json"
+    owner: root
+    group: root
+    mode: '0644'
+  become: true
+  tags: [monitoring]
+
+# Contrôle immédiat : une sonde qui répond `service_up 0` alors que le service
+# tourne est une sonde mal écrite, et sonnerait en permanence.
+- name: Verify the probe answers
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ svcprobe_listen_port }}/metrics"
+    return_content: true
+  register: starnet_probe
+  retries: 6
+  delay: 5
+  until: starnet_probe.status is defined and starnet_probe.status == 200
+  changed_when: false
+  tags: [monitoring]
+
+- name: Report the probe result
+  ansible.builtin.debug:
+    msg: >-
+      {{ starnet_probe.content.split('\n')
+         | select('search', 'starnet')
+         | list }}
+  tags: [monitoring]

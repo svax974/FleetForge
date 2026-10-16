@@ -1,0 +1,15 @@
+[Unit]
+Description=Restrict Docker-published ports to authorized sources
+# Docker recrée la chaîne DOCKER-USER vide à chaque démarrage : les règles
+# doivent être reposées APRÈS lui, sans quoi les ports publiés sont exposés à
+# Internet entre le démarrage de Docker et l'intervention manuelle.
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/docker-ports-firewall.sh
+
+[Install]
+WantedBy=multi-user.target

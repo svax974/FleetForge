@@ -1,0 +1,29 @@
+[package]
+name = "fleetforge-web"
+description = "Serveur HTTP de FleetForge : la même application, servie dans un navigateur."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+# Troisième façade du cœur, au même titre que le GUI Tauri et le TUI. Aucune
+# règle métier ici : ce binaire traduit du HTTP en appels `fleetforge-core`, et rien
+# d'autre. Ce qui s'y glisserait serait invisible aux deux autres interfaces.
+[dependencies]
+fleetforge-core.workspace = true
+fleetforge-providers.workspace = true
+
+anyhow.workspace = true
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+axum = "0.8"
+futures-util = "0.3"
+tower-http = { version = "0.6", features = ["fs", "set-header"] }
+base64 = "0.22"
+subtle = "2.6"
+# Empreinte du mot de passe d'accès. Le serveur ne stocke jamais le clair : il
+# vit dans le vault Ansible, l'empreinte seule est déposée sur la machine.
+argon2 = { version = "0.5", features = ["std"] }

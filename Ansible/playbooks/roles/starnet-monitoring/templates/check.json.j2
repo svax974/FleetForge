@@ -1,0 +1,12 @@
+{
+  "service": "starnet",
+  "up": {"kind": "http", "url": "{{ starnet_url }}/api/health", "status": [200], "timeout": 10},
+  "extra_checks": [
+    {"name": "relay", "kind": "http", "url": "{{ starnet_relay_url }}/api/health", "status": [200], "timeout": 10}
+  ],
+  "metrics_command": [
+    "{{ svcprobe_lib_dir }}/starnet-metrics.sh",
+    "{{ starnet_url }}"
+  ],
+  "metrics_timeout": 15
+}

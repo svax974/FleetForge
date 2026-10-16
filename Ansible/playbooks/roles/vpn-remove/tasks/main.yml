@@ -1,0 +1,54 @@
+---
+# Remove VPN (Pritunl + MongoDB) — uninstalls packages, preserves no config.
+# Pritunl config + DB are removed as part of standard uninstall. Use vpn-purge for logs.
+
+- name: Stop pritunl service
+  ansible.builtin.systemd:
+    name: pritunl
+    state: stopped
+    enabled: no
+  ignore_errors: true
+
+- name: Remove Pritunl and MongoDB packages
+  ansible.builtin.apt:
+    pkg:
+      - pritunl
+      - mongodb-org
+      - mongodb-org-server
+      - mongodb-org-mongos
+      - mongodb-org-shell
+      - mongodb-org-tools
+    state: absent
+    purge: yes
+
+- name: Remove pritunl config file
+  ansible.builtin.file:
+    path: /etc/pritunl.conf
+    state: absent
+
+- name: Remove MongoDB config file
+  ansible.builtin.file:
+    path: /etc/mongod.conf
+    state: absent
+
+- name: Remove Pritunl repo files
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/apt/sources.list.d/pritunl.list
+    - /etc/apt/sources.list.d/mongodb-org-6.0.list
+  ignore_errors: true
+
+# ── Supervision ────────────────────────────────────────────────────────────
+# Convention `-monitoring` (CLAUDE.md) : c'est le rôle de suppression du
+# service qui retire sa sonde. Une sonde laissée en place publierait
+# `service_up 0` indéfiniment et ferait sonner `ServiceDown` sur un service
+# volontairement désinstallé — l'alerte qu'on apprend à ignorer, et qui finit
+# par masquer les vraies.
+- name: Remove the svcprobe check
+  ansible.builtin.file:
+    path: "/etc/svcprobe/checks.d/vpn.json"
+    state: absent
+  become: true
+  tags: [monitoring]

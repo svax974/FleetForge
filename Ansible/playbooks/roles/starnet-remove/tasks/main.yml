@@ -1,0 +1,120 @@
+---
+# Arrête et retire StarNet : unité --user, relai, code, Node embarqué, sonde et
+# règles ufw. CONSERVE les workspaces (agents, mémoire, transcripts, ledgers)
+# et la configuration — dont la clé qui déchiffre les connecteurs : la retirer
+# sans les données rendrait ces dernières illisibles. Voir starnet-purge.
+
+- name: Look up the srvc UID
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ starnet_user }}"
+    fail_key: false
+
+- name: Set the XDG runtime dir fact
+  ansible.builtin.set_fact:
+    starnet_xdg_runtime_dir: "/run/user/{{ ansible_facts.getent_passwd[starnet_user][1] }}"
+  when: (ansible_facts.getent_passwd | default({}))[starnet_user] | default(none) is not none
+
+- name: Stop and disable the StarNet unit
+  ansible.builtin.systemd:
+    scope: user
+    name: starnet
+    state: stopped
+    enabled: false
+  become: true
+  become_user: "{{ starnet_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "{{ starnet_xdg_runtime_dir | default('/run/user/0') }}"
+  when: starnet_xdg_runtime_dir is defined
+  failed_when: false
+
+- name: Stop and disable the relay
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: stopped
+    enabled: false
+  loop:
+    - starnet-relay.socket
+    - starnet-relay.service
+  become: true
+  failed_when: false
+
+# Le Node embarqué n'appartient qu'à StarNet (préfixe propre, pas de Node
+# système) : il part avec le binaire.
+- name: Remove the units, the code and the embedded Node
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ starnet_home }}/.config/systemd/user/starnet.service"
+    - /etc/systemd/system/starnet-relay.socket
+    - /etc/systemd/system/starnet-relay.service
+    - "{{ starnet_app_dir }}"
+    - "{{ starnet_node_root }}"
+  become: true
+
+- name: Reload the system daemon
+  ansible.builtin.systemd:
+    daemon_reload: true
+  become: true
+
+- name: Reload the user daemon
+  ansible.builtin.systemd:
+    scope: user
+    daemon_reload: true
+  become: true
+  become_user: "{{ starnet_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "{{ starnet_xdg_runtime_dir | default('/run/user/0') }}"
+  when: starnet_xdg_runtime_dir is defined
+  failed_when: false
+
+# ── Pare-feu ───────────────────────────────────────────────────────────────
+# Mêmes sources que starnet-security. Laissées en place, ces règles
+# filtreraient le prochain service qui reprendrait ce port.
+- name: Close the StarNet port
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    port: "{{ starnet_port }}"
+    from_ip: "{{ item }}"
+    delete: true
+  loop: "{{ ((whitelist | default([]))
+            + (groups['proxies'] | default([]) | map('extract', hostvars, 'ansible_host') | list)
+            + (groups['vpns'] | default([]) | map('extract', hostvars, 'ansible_host') | list)
+            + [hostvars[prometheus_host].ansible_host]
+            + starnet_extra_allowed_cidrs) | unique }}"
+  become: true
+  failed_when: false
+
+- name: Remove the default-deny rule on the StarNet port
+  community.general.ufw:
+    rule: deny
+    proto: tcp
+    port: "{{ starnet_port }}"
+    delete: true
+  become: true
+  failed_when: false
+
+# ── Supervision ────────────────────────────────────────────────────────────
+# La sonde part avec le service : laissée en place, elle publierait
+# `service_up 0` indéfiniment. svcprobe lui-même (port 9110) reste : il porte
+# les sondes des autres services de cette machine.
+- name: Remove the StarNet probe and its collector
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ svcprobe_checks_dir | default('/etc/svcprobe/checks.d') }}/starnet.json"
+    - "{{ svcprobe_lib_dir | default('/usr/local/lib/svcprobe') }}/starnet-metrics.sh"
+  become: true
+  tags: [monitoring]
+
+# Ce rôle ne touche pas aux proxies : remove-starnet.yml et purge-starnet.yml
+# portent chacun une play qui retire le vhost.
+- name: Warn that the proxies still publish the vhost (role run standalone)
+  ansible.builtin.debug:
+    msg: >-
+      StarNet retiré, mais ce rôle ne touche pas aux proxies : s'il n'a pas été
+      joué via remove-starnet.yml ou purge-starnet.yml, le vhost
+      {{ starnet_hostname }} est toujours servi et renverra 502.

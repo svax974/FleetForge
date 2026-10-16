@@ -1,0 +1,18 @@
+---
+# Supervision de Rotki (sidecar TradeKong).
+#
+# Rotki n'expose aucun endpoint Prometheus natif : sonde déclarative pour
+# `svcprobe` (port 9110). Pas de collecteur dédié — contrairement à
+# searxng/freellm, il n'y a pas d'état "répond mais ne sert plus rien"
+# identifié à ce jour (pas de fournisseur amont tiers susceptible de bloquer
+# silencieusement une réponse 200 vide) ; la sonde binaire + le conteneur
+# suffisent. À enrichir si un tel état est constaté en usage.
+
+rotki_container: rotki
+rotki_port: 4302
+rotki_url: "http://127.0.0.1:{{ rotki_port }}"
+
+# Drop-in de docker-ports-security : autorise l'hôte Prometheus sur le port
+# publié (4302 est filtré dans DOCKER-USER, host_vars/ctdapi.yml).
+rotki_mon_dropin_dir: /etc/docker-ports/sources.d
+rotki_mon_firewall_script: /usr/local/sbin/docker-ports-firewall.sh

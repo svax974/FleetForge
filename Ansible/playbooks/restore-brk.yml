@@ -1,0 +1,77 @@
+---
+# Restaure le magasin BRK depuis la dernière sauvegarde, sur l'hôte BRK courant
+# OU sur une machine de REMPLACEMENT vierge.
+#
+#   ./play.sh papanglabs restore-brk.yml                        # état des sauvegardes seul
+#   ./play.sh papanglabs restore-brk.yml -e confirm=yes         # restaure `current` sur brk1
+#   ./play.sh papanglabs restore-brk.yml -e confirm=yes -e generation=previous
+#   ./play.sh papanglabs restore-brk.yml -e confirm=yes -e target_host=brk2   # hôte neuf
+#
+# `target_host` (défaut `brk1`) désigne l'hôte à restaurer. Le rôle
+# `brk-restore` le rend capable de tirer depuis la destination AVANT la
+# restauration (clé, autorisation, pare-feu + tcpwrappers, known_hosts, script)
+# — y compris s'il est vierge, ce que `brk-backup-install` ne sait pas faire
+# (il exige un `.brk` déjà présent). Déployer BRK au préalable (`deploy-brk.yml`)
+# n'est PAS requis : la restauration recrée le magasin.
+#
+# `generation=previous` couvre le cas d'une corruption non détectée : la
+# dernière sauvegarde a fidèlement recopié un magasin déjà abîmé, et
+# l'avant-dernière est la seule saine. Le manifeste affiché sans `confirm`
+# donne la date et la version de BRK de chaque génération — à lire AVANT de
+# confirmer, une restauration dans un binaire d'une autre majeure pouvant
+# migrer le magasin de façon irréversible.
+#
+# Sur l'hôte courant, l'ETL PapangMetrics n'est PAS arrêté : son curseur
+# d'avancement est en base, pas dans le magasin BRK. Il verra BRK injoignable
+# pendant l'opération (brk_up = 0, alerte BrkDown au bout de 10 min) et
+# reprendra seul.
+
+- name: Restauration du magasin BRK
+  hosts: "{{ target_host | default('brk1') }}"
+  remote_user: "{{ remote_username }}"
+  gather_facts: false
+  vars:
+    generation: current
+  # Rend l'hôte capable de restaurer (clé/pare-feu/known_hosts/script) avant les
+  # tâches ci-dessous — idempotent sur brk1, bootstrap sur un hôte neuf.
+  roles:
+    - brk-restore
+  tasks:
+    - name: État des sauvegardes disponibles
+      ansible.builtin.command: "/home/{{ remote_username }}/brk-restore.sh --check"
+      changed_when: false
+      register: brk_restore_check
+
+    - name: Afficher l'état
+      ansible.builtin.debug:
+        var: brk_restore_check.stdout_lines
+
+    - name: Rappel — confirmation requise
+      ansible.builtin.debug:
+        msg: >-
+          Lecture seule. Pour restaurer réellement :
+          ./play.sh papanglabs restore-brk.yml -e confirm=yes
+          {{ '-e generation=previous' if generation == 'current' else '' }}
+      when: (confirm | default('')) != 'yes'
+
+    # `async` : la restauration transfère jusqu'à 348 Go et dure des heures. Un
+    # `poll` classique romprait la connexion SSH d'Ansible bien avant la fin,
+    # laissant BRK arrêté au milieu d'un rsync — exactement l'incident qu'on
+    # cherche à réparer.
+    - name: Restaurer la génération '{{ generation }}'
+      ansible.builtin.shell: >-
+        /home/{{ remote_username }}/brk-restore.sh --yes
+        {{ '--previous' if generation == 'previous' else '' }}
+        >> /home/{{ remote_username }}/brk-restore.log 2>&1
+      async: 172800
+      poll: 0
+      changed_when: true
+      when: (confirm | default('')) == 'yes'
+
+    - name: Suivi
+      ansible.builtin.debug:
+        msg: >-
+          Restauration lancée en tâche de fond (plusieurs heures).
+          Suivi : tail -f /home/{{ remote_username }}/brk-restore.log
+          puis journalctl -u brk -f
+      when: (confirm | default('')) == 'yes'

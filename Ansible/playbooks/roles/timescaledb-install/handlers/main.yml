@@ -1,0 +1,5 @@
+---
+- name: restart timescaledb
+  community.docker.docker_compose_v2:
+    project_src: "{{ tsdb_dir }}"
+    state: restarted

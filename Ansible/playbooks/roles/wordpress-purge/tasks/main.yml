@@ -1,0 +1,64 @@
+---
+# Purge WordPress — removes everything including web files and database.
+# WARNING: all content and database will be permanently deleted.
+
+- name: Stop and disable Apache2
+  ansible.builtin.systemd:
+    name: apache2
+    state: stopped
+    enabled: no
+  ignore_errors: true
+
+- name: Stop and disable MySQL
+  ansible.builtin.systemd:
+    name: mysql
+    state: stopped
+    enabled: no
+  ignore_errors: true
+
+- name: Remove Apache2 and MySQL packages
+  ansible.builtin.apt:
+    pkg:
+      - apache2
+      - apache2-utils
+      - mysql-server
+      - mysql-client
+      - libapache2-mod-php
+      - php
+    state: absent
+    purge: yes
+
+- name: Remove WordPress files and Apache config
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /var/www/wordpress
+    - /var/www/html
+    - /etc/apache2
+    - /var/lib/mysql
+    - /var/log/mysql
+    - /var/log/apache2
+
+# ── Supervision ────────────────────────────────────────────────────────────
+# Convention `-monitoring` (CLAUDE.md) : c'est le rôle de suppression du
+# service qui retire sa sonde. Une sonde laissée en place publierait
+# `service_up 0` indéfiniment et ferait sonner `ServiceDown` sur un service
+# volontairement désinstallé — l'alerte qu'on apprend à ignorer, et qui finit
+# par masquer les vraies.
+- name: Remove the svcprobe check
+  ansible.builtin.file:
+    path: "/etc/svcprobe/checks.d/wordpress.json"
+    state: absent
+  become: true
+  tags: [monitoring]
+
+# Règles ufw posées par wordpress-security : sans cette suppression, le port
+# resterait ouvert aux proxies sur un service désinstallé.
+- name: Delete the WordPress ufw rules
+  ansible.builtin.shell: |
+    for n in $(ufw status numbered | grep -E "WordPress - " | sed -E 's/^\[ *([0-9]+)\].*/\1/' | sort -rn); do
+      ufw --force delete "$n"
+    done
+  become: true
+  changed_when: false

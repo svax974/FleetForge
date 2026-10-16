@@ -1,0 +1,37 @@
+---
+# Déploiement complet : code (rsync + build + migrations), unités systemd,
+# pare-feu, et enregistrement des cibles auprès de Prometheus.
+#
+# Tag `monitoring` — rejoue UNIQUEMENT l'enregistrement des cibles Prometheus et
+# les ouvertures de pare-feu associées, sans toucher au code ni redémarrer quoi
+# que ce soit :
+#   ./play.sh papanglabs deploy-papangmetrics.yml --tags monitoring
+# À utiliser dès que Prometheus est réinstallé ou que les alertes BRK
+# (brk_up, brk_height, etl_block_lag) n'ont plus de séries.
+# ── Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ───────────────────────
+# Échoue immédiatement si le parc n'a pas d'hôte de supervision utilisable,
+# puis vérifie — et répare — le socle de la machine, node_exporter et sa cible
+# Prometheus. Un service déployé sans supervision est un service dont personne
+# ne saura qu'il est tombé.
+# Les contrôles bloquants portent le tag `always` : ils s'appliquent même à un
+# rejeu ciblé par `--tags`.
+- name: Contrôle préalable
+  hosts: papangmetrics1
+  remote_user: "{{ remote_username }}"
+  roles:
+    - role: host-preflight
+      preflight_require_docker: false
+
+- name: Deploy PapangMetrics API + ETL
+  hosts: papangmetrics1
+  remote_user: "{{ remote_username }}"
+  roles:
+    - nodejs-install
+    # Tag `code` — livre le code (rsync + build + migrations) SANS toucher aux
+    # unités systemd. Indispensable pendant une opération de maintenance où les
+    # services doivent rester arrêtés : le playbook complet les redémarrerait.
+    #   ./play.sh papanglabs deploy-papangmetrics.yml --limit papangmetrics1 --tags code
+    - { role: papangmetrics-deploy, tags: [code] }
+    - papangmetrics-api-install
+    - papangmetrics-etl-install
+    - papangmetrics-api-security

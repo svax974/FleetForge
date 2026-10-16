@@ -1,0 +1,13 @@
+{
+  "service": "searxng",
+  "up": {"kind": "http", "url": "{{ searxng_url }}/healthz", "status": [200], "timeout": 10},
+  "extra_checks": [
+    {"name": "container", "kind": "docker", "container": "{{ searxng_container }}"},
+    {"name": "config", "kind": "http", "url": "{{ searxng_url }}/config", "status": [200], "timeout": 10}
+  ],
+  "metrics_command": [
+    "{{ svcprobe_lib_dir }}/searxng-metrics.sh",
+    "{{ searxng_url }}", "{{ searxng_probe_query }}", "{{ searxng_probe_interval | string }}"
+  ],
+  "metrics_timeout": 30
+}

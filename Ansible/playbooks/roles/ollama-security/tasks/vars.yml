@@ -1,0 +1,7 @@
+---
+# Point d'entrée vide : `include_role` avec `tasks_from: vars` et `public: true`
+# expose les defaults de ce rôle (`ollamasec_port`, `ollamasec_sources`) à
+# l'appelant — `ollama-purge` retire ainsi exactement les règles posées ici,
+# calculées à un seul endroit.
+- name: Expose the Ollama firewall defaults
+  ansible.builtin.meta: noop

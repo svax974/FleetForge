@@ -1,0 +1,37 @@
+---
+# Remove llama.cpp — stops and removes every running instance, the binary,
+# the build/source directory and the system user. Model files (data) are preserved.
+
+- name: Discover installed llama.cpp instances
+  ansible.builtin.service_facts:
+
+- name: Stop and disable llama.cpp instances
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: stopped
+    enabled: false
+  loop: "{{ ansible_facts.services.keys() | select('match', '^llamacpp-.*\\.service$') | list }}"
+  ignore_errors: true
+
+- name: Remove llama.cpp instance systemd unit files
+  ansible.builtin.file:
+    path: "/etc/systemd/system/{{ item }}"
+    state: absent
+  loop: "{{ ansible_facts.services.keys() | select('match', '^llamacpp-.*\\.service$') | list }}"
+  notify: reload systemd (llamacpp)
+
+- name: Remove llama-server binary
+  ansible.builtin.file:
+    path: /usr/local/bin/llama-server
+    state: absent
+
+- name: Remove llama.cpp source/build directory
+  ansible.builtin.file:
+    path: "{{ llamacpp_src_dir }}"
+    state: absent
+
+- name: Remove llamacpp system user
+  ansible.builtin.user:
+    name: "{{ llamacpp_user }}"
+    state: absent
+    remove: false

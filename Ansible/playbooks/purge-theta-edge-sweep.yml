@@ -1,0 +1,15 @@
+---
+# Retire le sweep TFuel et son journal.
+#
+#   ./play.sh web3c purge-theta-edge-sweep.yml --limit <hôte>
+
+- name: Purge du sweep TFuel
+  hosts: all
+  remote_user: "{{ remote_username }}"
+  become: true
+  pre_tasks:
+    - name: Skip hosts that do not carry the theta-edge family
+      ansible.builtin.meta: end_host
+      when: "'theta-edge' not in ansible_roles | default([])"
+  roles:
+    - theta-edge-sweep-purge

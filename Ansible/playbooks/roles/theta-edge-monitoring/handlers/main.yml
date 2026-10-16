@@ -1,0 +1,7 @@
+---
+- name: restart theta-edge-exporter
+  ansible.builtin.systemd:
+    name: theta-edge-exporter
+    state: restarted
+    daemon_reload: true
+  become: true

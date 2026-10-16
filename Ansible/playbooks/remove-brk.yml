@@ -1,0 +1,6 @@
+---
+- name: Remove BRK (keeps computed data)
+  hosts: brk1
+  remote_user: "{{ remote_username }}"
+  roles:
+    - brk-remove

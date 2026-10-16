@@ -1,0 +1,19 @@
+---
+# Supprime les nœuds Theta Edge, leur supervision, le sweep ET les clés.
+#
+#   ./play.sh web3c purge-theta-edge.yml --limit <hôte> -e confirm=yes
+#
+# Les clés sont d'abord rapatriées sur ce poste (export-theta-edge-keys) ; la
+# purge s'interrompt si ce rapatriement échoue. Une clé de nœud perdue rend
+# inaccessibles le TFuel qu'elle détient et le stake qui la vise.
+
+- name: Purge des nœuds Theta Edge (clés comprises)
+  hosts: all
+  remote_user: "{{ remote_username }}"
+  become: true
+  pre_tasks:
+    - name: Skip hosts that do not carry the theta-edge family
+      ansible.builtin.meta: end_host
+      when: "'theta-edge' not in ansible_roles | default([])"
+  roles:
+    - theta-edge-purge

@@ -1,0 +1,38 @@
+---
+# Contrôle des métadonnées d'inventaire OBLIGATOIRES sur un hôte.
+#
+# Appelé avec :
+#   - ansible.builtin.include_role:
+#       name: host-preflight
+#       tasks_from: inventory
+#
+# Ansible n'a aucun schéma d'inventaire : rien n'empêche d'ajouter une machine
+# sans `provider`, et une variable absente vaut simplement « non définie » chez
+# tous ses consommateurs — un `default()` de complaisance suffit alors à faire
+# passer l'oubli pour une valeur. La seule façon de rendre une variable
+# obligatoire est de la vérifier explicitement, tôt, et de refuser de continuer.
+#
+# D'où l'absence VOLONTAIRE de défaut sous `all.vars` : y poser
+# `provider: contabo` rendrait cet assert incapable de distinguer une machine
+# renseignée d'une machine oubliée.
+#
+# Ne se connecte pas à l'hôte (assert est une action locale) : le contrôle vaut
+# donc aussi sur une machine vierge, avant tout SSH utilisable.
+
+- name: Assert the host declares a valid provider
+  ansible.builtin.assert:
+    that:
+      - provider is defined
+      - provider in preflight_providers
+    fail_msg: >-
+      {{ inventory_hostname }} ne déclare pas d'hébergeur exploitable.
+      `provider` vaut « {{ provider | default('(non défini)') }} » et doit être
+      l'une des valeurs {{ preflight_providers | join(', ') }}. Renseigne-le
+      dans l'inventaire, sur l'hôte — les entrées partageant une même
+      `ansible_host` désignent la même machine et portent donc la même valeur.
+    # `default()` ici AUSSI : les deux messages sont rendus avant l'évaluation
+    # de `that`, et un `provider` absent ferait échouer la tâche sur « 'provider'
+    # is undefined » — soit exactement le diagnostic que ce message existe pour
+    # remplacer.
+    success_msg: "{{ inventory_hostname }} : provider={{ provider | default('') }}"
+  tags: [always]

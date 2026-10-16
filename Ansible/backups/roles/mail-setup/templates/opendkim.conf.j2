@@ -1,0 +1,36 @@
+# OpenDKIM Configuration
+
+# Log to syslog
+Syslog			yes
+SyslogSuccess		yes
+LogWhy			yes
+
+# Common DKIM configuration
+Canonicalization	relaxed/simple
+Mode			sv
+SubDomains		no
+
+# Socket
+Socket			inet:12301@localhost
+
+# Domain configuration
+Domain			{{ domain_name }}
+KeyFile			/etc/opendkim/keys/mail.private
+Selector		mail
+
+# Trust configuration
+InternalHosts		/etc/opendkim/TrustedHosts
+ExternalIgnoreList	/etc/opendkim/TrustedHosts
+KeyTable		/etc/opendkim/KeyTable
+SigningTable		/etc/opendkim/SigningTable
+
+# Security
+UMask			022
+UserID			opendkim:opendkim
+PidFile			/var/run/opendkim/opendkim.pid
+
+# Other settings
+AutoRestart		yes
+Background		yes
+DNSTimeout		5
+SignatureAlgorithm	rsa-sha256 

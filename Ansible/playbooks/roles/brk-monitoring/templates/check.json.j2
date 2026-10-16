@@ -1,0 +1,7 @@
+{
+  "service": "brk",
+  "up": {"kind": "http", "url": "{{ brkmon_url }}", "status": [200], "timeout": 10},
+  "extra_checks": [
+    {"name": "unit", "kind": "systemd", "unit": "{{ brkmon_unit }}"}
+  ]
+}

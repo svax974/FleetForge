@@ -1,0 +1,82 @@
+---
+# Exporter Prometheus des rapports agrégés DMARC.
+#
+# Raison d'être : DMARC n'a aucun moyen de n'émettre un rapport qu'en cas
+# d'anomalie. Les rapports `rua` sont inconditionnels et quotidiens — un mail
+# par domaine et par receveur, indéchiffrable à l'œil (XML zippé). Le tri doit
+# donc se faire après réception. Cet exporter lit la boîte, agrège, et laisse
+# Prometheus décider quand réveiller quelqu'un.
+
+# Port d'écoute — 7489 est le numéro de la RFC qui définit DMARC. Choisi hors
+# des grappes 96xx/97xx pour qu'il ne se lise pas comme un voisin de service.
+dmarc_exporter_port: 7489
+
+dmarc_exporter_user: dmarcexp
+dmarc_exporter_state_dir: /var/lib/dmarc-exporter
+dmarc_exporter_config_dir: /etc/dmarc-exporter
+
+# ── Source des rapports (IMAP) ────────────────────────────────────────────────
+# Les adresses `dmarc@` des domaines sont servies par Cloudflare Email Routing,
+# qui ne fait que du transfert : ce ne sont pas des boîtes, il n'y a rien à y
+# relever. Les rapports atterrissent donc dans la boîte de destination du
+# transfert, et c'est elle qu'on interroge.
+dmarc_exporter_imap_host: imap.gmail.com
+dmarc_exporter_imap_port: 993
+# Repli seulement : l'exporter détecte et lit le dossier « Tous les messages »
+# par son attribut IMAP `\All`, pas par ce nom. Un filtre Gmail qui range les
+# rapports hors d'INBOX (constaté sur papanglabs : étiquette « Monitoring »,
+# créée après coup, qui les fait sauter la boîte de réception) les rendait
+# invisibles à une recherche bornée à INBOX — panne silencieuse, puisque
+# `dmarc_up` reste à 1 (la relève réussit, elle ne trouve juste plus rien).
+dmarc_exporter_imap_folder: INBOX
+dmarc_exporter_imap_user: ""
+dmarc_exporter_imap_password: ""
+
+# Adresses `rua` publiées dans le DNS de ce parc. Sert de filtre de recherche
+# IMAP : le transfert Cloudflare préserve l'en-tête `To:`, on retrouve donc les
+# rapports par leur destinataire d'origine même dans une boîte partagée.
+dmarc_exporter_rua_addresses: []
+
+# Filet de sécurité : tout rapport agrégé porte un sujet en « Report domain: ».
+# Recherché en plus des adresses ci-dessus, au cas où un transfert réécrirait
+# `To:`. La déduplication par `report_id` rend le doublon inoffensif.
+dmarc_exporter_search_subject: true
+
+# Domaines d'expéditeur autorisés à faire foi d'un rapport agrégé. Ni le filtre
+# `TO` ni le filet `SUBJECT` ci-dessus ne vérifient qui a écrit le message : une
+# adresse `dmarc@` Cloudflare transfère sans authentifier l'émetteur, donc
+# n'importe qui la connaissant peut y déposer un faux rapport (par exemple pour
+# maquiller un alignement DMARC en réalité rompu). google.com et microsoft.com
+# sont les émetteurs observés à ce jour sur les deux parcs, parce que ce sont
+# les gros récepteurs de courrier de ces domaines — Yahoo, etc. s'ajouteraient
+# légitimement le jour où ces domaines leur enverraient du courrier. Étendre
+# cette liste plutôt que la contourner.
+dmarc_exporter_trusted_sender_domains:
+  - google.com
+  - microsoft.com
+
+# ── Cadence et fenêtres ───────────────────────────────────────────────────────
+# Les rapports sont quotidiens : relever plus souvent que toutes les 15 min ne
+# révèle rien de plus et multiplie les connexions IMAP.
+dmarc_exporter_poll_interval: 900
+
+# Profondeur de la recherche IMAP. Couvre un redémarrage prolongé sans relire
+# toute la boîte à chaque tour.
+dmarc_exporter_lookback_days: 14
+
+# Fenêtre glissante des séries `_recent`, sur laquelle portent les alertes.
+dmarc_exporter_window_days: 7
+
+# Bridge Docker par défaut, autorisé à scraper l'exporter. Nécessaire quand
+# Prometheus tourne en conteneur sur la MÊME machine que l'exporter : le paquet
+# arrive alors avec une source 172.17.x, pas avec l'IP publique de l'hôte.
+# C'est le cas sur les deux parcs (`mail`+`prometheus1` d'un côté,
+# `mail1`+`monitor` de l'autre).
+#
+# Valeur alignée sur les règles déjà en place sur `prometheus1`
+# (`9100/tcp ALLOW 172.17.0.0/16`, `9154/tcp ALLOW 172.17.0.0/16`) et sur
+# `alertmanager-security`. À élargir si Prometheus passe un jour sur un réseau
+# Docker défini par l'utilisateur (172.18+), sinon le scrape casserait sans
+# autre symptôme qu'un TargetDown permanent. Mettre à "" pour ne pas poser la
+# règle.
+dmarc_exporter_docker_bridge_cidr: "172.17.0.0/16"

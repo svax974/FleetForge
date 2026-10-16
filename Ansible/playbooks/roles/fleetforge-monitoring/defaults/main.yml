@@ -1,0 +1,22 @@
+---
+# Supervision de FleetForge.
+#
+# L'application expose Prometheus NATIVEMENT sur son port applicatif : pas de
+# sonde svcprobe ici, une cible directe suffit et en dit bien plus. C'est le
+# premier des trois cas de la convention `-monitoring` (CLAUDE.md), et le
+# meilleur — un exporter externe ne saurait rien de l'état interne.
+#
+# Ce que la cible apporte au-delà du binaire vivant/mort :
+#   • fleetforge_ansible_available — l'application répond mais ne peut RIEN
+#     déployer (ansible absent du PATH). C'est l'état dégradé propre à ce
+#     service : il ressemble en tout point à un service en bonne santé.
+#   • fleetforge_inventories / _roles — à 0, l'arbre Ansible n'est pas là ou
+#     les chemins sont faux : le parc paraît vide.
+#   • fleetforge_runs_failed_total — les déploiements qui échouent.
+ff_port: "{{ app_port | default(9750) }}"
+ff_job: fleetforge
+
+# `/metrics` n'est pas derrière l'authentification basique de l'application :
+# Prometheus n'a pas d'identifiants ici, et une cible en 401 ferait sonner
+# TargetDown en permanence. C'est ufw qui restreint ce port, ci-dessous.
+ff_metrics_path: /metrics

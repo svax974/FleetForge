@@ -1,0 +1,55 @@
+---
+# Rotki — sidecar de valorisation de portefeuille pour TradeKong (fusion
+# WalletOptimizer → TradeKong, Phase 4.2). Déployé sur l'entrée d'inventaire
+# dédiée `rotki` (machine partagée avec `ctdapi`/`dev`/
+# `docker-repo`/`xbot`) — PAS co-localisé avec TradeKong lui-même
+# (`tradekong`) : une machine séparée, dédiée. Jamais exposé directement,
+# joignable uniquement par IP réelle (TradeKong) ou via le vhost public
+# proxifié (voir ci-dessous).
+#
+#   ./play.sh web3c deploy-rotki.yml
+#   ./play.sh web3c deploy-rotki.yml --tags monitoring   # réarmer la supervision
+#
+# Après le premier déploiement, mettre à jour la config admin TradeKong
+# (rotkiIntegration_baseUrl) vers http://<ansible_host de rotki>:{{ rotki_port }}/api/1
+# — voir le message de rotki-install en fin de play.
+#
+# Le vhost (rotki.web3c.cc, jeton X-Api-Key ; + un vhost UI restreint VPN)
+# appartient au proxy, comme pour searxng — ce playbook publie le CNAME DNS
+# mais ne déploie PAS le vhost lui-même :
+#   ./play.sh web3c update-proxy-web3c.yml
+
+# ── Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ───────────────────────
+- name: Contrôle préalable
+  hosts: rotki
+  remote_user: "{{ remote_username }}"
+  roles:
+    - role: host-preflight
+      preflight_require_docker: true
+
+- name: Deploy the Rotki sidecar
+  hosts: rotki
+  remote_user: "{{ remote_username }}"
+  roles:
+    - rotki-install
+
+# 4302 est PUBLIÉ par Docker : une règle ufw ne le voit jamais, seul
+# DOCKER-USER le filtre réellement (CLAUDE.md). La règle vit dans
+# `docker_ports_rules`, déclarée dans host_vars/ctdapi.yml — `ctdapi`, pas
+# `rotki`, est l'hôte CANONIQUE de la machine (le premier établi pour
+# cette machine) : `docker_ports_rules` décrit une MACHINE, une liste par
+# host_vars et non par rôle. Joué sur `rotki`, qui n'a pas son propre
+# host_vars, ce play serait un no-op silencieux.
+- name: Filter the Rotki port in DOCKER-USER
+  hosts: ctdapi
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - docker-ports-security
+
+# ── Supervision (OBLIGATOIRE, voir CLAUDE.md) ──────────────────────────────
+- name: Supervision du service
+  hosts: rotki
+  remote_user: "{{ remote_username }}"
+  roles:
+    - rotki-monitoring

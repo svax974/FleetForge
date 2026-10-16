@@ -1,0 +1,24 @@
+# Configuration electrs (~/.electrs/config.toml). Voir `electrs --help` pour
+# la liste complète — les noms de champs ci-dessous correspondent au fork
+# mempool/electrs {{ esplora_version }}. Vérifier après le premier démarrage :
+# `journalctl -u esplora` doit lister ces valeurs sans avertissement
+# « unknown field ».
+network = "bitcoin"
+
+daemon_dir = "{{ esplora_daemon_dir }}"
+daemon_rpc_addr = "{{ esplora_daemon_rpc_addr }}"
+daemon_p2p_addr = "{{ esplora_daemon_p2p_addr }}"
+# Authentification RPC explicite : le nœud utilise un rpcauth personnalisé
+# (group_vars/rpcsbtc.yml), pas le fichier .cookie par défaut — même
+# raisonnement que rpcuser/rpcpassword dans brk-install/templates/config.toml.
+cookie = "{{ rpcbtcuser }}:{{ rpcbtcpasswd }}"
+
+db_dir = "{{ esplora_db_dir }}"
+
+http_addr = "{{ esplora_http_bind }}:{{ esplora_http_port }}"
+electrum_rpc_addr = "{{ esplora_electrum_addr }}"
+monitoring_addr = "{{ esplora_monitoring_bind }}:{{ esplora_monitoring_port }}"
+
+# Importe d'abord via le protocole P2P (plus rapide que RPC bloc par bloc)
+# avant de basculer en suivi RPC/ZMQ du tip.
+jsonrpc_import = true

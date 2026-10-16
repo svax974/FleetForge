@@ -1,0 +1,6 @@
+---
+agenthub_src: "/Users/steph/Dev/Apps/AgentHub/agent-hub/"
+agenthub_hostname: "agenthub.{{ domain_name }}"
+agenthub_front_port: "{{ hostvars['agenthub'].app_port | default(4700) }}"
+agenthub_back_port: "{{ hostvars['agenthub'].back_port | default(4701) }}"
+agenthub_runner_ssh_port: "{{ ssh_custom_port }}"

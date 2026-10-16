@@ -1,0 +1,21 @@
+---
+# Setup firewall rules — restrict Prometheus access to whitelisted IPs only
+
+- name: Deny everything and enable UFW
+  community.general.ufw:
+    state: enabled
+    policy: deny
+
+- name: Allow SSH access
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    port: "{{ ssh_custom_port | default('22') }}"
+
+- name: Allow Prometheus access only from whitelisted IPs
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    port: "9090"
+    from_ip: "{{ item }}"
+  loop: "{{ whitelist }}"

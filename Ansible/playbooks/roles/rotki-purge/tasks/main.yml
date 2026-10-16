@@ -1,0 +1,55 @@
+---
+# Supprime Rotki ET ses données : conteneur, image, volumes nommés (portefeuille
+# valorisé, historique). Reprend `rotki-remove` puis efface ce que celui-ci
+# préserve. Destructif — les données de valorisation ne sont pas
+# reconstructibles sans re-synchronisation complète depuis IBKR/les échanges
+# configurés.
+
+- name: Refuse to purge without explicit confirmation
+  ansible.builtin.assert:
+    that:
+      - (confirm | default('')) == 'yes'
+    fail_msg: >-
+      Purge refusée. Cette opération supprime les volumes de données Rotki
+      (portefeuille valorisé, historique), non reconstructibles sans
+      re-synchronisation complète depuis IBKR/les échanges configurés.
+      Relance avec -e confirm=yes en connaissance de cause.
+
+- name: Remove the service and its probe
+  ansible.builtin.include_role:
+    name: rotki-remove
+
+- name: Remove the Rotki image
+  community.docker.docker_image_remove:
+    name: "{{ rotki_image }}"
+  become: true
+  ignore_errors: true
+
+- name: Remove the named data and logs volumes
+  community.docker.docker_volume:
+    name: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ rotki_data_volume | default('rotki_data') }}"
+    - "{{ rotki_logs_volume | default('rotki_logs') }}"
+  become: true
+  ignore_errors: true
+
+# ── DNS : retirer le CNAME public ───────────────────────────────────────────
+# Symétrique de la publication (rotki-install inclut
+# cloudflare-dns-update/tasks/cnames.yml, via `proxy_hostname` de
+# l'entrée d'inventaire `rotki`) : le nom public disparaît avec le service.
+# ATTENTION : l'entrée d'inventaire porteuse de `proxy_hostname` doit être
+# retirée EN MÊME TEMPS (ou son attribut supprimé) — sinon la prochaine
+# synchronisation (update-cloudflare-dns.yml) republierait le record.
+- name: Remove the Rotki CNAME
+  community.general.cloudflare_dns:
+    api_token: "{{ cloudflare_token }}"
+    zone: "{{ domain_name }}"
+    record: "{{ rotki_hostname }}"
+    type: CNAME
+    state: absent
+  delegate_to: localhost
+  become: false
+  run_once: true
+  when: cloudflare_token | default('') | length > 0

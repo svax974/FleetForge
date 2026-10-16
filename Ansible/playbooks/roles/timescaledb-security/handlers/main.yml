@@ -1,0 +1,10 @@
+---
+# Le script est idempotent (il purge puis repose les règles du port) : le
+# rejouer applique immédiatement une liste d'autorisations modifiée, sans
+# attendre le prochain redémarrage.
+- name: reapply timescaledb firewall
+  ansible.builtin.systemd:
+    name: timescaledb-firewall
+    state: restarted
+    daemon_reload: true
+  become: true

@@ -1,0 +1,12 @@
+{
+  "service": "postgres-front",
+  "up": {"kind": "docker", "container": "{{ dbfmon_container }}"},
+  "extra_checks": [
+    {"name": "port", "kind": "tcp", "host": "127.0.0.1", "port": {{ dbfmon_port }}}
+  ],
+  "metrics_command": [
+    "{{ svcprobe_lib_dir }}/postgres-metrics.sh",
+    "{{ dbfmon_container }}", "{{ dbfmon_user }}", "{{ dbfmon_db }}", "postgres_front"
+  ],
+  "metrics_timeout": 15
+}

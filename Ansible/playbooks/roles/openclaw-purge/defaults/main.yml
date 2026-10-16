@@ -1,0 +1,18 @@
+---
+openclaw_user: "{{ remote_username }}"
+openclaw_home: "/home/{{ openclaw_user }}"
+openclaw_prefix: "{{ openclaw_home }}/.openclaw"
+openclaw_port: "{{ app_port | default(18789) }}"
+openclaw_lan_cidr: "192.168.1.0/24"
+openclaw_extra_allowed_cidrs: []
+# Nom public CNAME (openclaw.web3c.cc, attribut `proxy_hostname` de
+# l'entrée d'inventaire `openclaw`) : ce rôle en a besoin pour son retrait —
+# dupliqué ici, aucun autre rôle du parc ne le définit (motif
+# agenthub-purge).
+openclaw_hostname: "openclaw.{{ domain_name }}"
+
+# Désactivé par défaut : `openclaw-purge` ne sait pas si un AUTRE service sous
+# srvc dépend déjà du lingering. Ne pas désactiver un réglage posé pour
+# quelqu'un d'autre par défaut — le porter à `true` explicitement quand
+# OpenClaw est le seul consommateur connu.
+openclaw_disable_linger: false

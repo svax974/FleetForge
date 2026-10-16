@@ -1,0 +1,4 @@
+---
+llamacpp_instance_id: 1
+llamacpp_home: /opt/llamacpp
+llamacpp_models_dir: "{{ llamacpp_home }}/models"

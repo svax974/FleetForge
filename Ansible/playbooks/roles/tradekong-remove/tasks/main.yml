@@ -1,0 +1,18 @@
+---
+# Retire ce qu'ANSIBLE a déposé sur tradekong (la sonde svcprobe). Ne touche
+# PAS à la stack docker-compose (postgres/redis/back/front), déployée hors
+# Ansible.
+
+- name: Remove the svcprobe check file
+  ansible.builtin.file:
+    path: "{{ svcprobe_checks_dir }}/tradekong.json"
+    state: absent
+  become: true
+
+- name: Notice — the application stack is untouched
+  ansible.builtin.debug:
+    msg: >-
+      Sonde svcprobe retirée. La stack docker-compose de tradekong (postgres,
+      redis, back, répartiteur) n'est pas gérée par Ansible et n'est pas
+      affectée. Utilise tradekong-purge pour aussi supprimer la sauvegarde
+      PostgreSQL.

@@ -1,0 +1,57 @@
+---
+# Firewall Alertmanager : UI réservée à la whitelist et aux VPN, plus l'accès
+# de Prometheus qui lui pousse les alertes.
+#
+# Additif uniquement (voir la note de prometheus-security : machine partagée).
+
+- name: Allow Alertmanager access from whitelist
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    port: "{{ alertmanager_port }}"
+    from_ip: "{{ item }}"
+    comment: "Alertmanager UI - whitelist"
+  loop: "{{ whitelist }}"
+  become: true
+
+- name: Allow Alertmanager access from VPNs
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    port: "{{ alertmanager_port }}"
+    from_ip: "{{ hostvars[item].ansible_host }}"
+    comment: "Alertmanager UI - VPN"
+  loop: "{{ groups['vpns'] | default([]) }}"
+  become: true
+
+# Prometheus pousse les alertes vers Alertmanager. Quand les deux sont sur la
+# même machine, le trafic sort du conteneur Prometheus par le bridge Docker et
+# arrive sur l'IP de l'hôte : c'est le réseau Docker qu'il faut autoriser, pas
+# l'IP publique.
+- name: Allow Prometheus (same host, via Docker bridge) to push alerts
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    port: "{{ alertmanager_port }}"
+    src: "172.17.0.0/16"
+    comment: "Alertmanager - Prometheus local (docker bridge)"
+  become: true
+  when: hostvars[prometheus_host]['ansible_host'] == ansible_host
+
+- name: Allow Prometheus (remote) to push alerts
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    port: "{{ alertmanager_port }}"
+    src: "{{ hostvars[prometheus_host]['ansible_host'] }}"
+    comment: "Alertmanager - Prometheus remote"
+  become: true
+  when: hostvars[prometheus_host]['ansible_host'] != ansible_host
+
+- name: Deny all other external access to Alertmanager
+  community.general.ufw:
+    rule: deny
+    proto: tcp
+    port: "{{ alertmanager_port }}"
+    comment: "Alertmanager UI - deny external"
+  become: true

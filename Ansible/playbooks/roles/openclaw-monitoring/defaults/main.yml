@@ -1,0 +1,8 @@
+---
+# Supervision d'OpenClaw. Aucune métrique Prometheus native : sonde
+# déclarative pour `svcprobe` (port 9110, PARTAGÉ avec les autres alias de
+# cette machine NAT domestique — station/proxy2/vpn1/nuc — un exporter par
+# HÔTE, pas par service, cf. CLAUDE.md).
+
+openclaw_port: "{{ app_port | default(18789) }}"
+openclaw_url: "http://127.0.0.1:{{ openclaw_port }}"

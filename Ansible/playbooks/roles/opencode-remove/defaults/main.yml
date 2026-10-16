@@ -1,0 +1,20 @@
+---
+# Chemin du binaire posé par `opencode-install`. Répété ici plutôt que partagé :
+# un rôle de suppression doit rester jouable seul, y compris sur une machine
+# dont on ne rejoue plus l'installation.
+opencode_binary: "/usr/local/bin/opencode"
+
+# Répertoire du script officiel (`$HOME/.opencode/bin`). Ce rôle n'installe
+# jamais par ce chemin, mais une machine où quelqu'un a lancé
+# `curl https://opencode.ai/install | bash` en garde une copie qui masquerait
+# le binaire système dans le PATH — donc une version qui n'est plus celle que
+# l'inventaire décrit. Signalé, jamais supprimé : c'est le HOME d'un compte.
+opencode_user_install_dir: ".opencode/bin"
+
+# Comptes dont on vérifie l'installation parallèle. La configuration, elle,
+# n'est PAS touchée par `-remove` (voir `opencode-purge`).
+opencode_users:
+  - "{{ remote_username }}"
+
+preflight_state_dir: /var/lib/fleetforge/state
+preflight_legacy_state_dir: /var/lib/infra-manager/state

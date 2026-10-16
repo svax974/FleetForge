@@ -1,0 +1,100 @@
+---
+# Ordre imposé : ufw évalue ses règles séquentiellement et la première qui
+# matche gagne. Les autorisations doivent donc être posées AVANT le refus par
+# défaut, sinon le refus les couvre toutes et le service devient injoignable.
+
+- name: Fail early when the whitelist is empty
+  ansible.builtin.fail:
+    msg: >-
+      `whitelist` est vide : OpenClaw serait déployé avec un DROP sans aucune
+      exception, donc inatteignable même pour son propriétaire. Renseigner
+      group_vars/web3c.yml.
+  when: (whitelist | default([])) | length == 0
+
+- name: Allow the OpenClaw port from the operator whitelist
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    port: "{{ openclaw_port }}"
+    from_ip: "{{ item }}"
+    comment: "OpenClaw - whitelist"
+  loop: "{{ whitelist | default([]) }}"
+  become: true
+
+# Les proxies terminent le TLS et portent la restriction par whitelist du
+# vhost. Sans cette ouverture, le vhost répond 502 — ce qui ressemble à une
+# application tombée, alors qu'elle tourne.
+- name: Allow the OpenClaw port from the proxies
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    port: "{{ openclaw_port }}"
+    from_ip: "{{ hostvars[item].ansible_host }}"
+    comment: "OpenClaw - proxy {{ item }}"
+  loop: "{{ groups['proxies'] | default([]) }}"
+  become: true
+
+- name: Allow the OpenClaw port from the home LAN
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    port: "{{ openclaw_port }}"
+    from_ip: "{{ openclaw_lan_cidr }}"
+    comment: "OpenClaw - home LAN"
+  become: true
+
+- name: Allow the OpenClaw port from the extra allowed CIDRs
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    port: "{{ openclaw_port }}"
+    from_ip: "{{ item }}"
+    comment: "OpenClaw - extra"
+  loop: "{{ openclaw_extra_allowed_cidrs }}"
+  become: true
+
+- name: Deny the OpenClaw port from anywhere else
+  community.general.ufw:
+    rule: deny
+    proto: tcp
+    port: "{{ openclaw_port }}"
+    comment: "OpenClaw - default deny"
+  become: true
+
+# ── Contrôle ───────────────────────────────────────────────────────────────
+# Les règles ci-dessus sont POSÉES (`ufw show added` les liste) mais restent
+# décoratives tant qu'ufw lui-même est inactif — un état qui ne se voit pas en
+# relisant les règles une par une, seul `ufw status` répond « active/inactive ».
+# Constaté sur `hub` le 09/09/2026 : ufw inactif alors que ce rôle avait posé
+# les bonnes règles, port 18789 en réalité grand ouvert. Volontairement laissé
+# TEL QUEL par décision opérateur — d'autres services de cet hôte (ex. ollama,
+# 0.0.0.0 sans aucune règle) seraient coupés par une activation faite en
+# aveugle. Ce contrôle ALERTE au lieu de corriger silencieusement.
+- name: Check whether ufw is actually active
+  ansible.builtin.command: ufw status
+  become: true
+  register: openclaw_ufw_state
+  changed_when: false
+  check_mode: false
+
+- name: Warn when ufw is inactive on this host
+  ansible.builtin.debug:
+    msg: >-
+      ufw est INACTIF sur {{ inventory_hostname }} : les règles OpenClaw
+      ci-dessus sont enregistrées mais AUCUNE n'est appliquée, le port
+      {{ openclaw_port }} est réellement joignable sans filtrage. Ne pas
+      activer ufw sans vérifier d'abord les autres services de cet hôte qui
+      n'ont pas encore de règle (ex. ollama, 11434) — une activation à
+      l'aveugle les couperait.
+  when: "'Status: active' not in openclaw_ufw_state.stdout"
+
+- name: Report the effective rules
+  ansible.builtin.shell: "ufw status numbered | grep -F '{{ openclaw_port }}' || true"
+  become: true
+  register: openclaw_ufw
+  changed_when: false
+  check_mode: false
+
+- name: Show them
+  ansible.builtin.debug:
+    var: openclaw_ufw.stdout_lines

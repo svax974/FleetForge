@@ -1,0 +1,31 @@
+---
+# Retire UN SEUL vhost de ce proxy sans reconstruire tout /etc/nginx.
+# Symétrique de deploy-one-site.yml.
+#
+# Usage (depuis un play `hosts: proxies`) :
+#   - ansible.builtin.include_role:
+#       name: proxy-update-web3c
+#       tasks_from: remove-one-site
+#     vars:
+#       site: freellm.conf
+
+- name: Fail early without a target site
+  ansible.builtin.assert:
+    that:
+      - site is defined
+      - site | length > 0
+    fail_msg: >-
+      `site` doit nommer un fichier de /etc/nginx/sites-enabled/
+      (ex: freellm.conf).
+
+- name: Remove the vhost
+  ansible.builtin.file:
+    path: "/etc/nginx/sites-enabled/{{ site }}"
+    state: absent
+  register: proxy_one_site_removed
+
+- name: Reload nginx
+  ansible.builtin.systemd:
+    name: nginx
+    state: reloaded
+  when: proxy_one_site_removed.changed

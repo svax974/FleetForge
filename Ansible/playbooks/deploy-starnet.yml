@@ -1,0 +1,63 @@
+---
+# StarNet (https://github.com/androoAGI/starnet) — harnais d'agents IA,
+# interface « station » et moteur d'agents servis par un seul process Node.
+# Installé NATIVEMENT sous srvc (unité systemd --user, Node embarqué, tag
+# épinglé) sur l'entrée d'inventaire `starnet` (machine
+# partagée). Le sidecar n'écoute que sur 127.0.0.1 (en dur dans le code
+# amont) : un relai systemd publie `app_port`, filtré par ufw aux proxies,
+# whitelist, Prometheus et VPN.
+#
+# Nom public : starnet.web3c.cc, CNAME vers le front des proxies. Vhost
+# restreint à la whitelist + supervision + VPN, poussé par ce playbook seul
+# (play « Vhost StarNet sur les proxies »), rechargé sans toucher aux autres.
+#
+#   ./play.sh web3c deploy-starnet.yml
+#   ./play.sh web3c deploy-starnet.yml --tags proxy-conf    # rejouer seulement le vhost
+#   ./play.sh web3c deploy-starnet.yml --tags monitoring    # réarmer la supervision
+#
+# Montée de version : changer `starnet_version` (starnet-install/defaults ou
+# group_vars/web3c.yml) puis rejouer — les workspaces ne sont pas touchés.
+
+# ── Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ───────────────────────
+- name: Contrôle préalable
+  hosts: starnet
+  remote_user: "{{ remote_username }}"
+  roles:
+    - host-preflight
+
+- name: Deploy StarNet
+  hosts: starnet
+  remote_user: "{{ remote_username }}"
+  roles:
+    - starnet-install
+
+# Process natif (relai systemd) : ufw filtre RÉELLEMENT ce port, pas de
+# publication Docker à contourner. Le rôle échoue si ufw est inactif.
+- name: StarNet firewall
+  hosts: starnet
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - starnet-security
+
+# Pousse SEULEMENT sites-enabled/starnet.conf sur chaque proxy — reload, pas
+# restart, et uniquement si le fichier a changé.
+- name: Vhost StarNet sur les proxies
+  hosts: proxies
+  remote_user: "{{ remote_username }}"
+  become: true
+  tags: [proxy-conf]
+  tasks:
+    - name: Deploy just the StarNet vhost
+      ansible.builtin.include_role:
+        name: proxy-update-web3c
+        tasks_from: deploy-one-site
+      vars:
+        site: starnet.conf
+
+# ── Supervision (OBLIGATOIRE, voir CLAUDE.md) ──────────────────────────────
+- name: Supervision du service
+  hosts: starnet
+  remote_user: "{{ remote_username }}"
+  roles:
+    - starnet-monitoring

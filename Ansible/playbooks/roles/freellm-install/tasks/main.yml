@@ -1,0 +1,260 @@
+---
+# Déploie FreeLLMAPI via l'installeur officiel (Docker Compose). Voir
+# defaults/main.yml pour la logique de publication du port et pour les
+# options licence/clés fournisseur.
+
+- name: Fail early when no proxy is allowed to reach FreeLLMAPI
+  ansible.builtin.fail:
+    msg: >-
+      `freellm_allowed_proxies` est vide : le service serait déployé sans
+      aucun client autorisé, donc inutilisable et invisible. Renseigner le
+      groupe `proxies` de l'inventaire, ou la variable elle-même.
+  when: freellm_allowed_proxies | length == 0
+
+- name: Create the FreeLLMAPI install directory
+  ansible.builtin.file:
+    path: "{{ freellm_install_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  become: true
+
+# Premier passage uniquement : l'installeur écrit lui-même .env (avec un
+# ENCRYPTION_KEY tiré une fois, jamais régénéré) et docker-compose.yml, pull
+# l'image puis démarre le conteneur. PORT/HOST_BIND décident la publication
+# dès la création — les rejouer ensuite ne change rien tant que .env existe
+# déjà (d'où la tâche suivante, pour un changement de topologie après coup).
+- name: Run the FreeLLMAPI installer (first run only)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    curl -fsSL https://freellmapi.co/install.sh | bash
+  args:
+    executable: /bin/bash
+    creates: "{{ freellm_install_dir }}/.env"
+  become: true
+  environment:
+    FREELLMAPI_DIR: "{{ freellm_install_dir }}"
+    PORT: "{{ freellm_port | string }}"
+    HOST_BIND: "{{ freellm_bind_address }}"
+
+# Rejoué à CHAQUE exécution, pas seulement à l'install : la co-localisation
+# avec les proxies peut changer après coup — c'est arrivé à searxng, déplacé
+# le 12/09/2026 (cf. searxng-install/defaults). Sans cette étape, HOST_BIND
+# resterait figé sur la valeur du tout premier déploiement, l'installeur ne
+# réécrivant .env que s'il est absent.
+- name: Keep PORT/HOST_BIND in .env aligned with the current topology
+  ansible.builtin.lineinfile:
+    path: "{{ freellm_install_dir }}/.env"
+    regexp: "^{{ item.key }}="
+    line: "{{ item.key }}={{ item.value }}"
+  loop:
+    - { key: PORT, value: "{{ freellm_port }}" }
+    - { key: HOST_BIND, value: "{{ freellm_bind_address }}" }
+  become: true
+  notify: recreate freellm container
+
+# ── Licence (optionnelle, voir defaults) ───────────────────────────────────
+- name: Look up the optional license value
+  ansible.builtin.set_fact:
+    freellm_license_value: "{{ lookup('vars', freellm_license_var_name, default='') }}"
+  no_log: true
+
+- name: Write the license key into .env when the operator has set one
+  ansible.builtin.lineinfile:
+    path: "{{ freellm_install_dir }}/.env"
+    regexp: '^FREELLMAPI_LICENSE_KEY='
+    line: "FREELLMAPI_LICENSE_KEY={{ freellm_license_value }}"
+  become: true
+  when: freellm_license_value | length > 0
+  no_log: true
+  notify: recreate freellm container
+
+# ── Clés fournisseur (optionnel, voir defaults) ────────────────────────────
+- name: Check for a local provider-keys config file
+  ansible.builtin.stat:
+    path: "{{ freellm_config_local_path }}"
+  delegate_to: localhost
+  become: false
+  register: freellm_config_local
+
+# Le schéma applicatif (server/src/services/declarative-config.ts,
+# `declarativeConfigSchema`, lu le 18/09/2026) est déclaré `.strict()` : toute
+# clé de premier niveau non reconnue fait ÉCHOUER le parse — et
+# `applyDeclarativeConfigFromEnv()` tourne dans `main()`, donc au démarrage du
+# conteneur. Un export du dashboard (Keys → Export, `GET /api/keys/export`)
+# porte `version`/`exportedAt`/`source` en plus de `keys` : déposé tel quel,
+# il aurait empêché le conteneur de démarrer. On ne garde donc que les clés
+# que le schéma connaît (`keys`, `customProviders`, `models`, `fallback`,
+# `routing`) — celles-ci PEUVENT venir directement d'un export, leurs propres
+# champs (platform/key/label) correspondent déjà à `keySchema`.
+- name: Load the local provider-keys file
+  ansible.builtin.set_fact:
+    freellm_config_raw: "{{ lookup('file', freellm_config_local_path) | from_json }}"
+  when: freellm_config_local.stat.exists
+
+- name: Keep only the fields the app's declarative schema accepts
+  ansible.builtin.set_fact:
+    freellm_config_filtered: >-
+      {{ freellm_config_raw | dict2items
+         | selectattr('key', 'in', ['keys', 'customProviders', 'models', 'fallback', 'routing'])
+         | list | items2dict }}
+  when: freellm_config_local.stat.exists
+
+# Monté en lecture dans le conteneur (voir l'override plus bas) : `0600`
+# root:root le rendrait ILLISIBLE au process applicatif, qui tourne en
+# utilisateur `node` — le Dockerfile amont (lu le 18/09/2026) repasse
+# explicitement en non-root avant d'exec le CMD ("the entrypoint drops back
+# to the node user before exec'ing CMD"). `fs.readFileSync` échoue alors avec
+# EACCES, non rattrapé dans `main()` : le conteneur meurt avant même
+# d'écouter le port, symptôme identique à un simple crash — connexion
+# refusée sur /api/ping. `0644` (lisible par tous, pas seulement le
+# propriétaire) est le compromis retenu : ce n'est plus une question d'UID à
+# faire correspondre entre hôte et image.
+- name: Deploy the declarative provider-keys config
+  ansible.builtin.copy:
+    content: "{{ freellm_config_filtered | to_nice_json }}\n"
+    dest: "{{ freellm_install_dir }}/freellmapi.config.json"
+    owner: root
+    group: root
+    mode: '0644'
+  become: true
+  when: freellm_config_local.stat.exists
+  notify: recreate freellm container
+
+- name: Deploy the compose override for the provider-keys mount
+  ansible.builtin.template:
+    src: docker-compose.override.yml.j2
+    dest: "{{ freellm_install_dir }}/docker-compose.override.yml"
+    owner: root
+    group: root
+    mode: '0644'
+  become: true
+  when: freellm_config_local.stat.exists
+  notify: recreate freellm container
+
+# Symétrique : si le fichier local a été retiré, ne pas laisser un montage
+# orphelin pointer vers un fichier qui n'existe plus sur l'hôte (le conteneur
+# refuserait de démarrer, un bind-mount sur un chemin absent étant une erreur
+# Docker, pas un no-op).
+- name: Remove the compose override and the config file when none is provided
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ freellm_install_dir }}/docker-compose.override.yml"
+    - "{{ freellm_install_dir }}/freellmapi.config.json"
+  become: true
+  when: not freellm_config_local.stat.exists
+  notify: recreate freellm container
+
+- name: Apply pending .env/compose changes now
+  ansible.builtin.meta: flush_handlers
+
+# Point d'entrée utilisé par le HEALTHCHECK de l'image elle-même (voir
+# install.sh) : il répond 200 quand l'application est réellement servie.
+- name: Wait for FreeLLMAPI to answer
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ freellm_port }}/api/ping"
+    status_code: [200]
+  register: freellm_ready
+  until: freellm_ready.status | default(0) == 200
+  retries: 12
+  delay: 5
+
+- name: Report how the service is exposed
+  ansible.builtin.debug:
+    msg: >-
+      FreeLLMAPI publié sur {{ freellm_bind_address }}:{{ freellm_port }}
+      {{ '— boucle locale uniquement, tous les proxies autorisés sont sur cette machine, aucune règle de pare-feu nécessaire.'
+         if freellm_bind_address == '127.0.0.1'
+         else '— proxies distants : ' ~ (freellm_remote_proxies | join(', ')) ~
+              '. Le port est ouvert sur 0.0.0.0 et DOIT être filtré dans DOCKER-USER par freellm-security.' }}
+
+# ── Clé API unifiée (voir defaults) ─────────────────────────────────────────
+# Déjà générée par l'application elle-même au premier démarrage — cette étape
+# ne fait que la LIRE dans la base et la déposer localement, jamais
+# l'imprimer.
+#
+# `docker compose exec` (nom du SERVICE, « freellmapi », fixé par
+# install.sh) plutôt que `docker exec <nom de conteneur>` : Compose ne nomme
+# PAS le conteneur juste « freellmapi » — v2 donne
+# « <projet>-freellmapi-1 » (v1 : « <projet>_freellmapi_1 »), le projet valant
+# le nom du répertoire d'install par défaut. Deviner cette forme avait échoué
+# au premier essai (rc=1, « No such container ») ; `docker compose exec`,
+# exécuté depuis freellm_install_dir, résout le service vers le BON
+# conteneur quel que soit son nom réel — et démarre dans le WORKDIR de
+# l'image, où `require('better-sqlite3')` doit se résoudre normalement.
+- name: Read the unified API key from the running container
+  ansible.builtin.command:
+    argv:
+      - docker
+      - compose
+      - exec
+      - -T
+      - freellmapi
+      - node
+      - -e
+      - "const Database=require('better-sqlite3');const db=new Database('/app/server/data/freeapi.db',{readonly:true});const row=db.prepare(\"SELECT value FROM settings WHERE key='unified_api_key'\").get();process.stdout.write(row?row.value:'');"
+  args:
+    chdir: "{{ freellm_install_dir }}"
+  become: true
+  register: freellm_unified_key_raw
+  changed_when: false
+  failed_when: false
+  no_log: true
+  tags: [unified-key]
+
+- name: Ensure the local FleetForge config directory exists
+  ansible.builtin.file:
+    path: "{{ freellm_unified_key_local_path | dirname }}"
+    state: directory
+    mode: '0700'
+  delegate_to: localhost
+  become: false
+  when: freellm_unified_key_raw.rc == 0 and (freellm_unified_key_raw.stdout | trim | length > 0)
+  tags: [unified-key]
+
+- name: Save the unified API key to a local, protected file
+  ansible.builtin.copy:
+    content: "{{ freellm_unified_key_raw.stdout | trim }}\n"
+    dest: "{{ freellm_unified_key_local_path }}"
+    mode: '0600'
+  delegate_to: localhost
+  become: false
+  when: freellm_unified_key_raw.rc == 0 and (freellm_unified_key_raw.stdout | trim | length > 0)
+  no_log: true
+  tags: [unified-key]
+
+# `.stderr` N'EST PAS le secret (le secret vit dans `.stdout`, seul champ
+# couvert par `no_log` sur la tâche de lecture) : l'afficher ici en cas
+# d'échec est ce qui a manqué au premier essai, où le seul indice était
+# « rc=1 » sans le message d'erreur réel.
+- name: Report where to find the key, or what went wrong
+  ansible.builtin.debug:
+    msg: >-
+      {{ 'Clé API unifiée enregistrée dans ' ~ freellm_unified_key_local_path ~ ' (0600, hors dépôt).'
+         if (freellm_unified_key_raw.rc == 0 and (freellm_unified_key_raw.stdout | trim | length > 0))
+         else 'Lecture de la clé API unifiée impossible (rc=' ~ freellm_unified_key_raw.rc ~ ') : '
+              ~ (freellm_unified_key_raw.stderr | default('') | trim)
+              ~ '. Elle reste consultable manuellement : cd ' ~ freellm_install_dir
+              ~ ' && docker compose exec freellmapi node -e "console.log(require(\'better-sqlite3\'))" '
+              ~ '(pour vérifier le module), ou dans le tableau de bord (page Keys) : https://'
+              ~ freellm_hostname ~ '/.' }}
+  tags: [unified-key]
+
+# ── DNS : alias CNAME vers le front des proxies ─────────────────────────────
+# Convention d'inventaire : le nom public (freellm_hostname) est déclaré sur
+# l'entrée `freellm` via `proxy_hostname`, et c'est la synchronisation
+# générique (update-cloudflare-dns.yml, cloudflare-dns-update/tasks/
+# cnames.yml) qui publie le CNAME vers le front round-robin — jamais un A vers
+# l'IP propre de cet hôte. L'inclusion ci-dessous rejoue cette même logique en
+# portée réduite (ce seul hôte) pour garantir le CNAME dès le premier
+# déploiement, sans attendre la synchronisation générique.
+- name: Ensure the service CNAME to the canonical proxy front
+  ansible.builtin.include_role:
+    name: cloudflare-dns-update
+    tasks_from: cnames
+  vars:
+    cfdns_cname_scope:
+      - "{{ inventory_hostname }}"

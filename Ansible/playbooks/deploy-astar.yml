@@ -1,0 +1,47 @@
+---
+# Nœud Astar (collator, `--pruning archive`).
+#
+#   ./play.sh web3c deploy-astar.yml --limit hub
+#   ./play.sh web3c deploy-astar.yml --limit hub --tags monitoring   # cibles seules
+#
+# Ce playbook n'existait pas jusqu'au 12/08/2026 : `astar-install` était joué à
+# la main, l'installation sur `hub` est même enregistrée comme `manual` dans
+# l'historique. Il n'y avait aucun rôle `astar-monitoring` — seulement
+# `exporter-astar-install`, qui enregistrait la cible sans tag `monitoring`
+# (réarmer la supervision imposait donc de rejouer l'installation), sans
+# contrôle de `prometheus_host`, avec un `ignore_errors` sur l'ouverture ufw, et
+# en ignorant le nœud de relais. `astar-monitoring` le remplace ; les deux rôles
+# `exporter-astar-*` sont supprimés.
+#
+# `--limit` est OBLIGATOIRE : `hosts: all` sans restriction installerait un
+# collator sur tout le parc. Les hôtes concernés portent `astar` dans
+# `ansible_roles`.
+#
+# Non couvert ici : la synchronisation initiale de la chaîne, qui dure des
+# jours et n'est pas pilotable par Ansible. Le nœud démarre et rattrape seul —
+# `substrate_block_height{status="sync_target"}` en donne l'avancement.
+
+# ── Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ───────────────────────
+- name: Contrôle préalable
+  hosts: all
+  remote_user: "{{ remote_username }}"
+  roles:
+    - role: host-preflight
+
+- name: Installation du nœud Astar
+  hosts: all
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - astar-install
+
+# ── Supervision (OBLIGATOIRE, voir CLAUDE.md) ──────────────────────────────
+# Astar expose Prometheus nativement : pas d'exporter à écrire, deux cibles à
+# enregistrer (parachaîne 9615 et relais 9616). Le rôle vérifie ensuite que
+# `substrate_block_height` est réellement exposé — sans cette série, tout le
+# groupe d'alertes `astar` serait décoratif.
+- name: Supervision du nœud
+  hosts: all
+  remote_user: "{{ remote_username }}"
+  roles:
+    - astar-monitoring

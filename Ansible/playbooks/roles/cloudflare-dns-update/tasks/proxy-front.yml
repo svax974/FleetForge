@@ -1,0 +1,56 @@
+---
+# Nom canonique du front des proxies (round-robin).
+#
+# `proxy_hostname` (group_vars/<parc>.yml) route en répartition DNS entre TOUS
+# les hôtes du groupe `proxies` : un A record par proxy sous ce MÊME nom,
+# `solo: false` — contrairement à la synchronisation par hôte de main.yml,
+# plusieurs enregistrements doivent coexister sous ce nom. Les services dont
+# le vhost tourne sur plusieurs proxies y font pointer leur CNAME public
+# (tasks/cnames.yml, attribut d'inventaire `proxy_hostname`) plutôt que sur un
+# proxy nommé en dur : le nom reste correct quels que soient les proxies qui
+# composent le groupe.
+#
+# Le nom du front est construit en dur (`proxy.` + zone, même valeur que le
+# global `proxy_hostname`) plutôt que lu depuis cette variable : un hôte
+# portant l'attribut d'inventaire `proxy_hostname` la MASQUE (les vars d'hôte
+# gagnent sur les group_vars), et selon l'hôte qui exécute ce fichier le
+# `record` vaudrait tantôt le front, tantôt un nom de service.
+#
+# Fichier séparé pour être inclus des DEUX côtés :
+#   - tasks/cnames.yml (synchronisation générique ET rôles `-install` via
+#     `include_role: { name: cloudflare-dns-update, tasks_from: cnames }`) —
+#     pour garantir ces enregistrements AVANT de publier un CNAME, sans quoi
+#     le CNAME pointerait vers un nom sans aucun A record, donc injoignable.
+#
+# Ne PURGE PAS un proxy retiré du groupe : un record laissé par un proxy
+# démantelé resterait dans le tourniquet. À nettoyer à la main le jour où le
+# groupe `proxies` change (aucun parc de ce dépôt n'en a fait l'expérience).
+- name: Publish the round-robin A records for the canonical proxy front
+  community.general.cloudflare_dns:
+    api_token: "{{ cfdns_token }}"
+    zone: "{{ cfdns_zone }}"
+    record: "proxy.{{ cfdns_zone }}"
+    type: A
+    value: "{{ hostvars[item].ansible_host }}"
+    ttl: "{{ cfdns_ttl }}"
+    proxied: false
+    solo: false
+    state: present
+  loop: "{{ groups['proxies'] | default([]) }}"
+  loop_control:
+    label: "proxy.{{ cfdns_zone }} → {{ hostvars[item].ansible_host }} ({{ item }})"
+  when: groups['proxies'] | default([]) | length > 0
+  delegate_to: localhost
+  become: false
+  run_once: true
+  register: cfdns_proxy_lb_published
+
+- name: Summarise the canonical proxy front
+  ansible.builtin.debug:
+    msg: >-
+      proxy.{{ cfdns_zone }} : {{ groups['proxies'] | default([]) | length }} proxy(ies) en
+      round-robin ({{ groups['proxies'] | default([]) | map('extract', hostvars, 'ansible_host') | join(', ') }}).
+  when: groups['proxies'] | default([]) | length > 0
+  delegate_to: localhost
+  become: false
+  run_once: true

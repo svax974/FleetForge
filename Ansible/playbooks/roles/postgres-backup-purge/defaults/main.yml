@@ -1,0 +1,7 @@
+---
+pgbak_dir: "{{ ansible_env.HOME }}/postgres-backup"
+pgbak_dest_addr: "{{ hostvars[pgbak_dest_host]['ansible_host'] }}"
+pgbak_dest_user: "{{ remote_username }}"
+pgbak_dest_dir: "{{ backup_root }}/{{ pgbak_name }}"
+pgbak_ssh_key_path: "{{ ansible_env.HOME }}/.ssh/id_ed25519_{{ pgbak_name }}backup"
+node_exporter_textfile_dir: /var/lib/node_exporter/textfile_collector

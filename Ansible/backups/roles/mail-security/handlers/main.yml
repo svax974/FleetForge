@@ -1,0 +1,15 @@
+---
+- name: restart ufw
+  ansible.builtin.systemd:
+    name: ufw
+    state: restarted
+
+- name: restart postfix
+  ansible.builtin.systemd:
+    name: postfix
+    state: restarted
+
+- name: restart dovecot
+  ansible.builtin.systemd:
+    name: dovecot
+    state: restarted 

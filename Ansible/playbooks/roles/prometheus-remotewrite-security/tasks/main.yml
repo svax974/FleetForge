@@ -1,0 +1,71 @@
+---
+# Rien à ouvrir quand le pousseur et Prometheus partagent la machine : le
+# trafic part alors du bridge Docker, déjà autorisé par `allow_internal`.
+# Vérifié le 19/08/2026 depuis un conteneur de la préprod : `prometheus1`:9090
+# et 172.17.0.1:9090 répondent tous deux 401, donc joignables.
+- name: Open the remote_write receiver to this host
+  ansible.builtin.template:
+    src: sources.conf.j2
+    dest: "/etc/docker-ports/sources.d/{{ prwsec_service }}.conf"
+    owner: root
+    group: root
+    mode: '0644'
+  become: true
+  delegate_to: "{{ item }}"
+  loop: "{{ prwsec_prometheus_hosts }}"
+  when:
+    - prwsec_source != hostvars[item].ansible_host
+    # Poussée directe seulement : via un vhost du proxy, l'ouverture est inutile.
+    - (prwsec_urls | length) == 0
+      or (prwsec_urls | select('search', hostvars[item].ansible_host) | list | length) > 0
+  register: prwsec_dropin
+  tags: [monitoring]
+
+# Le drop-in n'est lu qu'à l'application des règles : sans ce redémarrage,
+# l'autorisation existe sur disque et pas dans iptables, ce qui est exactement
+# le genre d'écart qui ne se voit pas.
+- name: Reapply the Docker port rules
+  ansible.builtin.systemd:
+    name: docker-ports-firewall
+    state: restarted
+  become: true
+  delegate_to: "{{ item.item }}"
+  loop: "{{ prwsec_dropin.results | default([]) | selectattr('changed', 'defined') | selectattr('changed') | list }}"
+  loop_control:
+    label: "{{ item.item }}"
+  failed_when: false
+  tags: [monitoring]
+
+# Contrôle depuis le pousseur lui-même, seul point de vue qui compte. 401 = on
+# a atteint Prometheus (auth basique) : c'est un succès pour ce qu'on teste ici.
+# Un timeout signifie que le filtrage n'a pas pris.
+- name: Verify the receiver is reachable from this host
+  ansible.builtin.uri:
+    url: "http://{{ hostvars[item].ansible_host }}:{{ prwsec_port }}/api/v1/status/buildinfo"
+    status_code: [200, 401]
+    timeout: 10
+  loop: "{{ prwsec_prometheus_hosts }}"
+  when:
+    - prwsec_source != hostvars[item].ansible_host
+    - (prwsec_urls | length) == 0
+      or (prwsec_urls | select('search', hostvars[item].ansible_host) | list | length) > 0
+  register: prwsec_reach
+  failed_when: false
+  changed_when: false
+  tags: [monitoring]
+
+- name: Warn when a receiver stays unreachable
+  ansible.builtin.debug:
+    msg: >-
+      ATTENTION — {{ item.item }} injoignable sur {{ prwsec_port }} depuis
+      {{ inventory_hostname }} ({{ item.msg | default('pas de réponse') }}).
+      vmagent réessaiera indéfiniment sans rien signaler : aucune cible, aucune
+      série, donc aucune alerte pour le dire. Vérifie la chaîne DOCKER-USER sur
+      l'hôte de supervision (`iptables -L DOCKER-USER -n`).
+  loop: "{{ prwsec_reach.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when:
+    - not (item.skipped | default(false))
+    - item.status | default(0) not in [200, 401]
+  tags: [monitoring]
