@@ -1,0 +1,8 @@
+[
+{% for e in _target_endpoints %}
+    {
+        "targets": [ "{{ ansible_host }}:{{ e.scrape_port }}" ],
+        "labels": {{ ({'job': _target_job, 'aiserver': inventory_hostname} | combine(e.labels)) | to_json }}
+    }{{ ',' if not loop.last else '' }}
+{% endfor %}
+]

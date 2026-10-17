@@ -1,0 +1,128 @@
+---
+# Installe la Pushgateway : binaire amont épinglé, répertoire de persistance,
+# unité systemd durcie. Voir defaults/main.yml pour le choix du compte (srvc)
+# et la raison d'être de la persistance.
+
+- name: Fail on an unsupported architecture
+  ansible.builtin.assert:
+    that:
+      - ansible_architecture in pushgateway_arch_map
+    fail_msg: >-
+      Architecture {{ ansible_architecture }} non prise en charge
+      ({{ pushgateway_arch_map.keys() | join(', ') }}). Télécharger un binaire
+      d'une autre architecture donnerait une unité en échec au démarrage
+      (« exec format error »), pas une erreur ici.
+
+- name: Settle the release archive name
+  ansible.builtin.set_fact:
+    pushgw_release: "pushgateway-{{ pushgateway_version }}.linux-{{ pushgateway_arch_map[ansible_architecture] }}"
+
+# ── Répertoire de données ──────────────────────────────────────────────────
+# Possédé par srvc, qui lit le magasin et peut le sauvegarder sans sudo.
+- name: Create the data directory
+  ansible.builtin.file:
+    path: "{{ pushgateway_data_dir }}"
+    state: directory
+    owner: "{{ pushgateway_user }}"
+    group: "{{ pushgateway_user }}"
+    mode: '0750'
+  become: true
+
+# ── Binaire (idempotent) ───────────────────────────────────────────────────
+# On compare la version RÉELLEMENT installée plutôt que de se fier à la seule
+# présence du fichier : sans cela, monter `pushgateway_version` ne changerait
+# rien, et rejouer la même version retéléchargerait l'archive à chaque passage.
+# `--version` écrit sur stdout ou stderr selon la version de kingpin : on lit
+# les deux.
+- name: Read the installed version
+  ansible.builtin.command:
+    cmd: "{{ pushgateway_bin_path }} --version"
+  register: pushgw_installed
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Decide whether the binary must be (re)installed
+  ansible.builtin.set_fact:
+    pushgw_needs_binary: >-
+      {{ pushgw_installed.rc != 0
+         or ('version ' ~ pushgateway_version ~ ' ')
+            not in ((pushgw_installed.stdout | default('')) ~ (pushgw_installed.stderr | default(''))) }}
+
+# Somme de contrôle lue dans le `sha256sums.txt` publié avec la version : une
+# archive tronquée ou altérée est refusée avant d'être extraite.
+- name: Download the release archive
+  ansible.builtin.get_url:
+    url: "{{ pushgateway_release_base }}/{{ pushgw_release }}.tar.gz"
+    dest: "/tmp/{{ pushgw_release }}.tar.gz"
+    checksum: "sha256:{{ pushgateway_release_base }}/sha256sums.txt"
+    mode: '0644'
+  when: pushgw_needs_binary | bool
+
+- name: Extract the release archive
+  ansible.builtin.unarchive:
+    src: "/tmp/{{ pushgw_release }}.tar.gz"
+    dest: /tmp
+    remote_src: true
+  when: pushgw_needs_binary | bool
+
+# root:root 0755 : srvc exécute le binaire, il ne doit pas pouvoir le
+# remplacer — l'unité tourne sous son compte, un binaire modifiable par lui
+# serait un moyen de faire exécuter n'importe quoi au service.
+- name: Install the binary
+  ansible.builtin.copy:
+    src: "/tmp/{{ pushgw_release }}/pushgateway"
+    dest: "{{ pushgateway_bin_path }}"
+    owner: root
+    group: root
+    mode: '0755'
+    remote_src: true
+  become: true
+  when: pushgw_needs_binary | bool
+  notify: restart pushgateway
+
+- name: Clean up the release archive
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "/tmp/{{ pushgw_release }}.tar.gz"
+    - "/tmp/{{ pushgw_release }}"
+  when: pushgw_needs_binary | bool
+
+# ── Service ────────────────────────────────────────────────────────────────
+- name: Deploy the systemd unit
+  ansible.builtin.template:
+    src: pushgateway.service.j2
+    dest: /etc/systemd/system/pushgateway.service
+    owner: root
+    group: root
+    mode: '0644'
+  become: true
+  notify: restart pushgateway
+
+- name: Enable and start pushgateway
+  ansible.builtin.systemd:
+    name: pushgateway
+    state: started
+    enabled: true
+    daemon_reload: true
+  become: true
+
+# Le handler ne serait vidé qu'en FIN de play : la vérification ci-dessous
+# interrogerait alors l'ancien binaire, et une mise à jour cassée passerait
+# pour un déploiement réussi.
+- name: Flush handlers so the check hits the version just deployed
+  ansible.builtin.meta: flush_handlers
+
+# /-/ready et non le port : la passerelle accepte les connexions avant d'avoir
+# relu son magasin de persistance, et c'est cette relecture qu'on veut voir
+# aboutir (un magasin illisible la fait sortir en erreur).
+- name: Verify the service is ready
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ pushgateway_port }}/-/ready"
+  register: pushgw_ready
+  retries: 10
+  delay: 3
+  until: pushgw_ready.status is defined and pushgw_ready.status == 200
+  changed_when: false

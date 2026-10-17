@@ -4,10 +4,12 @@
 # onboardé, seuls la config des proxies de confiance et le contrôle de santé
 # rejouent.
 
+# La clé n'est exigée que pour `openclaw_auth_choice: openai-api-key` ; avec
+# `skip` (ou tout autre choix) elle est facultative et le fournisseur se règle
+# ensuite dans OpenClaw.
 - name: Fail early when the provider key is missing
   ansible.builtin.assert:
     that:
-      - openclaw_openai_api_key is defined
       - openclaw_openai_api_key | length > 0
     fail_msg: >-
       `openclaw_openai_api_key` n'est pas défini. OpenClaw est onboardé avec
@@ -105,6 +107,44 @@
     OPENCLAW_GATEWAY_TOKEN: "{{ openclaw_gateway_token }}"
   when: not openclaw_onboarded.stat.exists
 
+# `onboard` pose `gateway.auth.token` en SecretRef (env:OPENCLAW_GATEWAY_TOKEN).
+# On le remplace par la valeur : le jeton vit dans la config et nulle part
+# ailleurs. Garder aussi la variable dans `.openclaw.env` donnait deux sources
+# qui divergent — mise à jour 2026.10.4 du 17/10/2026 : la config portait un
+# jeton littéral différent de celui du fichier, et la gateway signalait
+# « OPENCLAW_GATEWAY_TOKEN conflicts with gateway.auth.token ». Premier
+# onboarding seulement : rejouée, elle écraserait un jeton déjà distribué aux
+# clients (UI web, appareils appairés). Fichier `--batch-file` : la valeur ne
+# doit pas apparaître dans argv.
+- name: Write the gateway token into the configuration
+  ansible.builtin.copy:
+    dest: "{{ openclaw_home }}/.gateway-token-batch.json"
+    owner: "{{ openclaw_user }}"
+    group: "{{ openclaw_user }}"
+    mode: '0600'
+    content: "{{ [{'path': 'gateway.auth.token', 'value': openclaw_gateway_token}] | to_json }}"
+  become: true
+  no_log: true
+  when: not openclaw_onboarded.stat.exists
+
+- name: Apply the gateway token
+  ansible.builtin.command:
+    cmd: "{{ openclaw_binary }} config set --batch-file {{ openclaw_home }}/.gateway-token-batch.json"
+    chdir: "{{ openclaw_home }}"
+  become: true
+  become_user: "{{ openclaw_user }}"
+  environment:
+    HOME: "{{ openclaw_home }}"
+  no_log: true
+  changed_when: true
+  when: not openclaw_onboarded.stat.exists
+
+- name: Remove the gateway token batch file
+  ansible.builtin.file:
+    path: "{{ openclaw_home }}/.gateway-token-batch.json"
+    state: absent
+  become: true
+
 # Rejoué à chaque exécution (pas seulement au premier onboarding) : c'est la
 # correction d'un défaut découvert en production, elle doit s'appliquer aussi
 # à une installation déjà onboardée. La gateway déjà démarrée ne relit ce
@@ -129,6 +169,25 @@
     HOME: "{{ openclaw_home }}"
   changed_when: true
   notify: restart openclaw gateway
+
+# Moteur d'embeddings de la mémoire. Vide = défaut d'OpenClaw (openai, qui exige
+# une clé). Sans fallback explicite (`none`), une panne du moteur retomberait
+# sur un fournisseur sans clé. Rien de secret ici : `--batch-json` convient.
+# Pas de `notify` : la gateway recharge `memory.search` à chaud.
+- name: Configure the memory search embeddings
+  ansible.builtin.command:
+    cmd: >-
+      {{ openclaw_binary }} config set --batch-json
+      '{{ [{"path": "memory.search.provider", "value": openclaw_memory_search_provider},
+           {"path": "memory.search.model", "value": openclaw_memory_search_model},
+           {"path": "memory.search.fallback", "value": openclaw_memory_search_fallback}] | to_json }}'
+    chdir: "{{ openclaw_home }}"
+  become: true
+  become_user: "{{ openclaw_user }}"
+  environment:
+    HOME: "{{ openclaw_home }}"
+  changed_when: true
+  when: openclaw_memory_search_provider | length > 0
 
 # Optionnel (openclaw_custom_provider_name vide = sauté). Écrit dans un
 # FICHIER plutôt qu'en argv (`--batch-file`, pas `--batch-json`) : la clé API
@@ -333,8 +392,10 @@
     group: "{{ openclaw_user }}"
     mode: '0600'
     content: |
+      # Secrets de la gateway (Ansible). Clé du fournisseur : uniquement si définie.
+      {% if openclaw_openai_api_key | trim | length > 0 %}
       OPENAI_API_KEY={{ openclaw_openai_api_key | trim }}
-      OPENCLAW_GATEWAY_TOKEN={{ openclaw_gateway_token }}
+      {% endif %}
   become: true
   become_user: "{{ openclaw_user }}"
   no_log: true

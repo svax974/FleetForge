@@ -12,7 +12,7 @@
 # le vhost (CLAUDE.md § « Obligation DNS + vhost » — ce playbook publie le
 # CNAME DNS, pas le vhost lui-même, qui appartient au proxy comme pour
 # rotki/searxng/freellm) :
-#   ./play.sh papanglabs update-proxy-papang.yml
+#   ./play.sh papanglabs update-proxy.yml
 
 # ── Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ───────────────────────
 - name: Contrôle préalable

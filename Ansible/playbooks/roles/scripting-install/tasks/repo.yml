@@ -1,0 +1,117 @@
+---
+# Un dépôt de `scripting_repos` (variable de boucle : scripting_repo).
+# Joué sous `remote_username` : c'est lui qui possède le code et le lance.
+
+# Mise à jour EN PLACE plutôt que suppression + reclonage : les fichiers
+# ignorés par git (configuration du parc, logs, outputs, venv) restent là, et
+# un rejeu sans nouveau commit ne change rien.
+#
+# `force: false` (défaut) : une modification locale d'un fichier SUIVI fait
+# échouer la tâche au lieu d'être écrasée en silence. Un correctif posé à la
+# main sur le serveur doit se voir, pas disparaître au déploiement suivant.
+#
+# Une installation de l'ancien rôle a l'URL avec jeton dans .git/config : le
+# module git réécrit `origin` dès qu'elle diffère de `url`, ce qui l'en retire.
+- name: "{{ scripting_repo.name }} — clone or update"
+  block:
+    - name: "{{ scripting_repo.name }} — git"
+      ansible.builtin.git:
+        repo: "{{ scripting_repo.url }}"
+        dest: "{{ scripting_repo.dest }}"
+        version: "{{ scripting_repo.version | default('HEAD') }}"
+        update: true
+        force: false
+      environment: "{{ scripting_git_env }}"
+      register: scripting_git_result
+      no_log: "{{ not (scripting_git_debug | bool) }}"
+  rescue:
+    - name: "{{ scripting_repo.name }} — explain the git failure"
+      ansible.builtin.fail:
+        msg: >-
+          git a échoué sur {{ scripting_repo.name }} ({{ scripting_repo.url }}
+          → {{ scripting_repo.dest }}). Sortie masquée (no_log) : relancer avec
+          `-e scripting_git_debug=true` pour la lire. Causes fréquentes : jeton
+          `scripting_git_token` absent ou expiré, modification locale d'un
+          fichier suivi (`git -C {{ scripting_repo.dest }} status`), répertoire
+          parent non accessible à {{ remote_username }}.
+  vars:
+    scripting_git_env: >-
+      {{ {'GIT_TERMINAL_PROMPT': '0'}
+         | combine({'GIT_ASKPASS': scripting_askpass,
+                    'SCRIPTING_GIT_USER': scripting_git_user,
+                    'SCRIPTING_GIT_TOKEN': scripting_git_token}
+                   if (scripting_git_token | length > 0) else {}) }}
+
+- name: "{{ scripting_repo.name }} — runtime directories"
+  ansible.builtin.file:
+    path: "{{ scripting_repo.dest }}/{{ item }}"
+    state: directory
+    mode: '0755'
+  loop: "{{ scripting_repo.runtime_dirs | default(scripting_runtime_dirs) }}"
+
+# ── venv ───────────────────────────────────────────────────────────────────
+# Reconstruit uniquement quand c'est nécessaire, d'après une empreinte posée
+# dans le venv : « sha256 de requirements.txt + version de Python ».
+#   • requirements.txt change → `pip install -r` dans le venv existant
+#     (aucune fenêtre sans venv pour les tâches cron en cours) ;
+#   • Python change (mise à niveau de la distribution) ou venv absent → venv
+#     supprimé et recréé : un venv est lié à l'interpréteur qui l'a créé, il
+#     ne survit pas à un changement de version mineure.
+# Un paquet RETIRÉ de requirements.txt reste installé jusqu'à la prochaine
+# recréation — compromis assumé contre une réinstallation complète à chaque
+# modification.
+- name: "{{ scripting_repo.name }} — look for requirements.txt"
+  ansible.builtin.stat:
+    path: "{{ scripting_repo.dest }}/requirements.txt"
+    get_checksum: true
+    checksum_algorithm: sha256
+  register: scripting_req
+
+- name: "{{ scripting_repo.name }} — venv"
+  when:
+    - scripting_repo.venv | default(true) | bool
+    - scripting_req.stat.exists
+  vars:
+    scripting_venv: "{{ scripting_repo.dest }}/venv"
+    scripting_venv_marker: "{{ scripting_repo.dest }}/venv/.fleetforge-requirements"
+    scripting_marker_want: "{{ scripting_req.stat.checksum }} python{{ scripting_python_version }}"
+  block:
+    - name: "{{ scripting_repo.name }} — read the venv fingerprint"
+      ansible.builtin.slurp:
+        src: "{{ scripting_venv_marker }}"
+      register: scripting_marker_raw
+      failed_when: false
+
+    - name: "{{ scripting_repo.name }} — check the venv interpreter"
+      ansible.builtin.stat:
+        path: "{{ scripting_venv }}/bin/python"
+      register: scripting_venv_python
+
+    - name: "{{ scripting_repo.name }} — compare the fingerprint"
+      ansible.builtin.set_fact:
+        scripting_marker_have: >-
+          {{ (scripting_marker_raw.content | b64decode | trim)
+             if scripting_marker_raw.content is defined else '' }}
+
+    - name: "{{ scripting_repo.name }} — drop a venv built for another Python"
+      ansible.builtin.file:
+        path: "{{ scripting_venv }}"
+        state: absent
+      when: >-
+        not scripting_venv_python.stat.exists
+        or (scripting_marker_have.split(' ') | last) != ('python' ~ scripting_python_version)
+
+    - name: "{{ scripting_repo.name }} — install the requirements"
+      ansible.builtin.pip:
+        requirements: "{{ scripting_repo.dest }}/requirements.txt"
+        virtualenv: "{{ scripting_venv }}"
+        virtualenv_command: /usr/bin/python3 -m venv
+      when: >-
+        not scripting_venv_python.stat.exists
+        or scripting_marker_have != scripting_marker_want
+
+    - name: "{{ scripting_repo.name }} — record the venv fingerprint"
+      ansible.builtin.copy:
+        dest: "{{ scripting_venv_marker }}"
+        content: "{{ scripting_marker_want }}\n"
+        mode: '0644'

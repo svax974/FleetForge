@@ -55,10 +55,8 @@ fn disambiguation_table() -> &'static [(&'static str, &'static str, &'static str
         ("dbfront-install-backup",  "postgresql-front", "install"),
         ("dbpool-install",          "pgpool",           "install"),
         ("proxy-install",           "nginx-proxy",      "install"),
-        ("proxy-update-web3c",      "nginx-proxy",      "update"),
-        ("proxy-update-papang",     "nginx-proxy",      "update"),
-        ("proxy-security-web3c",    "nginx-proxy",      "security"),
-        ("proxy-security-papang",   "nginx-proxy",      "security"),
+        ("proxy-update",            "nginx-proxy",      "update"),
+        ("proxy-security",          "nginx-proxy",      "security"),
         ("proxy-certs-bind9",       "ssl-certs",        "update"),
         ("nginx-install",           "nginx",            "install"),
         ("vpn-install",             "vpn",              "install"),
@@ -161,7 +159,7 @@ fn classify(role_name: &str) -> (String, String) {
             let svc = &role_name[..role_name.len() - suffix.len()];
             return (svc.to_string(), action.to_string());
         }
-        // Also handle compound like "proxy-update-web3c" → already in hardcoded, but
+        // Also handle compound like "proxy-update" → already in hardcoded, but
         // for unknown patterns, strip the last dash-segment if it matches a suffix keyword
         if let Some(pos) = role_name.rfind(&suffix[1..]) {
             if pos > 0 && role_name.as_bytes()[pos - 1] == b'-' {
@@ -263,7 +261,7 @@ fn family_of(service_name: &str) -> Option<String> {
         .iter()
         .filter(|&&(_, svc, _)| svc == service_name)
         .filter_map(|&(role, _, act)| {
-            // `proxy-install` → « proxy » ; `proxy-security-web3c` → « proxy ».
+            // `proxy-install` → « proxy » ; `proxy-security` → « proxy ».
             role.find(&format!("-{act}"))
                 .map(|pos| &role[..pos])
                 .or_else(|| {

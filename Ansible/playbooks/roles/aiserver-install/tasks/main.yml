@@ -1,0 +1,52 @@
+---
+# Serveur d'IA en conteneurs : pilote et runtime NVIDIA, modèles Hugging Face,
+# puis projet docker compose. Voir defaults/main.yml pour les choix.
+#
+# Le pare-feu (DOCKER-USER) est posé par `aiserver-security` et la
+# supervision par `aiserver-monitoring`, joués juste après par
+# deploy-aiserver.yml : entre les deux, les ports publiés sont ouverts à
+# Internet — le playbook ne doit pas être interrompu entre ces plays.
+
+- name: Validate the declared server types
+  ansible.builtin.assert:
+    that:
+      - aiserver_types is sequence
+      - aiserver_types is not string
+      - aiserver_types | length > 0
+      - aiserver_types | difference(aiserver_known_types) | length == 0
+    fail_msg: >-
+      `aiserver_types` doit être une LISTE non vide prise dans
+      {{ aiserver_known_types }} (reçu : {{ aiserver_types }}). L'ancien
+      `server_type(s)` n'est plus lu : dans FleetForge, `server_type` sert à
+      l'affichage.
+
+- name: Validate the scrape ports
+  ansible.builtin.assert:
+    that: item.scrape_port | int > 0
+    fail_msg: "Port de scrape invalide pour {{ item.name }} : {{ item.scrape_port }}."
+    quiet: true
+  loop: "{{ aiserver_endpoints }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Create the aiserver project directory
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: '0755'
+  become: true
+  loop:
+    - "{{ aiserver_home }}"
+    - "{{ aiserver_home }}/comfyui-docker"
+
+- name: GPU driver and container runtime
+  ansible.builtin.import_tasks: gpu.yml
+  when: aiserver_gpu_enabled | bool
+
+- name: Models
+  ansible.builtin.import_tasks: models.yml
+
+- name: Containers
+  ansible.builtin.import_tasks: deploy.yml

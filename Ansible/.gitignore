@@ -30,6 +30,13 @@ playbooks/group_vars/*
 inventories/*
 !inventories/*.template
 
+# Fichiers propres à chaque PARC hors des rôles (vhosts nginx, configuration
+# d'applications, certificats et htpasswd chiffrés) : Ansible/parcs/<parc>/.
+# Ils décrivent le parc réel — noms, amonts, filtrages — et vivent dans le
+# dépôt PRIVÉ du parc, pas ici. Convention : parcs/README.md.
+parcs/*
+!parcs/README.md
+
 # host_vars : pare-feu et réglages de chaque machine RÉELLE.
 # Modèle versionné : playbooks/host_vars/machine.yml.template.
 playbooks/host_vars/*

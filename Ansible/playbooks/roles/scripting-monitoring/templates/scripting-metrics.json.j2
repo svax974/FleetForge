@@ -1,0 +1,26 @@
+{#- Configuration du collecteur scripting-metrics.py — gérée par Ansible. -#}
+{%- set ns = namespace(watches=[], repos=[], instances=[]) -%}
+{%- for r in scripting_repos -%}
+  {%- set ns.repos = ns.repos + [{'name': r.name, 'path': r.dest, 'venv': r.venv | default(true) | bool}] -%}
+  {%- if scripting_monitoring_default_watches and 'logs' in (r.runtime_dirs | default(scripting_runtime_dirs)) -%}
+    {%- set ns.watches = ns.watches + [{'name': r.name, 'dir': r.dest ~ '/logs', 'pattern': '*',
+                                        'max_age': scripting_monitoring_max_age[r.name] | default(scripting_monitoring_default_max_age) | int}] -%}
+  {%- endif -%}
+{%- endfor -%}
+{%- for i in scripting_autodeploy_instances -%}
+  {%- set ns.instances = ns.instances + [{'name': i.name, 'source_repo': i.source_repo, 'path': scripting_install_dir ~ '/' ~ i.name}] -%}
+  {%- if scripting_monitoring_default_watches and 'logs' in scripting_runtime_dirs -%}
+    {%- set ns.watches = ns.watches + [{'name': i.name, 'dir': scripting_install_dir ~ '/' ~ i.name ~ '/logs', 'pattern': '*',
+                                        'max_age': scripting_monitoring_max_age[i.name] | default(scripting_monitoring_default_max_age) | int}] -%}
+  {%- endif -%}
+{%- endfor -%}
+{%- for w in scripting_monitoring_watches -%}
+  {%- set ns.watches = ns.watches + [{'name': w.name, 'dir': w.dir, 'pattern': w.pattern | default('*'),
+                                      'max_age': w.max_age | default(scripting_monitoring_default_max_age) | int}] -%}
+{%- endfor -%}
+{{ {'user': remote_username,
+    'cron_file': scripting_cron_file,
+    'cron_window_seconds': scripting_monitoring_cron_window | int,
+    'repos': ns.repos,
+    'instances': ns.instances,
+    'watches': ns.watches} | to_nice_json }}

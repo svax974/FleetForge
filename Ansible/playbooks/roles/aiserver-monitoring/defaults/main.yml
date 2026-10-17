@@ -1,0 +1,32 @@
+---
+# Supervision du serveur d'IA.
+#
+# Trois sources, dans l'ordre de préférence de CLAUDE.md :
+#   • llama.cpp expose Prometheus NATIVEMENT (`--metrics`, /metrics sur le
+#     port de l'instance) → cible dans le job EXISTANT `node-llamacpp`, celui du
+#     llama.cpp natif (exporter-llamacpp-install) : mêmes labels `instance`
+#     (<hôte>-<n>) et `model`, mêmes séries renommées, donc les mêmes requêtes
+#     valent pour les deux variantes. État dégradé : `requests_deferred` (file
+#     d'attente), `kv_cache_usage_ratio` (contexte saturé).
+#   • ComfyUI expose Prometheus via le nœud ComfyUI-api-tools, sur son port
+#     HTTP → job `aiserver-comfyui`.
+#   • le GPU, par l'exporter NVIDIA DCGM → job `aiserver-dcgm`. État dégradé :
+#     température, VRAM pleine, puissance au plafond — un GPU qui bride répond
+#     encore à tout.
+# Plus une sonde svcprobe `service_up{service="aiserver"}` : conteneurs en
+# marche ET santé HTTP de chaque service lancé.
+#
+# Chaque cible porte en plus le label `aiserver` (nom d'inventaire) : c'est la
+# variable de machine du tableau de bord Grafana fourni (files/), commune aux
+# trois jobs alors que `instance` diffère de l'un à l'autre.
+
+aiserver_llm_job: node-llamacpp
+aiserver_comfyui_job: aiserver-comfyui
+aiserver_dcgm_job: aiserver-dcgm
+
+aiserver_prometheus_home: "/home/{{ remote_username }}/prometheus"
+
+# Délai par appel HTTP de la sonde. Court à dessein : svcprobe répond à un
+# scrape pour TOUS les services de la machine, une sonde lente ferait tomber
+# la cible entière (scrape_timeout 10 s par défaut).
+aiserver_probe_http_timeout: 2

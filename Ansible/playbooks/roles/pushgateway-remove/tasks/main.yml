@@ -1,0 +1,79 @@
+---
+# Désinstalle la Pushgateway en conservant ses données (voir defaults).
+#
+# Pas de compte à supprimer : le service tourne sous srvc, qui n'appartient
+# pas à ce rôle.
+
+- name: Stop and disable pushgateway
+  ansible.builtin.systemd:
+    name: pushgateway
+    state: stopped
+    enabled: false
+  become: true
+  failed_when: false
+
+- name: Remove the systemd unit
+  ansible.builtin.file:
+    path: /etc/systemd/system/pushgateway.service
+    state: absent
+  become: true
+
+- name: Reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+  become: true
+
+- name: Remove the binary
+  ansible.builtin.file:
+    path: "{{ pushgateway_bin_path }}"
+    state: absent
+  become: true
+
+# La cible part avec le service (CLAUDE.md § 2) : laissée en place, elle
+# publierait `up=0` indéfiniment et ferait sonner TargetDown sur un service
+# VOLONTAIREMENT désinstallé. Le répertoire du job, lui, reste : il appartient
+# au job de scrape, déclaré par la stack de supervision.
+- name: Remove the Prometheus target
+  ansible.builtin.file:
+    path: "/home/{{ remote_username }}/prometheus/prometheus-configs/{{ pushgwrm_job }}/{{ inventory_hostname }}.json"
+    state: absent
+  delegate_to: "{{ prometheus_host }}"
+  become: true
+  when: prometheus_host is defined and prometheus_host in hostvars
+
+# ── Pare-feu ───────────────────────────────────────────────────────────────
+# Les autorisations sont posées par source : les supprimer impose de rejouer
+# la même liste, calculée par pushgateway-security. Un `delete` sans
+# `from_ip` ne matcherait que la règle générique et laisserait les autres.
+- name: Load the firewall rules computed by pushgateway-security
+  ansible.builtin.include_role:
+    name: pushgateway-security
+    tasks_from: vars
+    public: true
+
+- name: Remove the per-source pushgateway allow rules
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ item.src }}"
+    port: "{{ pushgateway_port }}"
+    delete: true
+  loop: "{{ pushgwsec_rules }}"
+  loop_control:
+    label: "{{ item.comment }}"
+  become: true
+  failed_when: false
+
+# Le bridge Docker n'est dans la liste que si Prometheus est co-localisé
+# AUJOURD'HUI : si Prometheus a déménagé depuis l'installation, la règle posée
+# alors survivrait. On la retire inconditionnellement — absente, le `delete`
+# ne fait rien.
+- name: Remove the Prometheus Docker bridge rule
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ pushgwsec_docker_bridge }}"
+    port: "{{ pushgateway_port }}"
+    delete: true
+  become: true
+  failed_when: false

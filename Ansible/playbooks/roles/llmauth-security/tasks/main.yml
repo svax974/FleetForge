@@ -1,0 +1,78 @@
+---
+# Voir defaults/main.yml : le port n'est pas filtré, il est INATTEIGNABLE —
+# et c'est ce que ce rôle vérifie.
+
+# Décorative : port publié par Docker, et de toute façon lié à 127.0.0.1.
+- name: Remove any decorative ufw rule on the llmauth port
+  community.general.ufw:
+    rule: "{{ item }}"
+    proto: tcp
+    port: "{{ llmauth_port | string }}"
+    delete: true
+  loop: [allow, deny]
+  become: true
+
+# ── Contrôle ───────────────────────────────────────────────────────────────
+# Les deux vues sont nécessaires :
+#   • `docker port` dit où DOCKER publie le conteneur — y compris quand le
+#     proxy userland est désactivé, auquel cas aucun socket n'apparaît dans
+#     `ss` et seule la règle DNAT existe ;
+#   • `ss` dit qui ÉCOUTE réellement sur ce port, Docker ou non — un autre
+#     process lié à 0.0.0.0:<port> exposerait le port sans que le compose y
+#     soit pour rien.
+- name: Read where Docker publishes the llmauth port
+  ansible.builtin.command:
+    argv: [docker, port, "{{ llmauth_container }}", "{{ llmauth_port }}/tcp"]
+  become: true
+  register: llmauth_published
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Read every listener on the llmauth port
+  ansible.builtin.command:
+    argv: [ss, -ltnH, "sport = :{{ llmauth_port }}"]
+  become: true
+  register: llmauth_listeners
+  changed_when: false
+  check_mode: false
+
+# Adresse locale = 4e colonne de `ss -ltnH` (127.0.0.1:19080, [::1]:19080,
+# 0.0.0.0:19080, *:19080, [::]:19080…). Est réputé sûr tout ce qui est en
+# 127.0.0.0/8 ou ::1, avec ou sans suffixe d'interface (`%lo`).
+- name: Collect the non-loopback bindings
+  ansible.builtin.set_fact:
+    llmauth_exposed_published: >-
+      {{ llmauth_published.stdout_lines
+         | reject('match', '^(127[.][0-9.]+|[[]::1[]]):')
+         | list }}
+    llmauth_exposed_listeners: >-
+      {{ llmauth_listeners.stdout_lines
+         | map('split') | map(attribute=3)
+         | reject('match', '^(127[.][0-9.]+|[[]::1[]]|[[]::ffff:127[.][0-9.]+[]])(%[^:]+)?:')
+         | list }}
+
+- name: Verify the llmauth port is bound to loopback only
+  ansible.builtin.assert:
+    that:
+      - llmauth_published.rc == 0
+      - llmauth_published.stdout_lines | length > 0
+      - llmauth_exposed_published | length == 0
+      - llmauth_exposed_listeners | length == 0
+    fail_msg: >-
+      Le port {{ llmauth_port }} n'est pas confiné à la boucle locale.
+      Publication Docker : {{ llmauth_published.stdout_lines | default([]) }}
+      ({{ llmauth_published.stderr | default('') | trim }}) ;
+      écoutes hors boucle locale : {{ llmauth_exposed_listeners }}.
+      llmauth doit être publié sur 127.0.0.1 uniquement (son seul client est
+      le nginx local) : sinon /admin/* et /validate sont joignables depuis le
+      réseau, protégés par le seul jeton d'administration. Vérifier
+      docker-compose.yml et `ss -ltnp 'sport = :{{ llmauth_port }}'`.
+    success_msg: >-
+      Port {{ llmauth_port }} publié sur {{ llmauth_published.stdout_lines | join(', ') }}
+      uniquement — inatteignable depuis le réseau, aucune règle de pare-feu
+      nécessaire. Contrôle depuis une machine tierce :
+      `nc -z {{ ansible_host }} {{ llmauth_port }}` doit échouer.
+  # En simulation le conteneur peut ne pas encore exister : on ne vérifie que
+  # ce qui a réellement été appliqué.
+  when: not ansible_check_mode

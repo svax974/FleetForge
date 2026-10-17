@@ -1,0 +1,59 @@
+[Unit]
+Description=Prometheus Pushgateway (métriques poussées par les jobs batch)
+Documentation=https://github.com/prometheus/pushgateway
+After=network-online.target
+Wants=network-online.target
+
+# Garde-fou anti-boucle de crash : la fenêtre reste supérieure à
+# RestartSec × burst (5 s × 5 = 25 s), sinon la limite ne se déclenche jamais.
+# En `failed`, l'unité devient détectable (alerte SystemdUnitFailed).
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+# srvc et non un compte dédié : voir defaults/main.yml de pushgateway-install.
+User={{ pushgateway_user }}
+Group={{ pushgateway_user }}
+
+# `--persistence.file` : sans lui, un redémarrage efface en silence toutes les
+# séries poussées (voir defaults/main.yml). La passerelle y écrit toutes les
+# `--persistence.interval` et à l'arrêt propre.
+ExecStart={{ pushgateway_bin_path }} \
+  --web.listen-address=:{{ pushgateway_port }} \
+  --persistence.file={{ pushgateway_persistence_file }} \
+  --persistence.interval={{ pushgateway_persistence_interval }}{% for arg in pushgateway_extra_args | default([]) %} \
+  {{ arg }}{% endfor %}
+
+Restart=on-failure
+RestartSec=5
+
+# Durcissement. La passerelle ne fait qu'écouter un port et écrire UN fichier :
+# tout le reste du système lui est fermé. Le $HOME de srvc est en lecture
+# seule, sauf le répertoire de données — c'est ce qui permet de tourner sous
+# srvc sans lui donner accès en écriture à ses clés SSH ou à ses autres
+# services.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths={{ pushgateway_data_dir }}
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# Port > 1024 : aucune capacité nécessaire.
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

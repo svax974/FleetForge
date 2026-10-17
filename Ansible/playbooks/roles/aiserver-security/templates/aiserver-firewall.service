@@ -1,0 +1,16 @@
+[Unit]
+Description=Restrict the AI server published ports (DOCKER-USER)
+# Docker recrée la chaîne DOCKER-USER vide à chaque démarrage : les règles
+# doivent être reposées APRÈS lui, sans quoi les API (sans authentification)
+# sont exposées à Internet jusqu'à une intervention manuelle.
+After=docker.service
+Requires=docker.service
+PartOf=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/aiserver-firewall.sh
+
+[Install]
+WantedBy=multi-user.target docker.service

@@ -1,0 +1,78 @@
+---
+# Planification : /etc/cron.d/{{ scripting_cron_name }}, rendu depuis le
+# `crontab_extras` du parc (chiffré au vault, Jinja autorisé).
+
+# Rendu une première fois en mémoire pour le CONTRÔLER avant de l'écrire :
+# cron ignore une ligne mal formée en le signalant seulement dans syslog, et
+# une entrée qui ne tourne plus ne produit aucun autre symptôme.
+- name: Render the parc crontab
+  ansible.builtin.set_fact:
+    scripting_cron_body: "{{ lookup('ansible.builtin.template', scripting_parc_dir ~ '/crontab_extras') }}"
+  no_log: true
+
+# Contrôle ligne par ligne (format /etc/cron.d : 5 champs horaires OU un
+# @mot-clé, puis l'UTILISATEUR, puis la commande). Le résultat ne contient que
+# des numéros de ligne et des noms d'utilisateur : rien du contenu chiffré.
+# Non vérifiable ici : un `%` non échappé dans une commande, que cron traduit
+# en saut de ligne.
+- name: Check the crontab syntax
+  ansible.builtin.set_fact:
+    scripting_cron_errors: >-
+      {%- set ns = namespace(errs=[], entries=0) -%}
+      {%- for raw in scripting_cron_body.splitlines() -%}
+        {%- set l = raw | trim -%}
+        {%- if l and not l.startswith('#') and l is not match('^[A-Za-z_][A-Za-z0-9_]*\s*=') -%}
+          {%- set f = l.split() -%}
+          {%- set ns.entries = ns.entries + 1 -%}
+          {%- if f[0].startswith('@') -%}
+            {%- set ok = f | length >= 3 and f[0] in ['@reboot', '@yearly', '@annually', '@monthly', '@weekly', '@daily', '@midnight', '@hourly'] -%}
+            {%- set user = f[1] if f | length > 1 else '' -%}
+          {%- else -%}
+            {%- set ok = f | length >= 7 and (f[:5] | select('match', '^[0-9A-Za-z*/,-]+$') | list | length) == 5 -%}
+            {%- set user = f[5] if f | length > 5 else '' -%}
+          {%- endif -%}
+          {%- if not ok -%}
+            {%- set ns.errs = ns.errs + ['ligne ' ~ loop.index ~ ' : format invalide (' ~ (f | length) ~ ' champs)'] -%}
+          {%- elif scripting_cron_enforce_user and user != remote_username -%}
+            {%- set ns.errs = ns.errs + ['ligne ' ~ loop.index ~ ' : utilisateur « ' ~ user ~ ' » au lieu de « ' ~ remote_username ~ ' »'] -%}
+          {%- endif -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ {'errors': ns.errs, 'entries': ns.entries} | to_json }}
+
+- name: Refuse an invalid crontab
+  ansible.builtin.assert:
+    that:
+      - (scripting_cron_errors | from_json).errors | length == 0
+      - (scripting_cron_errors | from_json).entries > 0
+    fail_msg: >-
+      {{ scripting_parc_dir }}/crontab_extras refusé —
+      {{ ((scripting_cron_errors | from_json).errors | join(' ; '))
+         or 'aucune entrée active : le service ne ferait rien' }}.
+      Format /etc/cron.d : « m h dom mon dow UTILISATEUR commande ». Chaque
+      entrée tourne sous {{ remote_username }} (règle srvc) ; écrire
+      `{{ '{{' }} remote_username {{ '}}' }}` et
+      `{{ '{{' }} scripting_install_dir {{ '}}' }}` plutôt que des valeurs en dur.
+    success_msg: "crontab_extras : {{ (scripting_cron_errors | from_json).entries }} entrée(s) active(s)."
+
+# Migration : l'ancien rôle ajoutait ce contenu à /etc/crontab par
+# `blockinfile` (marqueurs par défaut). Retiré AVANT la pose du nouveau
+# fichier : quelques secondes sans planification valent mieux que des tâches
+# lancées deux fois (deux autodéploiements concurrents sur le même produit).
+- name: Remove the former block from /etc/crontab
+  ansible.builtin.blockinfile:
+    path: /etc/crontab
+    state: absent
+  become: true
+
+# root:root 0644 : cron IGNORE un fichier de /etc/cron.d accessible en
+# écriture au groupe ou aux autres, ou qui n'appartient pas à root.
+- name: Deploy the cron file
+  ansible.builtin.template:
+    src: scripting.cron.j2
+    dest: "{{ scripting_cron_file }}"
+    owner: root
+    group: root
+    mode: '0644'
+  become: true
+  no_log: true

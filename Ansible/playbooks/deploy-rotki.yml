@@ -17,7 +17,7 @@
 # Le vhost (rotki.web3c.cc, jeton X-Api-Key ; + un vhost UI restreint VPN)
 # appartient au proxy, comme pour searxng — ce playbook publie le CNAME DNS
 # mais ne déploie PAS le vhost lui-même :
-#   ./play.sh web3c update-proxy-web3c.yml
+#   ./play.sh web3c update-proxy.yml
 
 # ── Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ───────────────────────
 - name: Contrôle préalable

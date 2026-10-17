@@ -1,0 +1,57 @@
+---
+# llmauth — service de validation des clés API appelé par nginx en
+# `auth_request` (vhost des modèles LLM). Petit service Go (files/app/) :
+#   GET  /healthz       sonde de vie (ne touche pas la base)
+#   GET  /validate      X-API-Key ou Authorization: Bearer → 200 + en-têtes
+#                       X-Api-User / X-Api-Group, sinon 401 (500 si la base
+#                       est illisible)
+#   POST /admin/keys    création d'une clé (en-tête X-Admin-Token)
+#   POST /admin/revoke  révocation par id ou par clé (X-Admin-Token)
+#   GET  /metrics       Prometheus natif (llm_auth_requests_total,
+#                       llm_auth_validate_seconds) — relayé par svcprobe, voir
+#                       llmauth-monitoring
+# Les clés sont stockées sous forme d'HMAC-SHA256(pepper, clé) dans SQLite :
+# la base seule ne permet pas de retrouver une clé.
+#
+# Tourne SUR les proxies (groupe d'inventaire `llmauth`) : son seul client est
+# le nginx de la même machine.
+#
+# Conteneur Docker : la règle « srvc doit pouvoir piloter les services qu'il
+# déploie » (CLAUDE.md § 2) vise les services NATIFS, elle ne s'applique pas
+# ici (comme searxng-install / freellm-install).
+
+# Sous /opt et non sous /home/srvc : svcprobe, qui lit la base pour compter
+# les clés (llmauth-monitoring), tourne avec `ProtectHome=true` — /home lui
+# est invisible.
+llmauth_base_dir: /opt/llmauth
+llmauth_data_dir: "{{ llmauth_base_dir }}/data"
+llmauth_db_path: "{{ llmauth_data_dir }}/keys.sqlite"
+
+llmauth_container: llmauth
+llmauth_image: "fleetforge/llmauth:local"
+
+# UID/GID d'exécution du conteneur ET propriétaire du répertoire de données.
+# Fixé ici plutôt que laissé à l'image : un `adduser` sans UID explicite donne
+# un UID qui dépend de l'image de base, et une base SQLite que le process ne
+# peut pas créer fait mourir le service au démarrage (« unable to open
+# database file »). Choisi hors de la plage des comptes humains de l'hôte.
+llmauth_uid: 10001
+
+# Port publié sur l'HÔTE, sur 127.0.0.1 UNIQUEMENT (en dur dans le gabarit,
+# pas de variable d'adresse : nginx est local, il n'y a aucune raison de
+# l'ouvrir ailleurs). Le conteneur écoute sur le MÊME port : si l'adresse
+# devait un jour changer, une règle DOCKER-USER écrite pour ce port matcherait
+# (DOCKER-USER voit le port APRÈS DNAT, CLAUDE.md § 1).
+llmauth_port: 19080
+
+# ── Secrets (Ansible Vault, group_vars du parc) ────────────────────────────
+#   ansible-vault encrypt_string --stdin-name 'llmauth_pepper'
+#   ansible-vault encrypt_string --stdin-name 'llmauth_admin_token'
+# Vides par défaut : le déploiement ÉCHOUE tant qu'ils ne sont pas posés.
+#
+# Le pepper ne doit JAMAIS changer une fois des clés émises : toutes les clés
+# stockées sont des HMAC calculés avec lui, en changer les rend toutes
+# invalides d'un coup (chaque requête répondrait 401). Il doit être le MÊME
+# sur tous les proxies si leurs bases sont alimentées avec les mêmes clés.
+llmauth_pepper: ""
+llmauth_admin_token: ""

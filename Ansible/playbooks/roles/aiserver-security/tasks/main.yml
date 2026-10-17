@@ -1,0 +1,131 @@
+---
+# Voir defaults/main.yml : ufw ne voit pas le trafic vers un port publié par
+# Docker, seule la chaîne DOCKER-USER le filtre réellement.
+
+- name: Load the aiserver ports and endpoints
+  ansible.builtin.include_role:
+    name: aiserver-install
+    tasks_from: vars
+    public: true
+
+- name: Build the firewall rules (one per published port)
+  ansible.builtin.set_fact:
+    aiserver_fw_rules: >-
+      {{ (aiserver_fw_rules | default([]))
+         + [item | combine({'sources': aiserver_fw_api_sources if item.exposed else aiserver_fw_base_sources})] }}
+  loop: "{{ aiserver_endpoints }}"
+  loop_control:
+    label: "{{ item.name }} :{{ item.port }}"
+  when: aiserver_fw_enabled | bool
+
+# Un API llama.cpp/ComfyUI ouverte, c'est du GPU offert à Internet. Si personne
+# n'est autorisé, c'est que l'inventaire est incomplet : mieux vaut s'arrêter.
+- name: Fail when the derived source lists are empty
+  ansible.builtin.assert:
+    that:
+      - aiserver_fw_prometheus | length > 0
+      - (aiserver_fw_proxies + aiserver_fw_vpns + (whitelist | default([])) + aiserver_fw_linked) | length > 0
+    fail_msg: >-
+      Sources du pare-feu incomplètes : Prometheus={{ aiserver_fw_prometheus }},
+      proxies={{ aiserver_fw_proxies | length }}, vpns={{ aiserver_fw_vpns | length }},
+      whitelist={{ whitelist | default([]) | length }}. Vérifier `prometheus_host`
+      et les groupes `proxies`/`vpns` de l'inventaire.
+  when: aiserver_fw_enabled | bool
+
+- name: Deploy the aiserver firewall script
+  ansible.builtin.template:
+    src: aiserver-firewall.sh.j2
+    dest: /usr/local/sbin/aiserver-firewall.sh
+    owner: root
+    group: root
+    mode: '0750'
+  become: true
+  when: aiserver_fw_enabled | bool
+
+- name: Deploy the aiserver firewall unit
+  ansible.builtin.template:
+    src: aiserver-firewall.service
+    dest: /etc/systemd/system/aiserver-firewall.service
+    owner: root
+    group: root
+    mode: '0644'
+  become: true
+  register: aiserver_fw_unit
+  when: aiserver_fw_enabled | bool
+
+# `enabled` + `daemon_reload` seulement : l'unité est un oneshot
+# `RemainAfterExit`, `state: started` ne la relancerait pas. L'application
+# effective est la tâche suivante, inconditionnelle — un handler perdu (play
+# interrompu) laisserait sinon la chaîne en retard sans que le rejeu ne
+# corrige rien (constat docker-ports-security, 22/09/2026).
+- name: Enable the aiserver firewall unit
+  ansible.builtin.systemd:
+    name: aiserver-firewall
+    enabled: true
+    daemon_reload: "{{ aiserver_fw_unit.changed | default(false) }}"
+  become: true
+  when: aiserver_fw_enabled | bool
+
+- name: Apply the rules now
+  ansible.builtin.systemd:
+    name: aiserver-firewall
+    state: restarted
+  become: true
+  changed_when: false
+  when: aiserver_fw_enabled | bool
+
+# Une règle ufw sur ces ports serait décorative — mais elle a pu être posée à
+# la main, et `ufw status` raconterait une histoire différente de la réalité.
+- name: Remove any decorative ufw rule on the published ports
+  community.general.ufw:
+    rule: "{{ item.1 }}"
+    proto: tcp
+    port: "{{ item.0.port | string }}"
+    delete: true
+  loop: "{{ aiserver_endpoints | product(['allow', 'deny']) | list }}"
+  loop_control:
+    label: "{{ item.0.port }} {{ item.1 }}"
+  become: true
+
+# ── Contrôle ───────────────────────────────────────────────────────────────
+# Sur l'état RÉEL de la chaîne, pas sur le dépôt d'un fichier : c'est toute la
+# différence entre une sécurité vérifiée et une sécurité déclarée.
+- name: Read back the DOCKER-USER chain
+  ansible.builtin.command: iptables -S DOCKER-USER
+  become: true
+  register: aiserver_chain
+  changed_when: false
+  check_mode: false
+  when:
+    - aiserver_fw_enabled | bool
+    - not ansible_check_mode
+
+- name: Verify each published port is really filtered
+  ansible.builtin.assert:
+    that:
+      # Motif et non égalité : `iptables -S` intercale `-m tcp` et réordonne
+      # les options selon la version. L'espace après le port écarte 80800.
+      - aiserver_chain.stdout is search('--dport ' ~ item.port ~ ' .*' ~ aiserver_fw_tag ~ ' ' ~ item.name ~ ' deny.*-j DROP')
+    fail_msg: >-
+      Le port {{ item.port }} ({{ item.container }}) est publié mais aucun DROP
+      ne le protège dans DOCKER-USER : il est joignable depuis Internet.
+      Vérifier `systemctl status aiserver-firewall` et `iptables -S DOCKER-USER`.
+    success_msg: "Port {{ item.port }} ({{ item.name }}) filtré dans DOCKER-USER."
+  loop: "{{ aiserver_endpoints }}"
+  loop_control:
+    label: "{{ item.name }} :{{ item.port }}"
+  when:
+    - aiserver_fw_enabled | bool
+    # En simulation le script n'est pas rejoué : la chaîne n'a pas encore les
+    # règles et le contrôle échouerait sur un hôte parfaitement sain.
+    - not ansible_check_mode
+
+- name: Warn that filtering is delegated to the hosting provider
+  ansible.builtin.debug:
+    msg: >-
+      ATTENTION — aiserver_fw_enabled=false sur {{ inventory_hostname }} :
+      AUCUN filtrage posé sur {{ aiserver_endpoints | map(attribute='port') | join(', ') }}.
+      Les API llama.cpp/ComfyUI n'ont pas d'authentification : le filtrage doit
+      être assuré chez l'hébergeur (redirections NAT restreintes), sinon elles
+      sont ouvertes à Internet.
+  when: not (aiserver_fw_enabled | bool)

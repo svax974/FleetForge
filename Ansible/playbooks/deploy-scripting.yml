@@ -1,0 +1,53 @@
+---
+# Orchestrateur « scripting » — dépôts Python lancés par cron (tâches
+# périodiques, maintenance, autodéploiement), sous `remote_username`.
+# Aucun port d'écoute, aucun démon : le service, c'est /etc/cron.d/scripting.
+#
+# Prérequis :
+#   • socle posé (setup-server.yml) ;
+#   • group_vars/<parc>.yml : scripting_install_dir, scripting_repos,
+#     scripting_config_files, scripting_autodeploy_instances,
+#     scripting_git_user / scripting_git_token (vault)… — voir
+#     roles/scripting-install/defaults/main.yml ;
+#   • Ansible/parcs/<parc>/scripting/ sur le poste (hors dépôt, gitignoré) :
+#     env.py, .env.prod, rclone.conf, crontab_extras, chacun chiffré par
+#     `ansible-vault encrypt`.
+#
+#   ./play.sh <parc> deploy-scripting.yml
+#   ./play.sh <parc> deploy-scripting.yml --tags config      # fichiers du parc seuls
+#   ./play.sh <parc> deploy-scripting.yml --tags cron        # planification seule
+#   ./play.sh <parc> deploy-scripting.yml --tags monitoring  # réarmer la supervision
+#   ./play.sh <parc> deploy-scripting.yml -e '{"scripting_toolchain":["go","rust"]}'
+#
+# Flux réseau SORTANTS à ouvrir côté destinataires (hérité de l'ancien
+# playbook) : relais mail, bases des VPN — ce sont les machines cibles qui
+# doivent autoriser l'adresse de ce serveur, rien ne s'ouvre ici.
+
+# ── Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ───────────────────────
+- name: Contrôle préalable
+  hosts: scripting_servers
+  remote_user: "{{ remote_username }}"
+  roles:
+    - host-preflight
+
+- name: Deploy the scripting orchestrator
+  hosts: scripting_servers
+  remote_user: "{{ remote_username }}"
+  roles:
+    - scripting-install
+
+# Pas de pare-feu à poser (aucun port) : contrôle des droits sur les secrets,
+# des remotes git sans jeton, du fichier cron, et de l'absence de port
+# d'écoute ouvert depuis l'installation.
+- name: Scripting security checks
+  hosts: scripting_servers
+  remote_user: "{{ remote_username }}"
+  roles:
+    - scripting-security
+
+# ── Supervision (OBLIGATOIRE, voir CLAUDE.md) ──────────────────────────────
+- name: Supervision du service
+  hosts: scripting_servers
+  remote_user: "{{ remote_username }}"
+  roles:
+    - scripting-monitoring

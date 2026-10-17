@@ -17,7 +17,7 @@
 # Le vhost (freellm.web3c.cc, restreint à `whitelist`) est poussé sur les DEUX
 # proxies par ce playbook lui-même (play « Vhost FreeLLMAPI sur les proxies »)
 # — SEULEMENT ce fichier, rechargé (pas redémarré), sans reconstruire tout
-# /etc/nginx comme le ferait update-proxy-web3c.yml (resynchronisation
+# /etc/nginx comme le ferait update-proxy.yml (resynchronisation
 # complète des quatre répertoires, redémarrage inconditionnel). Ce dernier
 # reste nécessaire après une modification du GABARIT lui-même
 # (sites-enabled/freellm.conf) ou de nginx.conf — pas pour un redéploiement
@@ -57,7 +57,7 @@
   tasks:
     - name: Deploy just the FreeLLMAPI vhost
       ansible.builtin.include_role:
-        name: proxy-update-web3c
+        name: proxy-update
         tasks_from: deploy-one-site
       vars:
         site: freellm.conf

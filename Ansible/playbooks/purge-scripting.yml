@@ -1,0 +1,11 @@
+---
+# Supprime l'orchestrateur « scripting » ET ses données : tout ce que retire
+# remove-scripting.yml, plus le répertoire d'installation entier (secrets du
+# parc, logs, outputs) et la copie des identifiants GCP. Destructif.
+#
+#   ./play.sh <parc> purge-scripting.yml
+- name: Purge the scripting orchestrator
+  hosts: scripting_servers
+  remote_user: "{{ remote_username }}"
+  roles:
+    - scripting-purge

@@ -34,7 +34,7 @@
 # à COMMITTER, faute de quoi un autre clone tirera d'autres secrets.
 #
 # Le vhost (infra.<domaine>, restreint à la whitelist) appartient au proxy :
-#   ./play.sh web3c update-proxy-web3c.yml   /   ./play.sh papanglabs update-proxy-papang.yml
+#   ./play.sh web3c update-proxy.yml   /   ./play.sh papanglabs update-proxy.yml
 
 # ── Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ───────────────────────
 - name: Contrôle préalable

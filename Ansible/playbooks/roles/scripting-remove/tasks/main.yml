@@ -1,0 +1,93 @@
+---
+# Arrête l'orchestrateur « scripting » et retire son code.
+#
+# CONSERVE : configuration du parc (env.py, .env.prod, rclone.conf… — tout
+# `scripting_config_files`), identifiants GCP, et les répertoires `logs/` et
+# `outputs/` de chaque dépôt et instance. Un `deploy-scripting.yml` ultérieur
+# repart donc de l'historique existant. Tout effacer : `scripting-purge`.
+#
+# Les outils (go, rust, gcloud, ansible) restent : outils génériques.
+
+- name: Check the installation directory
+  ansible.builtin.assert:
+    that:
+      - scripting_install_dir is match('^/.+')
+      - scripting_install_dir not in ['/', '/opt', '/home', '/usr', '/etc', '/var']
+    fail_msg: >-
+      `scripting_install_dir` (« {{ scripting_install_dir }} ») doit être le
+      répertoire dédié déclaré dans group_vars/<parc>.yml.
+
+# ── Arrêt ──────────────────────────────────────────────────────────────────
+# Le service, c'est le fichier cron : le retirer l'ARRÊTE. En premier, pour
+# qu'aucune tâche ne démarre dans un répertoire en cours de suppression.
+# Les tâches DÉJÀ lancées ne sont pas tuées : elles se terminent ou échouent
+# d'elles-mêmes sur un code disparu. `pgrep -af {{ scripting_install_dir }}`
+# pour les voir.
+- name: Remove the cron file
+  ansible.builtin.file:
+    path: "{{ scripting_cron_file }}"
+    state: absent
+  become: true
+
+# Hôte jamais migré vers /etc/cron.d : l'ancien bloc relancerait tout.
+- name: Remove the former block from /etc/crontab
+  ansible.builtin.blockinfile:
+    path: /etc/crontab
+    state: absent
+  become: true
+
+# ── Supervision ────────────────────────────────────────────────────────────
+# La sonde part avec le service : laissée, elle publierait `service_up 0`
+# indéfiniment. La CIBLE svcprobe reste : elle vaut pour la machine entière.
+- name: Remove the scripting probe and its collector
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ svcprobe_checks_dir | default('/etc/svcprobe/checks.d') }}/scripting.json"
+    - "{{ svcprobe_dir | default('/etc/svcprobe') }}/scripting-metrics.json"
+    - "{{ svcprobe_lib_dir | default('/usr/local/lib/svcprobe') }}/scripting-metrics.py"
+    - /var/lib/svcprobe/scripting.prom
+  become: true
+  tags: [monitoring]
+
+# ── Code ───────────────────────────────────────────────────────────────────
+# Dépôts et instances sont vidés de tout SAUF ce qui est listé ci-dessous —
+# configuration et sorties vivent à la racine des mêmes répertoires que le
+# code, une suppression du répertoire entier les emporterait.
+# `.git` et `venv` partent avec le code (le lien venv d'une instance aussi).
+- name: Remove the code, keeping configuration, logs and outputs
+  ansible.builtin.shell:
+    cmd: >-
+      [ -d {{ item | quote }} ] || exit 0;
+      find {{ item | quote }} -mindepth 1 -maxdepth 1
+      {% for keep in scripting_keep_names %}! -name {{ keep | quote }} {% endfor %}
+      -print -exec rm -rf {} +
+    executable: /bin/bash
+  loop: >-
+    {{ (scripting_repos | map(attribute='dest') | list)
+       + (scripting_autodeploy_instances | map(attribute='name')
+          | map('regex_replace', '^', scripting_install_dir ~ '/') | list) }}
+  vars:
+    scripting_keep_names: >-
+      {{ (scripting_config_files | map(attribute='dest', default='') | list
+          + scripting_config_files | map(attribute='src') | list
+          + scripting_runtime_dirs + scripting_remove_keep)
+         | reject('equalto', '') | unique | list }}
+  become: true
+  register: scripting_removed
+  changed_when: scripting_removed.stdout | length > 0
+
+- name: Remove the git askpass helper
+  ansible.builtin.file:
+    path: "{{ scripting_askpass | dirname }}"
+    state: absent
+  become: true
+
+- name: Report what was kept
+  ansible.builtin.debug:
+    msg: >-
+      scripting arrêté (cron retiré) et code supprimé. Conservés dans
+      {{ scripting_install_dir }} : configuration du parc, logs/ et outputs/
+      de chaque dépôt et instance, ainsi que les identifiants GCP.
+      purge-scripting.yml pour tout effacer.

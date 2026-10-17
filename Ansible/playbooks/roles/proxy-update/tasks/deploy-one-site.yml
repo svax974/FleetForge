@@ -1,0 +1,60 @@
+---
+# Déploie UN SEUL vhost sur ce proxy sans reconstruire tout /etc/nginx —
+# contrairement à tasks/main.yml (resynchronisation complète des quatre
+# répertoires, `restart` inconditionnel), pour un service dont le
+# déploiement doit pouvoir pousser sa propre conf sans retoucher aux autres
+# vhosts. Recharge nginx (`reload`, pas `restart`) pour ne pas couper les
+# connexions en cours sur les vhosts qui n'ont pas changé.
+#
+# Usage (depuis un play `hosts: proxies`) :
+#   - ansible.builtin.include_role:
+#       name: proxy-update
+#       tasks_from: deploy-one-site
+#     vars:
+#       site: freellm.conf
+
+- name: Fail early without a target site
+  ansible.builtin.assert:
+    that:
+      - site is defined
+      - site | length > 0
+    fail_msg: >-
+      `site` doit nommer un fichier de parcs/<parc_name>/nginx/sites-enabled/
+      (ex: freellm.conf).
+
+- name: Collect the installed nginx version
+  ansible.builtin.command: nginx -v
+  register: nginx_version_raw
+  changed_when: false
+  check_mode: false
+
+- name: Set the nginx version fact
+  ansible.builtin.set_fact:
+    nginx_version: "{{ ((nginx_version_raw.stderr | default('')) ~ (nginx_version_raw.stdout | default(''))) | regex_search('nginx/([0-9.]+)', '\\1') | first }}"
+
+# Les vhosts web3c-sync écrivent dans un répertoire de journaux dédié, rotation
+# 7 jours : il doit exister avant `nginx -t` (voir tasks/sync-logs.yml).
+- name: Prepare the dedicated sync access-log directory and rotation
+  ansible.builtin.include_tasks: sync-logs.yml
+  when: site is match('^sync-')
+
+- name: Deploy the vhost
+  ansible.builtin.template:
+    src: "{{ proxy_update_dir }}/sites-enabled/{{ site }}"
+    dest: "/etc/nginx/sites-enabled/{{ site }}"
+    owner: root
+    group: root
+  register: proxy_one_site_deployed
+
+# Contrôle AVANT de recharger : un vhost mal templaté couperait TOUS les
+# vhosts de ce proxy au reload, pas seulement le nouveau.
+- name: Test the nginx configuration before reloading
+  ansible.builtin.command: nginx -t
+  changed_when: false
+  when: proxy_one_site_deployed.changed
+
+- name: Reload nginx
+  ansible.builtin.systemd:
+    name: nginx
+    state: reloaded
+  when: proxy_one_site_deployed.changed

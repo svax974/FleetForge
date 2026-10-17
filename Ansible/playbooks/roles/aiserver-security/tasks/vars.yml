@@ -1,0 +1,6 @@
+---
+# Point d'entrée vide : `include_role` avec `tasks_from: vars` et `public: true`
+# expose les defaults de ce rôle (`aiserver_fw_enabled`, `aiserver_fw_tag`,
+# sources dérivées) à aiserver-monitoring, qui vérifie l'ouverture du scrape.
+- name: Expose the aiserver firewall defaults
+  ansible.builtin.meta: noop

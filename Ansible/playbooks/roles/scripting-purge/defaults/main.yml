@@ -1,0 +1,6 @@
+---
+# Mêmes valeurs que scripting-install (group_vars du parc).
+scripting_install_dir: /opt/scripting
+scripting_repos: []
+scripting_gcp_credentials_file: ""
+scripting_gcp_credentials_dir: "/home/{{ remote_username }}/.ansible"

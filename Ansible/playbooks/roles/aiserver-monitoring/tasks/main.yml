@@ -1,0 +1,269 @@
+---
+# Supervision du serveur d'IA. Voir defaults/main.yml.
+#
+# TOUTES les tâches portent `tags: [monitoring]` (CLAUDE.md) : réarmer la
+# supervision ne doit jamais imposer de rejouer le déploiement — modèles de
+# plusieurs dizaines de gigaoctets, construction de l'image ComfyUI.
+#   ./play.sh <parc> deploy-aiserver.yml --tags monitoring
+#
+# Le tableau de bord Grafana et les notes de métriques (files/) ne sont PAS
+# copiés sur l'hôte de supervision : aucun rôle FleetForge ne provisionne
+# Grafana depuis le disque, un fichier déposé là ne serait lu par personne.
+# Ils s'importent à la main (Grafana → Dashboards → Import).
+
+- name: Load the aiserver ports and endpoints
+  ansible.builtin.include_role:
+    name: aiserver-install
+    tasks_from: vars
+    public: true
+  tags: [monitoring]
+
+- name: Load the aiserver firewall settings
+  ansible.builtin.include_role:
+    name: aiserver-security
+    tasks_from: vars
+    public: true
+  tags: [monitoring]
+
+- name: Fail early when no Prometheus host is defined
+  ansible.builtin.assert:
+    that:
+      - prometheus_host is defined
+      - prometheus_host in hostvars
+    fail_msg: >-
+      `prometheus_host` n'est pas défini ou absent de l'inventaire. Une cible
+      que personne ne scrape ne supervise rien.
+  tags: [monitoring]
+
+# ── Sonde svcprobe ─────────────────────────────────────────────────────────
+# `public: true` : sans lui, svcprobe_checks_dir/svcprobe_lib_dir restent
+# confinés au rôle inclus (comportement documenté d'include_role).
+- name: Ensure the shared probe is installed
+  ansible.builtin.include_role:
+    name: svcprobe-install
+    public: true
+  tags: [monitoring]
+
+- name: Deploy the aiserver health script
+  ansible.builtin.copy:
+    src: aiserver-health.sh
+    dest: "{{ svcprobe_lib_dir }}/aiserver-health.sh"
+    owner: root
+    group: root
+    mode: '0755'
+  become: true
+  tags: [monitoring]
+
+- name: Compute the probe arguments (container=health URL)
+  ansible.builtin.set_fact:
+    aiserver_probe_pairs: "{{ (aiserver_probe_pairs | default([])) + [item.container ~ '=http://127.0.0.1:' ~ item.port ~ item.health] }}"
+  loop: "{{ aiserver_endpoints }}"
+  loop_control:
+    label: "{{ item.container }}"
+  tags: [monitoring]
+
+- name: Deploy the aiserver probe
+  ansible.builtin.template:
+    src: check.json.j2
+    dest: "{{ svcprobe_checks_dir }}/aiserver.json"
+    owner: root
+    group: root
+    mode: '0644'
+  become: true
+  tags: [monitoring]
+
+# ── Cibles Prometheus ──────────────────────────────────────────────────────
+# Mêmes règles de choix des modèles que le gabarit compose : l'instance 1 sert
+# le modèle `default: true` (sinon le premier), l'instance 2 le premier autre.
+- name: Compute the served LLM models
+  ansible.builtin.set_fact:
+    aiserver_llm_model_1: >-
+      {{ (aiserver_llm_models | selectattr('default', 'defined') | selectattr('default') | list
+          + aiserver_llm_models) | first | default({}) }}
+  tags: [monitoring]
+
+- name: Compute the second served LLM model
+  ansible.builtin.set_fact:
+    aiserver_served_models: >-
+      {{ [aiserver_llm_model_1,
+          aiserver_llm_models | rejectattr('filename', 'equalto', aiserver_llm_model_1.filename | default(''))
+          | first | default({})] }}
+  tags: [monitoring]
+
+- name: Build the target groups per job
+  ansible.builtin.set_fact:
+    aiserver_targets:
+      - job: "{{ aiserver_llm_job }}"
+        endpoints: "{{ aiserver_endpoints | selectattr('type', 'equalto', 'llm') | list }}"
+      - job: "{{ aiserver_comfyui_job }}"
+        endpoints: "{{ aiserver_endpoints | selectattr('type', 'in', ['image', 'video']) | list }}"
+      - job: "{{ aiserver_dcgm_job }}"
+        endpoints: "{{ aiserver_endpoints | selectattr('type', 'equalto', 'gpu') | list }}"
+  tags: [monitoring]
+
+# Labels propres à chaque job. `instance` suit la convention de
+# node-llamacpp (<hôte>-<n>) pour llama.cpp ; ComfyUI distingue image/vidéo.
+- name: Attach the labels to each endpoint
+  ansible.builtin.set_fact:
+    aiserver_labeled: >-
+      {{ (aiserver_labeled | default({}))
+         | combine({item.name: item | combine({'labels': _labels})}) }}
+  vars:
+    _n: "{{ item.name.split('-')[-1] if item.type == 'llm' else '' }}"
+    _model: "{{ aiserver_served_models[(_n | int) - 1] if item.type == 'llm' else {} }}"
+    _labels: >-
+      {{ {'instance': inventory_hostname ~ '-' ~ _n,
+          'model': _model.display_name | default(_model.name | default('unknown')),
+          'llm_instance': _n}
+         if item.type == 'llm' else
+         ({'instance': inventory_hostname ~ '-' ~ item.type, 'aiserver_type': item.type}
+          if item.type in ['image', 'video'] else {'instance': inventory_hostname}) }}
+  loop: "{{ aiserver_endpoints }}"
+  loop_control:
+    label: "{{ item.name }}"
+  tags: [monitoring]
+
+- name: Create the target directories on the Prometheus host
+  ansible.builtin.file:
+    path: "{{ aiserver_prometheus_home }}/prometheus-configs/{{ item.job }}"
+    state: directory
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: '0755'
+  delegate_to: "{{ prometheus_host }}"
+  become: true
+  loop: "{{ aiserver_targets | selectattr('endpoints') | list }}"
+  loop_control:
+    label: "{{ item.job }}"
+  tags: [monitoring]
+
+- name: Deploy the Prometheus targets
+  ansible.builtin.template:
+    src: targets.json.j2
+    dest: "{{ aiserver_prometheus_home }}/prometheus-configs/{{ item.job }}/{{ inventory_hostname }}.json"
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: '0644'
+  vars:
+    _target_job: "{{ item.job }}"
+    _target_endpoints: "{{ item.endpoints | map(attribute='name') | map('extract', aiserver_labeled) | list }}"
+  delegate_to: "{{ prometheus_host }}"
+  become: true
+  loop: "{{ aiserver_targets | selectattr('endpoints') | list }}"
+  loop_control:
+    label: "{{ item.job }}"
+  tags: [monitoring]
+
+# Un type retiré d'`aiserver_types` ne doit pas laisser sa cible : elle
+# publierait `up=0` indéfiniment et ferait sonner TargetDown.
+- name: Remove the targets of services no longer deployed
+  ansible.builtin.file:
+    path: "{{ aiserver_prometheus_home }}/prometheus-configs/{{ item.job }}/{{ inventory_hostname }}.json"
+    state: absent
+  delegate_to: "{{ prometheus_host }}"
+  become: true
+  loop: "{{ aiserver_targets | rejectattr('endpoints') | list }}"
+  loop_control:
+    label: "{{ item.job }}"
+  tags: [monitoring]
+
+# ── Vérifications ──────────────────────────────────────────────────────────
+# Une cible déposée ne prouve rien : le fichier n'est lu que si un
+# `scrape_config` porte ce job. Un job manquant laisse le fichier en place
+# sans que jamais rien ne le lise — c'est ce qui a rendu `service_up`
+# inexistant sur les DEUX parcs pendant des semaines.
+- name: Check that a scrape job reads each target directory
+  ansible.builtin.shell: >-
+    grep -c "prometheus-configs/{{ item.job }}/"
+    {{ aiserver_prometheus_home }}/prometheus.yml || true
+  args:
+    executable: /bin/bash
+  delegate_to: "{{ prometheus_host }}"
+  register: aiserver_jobs_declared
+  changed_when: false
+  check_mode: false
+  loop: "{{ aiserver_targets | selectattr('endpoints') | list }}"
+  loop_control:
+    label: "{{ item.job }}"
+  tags: [monitoring]
+
+- name: Fail when a scrape job is missing
+  ansible.builtin.fail:
+    msg: >-
+      Aucun `job_name: {{ item.item.job }}` ne lit prometheus-configs/{{ item.item.job }}/
+      sur {{ prometheus_host }}. La cible est posée mais ne sera JAMAIS scrapée,
+      et rien ne le signalerait. Ajouter le job au prometheus.yml.j2 de la stack
+      du parc (prometheus-install ou monitoring-install) puis la rejouer
+      (deploy-prometheus.yml ou deploy-monitoring.yml).
+  when: (item.stdout | default('0') | trim | int) == 0
+  loop: "{{ aiserver_jobs_declared.results }}"
+  loop_control:
+    label: "{{ item.item.job }}"
+  tags: [monitoring]
+
+# Ouverture du scrape : les ports sont publiés par Docker, l'autorisation de
+# Prometheus vit donc dans DOCKER-USER (aiserver-security), PAS dans ufw où
+# elle serait décorative. On vérifie qu'elle y est : sans elle la cible
+# apparaît et reste `down`, ce qui ressemble à une panne du service.
+# Prometheus co-localisé : ses scrapes arrivent par le bridge Docker, couvert
+# par la plage interne.
+- name: Read back the DOCKER-USER chain
+  ansible.builtin.command: iptables -S DOCKER-USER
+  become: true
+  register: aiserver_mon_chain
+  changed_when: false
+  check_mode: false
+  when:
+    - aiserver_fw_enabled | bool
+    - hostvars[prometheus_host].ansible_host != ansible_host
+    - hostvars[prometheus_host].ansible_host is match('^[0-9.]+$')
+  tags: [monitoring]
+
+- name: Verify Prometheus is allowed on each scraped port
+  ansible.builtin.assert:
+    that:
+      - aiserver_mon_chain.stdout is search('-s ' ~ (hostvars[prometheus_host].ansible_host | regex_escape) ~ '(/32)? .*--dport ' ~ item.port ~ ' .*-j RETURN')
+    fail_msg: >-
+      {{ prometheus_host }} n'est pas autorisé sur le port {{ item.port }}
+      ({{ item.name }}) dans DOCKER-USER : la cible restera `down`. Rejouer
+      deploy-aiserver.yml sans `--tags` (play aiserver-security).
+    quiet: true
+  loop: "{{ aiserver_endpoints }}"
+  loop_control:
+    label: "{{ item.name }} :{{ item.port }}"
+  when: aiserver_mon_chain.stdout is defined
+  tags: [monitoring]
+
+- name: Verify the probe answers
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ svcprobe_listen_port }}/metrics"
+    return_content: true
+  register: aiserver_probe
+  retries: 6
+  delay: 5
+  until: aiserver_probe.status is defined and aiserver_probe.status == 200
+  changed_when: false
+  tags: [monitoring]
+
+- name: Check the native metrics endpoints answer locally
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ item.port }}{{ item.metrics }}"
+    status_code: [200]
+    timeout: 10
+  register: aiserver_metrics
+  failed_when: false
+  loop: "{{ aiserver_endpoints }}"
+  loop_control:
+    label: "{{ item.name }} {{ item.metrics }}"
+  tags: [monitoring]
+
+- name: Report the probe result and the metrics endpoints
+  when: aiserver_probe.content is defined
+  ansible.builtin.debug:
+    msg:
+      probe: "{{ aiserver_probe.content.split('\n') | select('search', 'service=\"aiserver\"') | list }}"
+      metrics: >-
+        {{ aiserver_metrics.results | map(attribute='item.name')
+           | zip(aiserver_metrics.results | map(attribute='status', default=0))
+           | map('join', '=') | list }}
+  tags: [monitoring]

@@ -1,0 +1,88 @@
+---
+# Retire le serveur d'IA : conteneurs, filtrage DOCKER-USER, sonde et cibles
+# Prometheus. CONSERVE les volumes (modèles : des dizaines de gigaoctets,
+# données et sorties ComfyUI), les images et le répertoire du projet — leur
+# suppression relève d'`aiserver-purge`.
+#
+# Les outils GÉNÉRIQUES (Docker, pilote NVIDIA, NVIDIA Container Toolkit) ne
+# sont jamais retirés (CLAUDE.md § 2).
+
+- name: Load the aiserver names and endpoints
+  ansible.builtin.include_role:
+    name: aiserver-install
+    tasks_from: vars
+    public: true
+  tags: [always]
+
+# ── Conteneurs ─────────────────────────────────────────────────────────────
+- name: Look for the compose projects (current and legacy EasyNode)
+  ansible.builtin.stat:
+    path: "{{ item }}/docker-compose.yml"
+  register: aiserver_projects
+  loop: "{{ [aiserver_home, aiserver_legacy_home] | unique }}"
+
+# `down` sans `-v` : les volumes nommés survivent.
+- name: Stop the compose projects (volumes kept)
+  community.docker.docker_compose_v2:
+    project_src: "{{ item.item }}"
+    state: absent
+    remove_orphans: true
+  become: true
+  loop: "{{ aiserver_projects.results | selectattr('stat.exists') | list }}"
+  loop_control:
+    label: "{{ item.item }}"
+  failed_when: false
+
+# Filet de sécurité : fichier compose effacé ou modifié à la main, conteneur
+# lancé hors compose. Nommés explicitement, aucun motif.
+- name: Remove any remaining aiserver container
+  community.docker.docker_container:
+    name: "{{ item }}"
+    state: absent
+  become: true
+  loop: "{{ aiserver_all_containers }}"
+  failed_when: false
+
+# ── Pare-feu ───────────────────────────────────────────────────────────────
+- name: Remove the DOCKER-USER filtering
+  ansible.builtin.include_role:
+    name: aiserver-security
+    tasks_from: flush
+
+# ── Supervision ────────────────────────────────────────────────────────────
+# La sonde et les cibles partent avec le service : laissées en place, elles
+# publieraient `service_up 0` / `up 0` indéfiniment et feraient sonner une
+# alerte sur un service volontairement désinstallé.
+# La CIBLE svcprobe n'est pas retirée : elle vaut pour la MACHINE et porte les
+# sondes des autres services qui y tournent.
+- name: Remove the aiserver probe and its health script
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  become: true
+  loop:
+    - "{{ svcprobe_checks_dir | default('/etc/svcprobe/checks.d') }}/aiserver.json"
+    - "{{ svcprobe_lib_dir | default('/usr/local/lib/svcprobe') }}/aiserver-health.sh"
+  tags: [monitoring]
+
+# Jobs dupliqués depuis aiserver-monitoring/defaults (rôle non chargé ici).
+# `node-llamacpp/<hôte>.json` seulement : les fichiers `<hôte>-<n>.json` du
+# même répertoire appartiennent à exporter-llamacpp (llama.cpp natif).
+- name: Remove the Prometheus targets
+  ansible.builtin.file:
+    path: "/home/{{ remote_username }}/prometheus/prometheus-configs/{{ item }}/{{ inventory_hostname }}.json"
+    state: absent
+  delegate_to: "{{ prometheus_host }}"
+  become: true
+  loop: [node-llamacpp, aiserver-comfyui, aiserver-dcgm]
+  when: prometheus_host is defined and prometheus_host in hostvars
+  tags: [monitoring]
+
+- name: Report what is kept
+  ansible.builtin.debug:
+    msg: >-
+      Serveur d'IA retiré de {{ inventory_hostname }}. Conservés : volumes
+      {{ [aiserver_llm_models_volume, aiserver_comfyui_models_volume,
+          aiserver_comfyui_data_volume, aiserver_comfyui_output_volume] | join(', ') }},
+      images, et {{ aiserver_home }}. Tout supprimer : purge-aiserver.yml.
+      Retirer `aiserver` d'`ansible_roles` de l'hôte.

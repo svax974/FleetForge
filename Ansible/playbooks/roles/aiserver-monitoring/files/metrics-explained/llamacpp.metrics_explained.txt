@@ -1,0 +1,48 @@
+FleetForge: scraped by the shared `node-llamacpp` job (same job as the native
+llamacpp family). That job RENAMES the series (drops the `llamacpp:` prefix)
+and KEEPS only: up, kv_cache_usage_ratio, requests_processing,
+requests_deferred, prompt_tokens_total, tokens_predicted_total. The other
+series below are only stored if the job's keep-list is extended (see the
+aiserver-monitoring role report: prompt_seconds_total,
+tokens_predicted_seconds_total are needed by the "avg latency per token"
+dashboard panel).
+
+llama.cpp (llama-server) Prometheus metrics (selected / interesting)
+================================================================
+
+NOTE: These names come from llama.cpp metrics endpoint. They are already documented with `# HELP`
+comments in the raw `/metrics` output when reachable.
+
+- llamacpp:prompt_tokens_total (counter)
+  Total number of prompt tokens processed by the server.
+
+- llamacpp:prompt_seconds_total (counter)
+  Total time spent processing prompt tokens.
+
+- llamacpp:tokens_predicted_total (counter)
+  Total number of generated (predicted) tokens.
+
+- llamacpp:tokens_predicted_seconds_total (counter)
+  Total time spent generating tokens.
+
+- llamacpp:prompt_tokens_seconds (gauge)
+  Average prompt throughput in tokens/second.
+
+- llamacpp:predicted_tokens_seconds (gauge)
+  Average generation throughput in tokens/second.
+
+- llamacpp:requests_processing (gauge)
+  Current number of requests being processed.
+
+- llamacpp:requests_deferred (gauge)
+  Current number of requests deferred (queued / waiting).
+
+- llamacpp:n_decode_total (counter)
+  Total number of llama_decode() calls performed.
+
+- llamacpp:n_tokens_max (counter)
+  Largest observed n_tokens value (high-water mark).
+
+- llamacpp:n_busy_slots_per_decode (counter)
+  Average number of busy slots per llama_decode() call.
+

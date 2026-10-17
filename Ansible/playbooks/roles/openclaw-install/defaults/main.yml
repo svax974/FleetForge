@@ -34,7 +34,7 @@ openclaw_tz: UTC
 # de garde-fou dans openclaw-security et de repli dans trustedProxies. Aucune
 # tentative de résoudre le cas hairpin NAT de proxy2 ici : proxy1 (IP publique
 # réelle, cf. `openclaw_trusted_proxies`) est le chemin réellement servi pour
-# ce vhost (voir le commentaire dans openclaw.conf, proxy-update-web3c).
+# ce vhost (voir le commentaire dans openclaw.conf, proxy-update).
 openclaw_lan_cidr: "192.168.1.0/24"
 
 # Proxies de confiance pour `gateway.trustedProxies` : sans conteneur, plus de
@@ -43,7 +43,7 @@ openclaw_lan_cidr: "192.168.1.0/24"
 #
 # UNIQUEMENT proxy1, PAS `groups['proxies']` en entier : DNS ne pointe que sur
 # lui (openclaw.web3c.cc → proxy.web3c.cc → IP de proxy1), proxy2 ne sert
-# jamais ce vhost (cf. openclaw.conf, proxy-update-web3c). Le déclarer quand
+# jamais ce vhost (cf. openclaw.conf, proxy-update). Le déclarer quand
 # même serait activement DANGEREUX ici, pas juste inutile : `ansible_host` de
 # proxy2 est derrière LE MÊME NAT domestique que hub/nuc/vpn1. Un
 # visiteur qui teste depuis ce réseau a donc cette adresse comme IP réelle —
@@ -65,10 +65,22 @@ openclaw_control_ui_allowed_origins:
 
 # ── Authentification du fournisseur d'inférence ────────────────────────────
 # Valeurs possibles : voir `openclaw onboard --help` (openai-api-key,
-# custom-api-key, ollama, zai-api-key, ...). La clé elle-même
-# (openclaw_openai_api_key) N'A PAS de valeur par défaut : elle est vérifiée
-# par un `assert` en tâche, avec le message expliquant comment la chiffrer.
+# custom-api-key, ollama, zai-api-key, skip, ...). `skip` n'enregistre aucun
+# fournisseur : à régler ensuite dans OpenClaw (UI ou `models auth login`).
+# La clé (openclaw_openai_api_key) est vide par défaut : elle n'est exigée, par
+# un `assert` en tâche, que pour `openai-api-key`. Vide, elle n'est pas écrite
+# dans `.openclaw.env`.
 openclaw_auth_choice: openai-api-key
+openclaw_openai_api_key: ""
+
+# ── Embeddings de la mémoire ─────────────────────────────────────────────────
+# `openclaw_memory_search_provider` vide = rien n'est posé (défaut OpenClaw :
+# openai). Avec `ollama`, le modèle doit déjà être tiré sur l'hôte Ollama
+# (`deploy-ollama-model.yml -e ollama_model_name=<modèle>`). Changer de modèle
+# change la dimension des vecteurs : réindexer (`openclaw memory index --force`).
+openclaw_memory_search_provider: ""
+openclaw_memory_search_model: ""
+openclaw_memory_search_fallback: none
 
 # ── Fournisseur de modèles personnalisé (optionnel) ────────────────────────
 # Ajouté via `config set --batch-file` (jamais `--batch-json`/argv pour

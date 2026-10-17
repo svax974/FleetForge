@@ -1,0 +1,64 @@
+---
+# Supervision de llmauth.
+#
+# Convention `<service>-monitoring` (CLAUDE.md) : sonde déclarative pour
+# `svcprobe`, qui expose `service_up{service="llmauth"}`, plus un collecteur
+# qui relaie les métriques natives du service et le nombre de clés actives
+# (voir defaults/main.yml). svcprobe relit son répertoire de sondes à chaque
+# scrape : aucun redémarrage nécessaire.
+#
+# L'enregistrement de la cible sur `prometheus_host` et l'ouverture ufw du
+# scrape sont portés par `svcprobe-install` (une cible par MACHINE), tagués
+# `monitoring` comme tout ce rôle.
+
+# `public: true` : sans lui, les defaults du rôle inclus (svcprobe_checks_dir,
+# svcprobe_lib_dir, svcprobe_listen_port) restent confinés à ses propres
+# tâches et celles ci-dessous échouent sur une variable indéfinie.
+- name: Ensure the shared probe is installed
+  ansible.builtin.include_role:
+    name: svcprobe-install
+    public: true
+  tags: [monitoring]
+
+- name: Deploy the llmauth metric collector
+  ansible.builtin.copy:
+    src: llmauth-metrics.sh
+    dest: "{{ svcprobe_lib_dir }}/llmauth-metrics.sh"
+    owner: root
+    group: root
+    mode: '0755'
+  become: true
+  tags: [monitoring]
+
+- name: Deploy the llmauth probe
+  ansible.builtin.template:
+    src: check.json.j2
+    dest: "{{ svcprobe_checks_dir }}/llmauth.json"
+    owner: root
+    group: root
+    mode: '0644'
+  become: true
+  tags: [monitoring]
+
+# Contrôle immédiat : une sonde déposée qui répond `service_up 0` alors que le
+# service tourne est une sonde MAL ÉCRITE, et elle ferait sonner une alerte en
+# permanence. Mieux vaut le voir au déploiement.
+- name: Verify the probe answers
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ svcprobe_listen_port }}/metrics"
+    return_content: true
+  register: llmauth_probe
+  retries: 6
+  delay: 5
+  until: llmauth_probe.status is defined and llmauth_probe.status == 200
+  changed_when: false
+  tags: [monitoring]
+
+- name: Report the probe result
+  ansible.builtin.debug:
+    msg: >-
+      {{ llmauth_probe.content.split('\n')
+         | select('search', 'llmauth')
+         | reject('match', '#')
+         | list }}
+  tags: [monitoring]

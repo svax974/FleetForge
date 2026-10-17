@@ -76,5 +76,5 @@
       (cert-install/install-cert) — aucune action cert nécessaire pour ce
       nouveau nom. Reste à pousser le vhost sur les proxies :
       ./play.sh web3c deploy-agenthub.yml --tags proxy-conf
-      (ou ./play.sh web3c update-proxy-web3c.yml pour une resynchronisation
+      (ou ./play.sh web3c update-proxy.yml pour une resynchronisation
       complète).

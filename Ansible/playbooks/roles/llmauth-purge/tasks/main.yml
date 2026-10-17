@@ -1,0 +1,26 @@
+---
+# Supprime llmauth ET SES DONNÉES. Reprend `llmauth-remove` puis efface ce que
+# celui-ci préserve : l'image construite et TOUT le répertoire de base, base
+# des clés comprise.
+#
+# DESTRUCTIF ET IRRÉVERSIBLE : keys.sqlite contient l'unique trace des clés
+# API émises (seul leur HMAC est stocké, aucune ne peut être reconstituée).
+# Après purge, chaque client doit recevoir une NOUVELLE clé. Sauvegarder
+# {{ llmauth_base_dir }}/data/keys.sqlite avant, s'il y a le moindre doute.
+
+- name: Remove the service, its compose file and its probe
+  ansible.builtin.include_role:
+    name: llmauth-remove
+
+- name: Remove the llmauth image
+  community.docker.docker_image_remove:
+    name: "{{ llmauth_image }}"
+  become: true
+  ignore_errors: true
+
+# DESTRUCTIF : base des clés API incluse.
+- name: Remove the llmauth directory (API keys database included)
+  ansible.builtin.file:
+    path: "{{ llmauth_base_dir }}"
+    state: absent
+  become: true

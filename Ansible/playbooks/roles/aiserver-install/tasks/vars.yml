@@ -1,0 +1,7 @@
+---
+# Point d'entrée vide : `include_role` avec `tasks_from: vars` et `public: true`
+# expose les defaults de ce rôle (ports, conteneurs, volumes,
+# `aiserver_endpoints`) aux autres rôles de la famille — décidés à un seul
+# endroit, jamais recopiés.
+- name: Expose the aiserver defaults
+  ansible.builtin.meta: noop

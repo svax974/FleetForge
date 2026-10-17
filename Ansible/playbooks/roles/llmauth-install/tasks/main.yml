@@ -1,0 +1,138 @@
+---
+# Déploie llmauth (backend `auth_request` de nginx) en conteneur, construit
+# sur l'hôte depuis files/app/. Voir defaults/main.yml.
+#
+# Pas d'interrupteur `*_enabled` : la présence de la famille sur l'hôte (groupe
+# d'inventaire `llmauth`) EST la décision de déployer. Les secrets sont donc
+# exigés à chaque exécution.
+#
+# Pas de DNS ni de vhost propres : llmauth n'a pas de nom public, il est
+# appelé par le vhost LLM existant (`location = /_auth`, proxy_pass vers
+# http://127.0.0.1:<llmauth_port>/validate).
+
+- name: Fail early when the llmauth secrets are not set
+  ansible.builtin.assert:
+    that:
+      - llmauth_pepper | string | trim | length > 0
+      - llmauth_admin_token | string | trim | length > 0
+    fail_msg: >-
+      llmauth exige `llmauth_pepper` et `llmauth_admin_token`, à poser
+      chiffrés dans le group_vars du parc
+      (ansible-vault encrypt_string --stdin-name '<nom>'). Ne jamais les
+      committer en clair.
+    quiet: true
+
+- name: Create the llmauth directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner }}"
+    group: "{{ item.owner }}"
+    mode: "{{ item.mode }}"
+  become: true
+  loop:
+    - { path: "{{ llmauth_base_dir }}", owner: root, mode: '0755' }
+    - { path: "{{ llmauth_base_dir }}/app", owner: root, mode: '0755' }
+    # Propriété de l'UID du conteneur : c'est lui qui crée et écrit
+    # keys.sqlite. 0750 : la base ne contient que des HMAC, mais elle dit QUI
+    # a une clé — rien à faire lisible par les autres comptes.
+    - { path: "{{ llmauth_data_dir }}", owner: "{{ llmauth_uid }}", mode: '0750' }
+
+- name: Copy the llmauth sources (Docker build context)
+  ansible.builtin.copy:
+    src: "app/{{ item }}"
+    dest: "{{ llmauth_base_dir }}/app/{{ item }}"
+    owner: root
+    group: root
+    mode: '0644'
+  become: true
+  loop:
+    - Dockerfile
+    - go.mod
+    - go.sum
+    - main.go
+  register: llmauth_sources
+
+# `no_log` : le fichier rendu contient le pepper et le jeton d'administration,
+# et un `--diff` les afficherait en clair dans la sortie (que FleetForge peut
+# conserver dans son historique de runs).
+- name: Deploy the llmauth compose file (contains the secrets)
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: "{{ llmauth_base_dir }}/docker-compose.yml"
+    owner: root
+    group: root
+    mode: '0600'
+  become: true
+  no_log: true
+
+# Reconstruit l'image seulement quand les sources ont changé (sinon `policy` :
+# construite si absente). Compose recrée de lui-même le conteneur quand
+# l'image ou la configuration (secrets compris) diffère.
+- name: Build and start llmauth
+  community.docker.docker_compose_v2:
+    project_src: "{{ llmauth_base_dir }}"
+    state: present
+    build: "{{ 'always' if llmauth_sources is changed else 'policy' }}"
+    remove_orphans: true
+  become: true
+
+- name: Wait for llmauth to answer
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ llmauth_port }}/healthz"
+    status_code: [200]
+  register: llmauth_ready
+  until: llmauth_ready.status | default(0) == 200
+  retries: 12
+  delay: 5
+
+# /healthz ne touche pas la base : un service qui répond « ok » mais ne peut
+# pas lire keys.sqlite rejette TOUTES les requêtes en 500. Une clé bidon doit
+# traverser la requête SQL et revenir en 401 (« invalid api key ») — c'est la
+# preuve que le chemin de validation complet fonctionne.
+- name: Verify the validation path reaches the database
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ llmauth_port }}/validate"
+    headers:
+      X-API-Key: "fleetforge-deploy-check-not-a-key"
+    status_code: [401]
+  register: llmauth_validate
+  until: llmauth_validate.status | default(0) == 401
+  retries: 3
+  delay: 5
+
+# Le compte se fait sur l'hôte, en lecture seule : aucun endpoint ne liste les
+# clés, et le jeton d'administration n'a pas à transiter pour ça.
+- name: Count the enabled API keys
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -I
+      - -c
+      - |
+        import sqlite3, sys
+        db = sqlite3.connect("file:" + sys.argv[1] + "?mode=ro", uri=True, timeout=5)
+        print(db.execute("SELECT COUNT(*) FROM api_keys WHERE enabled = 1").fetchone()[0])
+      - "{{ llmauth_db_path }}"
+  become: true
+  register: llmauth_key_count
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Report the service state
+  ansible.builtin.debug:
+    msg: >-
+      llmauth publié sur 127.0.0.1:{{ llmauth_port }} (boucle locale
+      uniquement, aucune règle de pare-feu nécessaire).
+      {% if llmauth_key_count.rc == 0 and (llmauth_key_count.stdout | trim) == '0' %}
+      ATTENTION : aucune clé active — nginx rejettera TOUTES les requêtes.
+      Créer une clé : curl -s -X POST -H "X-Admin-Token: <jeton>"
+      -d '{"user":"<nom>","group":"<groupe>"}'
+      http://127.0.0.1:{{ llmauth_port }}/admin/keys (la clé n'est affichée
+      qu'une fois, seul son HMAC est stocké).
+      {% elif llmauth_key_count.rc == 0 %}
+      {{ llmauth_key_count.stdout | trim }} clé(s) active(s).
+      {% else %}
+      Comptage des clés impossible : {{ llmauth_key_count.stderr | default('') | trim }}
+      {% endif %}

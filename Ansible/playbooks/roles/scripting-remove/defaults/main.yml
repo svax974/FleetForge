@@ -1,0 +1,14 @@
+---
+# Mêmes valeurs que scripting-install (group_vars du parc).
+scripting_install_dir: /opt/scripting
+scripting_repos: []
+scripting_autodeploy_instances: []
+scripting_config_files: []
+scripting_runtime_dirs: [logs, outputs]
+scripting_cron_name: scripting
+scripting_cron_file: "/etc/cron.d/{{ scripting_cron_name }}"
+scripting_askpass: /usr/local/lib/scripting/git-askpass.sh
+
+# Noms supplémentaires à CONSERVER à la racine de chaque dépôt et instance
+# (fichiers d'état produits par les scripts, par exemple).
+scripting_remove_keep: []

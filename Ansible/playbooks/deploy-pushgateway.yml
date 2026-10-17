@@ -1,0 +1,51 @@
+---
+# Prometheus Pushgateway — point de dépôt des métriques poussées par les jobs
+# batch et les serveurs IA (bancs d'essai, crons), scrapé par Prometheus avec
+# `honor_labels: true`. Repris de l'ancien rôle EasyNode `monitor-pushgateway`.
+#
+#   ./play.sh <parc> deploy-pushgateway.yml
+#   ./play.sh <parc> deploy-pushgateway.yml --tags monitoring   # réarmer la supervision
+#
+# Vise le groupe `pushgateways`. Service NON publié par les proxies : pas
+# d'entrée dédiée, la famille `pushgateway` va sur l'entrée canonique de la
+# machine (CLAUDE.md § 2). Le job de scrape `pushgateway` doit exister dans la
+# stack de supervision du parc — `pushgateway-monitoring` échoue sinon.
+
+# ── Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ───────────────────────
+# Échoue immédiatement si le parc n'a pas d'hôte de supervision utilisable,
+# puis vérifie — et répare — le socle de la machine, node_exporter et sa cible
+# Prometheus. Une passerelle sans Prometheus derrière accepterait les pushes
+# avec des 200, et les métriques n'iraient nulle part.
+- name: Contrôle préalable
+  hosts: pushgateways
+  remote_user: "{{ remote_username }}"
+  roles:
+    - role: host-preflight
+
+- name: Installation de la Pushgateway
+  hosts: pushgateways
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - pushgateway-install
+
+# ── Pare-feu ───────────────────────────────────────────────────────────────
+# La passerelle n'a aucune authentification : qui joint le port peut pousser,
+# écraser ou effacer des séries. Refermer fait partie du déploiement, pas d'un
+# passage ultérieur.
+- name: Pare-feu
+  hosts: pushgateways
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - pushgateway-security
+
+# ── Supervision (OBLIGATOIRE, voir CLAUDE.md) ──────────────────────────────
+# /metrics natif : cible directe sur `prometheus_host`, ouverture du scrape,
+# contrôle du job (et de `honor_labels`). Rejouable seule :
+#   ./play.sh <parc> deploy-pushgateway.yml --tags monitoring
+- name: Supervision du service
+  hosts: pushgateways
+  remote_user: "{{ remote_username }}"
+  roles:
+    - pushgateway-monitoring

@@ -1,0 +1,10 @@
+---
+- name: Remove the service first
+  ansible.builtin.include_role:
+    name: pushgateway-remove
+
+- name: Remove the data directory
+  ansible.builtin.file:
+    path: "{{ pushgateway_data_dir }}"
+    state: absent
+  become: true

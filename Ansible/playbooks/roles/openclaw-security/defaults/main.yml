@@ -7,7 +7,7 @@
 openclaw_port: "{{ app_port | default(18789) }}"
 
 # Réseau domestique partagé par hub/nuc/station/proxy2/vpn1 — proxy2 relaie ce
-# vhost en LAN dans certains cas (voir openclaw.conf, proxy-update-web3c) ;
+# vhost en LAN dans certains cas (voir openclaw.conf, proxy-update) ;
 # garde-fou pour les tests locaux depuis une autre machine du même réseau.
 openclaw_lan_cidr: "192.168.1.0/24"
 

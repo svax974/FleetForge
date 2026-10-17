@@ -300,5 +300,5 @@
       {{ sync_data_dir }}. Filtrage DOCKER-USER par sync-server-security (joué
       sur `ctdapi`) : service réservé aux proxies, métriques réservées à
       Prometheus. Reste à poser le vhost sur les proxies :
-      ./play.sh web3c update-proxy-web3c.yml — puis
+      ./play.sh web3c update-proxy.yml — puis
       https://{{ sync_hostname }}/v1/health doit répondre.

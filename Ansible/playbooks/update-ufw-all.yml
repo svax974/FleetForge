@@ -79,14 +79,12 @@
   remote_user: "{{ remote_username }}"
   become: true
   tasks:
-    # Le rôle diffère par inventaire (proxy-security-papang / -web3c) : il est
-    # nommé dans group_vars plutôt qu'en dur. L'ancien update-security-all.yml
-    # référençait un `proxy-security` inexistant et échouait sur papanglabs.
-    # `include_role` et non `roles:` — un nom de rôle templaté n'est résolu
-    # qu'à l'exécution, les variables d'hôte n'existant pas encore au parsing.
-    - name: Apply the inventory's proxy security role
+    # Rôle unique pour tous les parcs depuis le 16/10/2026 (ex-`proxy_security_role`
+    # qui choisissait -papang / -web3c) : les sections sans port déclaré dans le
+    # group_vars du parc ne s'appliquent pas.
+    - name: Apply the proxy security role
       ansible.builtin.include_role:
-        name: "{{ proxy_security_role }}"
+        name: proxy-security
 
 - name: Bitcoin RPC nodes
   hosts: rpcsbtc

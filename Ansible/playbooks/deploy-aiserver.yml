@@ -1,0 +1,59 @@
+---
+# Serveur d'IA en conteneurs (famille `aiserver`) : llama.cpp (LLM), ComfyUI
+# (image/vidéo) et exporter GPU NVIDIA DCGM, sur les hôtes du groupe
+# `aiservers`. Types servis par hôte : `aiserver_types: [llm, image, video]`.
+#
+#   ./play.sh <parc> deploy-aiserver.yml
+#   ./play.sh <parc> deploy-aiserver.yml --limit llmtest
+#   ./play.sh <parc> deploy-aiserver.yml --tags monitoring   # réarmer la supervision
+#
+# Porté de l'ancien projet EasyNode (`ai-server.yml` + `ai-server-monitoring.yml`).
+# Un déploiement EasyNode existant (/opt/ai-server) est arrêté et ses volumes
+# de modèles sont REPRIS, sans retéléchargement.
+#
+# Le llama.cpp NATIF (hors Docker) reste `deploy-llamacpp.yml` : ne pas
+# déployer les deux sur la même machine, ils se disputeraient 8080/8081.
+#
+# Prérequis : `hf_token` (vault) dans les group_vars du parc si un modèle d'un
+# dépôt à accès restreint (`gated`, ex. FLUX.1-dev) doit être téléchargé.
+
+# ── Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ───────────────────────
+# Échoue immédiatement si le parc n'a pas d'hôte de supervision utilisable,
+# puis vérifie — et répare — le socle de la machine, node_exporter et sa cible
+# Prometheus. Docker est exigé : tous les services tournent en conteneurs.
+- name: Contrôle préalable
+  hosts: aiservers
+  remote_user: "{{ remote_username }}"
+  roles:
+    - role: host-preflight
+      preflight_require_docker: true
+
+# Peut redémarrer la machine : installation du pilote NVIDIA, ou pilote
+# présent mais module non chargé (`aiserver_nvidia_driver_reboot`).
+- name: Installation du serveur d'IA
+  hosts: aiservers
+  remote_user: "{{ remote_username }}"
+  roles:
+    - aiserver-install
+
+# Le filtrage vit dans DOCKER-USER et non dans ufw : les ports sont publiés
+# par Docker, qui insère ses DNAT en amont de tout ce que gère ufw. Les API
+# llama.cpp/ComfyUI n'ont aucune authentification — refermer fait partie du
+# déploiement, pas d'un passage ultérieur. Le rôle vérifie l'état RÉEL de la
+# chaîne après application.
+- name: Pare-feu
+  hosts: aiservers
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - aiserver-security
+
+# ── Supervision (OBLIGATOIRE, voir CLAUDE.md) ──────────────────────────────
+# Sonde `service_up{service="aiserver"}` + cibles node-llamacpp,
+# aiserver-comfyui et aiserver-dcgm. Rejouable seule :
+#   ./play.sh <parc> deploy-aiserver.yml --tags monitoring
+- name: Supervision du service
+  hosts: aiservers
+  remote_user: "{{ remote_username }}"
+  roles:
+    - aiserver-monitoring

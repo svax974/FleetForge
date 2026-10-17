@@ -1,0 +1,147 @@
+# Serveur d'IA — généré par Ansible (aiserver-install), ne pas éditer sur l'hôte.
+#
+# Chaque service écoute DANS son conteneur sur le port qu'il publie : la
+# chaîne DOCKER-USER voit le port du conteneur après le DNAT de Docker, et
+# `aiserver-security` y filtre ces mêmes numéros.
+{% set gpu = aiserver_gpu_enabled | bool %}
+{% set netns = aiserver_network_container | length > 0 %}
+{% set _models = aiserver_llm_models %}
+{% set _defaults = _models | selectattr('default', 'defined') | selectattr('default') | list %}
+{% set llm_1 = (_defaults[0] if _defaults | length > 0 else (_models[0] if _models | length > 0 else none)) %}
+{% set _others = (_models | rejectattr('filename', 'equalto', llm_1.filename) | list) if llm_1 is not none else [] %}
+{% set llm_2 = _others[0] if _others | length > 0 else none %}
+{% set ngl = 999 if (aiserver_llm_n_gpu_layers | string) == 'max' else aiserver_llm_n_gpu_layers %}
+{% macro gpu_block() %}
+{% if gpu %}
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+{% endif %}
+{% endmacro %}
+{% macro net_block(port) %}
+{% if netns %}
+    network_mode: "container:{{ aiserver_network_container }}"
+{% else %}
+    ports:
+      - "{{ aiserver_bind_address }}:{{ port }}:{{ port }}"
+{% endif %}
+{% endmacro %}
+{% macro common() %}
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+{% endmacro %}
+{% macro llama(name, model, port) %}
+  {{ name }}:
+    image: {{ aiserver_llama_image }}
+    container_name: {{ name }}
+{{ common() }}{{ net_block(port) }}    volumes:
+      - "llama-models:/models"
+{% if gpu %}
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+{% endif %}
+{{ gpu_block() }}    command: >-
+      -m /models/{{ model.filename }}
+{% if model.mmproj_filename is defined %}
+      --mmproj /models/{{ model.mmproj_filename }}
+{% endif %}
+{% if model.display_name is defined %}
+      --alias {{ model.display_name }}
+{% endif %}
+      --host 0.0.0.0
+      --port {{ port }}
+      --n-gpu-layers {{ ngl if gpu else 0 }}
+      -c {{ aiserver_llm_context_size }}
+      --flash-attn {{ 'on' if (gpu and aiserver_llm_flash_attention | bool) else 'off' }}
+      --parallel {{ aiserver_llm_parallel_slots }}
+      -b {{ aiserver_llm_batch_size }}
+{% if aiserver_llm_threads_batch | int > 0 %}
+      -tb {{ aiserver_llm_threads_batch }}
+{% endif %}
+      --cache-type-k {{ aiserver_llm_cache_type_k }}
+      --cache-type-v {{ aiserver_llm_cache_type_v }}
+{% if aiserver_llm_slot_idle_timeout | int > 0 %}
+      --slot-idle-timeout {{ aiserver_llm_slot_idle_timeout }}
+{% endif %}
+      --metrics
+{% endmacro %}
+{% macro comfyui(name, port) %}
+  {{ name }}:
+    image: {{ aiserver_comfyui_image }}
+{% if aiserver_comfyui_build | bool %}
+    build:
+      context: ./comfyui-docker
+{% endif %}
+    container_name: {{ name }}
+{{ common() }}{{ net_block(port) }}    volumes:
+      - "comfyui-data:/app/ComfyUI/user"
+      - "comfyui-models:/app/ComfyUI/models"
+      - "comfyui-output:/app/ComfyUI/output"
+{% if gpu %}
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+{% endif %}
+{{ gpu_block() }}    command: ["--port", "{{ port }}"{{ '' if gpu else ', "--cpu"' }}]
+{% endmacro %}
+name: {{ aiserver_compose_project }}
+
+services:
+{% if 'llm' in aiserver_types and llm_1 is not none %}
+{{ llama('llama-server', llm_1, aiserver_llm_port) }}
+{% if (aiserver_llm_second_instance | bool) and llm_2 is not none %}
+{{ llama('llama-server-2', llm_2, aiserver_llm_port_2) }}
+{% endif %}
+{% endif %}
+{% if 'image' in aiserver_types %}
+{{ comfyui('comfyui-image', aiserver_comfyui_port) }}
+{% endif %}
+{% if 'video' in aiserver_types %}
+{{ comfyui('comfyui-video', aiserver_comfyui_video_port) }}
+{% endif %}
+{% if aiserver_dcgm_active | bool %}
+  dcgm-exporter:
+    image: {{ aiserver_dcgm_image }}
+    container_name: dcgm-exporter
+{{ common() }}{{ net_block(aiserver_dcgm_port) }}    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - DCGM_EXPORTER_LISTEN=:{{ aiserver_dcgm_port }}
+    cap_add:
+      - SYS_ADMIN
+{{ gpu_block() }}{% endif %}
+
+{# Volumes tous EXTERNES, créés par tasks/models.yml : ceux de l'ancien projet
+   compose `ai-server` portent son étiquette de projet, et compose refuse de
+   les adopter autrement (avertissement, puis volume recréé sous un autre nom
+   au premier changement). Les modèles déjà téléchargés sont ainsi repris. #}
+{% set comfy = 'image' in aiserver_types or 'video' in aiserver_types %}
+{% if 'llm' in aiserver_types or comfy %}
+volumes:
+{% if 'llm' in aiserver_types %}
+  llama-models:
+    name: "{{ aiserver_llm_models_volume }}"
+    external: true
+{% endif %}
+{% if comfy %}
+  comfyui-models:
+    name: "{{ aiserver_comfyui_models_volume }}"
+    external: true
+  comfyui-data:
+    name: "{{ aiserver_comfyui_data_volume }}"
+    external: true
+  comfyui-output:
+    name: "{{ aiserver_comfyui_output_volume }}"
+    external: true
+{% endif %}
+{% endif %}

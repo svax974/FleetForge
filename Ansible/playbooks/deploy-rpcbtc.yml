@@ -41,4 +41,4 @@
   become: true
 
   roles:
-    - proxy-update-papang
+    - proxy-update

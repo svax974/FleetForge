@@ -1,0 +1,62 @@
+---
+# Prometheus Pushgateway (https://github.com/prometheus/pushgateway) — point de
+# dépôt des métriques POUSSÉES par ce qui ne vit pas assez longtemps pour être
+# scrapé : jobs batch, crons, bancs d'essai des serveurs IA. Prometheus scrape
+# ensuite la passerelle comme une cible ordinaire, avec `honor_labels: true`
+# pour garder le `job`/`instance` déclarés par chaque pousseur.
+#
+# Binaire NATIF sous systemd, sous `remote_username` (srvc) et non sous un
+# compte système `pushgateway` comme dans l'ancien rôle EasyNode : srvc doit
+# pouvoir lire le magasin de persistance, les journaux et relancer le service
+# sans détour (CLAUDE.md § 2, « srvc doit pouvoir piloter »). Rien dans la
+# passerelle n'exige un compte dédié : elle n'écrit que dans son répertoire de
+# données, que l'unité systemd est seule à pouvoir modifier (ReadWritePaths).
+
+# Version épinglée — https://github.com/prometheus/pushgateway/releases.
+# 1.11.3 (27/05/2026) plutôt que 1.11.4 (08/10/2026) : une version qui a
+# quelques mois de recul. Monter la valeur suffit, le rôle compare la version
+# installée et ne retélécharge que si elle diffère.
+pushgateway_version: "1.11.3"
+
+# Port d'écoute — registre des ports (CLAUDE.local.md). Pas `app_port` : la
+# passerelle n'est pas publiée par les proxies, elle n'a donc pas d'entrée
+# d'inventaire dédiée et vit sur l'entrée canonique de la machine, dont
+# `app_port` appartient à un autre service.
+pushgateway_port: 9900
+
+pushgateway_user: "{{ remote_username }}"
+pushgateway_bin_path: /usr/local/bin/pushgateway
+
+# ── Persistance ────────────────────────────────────────────────────────────
+# Sans `--persistence.file`, la passerelle garde tout en MÉMOIRE : un
+# redémarrage (mise à jour, reboot, OOM) efface en silence toutes les séries
+# poussées. Le pire n'est pas la perte, c'est qu'elle ne se voit pas — les
+# `push_time_seconds` disparaissent avec le reste, et une alerte de fraîcheur
+# n'a plus rien à évaluer jusqu'au prochain passage de chaque job, qui peut
+# être hebdomadaire. Avec le fichier, l'état d'avant le redémarrage revient tel
+# quel, horodatages compris.
+#
+# Dans le $HOME de srvc, comme les autres services natifs du parc
+# (fleetforge, openclaw) : c'est lui qui administre, c'est chez lui que ça vit.
+pushgateway_data_dir: "/home/{{ remote_username }}/pushgateway"
+pushgateway_persistence_file: "{{ pushgateway_data_dir }}/metrics.store"
+
+# Écriture périodique (défaut amont : 5m). La passerelle écrit aussi à l'arrêt
+# propre (SIGTERM) ; l'intervalle ne borne donc que la perte sur un arrêt
+# BRUTAL. Le fichier pèse quelques kilo-octets : une minute ne coûte rien.
+pushgateway_persistence_interval: 1m
+
+# Arguments supplémentaires (liste de chaînes), pour un besoin ponctuel.
+# Ne PAS y mettre `--web.enable-admin-api` sans raison : il ouvre l'effacement
+# complet du magasin à quiconque joint le port, et le port n'a pas
+# d'authentification — seul ufw le protège (pushgateway-security).
+pushgateway_extra_args: []
+
+# Architectures prises en charge : nom `ansible_architecture` → suffixe des
+# archives amont. Une machine hors liste fait échouer le rôle plutôt que de
+# télécharger un binaire qui ne démarrerait pas.
+pushgateway_arch_map:
+  x86_64: amd64
+  aarch64: arm64
+
+pushgateway_release_base: "https://github.com/prometheus/pushgateway/releases/download/v{{ pushgateway_version }}"

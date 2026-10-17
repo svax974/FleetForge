@@ -1,0 +1,22 @@
+---
+# Sécurité réseau de llmauth : VÉRIFIÉE, pas déclarée.
+#
+# Pourquoi aucune règle DOCKER-USER (contrairement à searxng-security) :
+#   • le port n'est publié que sur 127.0.0.1 — Docker ne pose alors son DNAT
+#     que pour la destination 127.0.0.1, et aucun socket n'écoute sur une
+#     adresse joignable depuis le réseau ; il n'y a RIEN à filtrer ;
+#   • le seul client, nginx, est sur la même machine : son trafic vers le
+#     conteneur passe par OUTPUT, pas par FORWARD — une règle DOCKER-USER ne le
+#     verrait même pas.
+# Une règle ufw sur ce port serait, elle, doublement décorative (port publié
+# par Docker, et déjà inatteignable) : ce rôle retire celles qui auraient pu
+# être posées à la main, pour que `ufw status` ne raconte pas une autre
+# histoire que la réalité.
+#
+# Ce qui protège réellement le service est donc l'ADRESSE de publication. Le
+# rôle la contrôle sur l'état réel de l'hôte (`docker port`, `ss`), pas sur le
+# gabarit : une édition du compose, un autre process sur le même port ou un
+# `docker run -p` manuel se verraient ici.
+
+llmauth_container: llmauth
+llmauth_port: 19080

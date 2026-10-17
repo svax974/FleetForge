@@ -1,0 +1,126 @@
+---
+# Outils optionnels (`scripting_toolchain`), repris de l'ancien
+# deploy-scripting-full.yml. Sous-tâches du rôle et non rôles séparés : ils
+# n'ont de raison d'être que pour les scripts de cette famille. Chaque bloc est
+# idempotent — un rejeu ne retélécharge ni ne réinstalle rien.
+
+- name: Check the requested tools
+  ansible.builtin.assert:
+    that:
+      - scripting_toolchain | difference(['ansible', 'gcloud', 'go', 'rust']) | length == 0
+    fail_msg: >-
+      `scripting_toolchain` n'accepte que ansible, gcloud, go, rust
+      (reçu : {{ scripting_toolchain | join(', ') }}).
+
+# ── Ansible ────────────────────────────────────────────────────────────────
+# Paquet de la distribution, comme l'ancien rôle, et non pipx : les scripts
+# lancent ansible depuis CRON, dont le PATH ne contient pas ~/.local/bin.
+- name: Install ansible
+  ansible.builtin.apt:
+    name: ansible
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  become: true
+  when: "'ansible' in scripting_toolchain"
+
+# ── Google Cloud CLI ───────────────────────────────────────────────────────
+# `google-cloud-cli` : nom actuel du paquet (`google-cloud-sdk`, utilisé par
+# l'ancien rôle, n'est plus qu'un nom de transition).
+- name: Add the Google Cloud CLI repository
+  ansible.builtin.deb822_repository:
+    name: google-cloud-cli
+    types: [deb]
+    uris: https://packages.cloud.google.com/apt
+    suites: [cloud-sdk]
+    components: [main]
+    signed_by: https://packages.cloud.google.com/apt/doc/apt-key.gpg
+    state: present
+  become: true
+  when: "'gcloud' in scripting_toolchain"
+
+- name: Install the Google Cloud CLI
+  ansible.builtin.apt:
+    name: google-cloud-cli
+    state: present
+    update_cache: true
+  become: true
+  when: "'gcloud' in scripting_toolchain"
+
+# ── Go ─────────────────────────────────────────────────────────────────────
+# Archive officielle dans /usr/local/go, vérifiée par sha256. La procédure
+# amont exige de SUPPRIMER l'ancienne arborescence avant d'extraire : extraire
+# par-dessus mélange deux bibliothèques standard. L'ancien rôle extrayait par-
+# dessus, et retéléchargeait à chaque passage.
+- name: Install go {{ scripting_go_version }}
+  when: "'go' in scripting_toolchain"
+  vars:
+    scripting_go_arch: "{{ {'x86_64': 'amd64', 'aarch64': 'arm64'}[ansible_facts['architecture']] | default('unsupported') }}"
+    scripting_go_archive: "go{{ scripting_go_version }}.linux-{{ scripting_go_arch }}.tar.gz"
+  block:
+    - name: Check the architecture is supported
+      ansible.builtin.assert:
+        that: scripting_go_arch in scripting_go_sha256
+        fail_msg: "Architecture {{ ansible_facts['architecture'] }} sans somme de contrôle Go connue (scripting_go_sha256)."
+
+    - name: Read the installed go version
+      ansible.builtin.slurp:
+        src: /usr/local/go/VERSION
+      register: scripting_go_installed
+      failed_when: false
+
+    - name: Install go when missing or at another version
+      when: >-
+        scripting_go_installed.content is not defined
+        or (scripting_go_installed.content | b64decode).splitlines() | first != 'go' ~ scripting_go_version
+      block:
+        - name: Download the go archive
+          ansible.builtin.get_url:
+            url: "https://go.dev/dl/{{ scripting_go_archive }}"
+            dest: "/tmp/{{ scripting_go_archive }}"
+            checksum: "sha256:{{ scripting_go_sha256[scripting_go_arch] }}"
+            mode: '0644'
+
+        - name: Remove the previous go tree
+          ansible.builtin.file:
+            path: /usr/local/go
+            state: absent
+          become: true
+
+        - name: Extract go
+          ansible.builtin.unarchive:
+            src: "/tmp/{{ scripting_go_archive }}"
+            dest: /usr/local
+            remote_src: true
+            owner: root
+            group: root
+          become: true
+
+        - name: Remove the downloaded archive
+          ansible.builtin.file:
+            path: "/tmp/{{ scripting_go_archive }}"
+            state: absent
+
+    # /usr/local/bin est dans le PATH de cron (scripting_cron_env).
+    - name: Link go and gofmt into /usr/local/bin
+      ansible.builtin.file:
+        src: "/usr/local/go/bin/{{ item }}"
+        path: "/usr/local/bin/{{ item }}"
+        state: link
+        force: true
+      loop: [go, gofmt]
+      become: true
+
+# ── Rust ───────────────────────────────────────────────────────────────────
+# rustup pour `remote_username` — l'ancien playbook l'installait pour root,
+# qui ne lance aucun des scripts. `creates` rend l'étape idempotente ; les
+# mises à jour se font ensuite par `rustup update`, hors déploiement.
+- name: Install rust for {{ remote_username }}
+  ansible.builtin.shell:
+    cmd: >-
+      set -o pipefail;
+      curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs
+      | sh -s -- -y --default-toolchain {{ scripting_rust_toolchain }}
+    creates: "/home/{{ remote_username }}/.cargo/bin/rustup"
+    executable: /bin/bash
+  when: "'rust' in scripting_toolchain"

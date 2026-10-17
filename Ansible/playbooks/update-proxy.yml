@@ -1,0 +1,17 @@
+---
+# Resynchronise les vhosts et le pare-feu des proxies d'un parc (famille
+# `proxy`). Remplace update-proxy-web3c.yml et update-proxy-papang.yml depuis le
+# 16/10/2026 : les gabarits sont ceux de Ansible/parcs/<parc_name>/nginx/,
+# choisis par le parc passé à play.sh.
+#
+#   ./play.sh web3c update-proxy.yml
+#   ./play.sh papanglabs update-proxy.yml --check --diff   # voir avant de pousser
+- name: Update proxies configurations and security settings
+  hosts: proxies
+  remote_user: "{{ remote_username }}"
+  become: true
+  become_method: sudo
+
+  roles:
+    - proxy-update
+    - proxy-security

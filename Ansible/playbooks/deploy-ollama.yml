@@ -14,7 +14,7 @@
 # 11/10/2026 — plus de `hosts: all` à restreindre par `--limit`.
 #
 # Publié par les proxies en MODE PRIVÉ : CNAME ollama.web3c.cc posé par
-# ollama-install, vhost ollama.conf par `./play.sh web3c update-proxy-web3c.yml`
+# ollama-install, vhost ollama.conf par `./play.sh web3c update-proxy.yml`
 # (à rejouer après le premier déploiement). Le routeur doit rediriger 11434
 # vers hub (hors Ansible).
 #

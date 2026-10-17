@@ -68,7 +68,7 @@
   tasks:
     - name: Deploy just the AgentHub vhost
       ansible.builtin.include_role:
-        name: proxy-update-web3c
+        name: proxy-update
         tasks_from: deploy-one-site
       vars:
         site: agenthub.conf

@@ -21,7 +21,7 @@
   tasks:
     - name: Remove the FreeLLMAPI vhost
       ansible.builtin.include_role:
-        name: proxy-update-web3c
+        name: proxy-update
         tasks_from: remove-one-site
       vars:
         site: freellm.conf

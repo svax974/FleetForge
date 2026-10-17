@@ -1,0 +1,13 @@
+---
+# Supprime llmauth ET ses données : conteneur, image et répertoire complet,
+# base des clés API comprise. DESTRUCTIF ET IRRÉVERSIBLE : les clés émises
+# sont perdues (seul leur HMAC était stocké), chaque client devra en recevoir
+# une nouvelle.
+#
+#   ./play.sh <parc> purge-llmauth.yml
+- name: Purge llmauth
+  hosts: llmauth
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - llmauth-purge

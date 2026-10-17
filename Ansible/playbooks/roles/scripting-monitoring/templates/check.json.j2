@@ -1,0 +1,11 @@
+{
+  "service": "scripting",
+  "up": {"kind": "command", "argv": ["/bin/sh", "-c", "test -s {{ scripting_cron_file }} && systemctl is-active --quiet {{ scripting_cron_unit }}"], "timeout": 5},
+  "extra_checks": [
+    {"name": "cron_daemon", "kind": "systemd", "unit": "{{ scripting_cron_unit }}"},
+    {"name": "cron_file", "kind": "command", "argv": ["test", "-s", "{{ scripting_cron_file }}"]},
+    {"name": "install_dir", "kind": "command", "argv": ["test", "-d", "{{ scripting_install_dir }}"]}
+  ],
+  "metrics_command": ["/usr/bin/python3", "{{ svcprobe_lib_dir }}/scripting-metrics.py", "{{ svcprobe_dir }}/scripting-metrics.json"],
+  "metrics_timeout": 30
+}

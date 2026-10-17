@@ -1,7 +1,8 @@
 ---
-# Proxies des deux parcs (famille `proxy`). Remplace `deploy-proxypl.yml`, copie
-# de ce playbook à deux rôles près : vhosts et pare-feu restent propres à chaque
-# parc (`proxy-update-*`, `proxy-security-*`), choisis par le groupe du parc.
+# Proxies de tous les parcs (famille `proxy`). Les vhosts propres à chaque parc
+# ne sont plus des rôles distincts (ex-`proxy-update-web3c` / `-papang`) : le
+# rôle unique `proxy-update` lit Ansible/parcs/<parc_name>/nginx/, et
+# `proxy-security` n'applique que les sections dont le parc déclare le port.
 #
 #   ./play.sh web3c deploy-proxy.yml
 #   ./play.sh papanglabs deploy-proxy.yml
@@ -31,16 +32,8 @@
     - install-nginx
     - install-cert
     - proxy-install
-  tasks:
-    # `include_role` et non `roles:` : le nom y est résolu à l'exécution, une
-    # fois l'inventaire chargé — dans `roles:`, il le serait avant.
-    - name: Vhosts du parc
-      ansible.builtin.include_role:
-        name: "proxy-update-{{ 'web3c' if 'web3c' in group_names else 'papang' }}"
-
-    - name: Pare-feu du parc
-      ansible.builtin.include_role:
-        name: "proxy-security-{{ 'web3c' if 'web3c' in group_names else 'papang' }}"
+    - proxy-update
+    - proxy-security
 
 # Pas de variable dans un `name:` de play : comme `hosts:`, il est résolu avant
 # le chargement des group_vars, donc `remote_username` y est toujours indéfini.

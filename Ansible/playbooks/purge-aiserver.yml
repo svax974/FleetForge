@@ -1,0 +1,13 @@
+---
+# Supprime le serveur d'IA ET ses données : tout ce que fait remove-aiserver.yml,
+# plus les images, les volumes (modèles, données et sorties ComfyUI) et les
+# répertoires du projet. DESTRUCTIF : plusieurs dizaines de gigaoctets à
+# retélécharger. Docker, pilote NVIDIA et NVIDIA Container Toolkit restent.
+#
+#   ./play.sh <parc> purge-aiserver.yml --limit <hôte>
+- name: Purge du serveur d'IA (modèles compris)
+  hosts: aiservers
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - aiserver-purge

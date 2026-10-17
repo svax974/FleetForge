@@ -1,0 +1,53 @@
+FleetForge: job `aiserver-dcgm` (container dcgm-exporter, port 9400).
+
+NVIDIA DCGM Exporter Prometheus metrics (selected / interesting)
+=============================================================
+
+NOTE: DCGM exporter exposes many metrics. Below are the key ones we keep in the Prometheus
+scrape config for AI servers. Most metrics have labels like `gpu`, `uuid`, `device`, etc.
+
+- DCGM_FI_DEV_GPU_UTIL
+  GPU utilization (%).
+
+- DCGM_FI_DEV_MEM_COPY_UTIL
+  Memory copy / memory controller utilization (%).
+
+- DCGM_FI_DEV_FB_USED
+  Framebuffer memory used (bytes).
+
+- DCGM_FI_DEV_FB_FREE
+  Framebuffer memory free (bytes).
+
+- DCGM_FI_DEV_FB_TOTAL
+  Total framebuffer memory (bytes).
+
+- DCGM_FI_DEV_POWER_USAGE
+  Power draw (watts).
+
+- DCGM_FI_DEV_GPU_TEMP
+  GPU temperature (Celsius).
+
+- DCGM_FI_DEV_SM_CLOCK
+  Streaming multiprocessor clock (MHz).
+
+- DCGM_FI_DEV_GPU_CLOCK
+  GPU graphics clock (MHz).
+
+- DCGM_FI_DEV_ENC_UTIL
+  NVENC encoder utilization (%).
+
+- DCGM_FI_DEV_DEC_UTIL
+  NVDEC decoder utilization (%).
+
+- DCGM_FI_DEV_PCIE_TX_BYTES
+  PCIe transmit bytes (bytes, usually per second depending on exporter config).
+
+- DCGM_FI_DEV_PCIE_RX_BYTES
+  PCIe receive bytes.
+
+- DCGM_FI_DEV_NVLINK_TX_BYTES
+  NVLink transmit bytes (if supported / available).
+
+- DCGM_FI_DEV_NVLINK_RX_BYTES
+  NVLink receive bytes.
+

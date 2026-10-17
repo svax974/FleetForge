@@ -1,0 +1,246 @@
+---
+# Modèles Hugging Face, téléchargés DIRECTEMENT dans les volumes Docker par un
+# conteneur jetable (files/hf_download.py) : aucune copie sur l'hôte.
+#
+# Seuls les fichiers ABSENTS sont téléchargés. L'ancien rôle testait la
+# présence du nom d'ORIGINE puis renommait le fichier en `display_name` :
+# le test échouait donc à chaque passage et le checkpoint (23 Go) était
+# retéléchargé à chaque déploiement. Le test porte ici sur le nom FINAL.
+
+- name: Build the model lists for the enabled types
+  ansible.builtin.set_fact:
+    aiserver_llm_artifacts: >-
+      {{ (aiserver_llm_models if 'llm' in aiserver_types else [])
+         | rejectattr('is_folder', 'defined') | list }}
+    aiserver_comfyui_models: >-
+      {{ (aiserver_image_models if 'image' in aiserver_types else [])
+         + (aiserver_video_models if 'video' in aiserver_types else []) }}
+
+# Un modèle LLM peut exiger un second fichier (mmproj des modèles vision) :
+# chaque fichier devient un artefact à part entière.
+- name: Expand LLM models into files (model + optional mmproj)
+  ansible.builtin.set_fact:
+    aiserver_llm_files: >-
+      {{ (aiserver_llm_files | default([]))
+         + [{'repo': item.repo, 'filename': item.filename, 'gated': item.gated | default(false)}]
+         + ([{'repo': item.mmproj_repo | default(item.repo), 'filename': item.mmproj_filename,
+              'gated': item.gated | default(false)}]
+            if (item.mmproj_filename | default('') | length > 0) else []) }}
+  loop: "{{ aiserver_llm_artifacts }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Compute the ComfyUI files and their final names
+  ansible.builtin.set_fact:
+    aiserver_comfyui_files: >-
+      {{ (aiserver_comfyui_files | default([]))
+         + [{'name': item.name, 'repo': item.repo, 'filename': item.filename,
+             'subdir': item.target_dir | default('checkpoints'),
+             'gated': item.gated | default(false),
+             'dest_name': _final}] }}
+  vars:
+    _friendly: "{{ item.display_name | default('') }}"
+    _ext: >-
+      {{ item.filename | regex_search('[.][^./]+$') | default('', true) }}
+    _final: >-
+      {{ item.filename if _friendly | length == 0
+         else (_friendly if (_friendly | regex_search('[.][^/]+$')) else _friendly ~ _ext) }}
+  loop: "{{ aiserver_comfyui_models | rejectattr('is_folder', 'defined') | list }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Report the multi-file repositories that are not downloaded
+  ansible.builtin.debug:
+    msg: >-
+      {{ item.name }} ({{ item.repo }}) est un dépôt multi-fichiers
+      (`is_folder`) : non téléchargé automatiquement, à placer à la main dans
+      le volume {{ aiserver_comfyui_models_volume }}.
+  loop: "{{ (aiserver_comfyui_models + (aiserver_llm_models if 'llm' in aiserver_types else []))
+            | selectattr('is_folder', 'defined') | list }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Ensure the data volumes exist
+  community.docker.docker_volume:
+    name: "{{ item }}"
+    state: present
+  become: true
+  # Tous ceux que compose référence (déclarés `external`, voir le gabarit).
+  loop: >-
+    {{ ([aiserver_llm_models_volume] if 'llm' in aiserver_types else [])
+       + ([aiserver_comfyui_models_volume, aiserver_comfyui_data_volume, aiserver_comfyui_output_volume]
+          if ('image' in aiserver_types or 'video' in aiserver_types) else []) }}
+
+- name: Deploy the Hugging Face download script
+  ansible.builtin.copy:
+    src: hf_download.py
+    dest: "{{ aiserver_home }}/hf_download.py"
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: '0644'
+  become: true
+
+# ── Présence ───────────────────────────────────────────────────────────────
+# Lecture seule : jouée aussi en simulation, sans quoi la liste des absents
+# serait indéfinie et `--check` échouerait sur un hôte sain.
+- name: Check which LLM files are missing
+  ansible.builtin.command:
+    argv: [docker, run, --rm, -v, "{{ aiserver_llm_models_volume }}:/models",
+           "{{ aiserver_helper_alpine_image }}", test, -f, "/models/{{ item.filename }}"]
+  register: aiserver_llm_checks
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  become: true
+  loop: "{{ aiserver_llm_files | default([]) }}"
+  loop_control:
+    label: "{{ item.filename }}"
+
+- name: Check which ComfyUI files are missing
+  ansible.builtin.command:
+    argv: [docker, run, --rm, -v, "{{ aiserver_comfyui_models_volume }}:/models",
+           "{{ aiserver_helper_alpine_image }}", sh, -c,
+           'test -f "/models/$1/$2" || test -f "/models/$1/$3"', sh,
+           "{{ item.subdir }}", "{{ item.dest_name }}", "{{ item.filename }}"]
+  register: aiserver_comfyui_checks
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  become: true
+  loop: "{{ aiserver_comfyui_files | default([]) }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: List the missing files
+  ansible.builtin.set_fact:
+    aiserver_llm_missing: "{{ aiserver_llm_checks.results | default([]) | selectattr('rc', 'defined') | selectattr('rc', 'ne', 0) | map(attribute='item') | list }}"
+    aiserver_comfyui_missing: "{{ aiserver_comfyui_checks.results | default([]) | selectattr('rc', 'defined') | selectattr('rc', 'ne', 0) | map(attribute='item') | list }}"
+
+# Le jeton n'est exigé que s'il sert : un hôte dont tous les modèles sont déjà
+# en place, ou qui ne tire que des dépôts publics, se déploie sans lui.
+- name: Require the Hugging Face token for gated downloads
+  ansible.builtin.assert:
+    that: aiserver_hf_token | length > 0
+    fail_msg: >-
+      Des fichiers de dépôts à accès restreint (`gated`) doivent être
+      téléchargés : {{ (aiserver_llm_missing + aiserver_comfyui_missing)
+      | selectattr('gated') | map(attribute='repo') | unique | join(', ') }}.
+      Définir `hf_token` dans les group_vars du parc, chiffré par
+      `ansible-vault encrypt_string --stdin-name hf_token`.
+    quiet: true
+  when: (aiserver_llm_missing + aiserver_comfyui_missing) | selectattr('gated') | list | length > 0
+
+# ── Téléchargements ────────────────────────────────────────────────────────
+# Le jeton passe par l'ENVIRONNEMENT de la tâche puis `-e HF_TOKEN` sans
+# valeur (relayé par docker) : il n'apparaît dans aucun argument de commande,
+# donc ni dans `ps` ni dans le journal. `no_log` masque le reste quand il y a
+# un jeton à protéger.
+- name: Download the missing LLM files
+  ansible.builtin.command:
+    argv:
+      - timeout
+      - --preserve-status
+      - -k
+      - 30s
+      - "{{ aiserver_download_timeout }}"
+      - docker
+      - run
+      - --rm
+      - --label
+      - aiserver_download=1
+      - -e
+      - HF_TOKEN
+      - -e
+      - "HF_REPO={{ item.repo }}"
+      - -e
+      - "HF_FILE={{ item.filename }}"
+      - -e
+      - "PIP_DISABLE_PIP_VERSION_CHECK=1"
+      - -v
+      - "{{ aiserver_llm_models_volume }}:/models"
+      - -v
+      - "{{ aiserver_home }}/hf_download.py:/hf_download.py:ro"
+      - "{{ aiserver_helper_python_image }}"
+      - sh
+      - -c
+      - pip install -q --no-cache-dir "huggingface_hub>=1.0.0" && python /hf_download.py
+  environment:
+    HF_TOKEN: "{{ aiserver_hf_token }}"
+  become: true
+  loop: "{{ aiserver_llm_missing }}"
+  loop_control:
+    label: "{{ item.filename }}"
+  no_log: "{{ aiserver_hf_token | length > 0 }}"
+
+# Un conteneur de téléchargement interrompu (timeout, Ctrl-C) reste en place
+# et garde le volume : nettoyé avant d'en lancer d'autres.
+- name: Remove downloader containers left by an aborted run
+  ansible.builtin.shell: |
+    set -euo pipefail
+    ids="$(docker ps -aq --filter label=aiserver_download=1)"
+    if [ -n "${ids}" ]; then docker rm -f ${ids} >/dev/null; echo removed; fi
+  args:
+    executable: /bin/bash
+  register: aiserver_dl_cleanup
+  changed_when: "'removed' in aiserver_dl_cleanup.stdout"
+  become: true
+  when: aiserver_comfyui_missing | length > 0
+
+- name: Download the missing ComfyUI files
+  ansible.builtin.command:
+    argv:
+      - timeout
+      - --preserve-status
+      - -k
+      - 30s
+      - "{{ aiserver_download_timeout }}"
+      - docker
+      - run
+      - --rm
+      - --label
+      - aiserver_download=1
+      - -e
+      - HF_TOKEN
+      - -e
+      - "HF_REPO={{ item.repo }}"
+      - -e
+      - "HF_FILE={{ item.filename }}"
+      - -e
+      - "HF_SUBDIR={{ item.subdir }}"
+      - -e
+      - "HF_DEST_NAME={{ item.dest_name }}"
+      - -e
+      - "KEEP_ORIGINAL={{ '1' if aiserver_keep_original_filename | bool else '0' }}"
+      - -e
+      - "PIP_DISABLE_PIP_VERSION_CHECK=1"
+      - -v
+      - "{{ aiserver_comfyui_models_volume }}:/models"
+      - -v
+      - "{{ aiserver_home }}/hf_download.py:/hf_download.py:ro"
+      - "{{ aiserver_helper_python_image }}"
+      - sh
+      - -c
+      - pip install -q --no-cache-dir "huggingface_hub>=1.0.0" && python /hf_download.py
+  environment:
+    HF_TOKEN: "{{ aiserver_hf_token }}"
+  register: aiserver_comfyui_downloads
+  failed_when: false
+  become: true
+  loop: "{{ aiserver_comfyui_missing }}"
+  loop_control:
+    label: "{{ item.name }}"
+  no_log: "{{ aiserver_hf_token | length > 0 }}"
+
+- name: Fail when a ComfyUI download failed (strict mode)
+  ansible.builtin.fail:
+    msg: >-
+      Téléchargement(s) en échec : {{ aiserver_comfyui_downloads.results
+      | selectattr('rc', 'defined') | selectattr('rc', 'ne', 0)
+      | map(attribute='item.name') | list }}. Dépôt `gated` dont l'accès n'a
+      pas été accordé au compte du jeton, nom de fichier changé en amont, ou
+      délai `aiserver_download_timeout` dépassé. La sortie est masquée
+      (`no_log`, jeton présent) : rejouer le conteneur à la main sur l'hôte
+      pour la lire, ou `aiserver_download_strict: false` pour poursuivre.
+  when:
+    - aiserver_download_strict | bool
+    - aiserver_comfyui_downloads.results | default([]) | selectattr('rc', 'defined') | selectattr('rc', 'ne', 0) | list | length > 0

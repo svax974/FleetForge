@@ -17,7 +17,7 @@
 #   ./play.sh web3c deploy-searxng.yml --tags monitoring   # réarmer la supervision
 #
 # Le vhost (searxng.web3c.cc, jeton X-Api-Key) appartient au proxy :
-#   ./play.sh web3c update-proxy-web3c.yml
+#   ./play.sh web3c update-proxy.yml
 
 # ── Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ───────────────────────
 # Échoue immédiatement si le parc n'a pas d'hôte de supervision utilisable,

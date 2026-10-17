@@ -1,0 +1,136 @@
+---
+# Voir defaults/main.yml : pas de port, donc pas de pare-feu à poser. Les
+# contrôles portent sur ce qui protège RÉELLEMENT les secrets du service, et
+# chacun échoue au lieu de seulement signaler — un contrôle de sécurité qui se
+# contente d'afficher un avertissement n'est lu par personne.
+
+# ── 1. Fichiers secrets : 0600, propriétaire remote_username ───────────────
+# Configuration du parc dans chaque dépôt, ses copies dans chaque instance
+# d'autodéploiement (rsync conserve les droits, mais une copie faite à la main
+# ne le ferait pas) et les identifiants GCP.
+- name: List the secret files
+  ansible.builtin.set_fact:
+    scripting_secret_files: >-
+      {%- set ns = namespace(files=[]) -%}
+      {%- set dirs = scripting_repos | items2dict(key_name='name', value_name='dest') -%}
+      {%- for cfg in scripting_config_files -%}
+        {%- set name = cfg.dest | default(cfg.src) -%}
+        {%- for repo in cfg.repos -%}
+          {%- set ns.files = ns.files + [{'path': dirs[repo] ~ '/' ~ name, 'mode': cfg.mode | default('0600')}] -%}
+          {%- for inst in scripting_autodeploy_instances | selectattr('source_repo', 'equalto', repo) -%}
+            {%- set ns.files = ns.files + [{'path': scripting_install_dir ~ '/' ~ inst.name ~ '/' ~ name, 'mode': cfg.mode | default('0600')}] -%}
+          {%- endfor -%}
+        {%- endfor -%}
+      {%- endfor -%}
+      {%- if scripting_gcp_credentials_file | length > 0 -%}
+        {%- set ns.files = ns.files + [{'path': scripting_gcp_credentials_dir ~ '/' ~ (scripting_gcp_credentials_file | basename), 'mode': '0600'}] -%}
+      {%- endif -%}
+      {{ ns.files | to_json }}
+
+# `state: file` échoue si le fichier manque : un secret attendu mais absent
+# signifie que scripting-install n'a pas tourné jusqu'au bout, ce qui doit se
+# voir ici plutôt qu'au premier script qui plante.
+- name: Enforce owner and mode on the secret files
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: file
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: "{{ item.mode }}"
+  loop: "{{ scripting_secret_files | from_json }}"
+  loop_control:
+    label: "{{ item.path }} ({{ item.mode }})"
+  become: true
+
+# Deuxième barrière : même un fichier rendu lisible par erreur reste hors de
+# portée des autres comptes si la racine ne se traverse pas.
+- name: Enforce the installation directory mode
+  ansible.builtin.file:
+    path: "{{ scripting_install_dir }}"
+    state: directory
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: '0750'
+  become: true
+
+# ── 2. Aucun identifiant dans .git/config ──────────────────────────────────
+# L'ancien rôle clonait avec `https://user:jeton@…` : le jeton restait en clair
+# dans le .git/config de chaque dépôt ET de chaque copie d'autodéploiement,
+# dans des répertoires 0755. scripting-install l'en retire ; ce contrôle
+# garantit que personne ne l'y remet (un `git clone` manuel suffit).
+# Seuls les CHEMINS sont rapportés, jamais le contenu.
+- name: Look for credentials stored in git remotes
+  ansible.builtin.shell:
+    cmd: >-
+      find {{ scripting_install_dir | quote }} -maxdepth 4 -path '*/.git/config' -type f
+      -exec grep -lE '://[^/@:[:space:]]+:[^/@[:space:]]+@' {} + 2>/dev/null || true
+  become: true
+  register: scripting_git_creds
+  changed_when: false
+  check_mode: false
+
+- name: Refuse credentials in git remotes
+  ansible.builtin.assert:
+    that: scripting_git_creds.stdout_lines | length == 0
+    fail_msg: >-
+      Identifiants en clair dans : {{ scripting_git_creds.stdout_lines | join(', ') }}.
+      Rejouer deploy-scripting.yml (le module git réécrit `origin` sans
+      jeton, rsync rafraîchit les copies), puis RÉVOQUER le jeton : il a été
+      lisible sur disque.
+    success_msg: "Aucun identifiant dans les remotes git."
+
+# ── 3. Fichier cron ────────────────────────────────────────────────────────
+# Un fichier de /etc/cron.d modifiable par srvc serait une élévation de
+# privilèges directe : il suffirait d'y écrire une ligne « root ».
+- name: Enforce the cron file ownership
+  ansible.builtin.file:
+    path: "{{ scripting_cron_file }}"
+    state: file
+    owner: root
+    group: root
+    mode: '0644'
+  become: true
+
+# ── 4. Aucun port d'écoute introduit ───────────────────────────────────────
+# Le service n'a pas de port déclaré, donc pas de filtrage : un script qui se
+# mettrait à écouter (serveur de debug, notebook, API ajoutée en douce) serait
+# exposé SANS règle. On liste les sockets en écoute dont le processus tourne
+# depuis l'installation (répertoire courant ou ligne de commande).
+#
+# Limite assumée : contrôle à l'INSTANT du déploiement. Les tâches cron sont
+# brèves ; un port ouvert par une tâche qui ne tourne pas à ce moment-là
+# passerait inaperçu.
+- name: List listening sockets opened from the installation
+  ansible.builtin.shell:
+    cmd: |
+      set -u
+      DIR={{ scripting_install_dir | quote }}
+      ss -Htulnp 2>/dev/null | while read -r proto state rq sq local peer procs; do
+        for pid in $(printf '%s' "$procs" | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u); do
+          cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null || true)
+          cmd=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)
+          case "$cwd/ $cmd" in
+            "$DIR"/*|*" $DIR/"*) echo "${local##*:} $proto $local pid=$pid ${cmd%% *}" ;;
+          esac
+        done
+      done | sort -u
+    executable: /bin/bash
+  become: true
+  register: scripting_listeners
+  changed_when: false
+  check_mode: false
+
+- name: Refuse an undeclared listening port
+  ansible.builtin.assert:
+    that: scripting_unexpected | length == 0
+    fail_msg: >-
+      Ports en écoute ouverts depuis {{ scripting_install_dir }} sans
+      déclaration : {{ scripting_unexpected | join(' ; ') }}. Un port non
+      déclaré n'a aucun filtrage. Soit l'arrêter, soit l'inscrire au registre
+      des ports et dans `scripting_allowed_listen_ports` avec sa règle ufw.
+    success_msg: "Aucun port d'écoute non déclaré ({{ scripting_listeners.stdout_lines | length }} au total)."
+  vars:
+    scripting_unexpected: >-
+      {{ scripting_listeners.stdout_lines
+         | reject('match', '^(' ~ ((scripting_allowed_listen_ports | map('string') | list) + ['__none__']) | join('|') ~ ') ')
+         | list }}

@@ -118,8 +118,8 @@ Au premier passage, les secrets tirés sont chiffrés dans
 `playbooks/group_vars/<parc>.yml` : **à committer**, sinon un autre clone en
 tirera d'autres et l'accès posé par le premier deviendra invalide.
 
-Le vhost appartient au proxy : `./play.sh web3c update-proxy-web3c.yml` /
-`./play.sh papanglabs update-proxy-papang.yml`.
+Le vhost appartient au proxy : `./play.sh web3c update-proxy.yml` /
+`./play.sh papanglabs update-proxy.yml`.
 
 Sur la machine, le service est un binaire natif sous systemd (donc les règles
 ufw d'`fleetforge-security` s'appliquent réellement) :

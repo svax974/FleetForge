@@ -1,0 +1,11 @@
+---
+# Supprime la Pushgateway ET son magasin de persistance. Destructif : toutes
+# les séries poussées sont perdues, les pousseurs repartent de zéro.
+#
+#   ./play.sh <parc> purge-pushgateway.yml
+- name: Purge de la Pushgateway (données comprises)
+  hosts: pushgateways
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - pushgateway-purge

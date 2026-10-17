@@ -130,19 +130,32 @@ fn get_playbook_metadata(name: &str) -> (String, String) {
         "deploy-alertmanager" => ("Déploiement Alertmanager".into(), "Installe Alertmanager sur alertmanager1 (notifications e-mail) et filtre le port 9093 via ufw ET DOCKER-USER — publié par Docker, il serait sinon joignable sans authentification depuis Internet. Vaut pour les deux parcs. Requiert alertmanager_email_to.".into()),
         "remove-alertmanager" => ("Suppression Alertmanager".into(), "Retire le conteneur Alertmanager en conservant sa configuration et son état.".into()),
         "purge-alertmanager" => ("Purge Alertmanager".into(), "Supprime Alertmanager, sa configuration (identifiants SMTP) et son état. Destructif.".into()),
-        "deploy-fleetforge" => ("Déploiement FleetForge (web)".into(), "Déploie l'application de gestion du parc, servie dans un navigateur : compilation sur la machine, service systemd, filtrage du port et cible Prometheus native. La machine devient un nœud de contrôle Ansible ; sans `ff_deploy_secrets=true` l'application voit le parc sans pouvoir le piloter. Avec, elle reçoit une clé SSH dédiée, autorisée sur le parc par le play `authorize` et restreinte à l'adresse de cette machine (`from=`). Prérequis : `npm run build` dans apps/gui. Le vhost appartient à update-proxy-web3c / update-proxy-papang.".into()),
+        "deploy-fleetforge" => ("Déploiement FleetForge (web)".into(), "Déploie l'application de gestion du parc, servie dans un navigateur : compilation sur la machine, service systemd, filtrage du port et cible Prometheus native. La machine devient un nœud de contrôle Ansible ; sans `ff_deploy_secrets=true` l'application voit le parc sans pouvoir le piloter. Avec, elle reçoit une clé SSH dédiée, autorisée sur le parc par le play `authorize` et restreinte à l'adresse de cette machine (`from=`). Prérequis : `npm run build` dans apps/gui. Le vhost appartient à update-proxy.yml.".into()),
         "remove-fleetforge" => ("Suppression FleetForge".into(), "Retire le service, les binaires, la cible Prometheus et les ouvertures de pare-feu. Conserve le code livré et la base locale.".into()),
         "purge-fleetforge" => ("Purge FleetForge".into(), "Supprime FleetForge, le code livré, l'arbre Ansible synchronisé et la base locale. Destructif.".into()),
-        "deploy-searxng" => ("Déploiement relai SearXNG".into(), "Installe SearXNG (Docker) sur l'hôte `station`, filtre son port et pose sa supervision. L'exposition se déduit de la co-localisation : port sur 127.0.0.1 si tous les proxies autorisés sont sur la même machine, sinon 0.0.0.0 restreint à leurs IP dans DOCKER-USER. Le vhost appartient à update-proxy-web3c.".into()),
+        "update-proxy" => ("MAJ vhosts et pare-feu des proxies".into(), "Resynchronise les vhosts du parc (Ansible/parcs/<parc_name>/nginx/, gitignoré) et les règles ufw des proxies. Remplace update-proxy-web3c / update-proxy-papang. Vérifier d'abord avec --check --diff.".into()),
+        "deploy-pushgateway" => ("Déploiement Pushgateway".into(), "Contrôle préalable, installation de la Prometheus Pushgateway (binaire natif sous srvc, séries persistées), filtrage ufw aux vpns, Prometheus, whitelist et pousseurs, puis cible Prometheus native. Exige un job `pushgateway` avec honor_labels: true dans la stack de supervision du parc.".into()),
+        "remove-pushgateway" => ("Suppression Pushgateway".into(), "Retire le service, le binaire, la cible Prometheus et les règles ufw. Conserve les séries persistées.".into()),
+        "purge-pushgateway" => ("Purge Pushgateway".into(), "Supprime la Pushgateway et son magasin de persistance. Destructif.".into()),
+        "deploy-llmauth" => ("Déploiement LLM Auth".into(), "Déploie sur les proxies (groupe llmauth) le service de validation des clés d'API appelé par nginx (auth_request), avec contrôle d'exposition et supervision. Le vhost s'active quand la famille llmauth est portée par le proxy (update-proxy.yml).".into()),
+        "remove-llmauth" => ("Suppression LLM Auth".into(), "Retire le service de validation des clés d'API des proxies en conservant la base des clés.".into()),
+        "purge-llmauth" => ("Purge LLM Auth".into(), "Supprime le service de validation des clés d'API et sa base de clés, de façon irréversible.".into()),
+        "deploy-aiserver" => ("Déploiement serveur IA".into(), "Contrôle préalable puis installation, pare-feu DOCKER-USER et supervision du serveur IA conteneurisé (llama.cpp, ComfyUI, DCGM) sur le groupe aiservers.".into()),
+        "remove-aiserver" => ("Suppression serveur IA".into(), "Retire les conteneurs, le pare-feu, la sonde et les cibles du serveur IA en conservant les modèles.".into()),
+        "purge-aiserver" => ("Purge serveur IA".into(), "Supprime le serveur IA et toutes ses données, modèles compris.".into()),
+        "deploy-scripting" => ("Déploiement orchestrateur scripting".into(), "Contrôle préalable puis installation, sécurité et supervision de l'orchestrateur scripting (tâches cron Python d'autodéploiement et de maintenance) sur le groupe scripting_servers. Fichiers du parc : Ansible/parcs/<parc>/scripting/.".into()),
+        "remove-scripting" => ("Suppression orchestrateur scripting".into(), "Arrête l'orchestrateur et retire son code en conservant configuration, logs et outputs.".into()),
+        "purge-scripting" => ("Purge orchestrateur scripting".into(), "Supprime l'orchestrateur et toutes ses données, secrets du parc compris. Destructif.".into()),
+        "deploy-searxng" => ("Déploiement relai SearXNG".into(), "Installe SearXNG (Docker) sur l'hôte `station`, filtre son port et pose sa supervision. L'exposition se déduit de la co-localisation : port sur 127.0.0.1 si tous les proxies autorisés sont sur la même machine, sinon 0.0.0.0 restreint à leurs IP dans DOCKER-USER. Le vhost appartient à update-proxy.".into()),
         "remove-searxng" => ("Suppression relai SearXNG".into(), "Retire le conteneur SearXNG, sa sonde et ses règles DOCKER-USER. Conserve la configuration et la clé secrète.".into()),
         "purge-searxng" => ("Purge relai SearXNG".into(), "Supprime SearXNG, son image, sa configuration, sa clé secrète et le CNAME public. Destructif.".into()),
-        "deploy-freellm" => ("Déploiement FreeLLMAPI".into(), "Installe FreeLLMAPI (Docker Compose) sur l'entrée d'inventaire `freellm`, filtre son port et pose sa supervision. L'exposition se déduit de la co-localisation avec les proxies : port sur 127.0.0.1 si tous les proxies autorisés sont sur la même machine, sinon 0.0.0.0 restreint à leurs IP dans DOCKER-USER. Publie aussi le CNAME DNS vers le proxy. Le vhost appartient à update-proxy-web3c.".into()),
+        "deploy-freellm" => ("Déploiement FreeLLMAPI".into(), "Installe FreeLLMAPI (Docker Compose) sur l'entrée d'inventaire `freellm`, filtre son port et pose sa supervision. L'exposition se déduit de la co-localisation avec les proxies : port sur 127.0.0.1 si tous les proxies autorisés sont sur la même machine, sinon 0.0.0.0 restreint à leurs IP dans DOCKER-USER. Publie aussi le CNAME DNS vers le proxy. Le vhost appartient à update-proxy.".into()),
         "remove-freellm" => ("Suppression FreeLLMAPI".into(), "Retire le conteneur FreeLLMAPI, sa sonde et ses règles DOCKER-USER. Conserve la configuration, l'ENCRYPTION_KEY et les clés fournisseur importées.".into()),
         "purge-freellm" => ("Purge FreeLLMAPI".into(), "Supprime FreeLLMAPI, son image, son volume de données, sa configuration, son ENCRYPTION_KEY et le CNAME public. Destructif.".into()),
         "deploy-starnet" => ("Déploiement StarNet".into(), "Installe StarNet nativement sous srvc sur l'entrée d'inventaire `starnet` (tag épinglé, Node embarqué, systemd --user), publie le sidecar loopback via un relai systemd filtré par ufw aux proxies/whitelist/Prometheus/VPN, pousse le vhost starnet.conf (whitelist + supervision + VPN) sur les proxies et pose la supervision. Publie aussi le CNAME DNS.".into()),
         "remove-starnet" => ("Suppression StarNet".into(), "Retire StarNet (unité, relai, code, Node embarqué), sa sonde, ses règles ufw et son vhost sur les proxies. Conserve les workspaces et la configuration.".into()),
         "purge-starnet" => ("Purge StarNet".into(), "Supprime StarNet, ses workspaces, sa configuration, la clé des connecteurs, son vhost et le CNAME public. Destructif.".into()),
-        "deploy-rotki" => ("Déploiement Rotki".into(), "Installe Rotki (conteneur autonome) sur l'hôte dédié `rotki` (machine partagée avec ctdapi/dev/docker-repo/xbot), filtre son port dans DOCKER-USER via docker_ports_rules (host_vars/ctdapi.yml, l'hôte canonique de cette machine), publie le CNAME rotki.web3c.cc vers le front des proxies, et pose sa supervision. Sidecar de valorisation de portefeuille pour la fusion WalletOptimizer → TradeKong (Phase 4.2), toujours publié sur 0.0.0.0 — clients : TradeKong (`tradekong`, appel direct) et les proxies (vhost public token-gated + UI restreinte VPN, déployés séparément par update-proxy-web3c.yml).".into()),
+        "deploy-rotki" => ("Déploiement Rotki".into(), "Installe Rotki (conteneur autonome) sur l'hôte dédié `rotki` (machine partagée avec ctdapi/dev/docker-repo/xbot), filtre son port dans DOCKER-USER via docker_ports_rules (host_vars/ctdapi.yml, l'hôte canonique de cette machine), publie le CNAME rotki.web3c.cc vers le front des proxies, et pose sa supervision. Sidecar de valorisation de portefeuille pour la fusion WalletOptimizer → TradeKong (Phase 4.2), toujours publié sur 0.0.0.0 — clients : TradeKong (`tradekong`, appel direct) et les proxies (vhost public token-gated + UI restreinte VPN, déployés séparément par update-proxy.yml).".into()),
         "remove-rotki" => ("Suppression Rotki".into(), "Retire le conteneur Rotki et sa sonde. Conserve les volumes de données/logs et l'entrée docker_ports_rules.".into()),
         "purge-rotki" => ("Purge Rotki".into(), "Supprime Rotki, son image, ses volumes nommés (portefeuille valorisé, historique) et le CNAME public. Destructif — exige -e confirm=yes.".into()),
         "deploy-openclaw" => ("Déploiement OpenClaw".into(), "Installe OpenClaw NATIVEMENT (CLI officiel, systemd --user) sur l'hôte `hub`, sous le compte srvc, onboardé en mode non interactif, filtre son port à la whitelist/aux proxies/au LAN via ufw, puis pose sa supervision. Idempotent : si déjà installé et onboardé, seules les étapes annexes (pare-feu, supervision) sont rejouées.".into()),
@@ -151,13 +164,13 @@ fn get_playbook_metadata(name: &str) -> (String, String) {
         "deploy-agenthub" => ("Déploiement AgentCenter".into(), "Déploie le hub AgentCenter sur l'hôte `agenthub` (machine partagée avec ctdapi/dev/rotki) : CNAME agenthub.web3c.cc, vhost proxies (WebSocket), filtrage DOCKER-USER des ports 4700/4701, build + déploiement de l'app via les scripts du dépôt, supervision, puis activation du runner (tag runner, jeton en vault).".into()),
         "remove-agenthub" => ("Suppression AgentCenter".into(), "Arrête le hub et le runner, retire la sonde. Conserve données, volumes et l'entrée docker_ports_rules.".into()),
         "purge-agenthub" => ("Purge AgentCenter".into(), "Supprime le hub (conteneurs, images, volumes nommés) et le CNAME, désactive le runner. Destructif — exige -e confirm=yes.".into()),
-        "deploy-sync-server" => ("Déploiement serveurs de synchro".into(), "Déploie les trois serveurs web3c-sync PUBLICS (iptv 4710, banking 4711, aiteam 4712 ; métriques 9710-9712) en conteneurs sur `ctdapi` (machine partagée) : filtrage DOCKER-USER, image construite sur l'hôte depuis les sources du poste, CNAME, supervision (/metrics natif, sonde, règles d'alerte). Les vhosts se posent par update-proxy-web3c.yml, les sauvegardes par deploy-backup.yml. Aucun secret.".into()),
+        "deploy-sync-server" => ("Déploiement serveurs de synchro".into(), "Déploie les trois serveurs web3c-sync PUBLICS (iptv 4710, banking 4711, aiteam 4712 ; métriques 9710-9712) en conteneurs sur `ctdapi` (machine partagée) : filtrage DOCKER-USER, image construite sur l'hôte depuis les sources du poste, CNAME, supervision (/metrics natif, sonde, règles d'alerte). Les vhosts se posent par update-proxy.yml, les sauvegardes par deploy-backup.yml. Aucun secret.".into()),
         "remove-sync-server" => ("Suppression serveurs de synchro".into(), "Retire les conteneurs web3c-sync, leurs sondes et cibles Prometheus. Conserve données, image, sauvegardes, CNAME, vhosts et entrées docker_ports_rules.".into()),
         "purge-sync-server" => ("Purge serveurs de synchro".into(), "IRRÉVERSIBLE : supprime une instance web3c-sync et ses données (base, blobs), le CNAME et le cron de sauvegarde. Exige -e sync_purge_confirm=yes et une sauvegarde récente ; toujours avec --limit sync-<instance>. -e sync_purge_backups=yes supprime aussi les archives.".into()),
         "deploy-monitoring" => ("Déploiement supervision web3c".into(), "Installe Prometheus en conteneur sur `monitor` (parc web3c) et déploie les règles d'alerte partagées. Grafana n'y est pas installé. Côté papanglabs : deploy-prometheus.".into()),
         "remove-monitoring" => ("Suppression supervision web3c".into(), "Arrête Prometheus sur `monitor` (configuration et historique conservés). Plus aucune alerte du parc ne part tant qu'il est arrêté.".into()),
         "purge-monitoring" => ("Purge supervision web3c".into(), "Supprime Prometheus, sa configuration et tout l'historique des métriques sur `monitor`.".into()),
-        "deploy-proxy" => ("Déploiement Proxy".into(), "Installe Nginx en reverse proxy avec certificats SSL, vhosts et pare-feu du parc (web3c ou papanglabs, choisis par le groupe de l'hôte), puis la supervision.".into()),
+        "deploy-proxy" => ("Déploiement Proxy".into(), "Installe Nginx en reverse proxy avec certificats SSL, vhosts du parc (Ansible/parcs/<parc_name>/nginx/) et pare-feu, puis la supervision.".into()),
         "remove-proxy" => ("Suppression Proxy".into(), "Arrête nginx sur les proxies ciblés (vhosts et certificats conservés). --limit recommandé.".into()),
         "purge-proxy" => ("Purge Proxy".into(), "Supprime nginx, les vhosts et les certificats des proxies ciblés. --limit recommandé.".into()),
         "deploy-back" => ("Déploiement Backend".into(), "Déploie les services backend avec sécurisation des ports applicatifs.".into()),
@@ -170,7 +183,7 @@ fn get_playbook_metadata(name: &str) -> (String, String) {
         "deploy-brk" => ("Déploiement BRK".into(), "Configure le nœud (server=1, ZMQ, prune=0) puis installe et lance BRK sur rpcbtc1.".into()),
         "remove-brk" => ("Suppression BRK".into(), "Supprime BRK (conserve les données calculées).".into()),
         "purge-brk" => ("Purge BRK".into(), "Supprime BRK et ses données calculées. Destructif.".into()),
-        "deploy-esplora" => ("Déploiement Esplora".into(), "Configure le nœud (server=1, ZMQ, prune=0, comme BRK) puis construit et installe Esplora (mempool/electrs) sur l'entrée d'inventaire `esplora1` (co-localisée avec rpcbtc1/brk1), filtre son API REST (whitelist + hôtes de l'inventaire), publie le CNAME esplora.papanglabs.com vers le front des proxies, et pose sa supervision (endpoint Prometheus natif d'electrs). Exige un nœud fully synced. Le vhost appartient à update-proxy-papang.yml.".into()),
+        "deploy-esplora" => ("Déploiement Esplora".into(), "Configure le nœud (server=1, ZMQ, prune=0, comme BRK) puis construit et installe Esplora (mempool/electrs) sur l'entrée d'inventaire `esplora1` (co-localisée avec rpcbtc1/brk1), filtre son API REST (whitelist + hôtes de l'inventaire), publie le CNAME esplora.papanglabs.com vers le front des proxies, et pose sa supervision (endpoint Prometheus natif d'electrs). Exige un nœud fully synced. Le vhost appartient à update-proxy.yml.".into()),
         "remove-esplora" => ("Suppression Esplora".into(), "Retire le service Esplora, le binaire et sa cible Prometheus. Conserve l'index construit.".into()),
         "purge-esplora" => ("Purge Esplora".into(), "Supprime Esplora, son binaire, ses sources, son index construit et le CNAME public. Destructif — exige -e confirm=yes.".into()),
         "deploy-papangmetrics" => ("Déploiement PapangMetrics".into(), "Déploie le code + API + ETL + firewall sur brk1 (Node.js, build, services systemd).".into()),
@@ -217,7 +230,7 @@ fn get_playbook_metadata(name: &str) -> (String, String) {
         "deploy-docker-repo" => ("Déploiement registre Docker".into(), "Installe un registre Docker privé avec authentification.".into()),
         "deploy-install-cert" => ("Installation certificats SSL".into(), "Génère et installe les certificats Let's Encrypt via certbot.".into()),
         "deploy-wordpress" => ("Déploiement WordPress".into(), "Installe WordPress (Apache2, MySQL), publie le CNAME, ouvre le pare-feu, pose le vhost des proxies et la sonde.".into()),
-        "deploy-ollama" => ("Déploiement Ollama".into(), "Installe Ollama sur l'entrée dédiée `ollama` (machine hub), publie le CNAME ollama.web3c.cc, restreint l'API 11434 (sans authentification) aux proxies, vpns, Prometheus et whitelist, puis pose la sonde. Vhost en mode privé via update-proxy-web3c. Aucun modèle téléchargé — voir deploy-ollama-model.".into()),
+        "deploy-ollama" => ("Déploiement Ollama".into(), "Installe Ollama sur l'entrée dédiée `ollama` (machine hub), publie le CNAME ollama.web3c.cc, restreint l'API 11434 (sans authentification) aux proxies, vpns, Prometheus et whitelist, puis pose la sonde. Vhost en mode privé via update-proxy. Aucun modèle téléchargé — voir deploy-ollama-model.".into()),
         "remove-ollama" => ("Suppression Ollama".into(), "Arrête Ollama, supprime le binaire, l'override systemd et la sonde (modèles préservés).".into()),
         "purge-ollama" => ("Purge Ollama".into(), "Supprime Ollama, tous les modèles, l'utilisateur système, la sonde, les règles de pare-feu et le CNAME public. Destructif.".into()),
         "deploy-ollama-model" => ("Déploiement modèle Ollama".into(), "Télécharge un modèle sur l'entrée `ollama`. Variable : ollama_model_name (requis).".into()),
@@ -271,6 +284,7 @@ fn get_playbook_metadata(name: &str) -> (String, String) {
 
 fn categorize(name: &str) -> String {
     if name.contains("monitor")
+        || name.contains("pushgateway")
         || name.contains("exporter")
         || name.contains("prometheus")
         || name.contains("alertmanager")
@@ -288,6 +302,8 @@ fn categorize(name: &str) -> String {
         "Blockchain".to_string()
     } else if name.contains("mtbridge") {
         "Trading".to_string()
+    } else if name.contains("scripting") {
+        "Orchestration".to_string()
     } else if name.contains("docker") {
         "Docker".to_string()
     } else if name.contains("wordpress") || name.contains("backup") || name.contains("restore") {
@@ -300,6 +316,8 @@ fn categorize(name: &str) -> String {
         || name.contains("agenthub")
         || name.contains("freellm")
         || name.contains("starnet")
+        || name.contains("aiserver")
+        || name.contains("llmauth")
     {
         "IA / LLM".to_string()
     } else if name.contains("copyfail") {

@@ -1,0 +1,116 @@
+---
+# Orchestrateur « scripting » — ensemble de dépôts Python lancés par cron
+# (tâches périodiques, maintenance, autodéploiement de produits).
+#
+# Le service n'écoute sur AUCUN port : il n'a pas de démon, seulement des
+# entrées cron qui lancent des scripts sous `remote_username` (règle srvc,
+# CLAUDE.md). Sa « disponibilité », c'est donc le fait que cron continue de les
+# lancer — voir `scripting-monitoring`.
+#
+# Rien de propre à un parc ne vit dans ce rôle (dépôt PUBLIC) : URL des dépôts,
+# instances d'autodéploiement et chemins se déclarent dans
+# `group_vars/<parc>.yml` ; les fichiers secrets dans `scripting_parc_dir`.
+
+# ── Emplacements ───────────────────────────────────────────────────────────
+# Racine de l'installation. Valeur générique : à fixer PAR PARC, les scripts
+# des dépôts y référencent souvent leur chemin en dur (crontab, *.sh).
+scripting_install_dir: /opt/scripting
+
+# Répertoire PAR PARC, hors des rôles et hors du dépôt public (gitignoré),
+# qui porte les fichiers propres au parc. Chacun y est chiffré en entier par
+# `ansible-vault encrypt` : `template` et `copy` le déchiffrent à la volée
+# (vérifié sur ansible-core 2.21.3), rien n'est jamais écrit en clair sur le
+# poste de contrôle.
+#   env.py, .env.prod, rclone.conf  → voir `scripting_config_files`
+#   crontab_extras                  → /etc/cron.d/{{ scripting_cron_name }}
+scripting_parc_dir: "{{ playbook_dir }}/../parcs/{{ parc_name }}/scripting"
+
+# Sous-répertoires vides créés à la racine, utilisés par les scripts eux-mêmes
+# (ex. `[repos, binaries]`). Rien par défaut : ce n'est pas au rôle de deviner
+# la disposition d'un code qu'il ne connaît pas.
+scripting_extra_dirs: []
+
+# ── Dépôts ─────────────────────────────────────────────────────────────────
+# Liste de { name, url, dest, version?, venv?, runtime_dirs? }.
+#   url          : SANS identifiants (refusé sinon) — le jeton est fourni à git
+#                  par GIT_ASKPASS, il n'atterrit jamais dans .git/config.
+#   dest         : chemin absolu du dépôt sur l'hôte.
+#   version      : branche/tag/commit, défaut HEAD (branche par défaut).
+#   venv         : défaut true — venv créé si le dépôt a un requirements.txt.
+#   runtime_dirs : défaut `scripting_runtime_dirs`.
+scripting_repos: []
+
+# Identifiants git (HTTPS). Le jeton est un SECRET : à déclarer chiffré
+# (`ansible-vault encrypt_string`) dans group_vars/<parc>.yml. Vides = dépôts
+# publics ou clonés par une autre voie (SSH).
+scripting_git_user: ""
+scripting_git_token: ""
+
+# `true` lève le `no_log` des tâches git pour lire une erreur de clonage. Le
+# jeton n'est pas dans l'URL, mais il est dans l'environnement du module :
+# à n'activer que ponctuellement.
+scripting_git_debug: false
+
+# Répertoires d'exécution créés dans chaque dépôt et chaque instance : ignorés
+# par git, conservés par `scripting-remove`.
+scripting_runtime_dirs: [logs, outputs]
+
+# ── Fichiers de configuration du parc ──────────────────────────────────────
+# Liste de { src, repos: [<nom de dépôt>…], dest?, mode?, render? }.
+#   src    : nom du fichier dans `scripting_parc_dir`.
+#   dest   : nom dans le dépôt, défaut = src.
+#   mode   : défaut 0600 (secrets).
+#   render : `template` (défaut, Jinja autorisé) ou `copy` (contenu brut —
+#            à choisir si le fichier contient `{{`, `{%` ou `{#`).
+# Les instances d'autodéploiement en héritent par copie de leur dépôt source.
+scripting_config_files: []
+
+# ── Instances d'autodéploiement ────────────────────────────────────────────
+# Liste de { name, source_repo, products: [...] }. Chaque instance est une
+# COPIE du dépôt `source_repo` dans {{ scripting_install_dir }}/<name>, avec
+# son propre env_deploy.py (AUTO_DEPLOY = products) et ses propres logs.
+scripting_autodeploy_instances: []
+
+# ── Identifiants GCP (optionnel) ───────────────────────────────────────────
+# Chemin sur le POSTE DE CONTRÔLE ; relatif = relatif à `scripting_parc_dir`
+# (le fichier peut donc y vivre, chiffré au vault). Vide = rien n'est copié.
+scripting_gcp_credentials_file: ""
+scripting_gcp_credentials_dir: "/home/{{ remote_username }}/.ansible"
+
+# ── Cron ───────────────────────────────────────────────────────────────────
+# Fichier dédié /etc/cron.d/<nom> plutôt qu'un bloc dans /etc/crontab : il se
+# retire exactement (un fichier, pas un bloc à retrouver) et sa présence EST
+# l'état du service. Nom sans point : run-parts ignore les fichiers qui en ont.
+scripting_cron_enabled: true
+scripting_cron_name: scripting
+scripting_cron_file: "/etc/cron.d/{{ scripting_cron_name }}"
+
+# Environnement en tête du fichier. Un fichier de /etc/cron.d n'hérite PAS du
+# SHELL ni du PATH de /etc/crontab : les entrées migrées depuis l'ancien bloc
+# y tournaient avec ce PATH-là, on le reproduit pour ne rien casser.
+scripting_cron_env:
+  SHELL: /bin/sh
+  PATH: /usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+
+# Chaque entrée doit tourner sous `remote_username` (règle srvc). `false`
+# n'est à poser que pour une exception documentée dans le group_vars.
+scripting_cron_enforce_user: true
+
+# ── Outils optionnels ──────────────────────────────────────────────────────
+# Sous-ensemble de [ansible, gcloud, go, rust]. Installés une fois, rejoués
+# sans effet (idempotents). Jamais retirés par -remove/-purge : ce sont des
+# outils génériques (CLAUDE.md § Obligation remove + purge).
+scripting_toolchain: []
+
+# Go : version épinglée, sommes de contrôle relevées sur
+# https://go.dev/dl/?mode=json (version stable au 16/10/2026).
+scripting_go_version: "1.27.2"
+scripting_go_sha256:
+  amd64: ecbadb99091a3f46e31f5f934b068b1864eafa7995211b39eaddf76996045fe5
+  arm64: 94f3e30b8e374bc285e7dadc11e0865726b9bc6e85b841ccceaabc0214c6b7c8
+
+# Rust : installé par rustup pour `remote_username`, pas pour root.
+scripting_rust_toolchain: stable
+
+# Assistant GIT_ASKPASS (générique, sans secret : il lit l'environnement).
+scripting_askpass: /usr/local/lib/scripting/git-askpass.sh

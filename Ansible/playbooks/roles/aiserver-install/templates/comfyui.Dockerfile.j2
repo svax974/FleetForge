@@ -1,0 +1,27 @@
+# ComfyUI — généré par Ansible (aiserver-install), ne pas éditer sur l'hôte.
+FROM {{ aiserver_comfyui_base_image }}
+
+ARG DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+RUN git clone --depth 1 --branch {{ aiserver_comfyui_git_ref }} {{ aiserver_comfyui_git_repo }} /app/ComfyUI
+WORKDIR /app/ComfyUI
+
+# ComfyUI-Manager, et ComfyUI-api-tools qui expose Prometheus sur le port HTTP
+# de ComfyUI ({{ aiserver_comfyui_metrics_path }}).
+RUN mkdir -p custom_nodes \
+    && git clone --depth 1 {{ aiserver_comfyui_manager_repo }} custom_nodes/ComfyUI-Manager \
+    && git clone --depth 1 {{ aiserver_comfyui_metrics_repo }} custom_nodes/ComfyUI-api-tools
+
+RUN python3 -m pip install --no-cache-dir -r requirements.txt \
+    && for r in custom_nodes/*/requirements.txt; do \
+         [ -f "$r" ] && python3 -m pip install --no-cache-dir -r "$r" || true; \
+       done
+
+# Le port d'écoute est passé par compose (`--port`) : chaque instance écoute
+# sur le port qu'elle publie, condition du filtrage DOCKER-USER.
+ENTRYPOINT ["python3", "-u", "main.py", "--listen", "0.0.0.0"]
+CMD ["--port", "8188"]

@@ -1,0 +1,73 @@
+#!/bin/bash
+#
+# FleetForge
+#
+# Copyright © 2025 Stéphane VAXELAIRE
+# SPDX-License-Identifier: MIT — see LICENSE
+#
+# Filtrage des ports du serveur d'IA — géré par Ansible (aiserver-security),
+# ne pas éditer sur l'hôte.
+#
+# Les services tournent en conteneurs à ports publiés : Docker insère ses DNAT
+# en amont de la chaîne INPUT, ufw ne voit jamais ce trafic. `DOCKER-USER` est
+# la seule chaîne que Docker traverse sans la réécrire.
+#
+# Rejoué au démarrage par aiserver-firewall.service, APRÈS docker.service :
+# Docker recrée DOCKER-USER vide à chaque démarrage. (iptables-persistent est
+# exclu : il se désinstalle mutuellement avec ufw sur cette distribution.)
+#
+# Chaque conteneur écoute sur le port qu'il publie : `--dport` désigne donc
+# bien le port vu après le DNAT. Un port publié remappé (`-p A:B`) exigerait
+# `-m conntrack --ctorigdstport A --ctdir ORIGINAL` — aiserver-install l'évite.
+set -euo pipefail
+
+TAG="{{ aiserver_fw_tag }}"
+
+# Purge de TOUTES les règles de la famille, puis repose : le script est
+# idempotent et un port abandonné (type retiré) ne garde pas de règle
+# orpheline. Suppression par NUMÉRO : réinjecter une spec contenant
+# `--comment "…"` la ferait découper par le shell. L'awk lit TOUTE la sortie :
+# fermer le tube tôt tue iptables par SIGPIPE (rc 141 avec pipefail).
+purge() {
+  local tool="$1" n
+  while n=$("${tool}" -L DOCKER-USER --line-numbers -n 2>/dev/null \
+            | awk -v t="${TAG}" 'index($0, t) && !d {print $1; d=1}'); [ -n "${n}" ]; do
+    "${tool}" -D DOCKER-USER "${n}"
+  done
+}
+
+# Insertion en TÊTE (-I 1), DROP d'abord puis les autorisations par-dessus :
+# l'ordre final est « RETURN des sources, puis DROP ». En tête, et non en
+# queue (-A) : certaines versions de Docker terminent DOCKER-USER par un
+# `-j RETURN` inconditionnel, derrière lequel un DROP ajouté ne serait jamais
+# atteint.
+apply() {
+  local tool="$1" port="$2" name="$3"; shift 3
+  "${tool}" -I DOCKER-USER 1 -p tcp --dport "${port}" \
+    -m comment --comment "${TAG} ${name} deny" -j DROP
+  local src
+  for src in "$@"; do
+    "${tool}" -I DOCKER-USER 1 -s "${src}" -p tcp --dport "${port}" \
+      -m comment --comment "${TAG} ${name} allow" -j RETURN
+  done
+}
+
+# Docker publie aussi sur `[::]` et pose alors une chaîne ip6tables
+# DOCKER-USER : sans règles IPv6, le port resterait joignable en IPv6 en
+# contournant tout. Chaîne absente (Docker en IPv4 seul) : rien à filtrer.
+HAS_V6=0
+if command -v ip6tables >/dev/null 2>&1 && ip6tables -S DOCKER-USER >/dev/null 2>&1; then
+  HAS_V6=1
+fi
+
+purge iptables
+[ "${HAS_V6}" = 1 ] && purge ip6tables
+
+{% for r in aiserver_fw_rules %}
+{%   set v6 = r.sources | select('search', ':') | list %}
+{%   set v4 = r.sources | reject('search', ':') | select('match', '^[0-9]') | list %}
+# {{ r.name }} ({{ r.container }}) — {{ 'API : proxies + vpns + Prometheus + whitelist + liés' if r.exposed else 'exporter : vpns + Prometheus + whitelist' }}
+apply iptables {{ r.port }} "{{ r.name }}" {{ v4 | join(' ') }}
+[ "${HAS_V6}" = 1 ] && apply ip6tables {{ r.port }} "{{ r.name }}" {{ v6 | join(' ') }}
+{% endfor %}
+exit 0

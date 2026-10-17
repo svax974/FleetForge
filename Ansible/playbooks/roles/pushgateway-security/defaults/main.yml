@@ -1,0 +1,70 @@
+---
+# Filtrage du port de la Pushgateway.
+#
+# La passerelle n'a AUCUNE authentification : qui joint le port peut pousser
+# des séries arbitraires (donc fausser ou noyer la supervision), en écraser
+# d'autres, ou les effacer par l'API `DELETE /metrics/job/…`, toujours active.
+# Seul ufw la protège — et ici il protège RÉELLEMENT : binaire natif sous
+# systemd, aucun port publié par Docker, rien à poser dans DOCKER-USER.
+#
+# Service NON exposé par les proxies (CLAUDE.md § 1, « Accès réseau ») :
+# vpns + Prometheus + `whitelist` + serveurs liés. Les serveurs liés sont ici
+# les POUSSEURS — le groupe `aiservers`, plus les entrées nommées dans
+# `pushgateway_allowed_hosts`.
+
+pushgateway_port: 9900
+
+# Pousseurs supplémentaires, par NOM D'INVENTAIRE (jamais une adresse) : leur
+# `ansible_host` est relu à chaque déploiement, un changement de machine suit
+# donc tout seul. Un nom inconnu fait échouer le rôle — une faute de frappe
+# laisserait sinon un job pousser dans le vide sans que rien ne le signale.
+pushgateway_allowed_hosts: []
+
+# Plage du bridge Docker par défaut, d'où arrivent les scrapes quand
+# Prometheus (conteneur) tourne sur la MÊME machine. Même valeur que
+# fleetforge-monitoring.
+pushgwsec_docker_bridge: "172.17.0.0/16"
+
+# ── Sources, toutes DÉRIVÉES de l'inventaire ───────────────────────────────
+# Partagé avec `pushgateway-monitoring` (même règle de scrape, même
+# commentaire) et `pushgateway-remove` (qui doit retirer exactement ces
+# règles), d'où un calcul en un seul endroit.
+#
+# Dédoublonné PAR ADRESSE, la première catégorie l'emportant : ufw tient une
+# règle par couple source/port, et une même adresse posée deux fois avec deux
+# commentaires différents ferait basculer le commentaire à chaque rejeu — un
+# rôle jamais idempotent, dont plus personne ne lit le `changed`. L'ordre
+# met Prometheus en tête pour que sa règle porte toujours le commentaire de
+# scrape, identique à celui de pushgateway-monitoring.
+pushgwsec_prometheus_addr: >-
+  {{ hostvars[prometheus_host]['ansible_host']
+     if (prometheus_host is defined and prometheus_host in hostvars) else '' }}
+
+# Prometheus co-localisé : test sur l'ADRESSE et non sur le nom — plusieurs
+# entrées d'inventaire décrivent la même machine.
+pushgwsec_prometheus_local: "{{ pushgwsec_prometheus_addr | length > 0 and pushgwsec_prometheus_addr == ansible_host }}"
+
+pushgwsec_pushers: "{{ ((groups['aiservers'] | default([])) + pushgateway_allowed_hosts) | unique }}"
+
+pushgwsec_rules: >-
+  {%- set ns = namespace(rules=[], seen=[]) -%}
+  {%- set candidates = [] -%}
+  {%- if pushgwsec_prometheus_local | bool -%}
+  {%- set _ = candidates.append({'src': pushgwsec_docker_bridge, 'comment': 'Prometheus Docker scrape - pushgateway'}) -%}
+  {%- elif pushgwsec_prometheus_addr | length > 0 -%}
+  {%- set _ = candidates.append({'src': pushgwsec_prometheus_addr, 'comment': 'Prometheus scrape - pushgateway'}) -%}
+  {%- endif -%}
+  {%- for h in groups['vpns'] | default([]) -%}
+  {%- set _ = candidates.append({'src': hostvars[h]['ansible_host'], 'comment': 'pushgateway - vpn ' ~ h}) -%}
+  {%- endfor -%}
+  {%- for h in pushgwsec_pushers if h in hostvars -%}
+  {%- set _ = candidates.append({'src': hostvars[h]['ansible_host'], 'comment': 'pushgateway - pusher ' ~ h}) -%}
+  {%- endfor -%}
+  {%- for ip in whitelist | default([]) -%}
+  {%- set _ = candidates.append({'src': ip, 'comment': 'pushgateway - whitelist'}) -%}
+  {%- endfor -%}
+  {%- for r in candidates if r.src not in ns.seen -%}
+  {%- set ns.rules = ns.rules + [r] -%}
+  {%- set ns.seen = ns.seen + [r.src] -%}
+  {%- endfor -%}
+  {{ ns.rules }}

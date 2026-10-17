@@ -1,0 +1,19 @@
+FleetForge: job `aiserver-comfyui`, metrics_path /api-tools/v1/metrics on the
+ComfyUI HTTP port (ComfyUI-api-tools custom node). No separate exporter port.
+
+ComfyUI Prometheus exporter metrics (selected / interesting)
+==========================================================
+
+NOTE: Depending on the exporter implementation, metric names can vary.
+In this repository we keep:
+- comfyui_*/comfy_* application metrics (queue/job counters, durations, errors, etc.)
+- process_* runtime metrics (CPU seconds, RSS, open fds, start time)
+- python_* / python_gc_* metrics (Python runtime/GC)
+
+Useful examples you will typically see:
+- process_cpu_seconds_total: CPU time used by the exporter process
+- process_resident_memory_bytes: RSS memory usage
+- process_start_time_seconds: process start time
+- python_info: Python runtime info (version)
+- python_gc_*: garbage collection counters
+

@@ -1,0 +1,12 @@
+---
+# Retire llmauth : conteneur, fichier compose (secrets), contexte de
+# construction et sonde. Conserve la base des clés (voir purge-llmauth.yml).
+# Tout vhost qui fait encore `auth_request` vers lui répondra 500.
+#
+#   ./play.sh <parc> remove-llmauth.yml
+- name: Remove llmauth
+  hosts: llmauth
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - llmauth-remove

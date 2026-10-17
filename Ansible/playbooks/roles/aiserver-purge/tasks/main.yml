@@ -1,0 +1,47 @@
+---
+# Supprime le serveur d'IA ET ses données : tout ce que fait aiserver-remove,
+# plus les images, les volumes (modèles téléchargés, données et sorties
+# ComfyUI) et les répertoires du projet. DESTRUCTIF : les modèles devront
+# être retéléchargés (plusieurs dizaines de gigaoctets, jeton Hugging Face
+# pour les dépôts `gated`).
+#
+# Les outils GÉNÉRIQUES restent : Docker, pilote NVIDIA, NVIDIA Container
+# Toolkit, et les images auxiliaires génériques (python, alpine, nvidia/cuda),
+# susceptibles de servir à d'autres (CLAUDE.md § 2).
+
+- name: Load the aiserver names, images and volumes
+  ansible.builtin.include_role:
+    name: aiserver-install
+    tasks_from: vars
+    public: true
+
+- name: Remove the containers, the firewall, the probe and the targets
+  ansible.builtin.include_role:
+    name: aiserver-remove
+
+- name: Remove the aiserver images
+  community.docker.docker_image_remove:
+    name: "{{ item }}"
+    force: true
+  become: true
+  loop: "{{ [aiserver_llama_image, aiserver_comfyui_image, aiserver_dcgm_image] | unique }}"
+  failed_when: false
+
+- name: Remove the aiserver volumes (models, ComfyUI data and outputs)
+  community.docker.docker_volume:
+    name: "{{ item }}"
+    state: absent
+  become: true
+  loop:
+    - "{{ aiserver_llm_models_volume }}"
+    - "{{ aiserver_comfyui_models_volume }}"
+    - "{{ aiserver_comfyui_data_volume }}"
+    - "{{ aiserver_comfyui_output_volume }}"
+  failed_when: false
+
+- name: Remove the project directories (current and legacy EasyNode)
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  become: true
+  loop: "{{ [aiserver_home, aiserver_legacy_home] | unique }}"

@@ -14,7 +14,7 @@
 # ORDRE D'ENSEMBLE (voir Ansible/README.md, section « Serveurs de synchronisation ») :
 #   certificat (rien à faire : wildcard *.web3c.cc) → update-cloudflare-dns.yml →
 #   deploy-monitoring.yml (job Prometheus `sync-server`) → CE playbook →
-#   update-proxy-web3c.yml (vhosts + rotation des journaux) →
+#   update-proxy.yml (vhosts + rotation des journaux) →
 #   deploy-backup.yml (sauvegardes SQLite).
 #
 # Ordre des effets de ce playbook :
@@ -31,7 +31,7 @@
 #   5. règles d'alerte (groupe `sync`, tag monitoring) sur l'hôte Prometheus
 #
 # Aucun secret requis : inscription ouverte, pas de jeton administrateur.
-# Le vhost NE se déploie PAS ici (c'est update-proxy-web3c.yml, comme rotki).
+# Le vhost NE se déploie PAS ici (c'est update-proxy.yml, comme rotki).
 
 # ── Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ───────────────────────
 - name: Contrôle préalable

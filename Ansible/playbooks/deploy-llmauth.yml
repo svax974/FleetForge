@@ -1,0 +1,50 @@
+---
+# llmauth (conteneur) — validation des clés API pour nginx (`auth_request`)
+# devant le vhost des modèles LLM. Tourne SUR les proxies : groupe
+# d'inventaire `llmauth`, dont les membres sont les proxies qui publient ce
+# vhost. Publié sur 127.0.0.1:19080 uniquement, son seul client étant le nginx
+# local.
+#
+# Secrets requis (vault, group_vars du parc) : `llmauth_pepper`,
+# `llmauth_admin_token` — le déploiement échoue sans eux.
+#
+#   ./play.sh <parc> deploy-llmauth.yml
+#   ./play.sh <parc> deploy-llmauth.yml --tags monitoring   # réarmer la supervision
+
+# ── Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ───────────────────────
+# Échoue immédiatement si le parc n'a pas d'hôte de supervision utilisable,
+# puis vérifie — et répare — le socle de la machine, node_exporter et sa cible
+# Prometheus. Docker est exigé : le service est construit et lancé par
+# docker compose.
+- name: Contrôle préalable
+  hosts: llmauth
+  remote_user: "{{ remote_username }}"
+  roles:
+    - role: host-preflight
+      preflight_require_docker: true
+
+- name: Deploy llmauth
+  hosts: llmauth
+  remote_user: "{{ remote_username }}"
+  roles:
+    - llmauth-install
+
+# Pas de règle DOCKER-USER : le port n'est publié que sur 127.0.0.1, il n'y a
+# rien à filtrer. Le rôle VÉRIFIE cet état sur l'hôte (`docker port`, `ss`) et
+# échoue si le port écoute ailleurs que sur la boucle locale.
+- name: llmauth network exposure check
+  hosts: llmauth
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - llmauth-security
+
+# ── Supervision (OBLIGATOIRE, voir CLAUDE.md) ──────────────────────────────
+# Sonde `service_up`, métriques natives relayées et nombre de clés actives.
+# Rejouable seule :
+#   ./play.sh <parc> deploy-llmauth.yml --tags monitoring
+- name: Supervision du service
+  hosts: llmauth
+  remote_user: "{{ remote_username }}"
+  roles:
+    - llmauth-monitoring

@@ -1,0 +1,47 @@
+---
+# Retrait du filtrage, appelé par aiserver-remove (`tasks_from: flush`) : un
+# seul endroit sait quelles règles appartiennent à la famille.
+#
+# Les règles DOCKER-USER survivent aux conteneurs : laissées en place, elles
+# couperaient le prochain service qui reprendrait ces ports, avec une cause
+# introuvable puisque `ufw status` ne montre rien.
+
+- name: Stop and disable the aiserver firewall unit
+  ansible.builtin.systemd:
+    name: aiserver-firewall
+    state: stopped
+    enabled: false
+  become: true
+  failed_when: false
+
+- name: Flush the aiserver rules from DOCKER-USER (IPv4 and IPv6)
+  ansible.builtin.shell: |
+    set -uo pipefail
+    for tool in iptables ip6tables; do
+      command -v "${tool}" >/dev/null 2>&1 || continue
+      while n=$("${tool}" -L DOCKER-USER --line-numbers -n 2>/dev/null \
+                | awk -v t="{{ aiserver_fw_tag }}" 'index($0, t) && !d {print $1; d=1}'); [ -n "${n}" ]; do
+        "${tool}" -D DOCKER-USER "${n}" || break
+        echo flushed
+      done
+    done
+  args:
+    executable: /bin/bash
+  register: aiserver_fw_flush
+  changed_when: "'flushed' in aiserver_fw_flush.stdout"
+  failed_when: false
+  become: true
+
+- name: Remove the aiserver firewall files
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/systemd/system/aiserver-firewall.service
+    - /usr/local/sbin/aiserver-firewall.sh
+  become: true
+
+- name: Reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+  become: true

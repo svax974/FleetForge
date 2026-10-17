@@ -1,0 +1,28 @@
+---
+# Supervision de llmauth.
+#
+# Le service expose un /metrics Prometheus natif, mais sur 127.0.0.1 seulement
+# et sur le même listener que /admin/* : l'ouvrir au scrape reviendrait à
+# exposer l'administration des clés. Il est donc RELAYÉ par svcprobe (port
+# 9110, déjà ouvert à Prometheus et déjà enregistré comme cible), avec le
+# nombre de clés actives lu dans la base — l'état dégradé que /healthz ne voit
+# pas. Voir files/llmauth-metrics.sh.
+#
+# Sondes :
+#   up         GET /healthz → 200
+#   container  conteneur `llmauth` en marche
+#   validate   GET /validate avec une clé bidon → 401 attendu. /healthz ne
+#              touche pas la base ; ce contrôle traverse la requête SQL, et une
+#              base illisible y répond 500. Effet de bord ASSUMÉ : environ une
+#              requête refusée par cycle svcprobe (~10 s) s'ajoute à
+#              llm_auth_requests_total{endpoint="/validate",result="deny"} — une
+#              alerte sur le taux de refus doit tenir compte de ce plancher.
+
+llmauth_container: llmauth
+llmauth_port: 19080
+llmauth_url: "http://127.0.0.1:{{ llmauth_port }}"
+llmauth_db_path: /opt/llmauth/data/keys.sqlite
+
+# Clé volontairement invalide, reconnaissable dans les journaux du conteneur.
+# Ce n'est pas un secret : elle ne doit justement correspondre à aucune clé.
+llmauth_probe_key: "svcprobe-health-check-not-a-key"

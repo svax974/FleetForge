@@ -1,0 +1,7 @@
+---
+# Retire le service, le binaire, la cible Prometheus et les règles ufw.
+# CONSERVE le répertoire de données (magasin de persistance) : une
+# réinstallation retrouve les séries poussées et leurs horodatages — c'est
+# `pushgateway-purge` qui le supprime.
+pushgateway_bin_path: /usr/local/bin/pushgateway
+pushgwrm_job: pushgateway

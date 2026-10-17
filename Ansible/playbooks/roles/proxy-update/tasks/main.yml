@@ -1,0 +1,214 @@
+---
+########### Resynchronisation complète des vhosts d'un PARC sur ses proxies
+#
+# Rôle UNIQUE pour tous les parcs (ex-`proxy-update-web3c` et
+# `proxy-update-papang`, fusionnés le 16/10/2026). Le rôle ne porte que la
+# MÉCANIQUE et les partiels génériques (`_access.inc`, `_sync-vhost.inc`) ; les
+# gabarits propres au parc vivent hors des rôles, dans
+# `Ansible/parcs/<parc_name>/nginx/` (voir defaults/main.yml), gitignoré dans le
+# dépôt public : les vhosts décrivent le parc réel (noms, amonts, filtrages).
+#
+# Le parc est désigné par `parc_name` (group_vars/<parc>.yml, sans défaut) :
+# `play.sh` comme les applications chargent ces group_vars, le bon répertoire
+# est donc choisi sans rien passer en argument.
+
+- name: Fail early when the parc has no nginx directory
+  ansible.builtin.assert:
+    that:
+      - parc_name is defined
+      - parc_name | length > 0
+      - proxy_update_dir is directory
+    fail_msg: >-
+      Aucun gabarit nginx pour ce parc : `parc_name` vaut
+      « {{ parc_name | default('(non défini)') }} » et {{ proxy_update_dir }}
+      n'existe pas. Les vhosts d'un parc vivent dans Ansible/parcs/<parc_name>/nginx/
+      (gitignoré : à reprendre depuis le dépôt privé du parc). Sans ce garde-fou,
+      la suite viderait /etc/nginx/sites-enabled et redémarrerait nginx sans
+      aucun vhost — tous les services du parc tomberaient d'un coup.
+  run_once: true
+
+# Le parc n'est pas homogène : proxy1 est en 1.30.0, proxy2 en 1.24.0 (paquet
+# Ubuntu). Certaines directives ont changé de forme entre les deux et la forme
+# invalide n'est pas ignorée — elle empêche nginx de DÉMARRER. Les gabarits qui
+# en dépendent testent cette variable (cf. `http2` dans searxng.conf).
+- name: Collect the installed nginx version
+  ansible.builtin.command: nginx -v
+  register: nginx_version_raw
+  changed_when: false
+  check_mode: false
+
+- name: Set the nginx version fact
+  ansible.builtin.set_fact:
+    nginx_version: "{{ ((nginx_version_raw.stderr | default('')) ~ (nginx_version_raw.stdout | default(''))) | regex_search('nginx/([0-9.]+)', '\\1') | first }}"
+
+# Le répertoire du parc FAIT FOI : vidés puis reconstruits, un vhost retiré du
+# dépôt est retiré des proxies au passage suivant.
+- name: Delete the vhost directories
+  ansible.builtin.file:
+    path: "/etc/nginx/{{ item }}"
+    state: absent
+  loop: "{{ proxy_update_subdirs }}"
+
+- name: Create the vhost directories
+  ansible.builtin.file:
+    path: "/etc/nginx/{{ item }}"
+    state: directory
+  loop: "{{ proxy_update_subdirs }}"
+
+- name: Copy nginx conf
+  ansible.builtin.template:
+    src: "{{ proxy_update_dir }}/nginx.conf"
+    dest: /etc/nginx/nginx.conf
+    owner: root
+    group: root
+  when: (proxy_update_dir ~ '/nginx.conf') is file
+
+# Fichiers sensibles du parc, chiffrés EN ENTIER par `ansible-vault encrypt`
+# dans le répertoire du parc (`copy` les déchiffre à la volée) :
+#   certs/ → /etc/nginx/certs/  (certificat d'origine Cloudflare et sa clé)
+#   auth/  → /etc/nginx/auth/   (htpasswd — une empreinte est un secret, CLAUDE.md)
+# Copiés avant les vhosts : `nginx -t` refuse un `ssl_certificate` absent.
+- name: Create the certs and auth directories
+  ansible.builtin.file:
+    path: "/etc/nginx/{{ item }}"
+    state: directory
+    owner: root
+    group: www-data
+    mode: '0750'
+  loop: [certs, auth]
+  when: (proxy_update_dir ~ '/' ~ item) is directory
+
+- name: Copy the parc certificates and htpasswd files
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "/etc/nginx/{{ item | dirname | basename }}/{{ item | basename }}"
+    owner: root
+    group: www-data
+    mode: '0640'
+  with_fileglob:
+    - "{{ proxy_update_dir }}/certs/*"
+    - "{{ proxy_update_dir }}/auth/*"
+  no_log: true
+
+# Journaux dédiés (et leur rotation 7 jours) des vhosts web3c-sync : le
+# répertoire DOIT exister avant la copie des vhosts, sans quoi `nginx` refuse de
+# démarrer (open() failed sur access_log/error_log). Seulement pour un parc qui
+# porte des serveurs de synchronisation.
+- name: Prepare the dedicated sync access-log directory and rotation
+  ansible.builtin.include_tasks: sync-logs.yml
+  when: groups['sync_servers'] | default([]) | length > 0
+
+- name: Copy nginx sites enabled confs
+  ansible.builtin.template:
+    src: "{{ item }}"
+    dest: /etc/nginx/sites-enabled/{{ item | basename }}
+    owner: root
+    group: root
+  with_fileglob:
+    - "{{ proxy_update_dir }}/sites-enabled/*"
+  # `_*` : fichiers partiels inclus par d'autres gabarits, jamais des vhosts —
+  # les déployer ferait inclure leur contenu deux fois.
+  when: not (item | basename).startswith('_')
+
+- name: Copy nginx streams enabled confs
+  ansible.builtin.template:
+    src: "{{ item }}"
+    dest: /etc/nginx/streams-enabled/{{ item | basename }}
+    owner: root
+    group: root
+  with_fileglob:
+    - "{{ proxy_update_dir }}/streams-enabled/*"
+  when: not (item | basename).startswith('_')
+
+- name: Copy nginx sites available confs
+  ansible.builtin.template:
+    src: "{{ item }}"
+    dest: /etc/nginx/sites-available/{{ item | basename }}
+    owner: root
+    group: root
+  with_fileglob:
+    - "{{ proxy_update_dir }}/sites-available/*"
+  when: not (item | basename).startswith('_')
+
+- name: Copy nginx streams available confs
+  ansible.builtin.template:
+    src: "{{ item }}"
+    dest: /etc/nginx/streams-available/{{ item | basename }}
+    owner: root
+    group: root
+  with_fileglob:
+    - "{{ proxy_update_dir }}/streams-available/*"
+  when: not (item | basename).startswith('_')
+
+# ── Stream Bitcoin P2P (papanglabs) ────────────────────────────────────────
+# Le gabarit rpcbtc_8333.conf ne connaît pas les nœuds : la liste des amonts
+# est complétée ici à partir du groupe `rpcsbtc`. Sans effet sur un parc dont
+# le répertoire nginx n'active pas ce stream.
+- name: Check if rpcbtc_8333.conf exists in streams-enabled
+  ansible.builtin.stat:
+    path: "/etc/nginx/streams-enabled/rpcbtc_8333.conf"
+  register: rpcbtc_streams_enabled
+
+- name: Set rpcbtc.conf path
+  ansible.builtin.set_fact:
+    rpcbtc_conf_path: "/etc/nginx/streams-enabled/rpcbtc_8333.conf"
+  when: rpcbtc_streams_enabled.stat.exists
+
+- name: Customize the rpcbtc.conf stream config file with all known BTC RPCs part 1
+  ansible.builtin.lineinfile:
+    path: "{{ rpcbtc_conf_path }}"
+    regexp: "server .*;"
+    line: ""
+  when: rpcbtc_conf_path is defined
+
+- name: Customize the rpcbtc.conf stream config file with all known BTC RPCs part 2
+  ansible.builtin.lineinfile:
+    path: "{{ rpcbtc_conf_path }}"
+    regexp: "#ADDSERVERS"
+    line: "  server {{ hostvars[item]['ansible_host'] }}:{{ proxy_port_btcd }};\n  #ADDSERVERS"
+  loop: "{{ groups['rpcsbtc'] | default([]) }}"
+  when: rpcbtc_conf_path is defined
+
+# ── Jeton d'écriture Prometheus (remote-write, papanglabs) ─────────────────
+# Tiré UNE FOIS sur le proxy et jamais régénéré : le changer à chaque rejeu
+# couperait les émetteurs sans que rien ne l'explique.
+- name: Check if prometheus-write-token.conf exists
+  ansible.builtin.stat:
+    path: /etc/nginx/prometheus-write-token.conf
+  register: prometheus_write_token_file
+  when: proxy_write_token_enabled | bool
+
+- name: Generate prometheus write token
+  ansible.builtin.shell: >
+    echo 'set $prometheus_write_token "'"$(openssl rand -hex 32)"'";'
+    > /etc/nginx/prometheus-write-token.conf
+  when:
+    - proxy_write_token_enabled | bool
+    - not prometheus_write_token_file.stat.exists
+
+- name: Set prometheus write token file permissions
+  ansible.builtin.file:
+    path: /etc/nginx/prometheus-write-token.conf
+    owner: www-data
+    group: www-data
+    mode: '0600'
+  when:
+    - proxy_write_token_enabled | bool
+    - not prometheus_write_token_file.stat.exists
+
+# Contrôle AVANT de redémarrer : un vhost mal templaté couperait TOUS les
+# vhosts de ce proxy, pas seulement le fautif. En simulation les fichiers ne
+# sont pas réellement posés : le test porterait sur l'ancienne configuration.
+- name: Validate nginx configuration
+  ansible.builtin.command: nginx -t
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Reload systemd daemon
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+- name: Restart Nginx service
+  ansible.builtin.systemd:
+    state: restarted
+    name: nginx

@@ -71,7 +71,7 @@
     msg: >-
       AgentHub purgé (conteneurs, volumes, images, CNAME DNS). Restent à
       retirer à la main si le port doit être réattribué : le gabarit
-      sites-enabled/agenthub.conf (proxy-update-web3c) et les entrées
+      sites-enabled/agenthub.conf (proxy-update) et les entrées
       {{ agenthub_front_port }}/{{ agenthub_back_port }} de
       docker_ports_rules (host_vars/ctdapi.yml) — voir la limite documentée
       dans agenthub-remove.

@@ -2,7 +2,7 @@
 
 certbot certonly --expand --non-interactive --agree-tos -m <email du parc (variable `email`)> --standalone -d papanglabs.com,store.papanglabs.com,cert.papanglabs.com,monitor.papanglabs.com,vpn.papanglabs.com,rpcbtc.papanglabs.com,back.papanglabs.com,front.papanglabs.com,db.papanglabs.com,analytics.papanglabs.com
 
-Note (2026-09-14): `analytics.papanglabs.com` (Umami) needs its DNS record created manually first, then this cert command re-run with `--expand` to add it, before `deploy-umami.yml` + `update-proxy-papang.yml` can serve it over TLS.
+Note (2026-09-14): `analytics.papanglabs.com` (Umami) needs its DNS record created manually first, then this cert command re-run with `--expand` to add it, before `deploy-umami.yml` + `update-proxy.yml` can serve it over TLS.
 
 ## Playbooks
 Prerequisites : have all cert domains declared in a DNS provider and pointing to proxies with health check on proxies TCP port 443
@@ -79,7 +79,7 @@ Rien à émettre : le parc web3c utilise le certificat WILDCARD `*.web3c.cc` (r�
 `certbot certonly --dns-cloudflare -d "*.web3c.cc"`), qui couvre déjà `sync-iptv.web3c.cc`, `sync-banking.web3c.cc` et
 `sync-aiteam.web3c.cc` (un seul niveau de sous-domaine). Le `certbot --expand` à liste de domaines du haut de ce
 fichier ne concerne que papanglabs.com (certificat non wildcard). Si un jour le certificat web3c n'était plus wildcard,
-la commande ponctuelle, à jouer à la main sur chaque proxy AVANT `update-proxy-web3c.yml` (comme pour
+la commande ponctuelle, à jouer à la main sur chaque proxy AVANT `update-proxy.yml` (comme pour
 `analytics.papanglabs.com`), serait : `certbot certonly --expand --non-interactive --agree-tos -m <email>
 --dns-cloudflare --dns-cloudflare-credentials /etc/letsencrypt/cloudflare_web3c.cc.ini -d <liste existante>,sync-iptv.web3c.cc,sync-banking.web3c.cc,sync-aiteam.web3c.cc`.
 
@@ -94,7 +94,7 @@ aucune étape DNS séparée n'est nécessaire. `update-cloudflare-dns.yml` ne se
 2. `./play.sh web3c deploy-sync-server.yml` — preflight, DOCKER-USER (`sync-server-security`, joué sur `ctdapi`), build +
    conteneurs + contrôles fonctionnels, supervision. Une instance : `--limit sync-iptv:ctdapi`. Supervision seule :
    `--tags monitoring`.
-3. `./play.sh web3c update-proxy-web3c.yml` — pose les vhosts `sites-enabled/sync-<x>.conf` (publics, pas de whitelist ni
+3. `./play.sh web3c update-proxy.yml` — pose les vhosts `sites-enabled/sync-<x>.conf` (publics, pas de whitelist ni
    X-Api-Key) ET le répertoire de journaux dédié `/var/log/nginx-sync/` avec sa rotation (`/etc/logrotate.d/nginx-sync`).
 4. `./play.sh web3c deploy-backup.yml` — sauvegarde SQLite quotidienne (04:05/04:15/04:25) vers `backup-sync`.
 

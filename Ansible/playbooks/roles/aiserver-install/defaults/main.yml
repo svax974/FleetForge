@@ -1,0 +1,221 @@
+---
+# Serveur d'IA en conteneurs (famille `aiserver`) : llama.cpp (LLM), ComfyUI
+# (image, vidéo) et l'exporter GPU NVIDIA DCGM, sur une machine à GPU NVIDIA.
+#
+# Porté depuis l'ancien rôle EasyNode `ai_server`. La variante native
+# (`ai_server_nodocker`) n'est PAS reprise : elle existe déjà sous la forme
+# `llamacpp-install` + `exporter-llamacpp-install`.
+#
+# Ces defaults sont PARTAGÉS : `aiserver-security`, `-monitoring`, `-remove`
+# et `-purge` les chargent par `include_role: aiserver-install, tasks_from:
+# vars, public: true` — ports, conteneurs et volumes sont ainsi décidés à un
+# seul endroit (même motif qu'`ollama-security/tasks/vars.yml`).
+
+# ── Types servis par la machine ────────────────────────────────────────────
+# Variable d'INVENTAIRE, toujours une liste : `[llm]`, `[llm, image]`…
+# Remplace `server_type`/`server_types` de l'ancien projet : dans FleetForge,
+# `server_type` sert à l'AFFICHAGE (proxy|monitoring|vpn|db|backup|app|misc).
+aiserver_types: [llm]
+aiserver_known_types: [llm, image, video]
+
+# ── Emplacements ───────────────────────────────────────────────────────────
+# Répertoire du projet compose (docker-compose.yml + contexte de build
+# ComfyUI). Possédé par `remote_username` : srvc pilote lui-même ses
+# conteneurs (`docker compose ps/logs` dans ce répertoire), CLAUDE.md § 2.
+aiserver_home: /opt/aiserver
+aiserver_compose_project: aiserver
+# Ancien déploiement EasyNode (projet compose `ai-server`). S'il existe, il est
+# arrêté avant le premier `up` : mêmes noms de conteneurs, et surtout son
+# conteneur `node-exporter` occupe 9100 — le port du node_exporter natif
+# d'`exporter-sys`. Ses volumes (modèles) sont conservés et REPRIS.
+aiserver_legacy_home: /opt/ai-server
+
+# Volumes nommés plutôt que montages : l'ancien projet les a adoptés parce que
+# les bind mounts sont peu fiables sur les hôtes « conteneur » (QuickPod).
+# Noms CONSERVÉS de l'ancien projet : les machines existantes y ont déjà des
+# dizaines de gigaoctets de modèles, un renommage les ferait retélécharger.
+aiserver_llm_models_volume: ai-llama-models
+aiserver_comfyui_models_volume: ai-comfyui-models
+aiserver_comfyui_data_volume: ai-comfyui-data
+aiserver_comfyui_output_volume: ai-comfyui-output
+
+# Pile réseau d'un conteneur existant à REJOINDRE (`network_mode:
+# container:<nom>`) au lieu de publier les ports. Cas des hôtes QuickPod, où
+# seul le conteneur fourni par l'hébergeur a des ports redirigés par son NAT.
+# L'ancien rôle le DEVINAIT (« premier conteneur ubuntu:* en marche ») : ici
+# c'est un choix explicite, une détection implicite ayant toutes les chances
+# de rejoindre le mauvais conteneur.
+aiserver_network_container: ""
+
+# ── Ports d'ÉCOUTE (= ports publiés = ports du conteneur) ──────────────────
+# Chaque service écoute DANS le conteneur sur le port qu'il publie
+# (`-p 8080:8080`) : `DOCKER-USER` voit le port du conteneur après le DNAT,
+# un port publié différent rendrait le DROP inopérant (CLAUDE.md, piège
+# `published_remap`). C'est aussi ce qui permet le mode
+# `aiserver_network_container`, où les services partagent une pile réseau.
+aiserver_llm_port: 8080
+aiserver_llm_port_2: 8081
+aiserver_comfyui_port: 8188
+# 8188 dans l'ancien projet, comme l'image : deux types sur la même machine se
+# disputaient le port. Distinct ici.
+aiserver_comfyui_video_port: 8189
+aiserver_dcgm_port: 9400
+aiserver_bind_address: "0.0.0.0"
+
+# ── Ports de SCRAPE (variables d'inventaire, optionnelles) ─────────────────
+# Port que Prometheus JOINT, comme `monitor_port`/`svcprobe_port` : ne diffère
+# de l'écoute que derrière un NAT qui remappe les ports (QuickPod).
+aiserver_llm_scrape_port: "{{ aiserver_llm_port }}"
+aiserver_llm_scrape_port_2: "{{ aiserver_llm_port_2 }}"
+aiserver_comfyui_scrape_port: "{{ aiserver_comfyui_port }}"
+aiserver_comfyui_video_scrape_port: "{{ aiserver_comfyui_video_port }}"
+aiserver_dcgm_scrape_port: "{{ aiserver_dcgm_port }}"
+
+# ── GPU ────────────────────────────────────────────────────────────────────
+# `false` = mode CPU : aucun GPU demandé par compose, pas de DCGM. Avec `true`,
+# un GPU inutilisable par Docker FAIT ÉCHOUER le déploiement plutôt que de
+# démarrer en CPU sans le dire (l'ancien `ai_server_gpu_required` est fondu
+# ici : un GPU voulu mais absent n'est jamais un état acceptable).
+aiserver_gpu_enabled: true
+# Outils GÉNÉRIQUES : posés si absents, jamais retirés par remove/purge.
+aiserver_nvidia_driver_install: true
+# L'installation du pilote exige un redémarrage pour charger le module noyau.
+aiserver_nvidia_driver_reboot: true
+aiserver_gpu_smoketest_image: "nvidia/cuda:12.1.1-base-ubuntu22.04"
+
+aiserver_dcgm_enabled: true
+aiserver_dcgm_image: "nvidia/dcgm-exporter:4.4.2-4.7.1-ubuntu22.04"
+
+# ── Images ─────────────────────────────────────────────────────────────────
+aiserver_llama_image: "ghcr.io/ggml-org/llama.cpp:server-cuda"
+# ComfyUI n'a pas d'image officielle : construite localement (Dockerfile
+# templates/comfyui.Dockerfile.j2). `false` + `aiserver_comfyui_image` pour une
+# image préconstruite.
+aiserver_comfyui_build: true
+aiserver_comfyui_image: "aiserver-comfyui:latest"
+aiserver_comfyui_base_image: "pytorch/pytorch:2.4.1-cuda12.1-cudnn9-runtime"
+aiserver_comfyui_git_repo: "https://github.com/comfyanonymous/ComfyUI.git"
+aiserver_comfyui_git_ref: "master"
+aiserver_comfyui_manager_repo: "https://github.com/ltdrdata/ComfyUI-Manager.git"
+# Nœud ComfyUI qui expose Prometheus sur le port HTTP de ComfyUI
+# (/api-tools/v1/metrics). Le port 8000 de l'ancien projet visait un exporter
+# séparé abandonné depuis : plus rien n'y écoute, il n'est plus publié.
+aiserver_comfyui_metrics_repo: "https://github.com/brantje/ComfyUI-api-tools.git"
+aiserver_comfyui_metrics_path: /api-tools/v1/metrics
+
+# Images auxiliaires des téléchargements (aucun Python côté hôte).
+aiserver_helper_python_image: "python:3.12-slim"
+aiserver_helper_alpine_image: "alpine:3.21"
+
+# ── Téléchargements Hugging Face ───────────────────────────────────────────
+# `hf_token` vient des group_vars du parc (vault). Exigé UNIQUEMENT quand un
+# modèle `gated: true` manque dans son volume ; jamais écrit sur l'hôte.
+aiserver_hf_token: "{{ hf_token | default('') }}"
+# Échec du déploiement si un téléchargement image/vidéo échoue.
+aiserver_download_strict: true
+# Garde-fou de durée par fichier : un téléchargement bloqué (réseau, jeton)
+# figerait sinon le play sans fin apparente.
+aiserver_download_timeout: "3h"
+# Conserver le nom de fichier d'origine à côté de l'alias `display_name`.
+# Un checkpoint dupliqué double l'espace disque : non par défaut.
+aiserver_keep_original_filename: false
+
+# ── LLM (llama.cpp) ────────────────────────────────────────────────────────
+aiserver_llm_context_size: 8000
+# Entier, ou "max" (traduit en 999 : tout ce qui tient en VRAM).
+aiserver_llm_n_gpu_layers: "max"
+aiserver_llm_flash_attention: true
+aiserver_llm_parallel_slots: 4
+aiserver_llm_batch_size: 2048
+# 0 = détection automatique. L'ancien défaut (22) était propre à UNE machine.
+aiserver_llm_threads_batch: 0
+aiserver_llm_cache_type_k: "q4_0"
+aiserver_llm_cache_type_v: "q4_0"
+# Libère un slot resté occupé par un client parti (0 = désactivé).
+aiserver_llm_slot_idle_timeout: 300
+
+# Une instance llama.cpp sert UN modèle : l'instance 1 sert le modèle
+# `default: true` (sinon le premier), l'instance 2 le premier des autres.
+aiserver_llm_models:
+  - name: "Apriel-1.6-15B-Thinker"
+    repo: "mradermacher/Apriel-1.6-15B-Thinker-GGUF"
+    display_name: "EasyNode-Thinker"
+    # Noms Hugging Face sensibles à la casse (15b, pas 15B).
+    filename: "Apriel-1.6-15b-Thinker.Q4_K_M.gguf"
+    default: true
+  - name: "qwen3-vl:32b"
+    # Modèle vision-langage : exige son fichier mmproj avec llama.cpp.
+    repo: "Qwen/Qwen3-VL-32B-Instruct-GGUF"
+    display_name: "EasyNode-Flash"
+    filename: "Qwen3VL-32B-Instruct-Q4_K_M.gguf"
+    mmproj_filename: "mmproj-Qwen3VL-32B-Instruct-F16.gguf"
+aiserver_llm_second_instance: "{{ (aiserver_llm_models | length) > 1 }}"
+
+# ── Image / vidéo (ComfyUI) ────────────────────────────────────────────────
+# `target_dir` : sous-répertoire de models/ attendu par les nœuds ComfyUI.
+# `gated: true` : dépôt à accès accordé, jeton Hugging Face obligatoire.
+aiserver_image_models:
+  - name: "FLUX.1-dev"
+    repo: "black-forest-labs/flux.1-dev"
+    display_name: "EasyNode-FluxD"
+    filename: "flux1-dev.safetensors"
+    target_dir: "unet"
+    gated: true
+  - name: "FLUX-CLIP-L"
+    repo: "comfyanonymous/flux_text_encoders"
+    filename: "clip_l.safetensors"
+    target_dir: "clip"
+  - name: "FLUX-T5-XXL"
+    repo: "comfyanonymous/flux_text_encoders"
+    filename: "t5xxl_fp16.safetensors"
+    target_dir: "text_encoders"
+  - name: "FLUX-AE"
+    repo: "black-forest-labs/flux.1-dev"
+    filename: "ae.safetensors"
+    target_dir: "vae"
+    gated: true
+
+# `is_folder: true` : dépôt multi-fichiers, NON téléchargé automatiquement
+# (comme dans l'ancien rôle) — signalé au déploiement.
+aiserver_video_models:
+  - name: "Wan-2.1-14B"
+    repo: "Wan-AI/Wan2.1-T2V-14B"
+    display_name: "EasyNode-Wan"
+    filename: "Wan2.1-T2V-14B.safetensors"
+    is_folder: true
+  - name: "HunyuanVideo-8.3B"
+    repo: "tencent/HunyuanVideo"
+    display_name: "EasyNode-Hunyuan"
+    filename: "hunyuan-video-t2v-720p-v1.1.safetensors"
+
+# ── Vue dérivée : un point d'accès par service lancé ───────────────────────
+# Lue par security (ports à filtrer), monitoring (cibles, sonde) et remove
+# (conteneurs, cibles). `exposed: true` = API consommée via les proxies ;
+# DCGM n'est qu'un exporter (vpns + Prometheus + whitelist seulement).
+aiserver_dcgm_active: "{{ (aiserver_gpu_enabled | bool) and (aiserver_dcgm_enabled | bool) }}"
+aiserver_endpoints: >-
+  {{
+    ([{'name': 'llm-1', 'type': 'llm', 'container': 'llama-server',
+       'port': aiserver_llm_port | int, 'scrape_port': aiserver_llm_scrape_port | int,
+       'health': '/health', 'metrics': '/metrics', 'exposed': true}]
+      if 'llm' in aiserver_types else [])
+    + ([{'name': 'llm-2', 'type': 'llm', 'container': 'llama-server-2',
+         'port': aiserver_llm_port_2 | int, 'scrape_port': aiserver_llm_scrape_port_2 | int,
+         'health': '/health', 'metrics': '/metrics', 'exposed': true}]
+       if ('llm' in aiserver_types and (aiserver_llm_second_instance | bool)
+           and (aiserver_llm_models | length) > 1) else [])
+    + ([{'name': 'image', 'type': 'image', 'container': 'comfyui-image',
+         'port': aiserver_comfyui_port | int, 'scrape_port': aiserver_comfyui_scrape_port | int,
+         'health': '/system_stats', 'metrics': aiserver_comfyui_metrics_path, 'exposed': true}]
+       if 'image' in aiserver_types else [])
+    + ([{'name': 'video', 'type': 'video', 'container': 'comfyui-video',
+         'port': aiserver_comfyui_video_port | int, 'scrape_port': aiserver_comfyui_video_scrape_port | int,
+         'health': '/system_stats', 'metrics': aiserver_comfyui_metrics_path, 'exposed': true}]
+       if 'video' in aiserver_types else [])
+    + ([{'name': 'dcgm', 'type': 'gpu', 'container': 'dcgm-exporter',
+         'port': aiserver_dcgm_port | int, 'scrape_port': aiserver_dcgm_scrape_port | int,
+         'health': '/metrics', 'metrics': '/metrics', 'exposed': false}]
+       if (aiserver_dcgm_active | bool) else [])
+  }}
+# Tous les conteneurs que la famille a pu créer, actifs ou non (remove).
+aiserver_all_containers: [llama-server, llama-server-2, comfyui-image, comfyui-video, dcgm-exporter]

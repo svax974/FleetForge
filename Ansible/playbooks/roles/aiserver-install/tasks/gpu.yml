@@ -1,0 +1,184 @@
+---
+# Pilote NVIDIA + NVIDIA Container Toolkit. Outils GÉNÉRIQUES de la machine :
+# posés s'ils manquent, jamais retirés par aiserver-remove/-purge (CLAUDE.md).
+#
+# La preuve qui compte est la DERNIÈRE : `docker run --gpus all … nvidia-smi`.
+# Un pilote présent sur l'hôte et un runtime installé ne disent pas qu'un
+# conteneur voit le GPU — c'est l'écart « nvidia-smi marche, llama.cpp tourne
+# sur CPU » que l'ancien rôle a mis du temps à diagnostiquer.
+
+# ── Pilote ─────────────────────────────────────────────────────────────────
+- name: Look for the NVIDIA driver tools
+  ansible.builtin.shell: command -v nvidia-smi
+  args:
+    executable: /bin/bash
+  register: aiserver_smi_path
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Install the recommended NVIDIA driver
+  when:
+    - aiserver_smi_path.rc != 0
+    - aiserver_nvidia_driver_install | bool
+    - ansible_distribution | lower == 'ubuntu'
+  become: true
+  block:
+    - name: Install ubuntu-drivers-common
+      ansible.builtin.apt:
+        name: ubuntu-drivers-common
+        state: present
+        update_cache: true
+
+    - name: Install the recommended driver (ubuntu-drivers)
+      ansible.builtin.command: ubuntu-drivers install
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+      changed_when: true
+
+- name: Fail when no driver is present and none can be installed
+  ansible.builtin.fail:
+    msg: >-
+      Aucun pilote NVIDIA (nvidia-smi absent) et installation automatique
+      impossible (aiserver_nvidia_driver_install={{ aiserver_nvidia_driver_install }},
+      distribution={{ ansible_distribution }}). Installer le pilote, ou passer en
+      mode CPU : `aiserver_gpu_enabled: false`.
+  when:
+    - aiserver_smi_path.rc != 0
+    - not (aiserver_nvidia_driver_install | bool and ansible_distribution | lower == 'ubuntu')
+    - not ansible_check_mode
+
+# Présent ne veut pas dire chargé : après une installation ou une mise à jour
+# du noyau, le module n'est chargé qu'au redémarrage.
+- name: Check that the driver actually works
+  ansible.builtin.command: nvidia-smi -L
+  register: aiserver_smi
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Reboot to load the NVIDIA kernel module
+  ansible.builtin.reboot:
+    reboot_timeout: 1800
+  become: true
+  when:
+    - aiserver_smi.rc != 0
+    - aiserver_nvidia_driver_reboot | bool
+
+- name: Wait for the driver after reboot
+  ansible.builtin.command: nvidia-smi -L
+  register: aiserver_smi_after
+  changed_when: false
+  retries: 10
+  delay: 10
+  until: aiserver_smi_after.rc == 0
+  when:
+    - aiserver_smi.rc != 0
+    - aiserver_nvidia_driver_reboot | bool
+    - not ansible_check_mode
+
+- name: Fail when the driver is installed but not loaded
+  ansible.builtin.fail:
+    msg: >-
+      Pilote NVIDIA présent mais inopérant (`nvidia-smi -L` : {{ aiserver_smi.stderr | default('') }}).
+      Un redémarrage est probablement nécessaire ; il est désactivé
+      (`aiserver_nvidia_driver_reboot: false`).
+  when:
+    - aiserver_smi.rc != 0
+    - not (aiserver_nvidia_driver_reboot | bool)
+    - not ansible_check_mode
+
+# Évite la latence de réveil d'un GPU inactif. Sans effet de bord.
+- name: Enable NVIDIA persistence mode
+  ansible.builtin.command: nvidia-smi -pm 1
+  register: aiserver_pm
+  changed_when: "'already' not in (aiserver_pm.stdout | default(''))"
+  failed_when: false
+  become: true
+
+# ── NVIDIA Container Toolkit ───────────────────────────────────────────────
+- name: Look for the NVIDIA Container Toolkit
+  ansible.builtin.shell: command -v nvidia-ctk
+  args:
+    executable: /bin/bash
+  register: aiserver_ctk_path
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Install the NVIDIA Container Toolkit
+  when: aiserver_ctk_path.rc != 0
+  become: true
+  block:
+    - name: Add the NVIDIA Container Toolkit keyring
+      ansible.builtin.shell: |
+        set -euo pipefail
+        curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
+          | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+      args:
+        executable: /bin/bash
+        creates: /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+
+    - name: Add the NVIDIA Container Toolkit apt source
+      ansible.builtin.shell: |
+        set -euo pipefail
+        curl -fsSL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
+          | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
+          > /etc/apt/sources.list.d/nvidia-container-toolkit.list
+      args:
+        executable: /bin/bash
+        creates: /etc/apt/sources.list.d/nvidia-container-toolkit.list
+
+    - name: Install the nvidia-container-toolkit package
+      ansible.builtin.apt:
+        name: nvidia-container-toolkit
+        state: present
+        update_cache: true
+
+# Configuré seulement si Docker ne connaît pas encore le runtime : le
+# redémarrage de Docker relance TOUS les conteneurs de la machine, il n'a pas
+# à se produire à chaque déploiement (l'ancien rôle le faisait).
+- name: Read the Docker runtimes
+  ansible.builtin.command:
+    argv: [docker, info, --format, "{{ '{{json .Runtimes}}' }}"]
+  register: aiserver_runtimes
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  become: true
+
+- name: Register the NVIDIA runtime with Docker
+  when: "'nvidia' not in (aiserver_runtimes.stdout | default(''))"
+  become: true
+  block:
+    - name: Configure the NVIDIA runtime (nvidia-ctk)
+      ansible.builtin.command: nvidia-ctk runtime configure --runtime=docker
+      changed_when: true
+
+    # Immédiat, pas en handler : le test GPU ci-dessous en dépend.
+    - name: Restart Docker to load the runtime
+      ansible.builtin.systemd:
+        name: docker
+        state: restarted
+
+# ── Preuve finale ──────────────────────────────────────────────────────────
+- name: Check that a container can see the GPU
+  ansible.builtin.command:
+    argv: [docker, run, --rm, --gpus, all, "{{ aiserver_gpu_smoketest_image }}", nvidia-smi, -L]
+  register: aiserver_gpu_smoke
+  changed_when: false
+  failed_when: false
+  become: true
+  when: not ansible_check_mode
+
+- name: Fail when Docker cannot use the GPU
+  ansible.builtin.fail:
+    msg: >-
+      Docker ne peut pas utiliser le GPU (rc={{ aiserver_gpu_smoke.rc }}) :
+      {{ aiserver_gpu_smoke.stderr | default('') }}.
+      Contrôles : `nvidia-smi`, `docker info --format '{{ '{{json .Runtimes}}' }}'`,
+      `docker run --rm --gpus all {{ aiserver_gpu_smoketest_image }} nvidia-smi -L`.
+      Mode CPU volontaire : `aiserver_gpu_enabled: false`.
+  when:
+    - not ansible_check_mode
+    - aiserver_gpu_smoke.rc != 0

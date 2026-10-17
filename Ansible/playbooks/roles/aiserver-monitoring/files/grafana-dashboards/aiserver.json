@@ -1,0 +1,890 @@
+{
+  "__inputs": [
+    {
+      "name": "DS_PROMETHEUS",
+      "label": "Prometheus",
+      "description": "",
+      "type": "datasource",
+      "pluginId": "prometheus",
+      "pluginName": "Prometheus"
+    }
+  ],
+  "__requires": [
+    {
+      "type": "grafana",
+      "id": "grafana",
+      "name": "Grafana",
+      "version": "10.0.0"
+    },
+    {
+      "type": "datasource",
+      "id": "prometheus",
+      "name": "Prometheus",
+      "version": "1.0.0"
+    },
+    {
+      "type": "panel",
+      "id": "timeseries",
+      "name": "Time series",
+      "version": ""
+    },
+    {
+      "type": "panel",
+      "id": "stat",
+      "name": "Stat",
+      "version": ""
+    },
+    {
+      "type": "panel",
+      "id": "row",
+      "name": "Row",
+      "version": ""
+    }
+  ],
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "panels": [],
+      "title": "Overview",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "Exporter availability by selected sources for the selected aiserver.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 0,
+        "y": 1
+      },
+      "id": 2,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "expr": "max by (job, instance, model) (up{aiserver=~\"$instance\", job=~\"$sources\"})",
+          "legendFormat": "{{job}} {{instance}} {{model}}",
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Up (selected sources)",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "Current llama.cpp concurrency (in-flight) and queue (deferred).",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 8,
+        "y": 1
+      },
+      "id": 3,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "repeat": "llmModel",
+      "repeatDirection": "h",
+      "targets": [
+        {
+          "expr": "requests_processing{aiserver=~\"$instance\", job=~\"$sources\", model=~\"$llmModel\"}",
+          "legendFormat": "{{model}} processing",
+          "refId": "A"
+        },
+        {
+          "expr": "requests_deferred{aiserver=~\"$instance\", job=~\"$sources\", model=~\"$llmModel\"}",
+          "legendFormat": "{{model}} deferred",
+          "refId": "B"
+        }
+      ],
+      "title": "LLM load (processing / deferred)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "GPU utilization and VRAM used (if DCGM selected).",
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 16,
+        "y": 1
+      },
+      "id": 4,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "expr": "avg by (gpu) (DCGM_FI_DEV_GPU_UTIL{aiserver=~\"$instance\", job=~\"$sources\", gpu=~\"$gpu\"})",
+          "legendFormat": "gpu{{gpu}} util %",
+          "refId": "A"
+        },
+        {
+          "expr": "DCGM_FI_DEV_FB_USED{aiserver=~\"$instance\", job=~\"$sources\", gpu=~\"$gpu\"} / 1073741824",
+          "legendFormat": "gpu{{gpu}} vram GiB",
+          "refId": "B"
+        }
+      ],
+      "title": "GPU quick view (util / VRAM)",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 6
+      },
+      "id": 10,
+      "panels": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Derived throughput from counters: tokens per second.",
+          "fieldConfig": {
+            "defaults": {
+              "unit": "tps"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 6,
+            "w": 12,
+            "x": 0,
+            "y": 7
+          },
+          "id": 11,
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "single"
+            }
+          },
+          "repeat": "llmModel",
+          "repeatDirection": "h",
+          "targets": [
+            {
+              "expr": "sum by (aiserver, model) (rate(prompt_tokens_total{aiserver=~\"$instance\", job=~\"$sources\", model=~\"$llmModel\"}[$window]))",
+              "legendFormat": "{{model}} prompt tps",
+              "refId": "A"
+            },
+            {
+              "expr": "sum by (aiserver, model) (rate(tokens_predicted_total{aiserver=~\"$instance\", job=~\"$sources\", model=~\"$llmModel\"}[$window]))",
+              "legendFormat": "{{model}} gen tps",
+              "refId": "B"
+            }
+          ],
+          "title": "LLM throughput (derived)",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Average seconds/token derived from counters. Lower is better.",
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ms"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 6,
+            "w": 12,
+            "x": 12,
+            "y": 7
+          },
+          "id": 12,
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "single"
+            }
+          },
+          "repeat": "llmModel",
+          "repeatDirection": "h",
+          "targets": [
+            {
+              "expr": "1000 * (sum by (aiserver, model) (rate(prompt_seconds_total{aiserver=~\"$instance\", job=~\"$sources\", model=~\"$llmModel\"}[$window])) / clamp_min(sum by (aiserver, model) (rate(prompt_tokens_total{aiserver=~\"$instance\", job=~\"$sources\", model=~\"$llmModel\"}[$window])), 1e-9))",
+              "legendFormat": "{{model}} prompt ms/token",
+              "refId": "A"
+            },
+            {
+              "expr": "1000 * (sum by (aiserver, model) (rate(tokens_predicted_seconds_total{aiserver=~\"$instance\", job=~\"$sources\", model=~\"$llmModel\"}[$window])) / clamp_min(sum by (aiserver, model) (rate(tokens_predicted_total{aiserver=~\"$instance\", job=~\"$sources\", model=~\"$llmModel\"}[$window])), 1e-9))",
+              "legendFormat": "{{model}} gen ms/token",
+              "refId": "B"
+            }
+          ],
+          "title": "LLM avg latency per token (derived)",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Client-perceived total latency vs llama.cpp reported server processing time (requires Pushgateway test metrics).",
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s"
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Client wait (total)"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "red"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Server work (llama.cpp)"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "green"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 6,
+            "w": 24,
+            "x": 0,
+            "y": 13
+          },
+          "id": 13,
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "single"
+            }
+          },
+          "targets": [
+            {
+              "expr": "client_latency_total",
+              "legendFormat": "Client wait (total) {{job}} {{instance}}",
+              "refId": "A"
+            },
+            {
+              "expr": "server_processing_time",
+              "legendFormat": "Server work (llama.cpp) {{job}} {{instance}}",
+              "refId": "B"
+            }
+          ],
+          "title": "Le Goulot d'Étranglement (Client Wait vs Server Work)",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Native llama.cpp load: processing vs deferred (queued). Use stacked area to spot saturation onset.",
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 35,
+                "stacking": {
+                  "mode": "normal",
+                  "group": "A"
+                }
+              }
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Processing (slots)"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "blue"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Deferred (queued)"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "red"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 6,
+            "w": 24,
+            "x": 0,
+            "y": 19
+          },
+          "id": 14,
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "single"
+            }
+          },
+          "repeat": "llmModel",
+          "repeatDirection": "h",
+          "targets": [
+            {
+              "expr": "requests_processing{aiserver=~\"$instance\", job=~\"$sources\", model=~\"$llmModel\"}",
+              "legendFormat": "Processing (slots)",
+              "refId": "A"
+            },
+            {
+              "expr": "requests_deferred{aiserver=~\"$instance\", job=~\"$sources\", model=~\"$llmModel\"}",
+              "legendFormat": "Deferred (queued)",
+              "refId": "B"
+            }
+          ],
+          "title": "Indice de Saturation (Processing vs Deferred)",
+          "type": "timeseries"
+        }
+      ],
+      "title": "llama.cpp (LLM)",
+      "type": "row"
+    },
+    {
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 13
+      },
+      "id": 20,
+      "panels": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "VRAM usage percentage (used/total).",
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 6,
+            "w": 12,
+            "x": 0,
+            "y": 14
+          },
+          "id": 21,
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "single"
+            }
+          },
+          "targets": [
+            {
+              "expr": "100 * (sum by (gpu) (DCGM_FI_DEV_FB_USED{aiserver=~\"$instance\", job=~\"$sources\", gpu=~\"$gpu\"}) / clamp_min((sum by (gpu) (DCGM_FI_DEV_FB_USED{aiserver=~\"$instance\", job=~\"$sources\", gpu=~\"$gpu\"}) + sum by (gpu) (DCGM_FI_DEV_FB_FREE{aiserver=~\"$instance\", job=~\"$sources\", gpu=~\"$gpu\"})), 1))",
+              "legendFormat": "gpu{{gpu}} vram %",
+              "refId": "A"
+            }
+          ],
+          "title": "GPU VRAM utilization %",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Thermals and power draw.",
+          "fieldConfig": {
+            "defaults": {},
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 6,
+            "w": 12,
+            "x": 12,
+            "y": 14
+          },
+          "id": 22,
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "single"
+            }
+          },
+          "targets": [
+            {
+              "expr": "DCGM_FI_DEV_GPU_TEMP{aiserver=~\"$instance\", job=~\"$sources\", gpu=~\"$gpu\"}",
+              "legendFormat": "gpu{{gpu}} temp C",
+              "refId": "A"
+            },
+            {
+              "expr": "DCGM_FI_DEV_POWER_USAGE{aiserver=~\"$instance\", job=~\"$sources\", gpu=~\"$gpu\"}",
+              "legendFormat": "gpu{{gpu}} power W",
+              "refId": "B"
+            }
+          ],
+          "title": "GPU thermals / power",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Memory copy / memory controller utilization. Often a better universal signal than PCIe bytes (which may be absent).",
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 6,
+            "w": 24,
+            "x": 0,
+            "y": 20
+          },
+          "id": 23,
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "single"
+            }
+          },
+          "targets": [
+            {
+              "expr": "avg by (gpu) (DCGM_FI_DEV_MEM_COPY_UTIL{aiserver=~\"$instance\", job=~\"$sources\", gpu=~\"$gpu\"})",
+              "legendFormat": "gpu{{gpu}} memcopy %",
+              "refId": "A"
+            }
+          ],
+          "title": "GPU memory copy util %",
+          "type": "timeseries"
+        }
+      ],
+      "title": "NVIDIA DCGM",
+      "type": "row"
+    },
+    {
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 26
+      },
+      "id": 30,
+      "panels": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "Exporter process health (works even if ComfyUI-specific metrics are not implemented).",
+          "fieldConfig": {
+            "defaults": {},
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 6,
+            "w": 12,
+            "x": 0,
+            "y": 27
+          },
+          "id": 31,
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "single"
+            }
+          },
+          "targets": [
+            {
+              "expr": "comfyui_uptime_seconds{aiserver=~\"$instance\", job=\"aiserver-comfyui\"}",
+              "legendFormat": "uptime s (api-tools)",
+              "refId": "A"
+            },
+            {
+              "expr": "comfyui_memory_usage_bytes{aiserver=~\"$instance\", job=\"aiserver-comfyui\"} / 1073741824",
+              "legendFormat": "mem GiB (api-tools)",
+              "refId": "B"
+            }
+          ],
+          "title": "ComfyUI exporter process (uptime / RSS)",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "description": "CPU usage in cores (rate of CPU-seconds).",
+          "fieldConfig": {
+            "defaults": {
+              "unit": "cores"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 6,
+            "w": 12,
+            "x": 12,
+            "y": 27
+          },
+          "id": 32,
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "single"
+            }
+          },
+          "targets": [
+            {
+              "expr": "comfyui_cpu_usage_percent{aiserver=~\"$instance\", job=\"aiserver-comfyui\"}",
+              "legendFormat": "cpu % (api-tools)",
+              "refId": "A"
+            },
+            {
+              "expr": "comfyui_disk_usage_percent{aiserver=~\"$instance\", job=\"aiserver-comfyui\"}",
+              "legendFormat": "disk % (api-tools)",
+              "refId": "B"
+            }
+          ],
+          "title": "ComfyUI exporter process (CPU / fds)",
+          "type": "timeseries"
+        }
+      ],
+      "title": "ComfyUI exporter",
+      "type": "row"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": [
+    "ai",
+    "llm",
+    "gpu",
+    "monitoring"
+  ],
+  "templating": {
+    "list": [
+      {
+        "current": {
+          "selected": false,
+          "text": "Prometheus",
+          "value": "${DS_PROMETHEUS}"
+        },
+        "hide": 2,
+        "includeAll": false,
+        "label": "Datasource",
+        "name": "ds",
+        "options": [],
+        "query": "prometheus",
+        "refresh": 1,
+        "type": "datasource"
+      },
+      {
+        "allValue": "node-llamacpp|aiserver-dcgm|aiserver-comfyui",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "includeAll": true,
+        "label": "Sources",
+        "multi": true,
+        "name": "sources",
+        "options": [
+          {
+            "selected": true,
+            "text": "node-llamacpp",
+            "value": "node-llamacpp"
+          },
+          {
+            "selected": true,
+            "text": "aiserver-dcgm",
+            "value": "aiserver-dcgm"
+          },
+          {
+            "selected": false,
+            "text": "aiserver-comfyui",
+            "value": "aiserver-comfyui"
+          }
+        ],
+        "query": "node-llamacpp,aiserver-dcgm,aiserver-comfyui",
+        "type": "custom"
+      },
+      {
+        "current": {
+          "selected": false,
+          "text": "5m",
+          "value": "5m"
+        },
+        "label": "Rate window",
+        "name": "window",
+        "options": [
+          {
+            "selected": true,
+            "text": "1m",
+            "value": "1m"
+          },
+          {
+            "selected": false,
+            "text": "5m",
+            "value": "5m"
+          },
+          {
+            "selected": false,
+            "text": "15m",
+            "value": "15m"
+          },
+          {
+            "selected": false,
+            "text": "1h",
+            "value": "1h"
+          }
+        ],
+        "query": "1m,5m,15m,1h",
+        "type": "custom"
+      },
+      {
+        "current": {
+          "selected": false,
+          "text": "All",
+          "value": ".*"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS_PROMETHEUS}"
+        },
+        "definition": "label_values(up{aiserver=~\".+\"}, aiserver)",
+        "includeAll": true,
+        "allValue": ".*",
+        "label": "AI server",
+        "multi": true,
+        "name": "instance",
+        "query": {
+          "query": "label_values(up{aiserver=~\".+\"}, aiserver)",
+          "refId": "StandardVariableQuery"
+        },
+        "refresh": 2,
+        "type": "query"
+      },
+      {
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": ".*"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS_PROMETHEUS}"
+        },
+        "definition": "label_values(up{job=\"node-llamacpp\", aiserver=~\"$instance\"}, model)",
+        "includeAll": true,
+        "allValue": ".*",
+        "label": "LLM model",
+        "multi": true,
+        "name": "llmModel",
+        "query": {
+          "query": "label_values(up{job=\"node-llamacpp\", aiserver=~\"$instance\"}, model)",
+          "refId": "StandardVariableQuery"
+        },
+        "refresh": 2,
+        "type": "query"
+      },
+      {
+        "current": {
+          "selected": false,
+          "text": "All",
+          "value": ".*"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS_PROMETHEUS}"
+        },
+        "definition": "label_values(DCGM_FI_DEV_GPU_UTIL{aiserver=~\"$instance\"}, gpu)",
+        "includeAll": true,
+        "allValue": ".*",
+        "label": "GPU",
+        "multi": true,
+        "name": "gpu",
+        "query": {
+          "query": "label_values(DCGM_FI_DEV_GPU_UTIL{aiserver=~\"$instance\"}, gpu)",
+          "refId": "StandardVariableQuery"
+        },
+        "refresh": 2,
+        "type": "query"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "",
+  "title": "AI Server (FleetForge - llama.cpp / DCGM / ComfyUI)",
+  "uid": "aiserver",
+  "version": 5,
+  "weekStart": "",
+  "description": "Familles aiserver (Docker) et llamacpp (natif). Jobs node-llamacpp, aiserver-dcgm, aiserver-comfyui ; variable de machine = label `aiserver`."
+}

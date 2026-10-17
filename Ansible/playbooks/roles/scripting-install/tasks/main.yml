@@ -1,0 +1,312 @@
+---
+# Déploie l'orchestrateur « scripting » : dépôts git, venvs Python, fichiers
+# de configuration du parc, instances d'autodéploiement, identifiants GCP et
+# planification cron.
+#
+# Différences voulues avec l'ancien rôle (EasyNode) :
+#   • plus de suppression + reclonage à chaque passage : les dépôts sont mis à
+#     jour EN PLACE (`git`), le venv n'est retouché que si requirements.txt ou
+#     la version de Python changent. Un rejeu sans changement ne modifie rien,
+#     et surtout ne laisse plus une fenêtre où cron lance des scripts dans un
+#     répertoire à moitié recopié ;
+#   • le jeton git n'est plus dans l'URL — donc plus dans .git/config, que
+#     l'ancien rôle laissait lisible (0755) dans chaque dépôt et chaque copie ;
+#   • aucun secret dans le rôle : tout vient de `scripting_parc_dir` (vault) ;
+#   • cron dans /etc/cron.d/<nom> au lieu d'un bloc de /etc/crontab ;
+#   • tout tourne sous `remote_username` (règle srvc) ; seules les étapes
+#     système (apt, /opt, /etc/cron.d) passent par `become`.
+
+# ── Contrôles préalables ───────────────────────────────────────────────────
+# Tagués `always` : un rejeu `--tags cron` ou `--tags config` doit refuser une
+# configuration incomplète exactement comme un déploiement complet.
+
+- name: Check the scripting variables
+  ansible.builtin.assert:
+    that:
+      - parc_name is defined
+      - scripting_install_dir is match('^/.+')
+      - scripting_install_dir not in ['/', '/opt', '/home', '/usr', '/etc', '/var']
+      - scripting_repos | length > 0
+      - scripting_repos | map(attribute='name') | unique | list | length == scripting_repos | length
+    fail_msg: >-
+      Configuration scripting incomplète : `parc_name`, `scripting_install_dir`
+      (chemin absolu dédié, actuellement « {{ scripting_install_dir }} ») et
+      `scripting_repos` (non vide, noms uniques) doivent être déclarés dans
+      group_vars/<parc>.yml.
+  tags: [always]
+
+- name: Check each repository entry
+  ansible.builtin.assert:
+    that:
+      - item.name is defined and item.url is defined and item.dest is defined
+      - item.dest is match('^/.+')
+      # Identifiants dans l'URL (https://user:token@…) : refusés. Ils
+      # finiraient dans .git/config, et ce dépôt-ci est PUBLIC.
+      - item.url is not search('://[^/@:]+:[^/@]+@')
+    fail_msg: >-
+      Entrée de `scripting_repos` invalide (« {{ item.name | default('?') }} ») :
+      name, url et dest (absolu) sont obligatoires, et l'URL ne doit contenir
+      AUCUN identifiant — le jeton se déclare dans `scripting_git_token` (vault).
+    quiet: true
+  loop: "{{ scripting_repos }}"
+  loop_control:
+    label: "{{ item.name | default('?') }}"
+  tags: [always]
+
+- name: Check each autodeploy instance
+  ansible.builtin.assert:
+    that:
+      - item.name is defined and item.source_repo is defined
+      - item.products is defined and item.products is sequence and item.products is not string
+      - item.source_repo in (scripting_repos | map(attribute='name'))
+      - item.name not in (scripting_repos | map(attribute='name'))
+      - item.name is match('^[A-Za-z0-9_.-]+$')
+    fail_msg: >-
+      Instance d'autodéploiement invalide (« {{ item.name | default('?') }} ») :
+      name (simple, distinct des dépôts), source_repo (nom d'un dépôt de
+      `scripting_repos`) et products (liste) sont obligatoires.
+    quiet: true
+  loop: "{{ scripting_autodeploy_instances }}"
+  loop_control:
+    label: "{{ item.name | default('?') }}"
+  tags: [always]
+
+- name: Resolve the derived paths
+  ansible.builtin.set_fact:
+    scripting_repo_dirs: "{{ scripting_repos | items2dict(key_name='name', value_name='dest') }}"
+    scripting_gcp_src: >-
+      {{ '' if (scripting_gcp_credentials_file | length == 0)
+         else (scripting_gcp_credentials_file if scripting_gcp_credentials_file is match('^/')
+               else scripting_parc_dir ~ '/' ~ scripting_gcp_credentials_file) }}
+    scripting_parc_required: >-
+      {{ (scripting_config_files | map(attribute='src') | list)
+         + (['crontab_extras'] if scripting_cron_enabled else []) }}
+  tags: [always]
+
+# Les tests `is directory` / `is file` s'évaluent sur le POSTE DE CONTRÔLE :
+# c'est là que vivent les fichiers du parc.
+- name: Check the parc directory and its files
+  ansible.builtin.assert:
+    that:
+      - scripting_parc_dir is directory
+      - scripting_parc_missing | length == 0
+      - scripting_config_unknown_repos | length == 0
+      - scripting_gcp_src | length == 0 or scripting_gcp_src is file
+    fail_msg: >-
+      Fichiers du parc manquants. Attendu sur le poste de contrôle :
+      {{ scripting_parc_dir }}/ contenant {{ scripting_parc_required | join(', ') }}
+      (chacun chiffré par `ansible-vault encrypt <fichier>`).
+      Manquants : {{ scripting_parc_missing | join(', ') if scripting_parc_missing else 'aucun' }}.
+      {% if scripting_config_unknown_repos %}Dépôts inconnus dans `scripting_config_files` : {{ scripting_config_unknown_repos | join(', ') }}.{% endif %}
+      {% if scripting_gcp_src and scripting_gcp_src is not file %}Identifiants GCP introuvables : {{ scripting_gcp_src }}.{% endif %}
+      Ce répertoire est hors du dépôt public (gitignoré) ; son chemin se
+      règle par `scripting_parc_dir`.
+    success_msg: "Fichiers du parc : {{ scripting_parc_dir }}"
+  vars:
+    scripting_parc_missing: >-
+      {{ scripting_parc_required
+         | map('regex_replace', '^', scripting_parc_dir ~ '/')
+         | reject('file') | map('basename') | list }}
+    scripting_config_unknown_repos: >-
+      {{ scripting_config_files | map(attribute='repos') | flatten | unique
+         | difference(scripting_repos | map(attribute='name')) }}
+  tags: [always]
+
+# ── Paquets ────────────────────────────────────────────────────────────────
+# git et python3 sont garantis par le socle (host-preflight les contrôle) ;
+# venv et rsync ne le sont pas, et leur absence ne se verrait qu'à la tâche
+# qui s'en sert.
+- name: Install the packages the deployment relies on
+  ansible.builtin.apt:
+    name: [git, python3-venv, python3-pip, rsync]
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  become: true
+  tags: [code]
+
+- name: Install the optional toolchain
+  ansible.builtin.include_tasks: toolchain.yml
+  when: scripting_toolchain | length > 0
+  tags: [toolchain]
+
+# ── Arborescence ───────────────────────────────────────────────────────────
+# 0750 : le code et ses secrets ne regardent que `remote_username`. svcprobe,
+# qui tourne en root, y lit les dates des journaux sans avoir besoin de plus.
+- name: Create the installation directory
+  ansible.builtin.file:
+    path: "{{ scripting_install_dir }}"
+    state: directory
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: '0750'
+  become: true
+  tags: [code]
+
+# Reprise d'une installation de l'ancien rôle, qui déplaçait les dépôts en
+# root puis rectifiait le propriétaire en fin de jeu : un passage interrompu
+# laissait des fichiers à root, sur lesquels `git` (lancé en srvc) échoue.
+# On ne fait le chown récursif QUE si un tel fichier existe — le faire à
+# chaque passage coûterait un parcours complet et du `changed` permanent.
+- name: Look for files not owned by {{ remote_username }}
+  ansible.builtin.command:
+    cmd: "find {{ scripting_install_dir | quote }} -xdev ! -user {{ remote_username | quote }} -print -quit"
+  become: true
+  register: scripting_foreign_files
+  changed_when: false
+  check_mode: false
+  tags: [code]
+
+- name: Give the installation back to {{ remote_username }}
+  ansible.builtin.file:
+    path: "{{ scripting_install_dir }}"
+    state: directory
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    recurse: true
+  become: true
+  when: scripting_foreign_files.stdout | length > 0
+  tags: [code]
+
+- name: Create the extra directories
+  ansible.builtin.file:
+    path: "{{ scripting_install_dir }}/{{ item }}"
+    state: directory
+    mode: '0750'
+  loop: "{{ scripting_extra_dirs }}"
+  tags: [code]
+
+# GIT_ASKPASS : git appelle ce script quand il lui faut un identifiant, et le
+# script répond depuis l'environnement du processus git — qui n'est lisible
+# que par srvc et root, contrairement à la ligne de commande (`ps`). Le
+# fichier ne contient donc aucun secret.
+- name: Create the helper directory
+  ansible.builtin.file:
+    path: "{{ scripting_askpass | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  become: true
+  tags: [code]
+
+- name: Deploy the git askpass helper
+  ansible.builtin.copy:
+    dest: "{{ scripting_askpass }}"
+    owner: root
+    group: root
+    mode: '0755'
+    content: |
+      #!/bin/sh
+      # Géré par Ansible (scripting-install). Répond à git depuis l'environnement.
+      case "$1" in
+        Username*) printf '%s\n' "${SCRIPTING_GIT_USER:-}" ;;
+        *)         printf '%s\n' "${SCRIPTING_GIT_TOKEN:-}" ;;
+      esac
+  become: true
+  tags: [code]
+
+# ── Dépôts ─────────────────────────────────────────────────────────────────
+# Version de l'interpréteur des venvs (/usr/bin/python3), et non celle
+# qu'Ansible utilise : ce sont elles qui doivent coïncider pour qu'un venv
+# reste valide (voir repo.yml). Majeure.mineure seulement : un correctif
+# (3.12.3 → 3.12.4) ne casse pas un venv, le recréer serait du temps perdu.
+- name: Read the system Python version
+  ansible.builtin.command:
+    cmd: /usr/bin/python3 -c "import sys; print('%d.%d' % sys.version_info[:2])"
+  register: scripting_python_raw
+  changed_when: false
+  check_mode: false
+  tags: [code]
+
+- name: Keep it for the venv fingerprints
+  ansible.builtin.set_fact:
+    scripting_python_version: "{{ scripting_python_raw.stdout | trim }}"
+  tags: [code]
+
+- name: Deploy each repository
+  ansible.builtin.include_tasks: repo.yml
+  loop: "{{ scripting_repos }}"
+  loop_control:
+    loop_var: scripting_repo
+    label: "{{ scripting_repo.name }}"
+  tags: [code]
+
+# ── Fichiers de configuration du parc ──────────────────────────────────────
+# Avant les instances d'autodéploiement : celles-ci sont recopiées depuis leur
+# dépôt source, configuration comprise.
+#
+# `no_log` : avec `--diff`, Ansible afficherait le contenu déchiffré.
+- name: Deploy the parc configuration files (templated)
+  ansible.builtin.template:
+    src: "{{ scripting_parc_dir }}/{{ item.0.src }}"
+    dest: "{{ scripting_repo_dirs[item.1] }}/{{ item.0.dest | default(item.0.src) }}"
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: "{{ item.0.mode | default('0600') }}"
+  loop: "{{ scripting_config_files | subelements('repos') }}"
+  loop_control:
+    label: "{{ item.1 }}/{{ item.0.dest | default(item.0.src) }}"
+  when: (item.0.render | default('template')) == 'template'
+  no_log: true
+  tags: [config]
+
+- name: Deploy the parc configuration files (verbatim)
+  ansible.builtin.copy:
+    src: "{{ scripting_parc_dir }}/{{ item.0.src }}"
+    dest: "{{ scripting_repo_dirs[item.1] }}/{{ item.0.dest | default(item.0.src) }}"
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: "{{ item.0.mode | default('0600') }}"
+  loop: "{{ scripting_config_files | subelements('repos') }}"
+  loop_control:
+    label: "{{ item.1 }}/{{ item.0.dest | default(item.0.src) }}"
+  when: (item.0.render | default('template')) == 'copy'
+  no_log: true
+  tags: [config]
+
+# ── Instances d'autodéploiement ────────────────────────────────────────────
+- name: Deploy each autodeploy instance
+  ansible.builtin.include_tasks: autodeploy.yml
+  loop: "{{ scripting_autodeploy_instances }}"
+  loop_control:
+    loop_var: scripting_instance
+    label: "{{ scripting_instance.name }}"
+  tags: [code, config]
+
+# ── Identifiants GCP ───────────────────────────────────────────────────────
+# Même emplacement que l'ancien rôle (~/.ansible/<fichier>) : les scripts et
+# l'inventaire GCP du dépôt `ansible` l'y attendent.
+- name: Create the GCP credentials directory
+  ansible.builtin.file:
+    path: "{{ scripting_gcp_credentials_dir }}"
+    state: directory
+    mode: '0700'
+  when: scripting_gcp_src | length > 0
+  tags: [config]
+
+- name: Copy the GCP credentials
+  ansible.builtin.copy:
+    src: "{{ scripting_gcp_src }}"
+    dest: "{{ scripting_gcp_credentials_dir }}/{{ scripting_gcp_src | basename }}"
+    mode: '0600'
+  when: scripting_gcp_src | length > 0
+  no_log: true
+  tags: [config]
+
+# ── Planification ──────────────────────────────────────────────────────────
+# En DERNIER : cron ne doit lancer les scripts qu'une fois code, venvs et
+# configuration en place.
+- name: Schedule the jobs
+  ansible.builtin.include_tasks: cron.yml
+  when: scripting_cron_enabled
+  tags: [cron]
+
+- name: Report the deployment
+  ansible.builtin.debug:
+    msg: >-
+      scripting déployé dans {{ scripting_install_dir }} :
+      dépôts {{ scripting_repos | map(attribute='name') | join(', ') }} ;
+      instances {{ scripting_autodeploy_instances | map(attribute='name') | join(', ') or 'aucune' }} ;
+      cron {{ scripting_cron_file if scripting_cron_enabled else 'désactivé' }}.
+  tags: [always]

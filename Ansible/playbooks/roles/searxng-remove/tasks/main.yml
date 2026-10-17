@@ -84,4 +84,4 @@
     msg: >-
       SearXNG supprimé, mais les proxies servent toujours le vhost
       searxng.{{ domain_name }} et renverront 502. Retirer
-      sites-enabled/searxng.conf puis rejouer update-proxy-web3c.yml.
+      sites-enabled/searxng.conf puis rejouer update-proxy.yml.

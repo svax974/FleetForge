@@ -1,0 +1,13 @@
+---
+# Retire le serveur d'IA : conteneurs, filtrage DOCKER-USER, sonde svcprobe et
+# cibles Prometheus. CONSERVE les modèles (volumes Docker), les images et le
+# répertoire du projet : une réinstallation repart sans retéléchargement.
+# Pour tout supprimer : purge-aiserver.yml.
+#
+#   ./play.sh <parc> remove-aiserver.yml --limit <hôte>
+- name: Désinstallation du serveur d'IA (modèles conservés)
+  hosts: aiservers
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - aiserver-remove

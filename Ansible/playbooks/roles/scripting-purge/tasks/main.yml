@@ -1,0 +1,35 @@
+---
+# Supprime l'orchestrateur « scripting » ET ses données : reprend
+# `scripting-remove`, puis efface ce que celui-ci conserve — configuration du
+# parc (secrets), logs, outputs, identifiants GCP. Destructif et sans retour :
+# les journaux et sorties n'existent nulle part ailleurs.
+#
+# Les fichiers du parc côté POSTE (Ansible/parcs/<parc>/scripting/) ne sont
+# pas touchés : ils restent la source d'un redéploiement.
+
+- name: Stop the service and remove its code first
+  ansible.builtin.include_role:
+    name: scripting-remove
+
+- name: Remove the whole installation directory
+  ansible.builtin.file:
+    path: "{{ scripting_install_dir }}"
+    state: absent
+  become: true
+
+# Dépôts déclarés hors de la racine d'installation : non couverts ci-dessus.
+- name: Remove repositories living outside the installation directory
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ scripting_repos | map(attribute='dest') | reject('match', '^' ~ (scripting_install_dir | regex_escape) ~ '/') | list }}"
+  become: true
+
+# Seul le fichier copié par scripting-install : ~/.ansible sert aussi
+# d'espace de travail à Ansible lui-même, il n'est pas à nous.
+- name: Remove the GCP credentials copy
+  ansible.builtin.file:
+    path: "{{ scripting_gcp_credentials_dir }}/{{ scripting_gcp_credentials_file | basename }}"
+    state: absent
+  become: true
+  when: scripting_gcp_credentials_file | length > 0

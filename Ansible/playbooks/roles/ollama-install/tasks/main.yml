@@ -44,7 +44,7 @@
 # Nom public (`proxy_hostname` de l'entrée) : CNAME vers le front des proxies,
 # publié dès l'installation sans attendre update-cloudflare-dns.yml (CLAUDE.md
 # § 2, modèle agenthub-install). Le vhost, lui, se pose par
-# `./play.sh web3c update-proxy-web3c.yml`.
+# `./play.sh web3c update-proxy.yml`.
 - name: Ensure the service CNAME to the canonical proxy front
   ansible.builtin.include_role:
     name: cloudflare-dns-update

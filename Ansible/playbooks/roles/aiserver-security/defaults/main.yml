@@ -1,0 +1,54 @@
+---
+# Pare-feu du serveur d'IA.
+#
+# Tous ses ports sont PUBLIÉS PAR DOCKER : Docker insère ses DNAT en amont de
+# tout ce que gère ufw, une règle ufw sur ces ports n'a AUCUN effet (CLAUDE.md,
+# constats des 06/08 et 09/08/2026). Le filtrage vit dans `DOCKER-USER`, par un
+# script et une unité propres à la famille (modèle : searxng-security).
+#
+# Rôle dédié plutôt qu'une entrée `docker_ports_rules` : les ports dépendent de
+# `aiserver_types` (une machine `[llm]` n'a ni 8188 ni 8189) et ce rôle les lit
+# dans la vue `aiserver_endpoints` d'aiserver-install. Les recopier dans un
+# host_vars ferait diverger deux listes censées être la même. Les deux
+# dispositifs cohabitent : ce script ne purge que les règles dont le
+# commentaire porte `aiserver_fw_tag`.
+#
+# Les ports eux-mêmes viennent d'aiserver-install (tasks_from: vars).
+
+# `false` uniquement pour un hôte dont la chaîne DOCKER-USER n'est pas à nous
+# (conteneur fourni par l'hébergeur, cas QuickPod) : le filtrage se fait alors
+# chez l'hébergeur, et le rôle le RAPPELLE à chaque passage.
+aiserver_fw_enabled: true
+
+# Étiquette de commentaire des règles : sert à les purger sans toucher à
+# celles de docker-ports-security ou d'un autre service.
+aiserver_fw_tag: aiserver-fw
+
+# Trafic conteneur → conteneur (FORWARD, donc DOCKER-USER) : Prometheus ou une
+# interface web co-localisés en conteneur.
+aiserver_fw_internal_cidr: "172.16.0.0/12"
+
+# Serveurs liés (CLAUDE.md § 1) : clients applicatifs réels, par NOM
+# d'inventaire — ex. l'hôte d'une interface Open WebUI. Leur `ansible_host` est
+# autorisé sur les API (pas sur DCGM).
+aiserver_linked_hosts: []
+
+# IP/CIDR bruts en plus (dépannage). À garder vide : chaque entrée est une
+# exception qui survit à celui qui l'a posée.
+aiserver_extra_allowed_cidrs: []
+
+# ── Sources, toutes DÉRIVÉES de l'inventaire ───────────────────────────────
+aiserver_fw_proxies: "{{ groups['proxies'] | default([]) | map('extract', hostvars, 'ansible_host') | select('defined') | list }}"
+aiserver_fw_vpns: "{{ groups['vpns'] | default([]) | map('extract', hostvars, 'ansible_host') | select('defined') | list }}"
+aiserver_fw_prometheus: "{{ [hostvars[prometheus_host].ansible_host] if (prometheus_host is defined and prometheus_host in hostvars) else [] }}"
+aiserver_fw_linked: "{{ aiserver_linked_hosts | map('extract', hostvars, 'ansible_host') | select('defined') | list }}"
+
+# Profil « service non exposé » : vpns + Prometheus + whitelist (+ réseau
+# interne Docker). C'est celui de l'exporter DCGM.
+aiserver_fw_base_sources: >-
+  {{ ([aiserver_fw_internal_cidr] + (whitelist | default([])) + aiserver_fw_vpns
+      + aiserver_fw_prometheus + aiserver_extra_allowed_cidrs) | unique | list }}
+# Profil « service exposé par les proxies » : le précédent + proxies + serveurs
+# liés. llama.cpp et ComfyUI (API sans authentification propre).
+aiserver_fw_api_sources: >-
+  {{ (aiserver_fw_base_sources + aiserver_fw_proxies + aiserver_fw_linked) | unique | list }}

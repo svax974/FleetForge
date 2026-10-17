@@ -59,7 +59,7 @@ rotki_logs_volume: rotki_logs
 # JAMAIS directement sur l'IP de cet hôte (même raisonnement que freellm) :
 # le trafic passe toujours par un proxy, et un CNAME vers le nom canonique
 # reste correct même si Rotki change un jour de machine. Le vhost lui-même
-# (API token-gated + UI restreinte VPN) vit dans proxy-update-web3c,
+# (API token-gated + UI restreinte VPN) vit dans proxy-update,
 # sites-enabled/rotki.conf — déployé seulement sur les proxies listés dans
 # `rotki_allowed_proxies` (group_vars/web3c.yml).
 rotki_hostname: "rotki.{{ domain_name }}"

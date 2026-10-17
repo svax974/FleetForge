@@ -1,0 +1,9 @@
+# Géré par Ansible (scripting-install) — NE PAS ÉDITER SUR L'HÔTE.
+# Source : parcs/{{ parc_name }}/scripting/crontab_extras (vault).
+# Retrait : remove-scripting.yml supprime ce fichier, ce qui arrête le service.
+{% for key, value in scripting_cron_env.items() %}
+{{ key }}={{ value }}
+{% endfor %}
+
+{{ scripting_cron_body | trim }}
+

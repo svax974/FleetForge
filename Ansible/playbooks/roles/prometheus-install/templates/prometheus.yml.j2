@@ -96,3 +96,83 @@ scrape_configs:
     file_sd_configs:
       - files:
           - 'prometheus-configs/fleetforge/*.json'
+
+  # Pushgateway — métriques POUSSÉES par les jobs batch / serveurs IA. Cible
+  # déposée par `pushgateway-monitoring`. `honor_labels: true` OBLIGATOIRE :
+  # sans lui chaque série poussée perd son `job` (renommé `exported_job`) et
+  # toute règle de fraîcheur (`push_time_seconds`) filtrée par job est muette.
+  - job_name: 'pushgateway'
+    metrics_path: /metrics
+    honor_labels: true
+    file_sd_configs:
+      - files:
+          - 'prometheus-configs/pushgateway/*.json'
+
+  # Serveur d'IA conteneurisé (`aiserver-monitoring`) : ComfyUI via le nœud
+  # ComfyUI-api-tools, sur le port HTTP de ComfyUI. Les cibles llama.cpp du
+  # même rôle vont dans `node-llamacpp`.
+  - job_name: 'aiserver-comfyui'
+    metrics_path: /api-tools/v1/metrics
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: (comfyui_.*|comfy_.*|python_gc_.*|python_info|process_.*)
+        action: keep
+    file_sd_configs:
+      - files:
+          - 'prometheus-configs/aiserver-comfyui/*.json'
+
+  # GPU NVIDIA du serveur d'IA (exporter DCGM).
+  - job_name: 'aiserver-dcgm'
+    metrics_path: /metrics
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: (up|DCGM_FI_DEV_GPU_UTIL|DCGM_FI_DEV_MEM_COPY_UTIL|DCGM_FI_DEV_FB_USED|DCGM_FI_DEV_FB_FREE|DCGM_FI_DEV_FB_TOTAL|DCGM_FI_DEV_POWER_USAGE|DCGM_FI_DEV_GPU_TEMP|DCGM_FI_DEV_SM_CLOCK|DCGM_FI_DEV_GPU_CLOCK|DCGM_FI_DEV_ENC_UTIL|DCGM_FI_DEV_DEC_UTIL|DCGM_FI_DEV_PCIE_TX_BYTES|DCGM_FI_DEV_PCIE_RX_BYTES|DCGM_FI_DEV_NVLINK_TX_BYTES|DCGM_FI_DEV_NVLINK_RX_BYTES)
+        action: keep
+    file_sd_configs:
+      - files:
+          - 'prometheus-configs/aiserver-dcgm/*.json'
+
+  # llama.cpp natif (`exporter-llamacpp-install`) et conteneurisé
+  # (`aiserver-monitoring`) : repris de monitoring-install, absent ici jusqu'au
+  # 16/10/2026 — une cible llama.cpp sur ce parc n'était jamais lue.
+  - job_name: 'node-llamacpp'
+    metrics_path: /metrics
+    metric_relabel_configs:
+      # llama-server exposes its native metrics under the "llamacpp:" namespace
+      - source_labels: [__name__]
+        target_label: __name__
+        regex: "llamacpp:kv_cache_usage_ratio"
+        replacement: "kv_cache_usage_ratio"
+      - source_labels: [__name__]
+        target_label: __name__
+        regex: "llamacpp:requests_processing"
+        replacement: "requests_processing"
+      - source_labels: [__name__]
+        target_label: __name__
+        regex: "llamacpp:requests_deferred"
+        replacement: "requests_deferred"
+      - source_labels: [__name__]
+        target_label: __name__
+        regex: "llamacpp:prompt_tokens_total"
+        replacement: "prompt_tokens_total"
+      - source_labels: [__name__]
+        target_label: __name__
+        regex: "llamacpp:tokens_predicted_total"
+        replacement: "tokens_predicted_total"
+      # Latence par jeton (tableau de bord aiserver).
+      - source_labels: [__name__]
+        target_label: __name__
+        regex: "llamacpp:prompt_seconds_total"
+        replacement: "prompt_seconds_total"
+      - source_labels: [__name__]
+        target_label: __name__
+        regex: "llamacpp:tokens_predicted_seconds_total"
+        replacement: "tokens_predicted_seconds_total"
+      # Keep only the useful renamed metrics plus the scrape health signal
+      - source_labels: [__name__]
+        target_label: __name__
+        regex: (up|kv_cache_usage_ratio|requests_processing|requests_deferred|prompt_tokens_total|tokens_predicted_total|prompt_seconds_total|tokens_predicted_seconds_total)
+        action: keep
+    file_sd_configs:
+      - files:
+          - 'prometheus-configs/node-llamacpp/*.json'

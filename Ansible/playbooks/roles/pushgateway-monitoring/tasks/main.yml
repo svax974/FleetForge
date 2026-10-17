@@ -1,0 +1,155 @@
+---
+# Enregistrement de la cible native, et ouverture du scrape.
+#
+# TOUTES les tâches portent `tags: [monitoring]` : réarmer la supervision ne
+# doit jamais imposer de rejouer le déploiement (téléchargement, unité,
+# redémarrage — qui coûte aux pousseurs une fenêtre d'indisponibilité).
+#   ./play.sh <parc> deploy-pushgateway.yml --tags monitoring
+
+- name: Fail early when no Prometheus host is defined
+  ansible.builtin.assert:
+    that:
+      - prometheus_host is defined
+      - prometheus_host in hostvars
+    fail_msg: >-
+      `prometheus_host` n'est pas défini ou absent de l'inventaire. Une cible
+      que personne ne scrape ne supervise rien — et ici, toutes les métriques
+      poussées par les jobs batch seraient perdues avec elle.
+  tags: [monitoring]
+
+# ── Pare-feu ───────────────────────────────────────────────────────────────
+# Sans cette ouverture, la cible apparaît dans Prometheus et reste `down` — ce
+# qui ressemble à une panne du service, pas à une règle manquante.
+# Commentaires IDENTIQUES à ceux de pushgateway-security, qui pose la même
+# règle : deux commentaires différents la feraient basculer à chaque rejeu.
+- name: Allow Prometheus to scrape the pushgateway
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ hostvars[prometheus_host]['ansible_host'] }}"
+    port: "{{ pushgateway_port }}"
+    comment: "Prometheus scrape - pushgateway"
+  become: true
+  when: ansible_host != hostvars[prometheus_host]['ansible_host']
+  tags: [monitoring]
+
+# Prometheus co-localisé : il tourne en conteneur, ses scrapes arrivent donc
+# par le bridge Docker et non par l'adresse publique de la machine. Le test
+# porte sur l'IP et non sur le nom d'hôte — plusieurs entrées d'inventaire
+# décrivent la même machine.
+- name: Allow the Prometheus Docker bridge to scrape (monitor is local)
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ pushgwmon_docker_bridge }}"
+    port: "{{ pushgateway_port }}"
+    comment: "Prometheus Docker scrape - pushgateway"
+  become: true
+  when: ansible_host == hostvars[prometheus_host]['ansible_host']
+  tags: [monitoring]
+
+# ── Cible Prometheus ───────────────────────────────────────────────────────
+- name: Create the target directory on the Prometheus host
+  ansible.builtin.file:
+    path: "/home/{{ remote_username }}/prometheus/prometheus-configs/{{ pushgwmon_job }}"
+    state: directory
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: '0755'
+  delegate_to: "{{ prometheus_host }}"
+  become: true
+  tags: [monitoring]
+
+- name: Deploy the Prometheus target
+  ansible.builtin.template:
+    src: prometheus-target.json.j2
+    dest: "/home/{{ remote_username }}/prometheus/prometheus-configs/{{ pushgwmon_job }}/{{ inventory_hostname }}.json"
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: '0644'
+  delegate_to: "{{ prometheus_host }}"
+  become: true
+  tags: [monitoring]
+
+# ── Vérifications ──────────────────────────────────────────────────────────
+# Une cible déposée ne prouve rien : le fichier n'est lu que si un
+# `scrape_config` porte ce job. Un job manquant laisse le fichier en place sans
+# que jamais rien ne le lise — c'est ce qui a rendu `service_up` inexistant sur
+# les DEUX parcs pendant des semaines, règles chargées et `health=ok`.
+- name: Check that a scrape job exists for this target
+  ansible.builtin.shell: >-
+    grep -c "prometheus-configs/{{ pushgwmon_job }}/"
+    /home/{{ remote_username }}/prometheus/prometheus.yml || true
+  args:
+    executable: /bin/bash
+  delegate_to: "{{ prometheus_host }}"
+  register: pushgwmon_job_declared
+  changed_when: false
+  check_mode: false
+  tags: [monitoring]
+
+- name: Fail when no scrape job reads this directory
+  ansible.builtin.fail:
+    msg: >-
+      Aucun `job_name: {{ pushgwmon_job }}` ne lit
+      prometheus-configs/{{ pushgwmon_job }}/ sur {{ prometheus_host }}. La
+      cible est posée mais ne sera JAMAIS scrapée, et rien ne le signalerait :
+      les pousseurs recevraient des 200 et leurs métriques n'iraient nulle
+      part. Rejouer la stack de supervision du parc (deploy-prometheus.yml ou
+      deploy-monitoring.yml).
+  when: (pushgwmon_job_declared.stdout | default('0') | trim | int) == 0
+  tags: [monitoring]
+
+# `honor_labels` n'est pas un détail : sans lui chaque série poussée perd son
+# `job` (renommé `exported_job`) et toute règle de fraîcheur filtrée par job
+# est muette. On vérifie qu'il est présent dans le bloc du job, pas seulement
+# quelque part dans le fichier.
+- name: Check that the scrape job keeps the pushed labels
+  ansible.builtin.shell: >-
+    awk '/job_name: *.{{ pushgwmon_job }}./{f=1;next} /job_name:/{f=0} f && /honor_labels: *true/{c++} END{print c+0}'
+    /home/{{ remote_username }}/prometheus/prometheus.yml
+  args:
+    executable: /bin/bash
+  delegate_to: "{{ prometheus_host }}"
+  register: pushgwmon_honor
+  changed_when: false
+  check_mode: false
+  tags: [monitoring]
+
+- name: Fail when the scrape job does not honor pushed labels
+  ansible.builtin.fail:
+    msg: >-
+      Le job `{{ pushgwmon_job }}` de {{ prometheus_host }} n'a pas
+      `honor_labels: true`. Les séries poussées y perdraient leur `job`
+      (renommé `exported_job`) et sembleraient toutes venir de la passerelle.
+  when: (pushgwmon_honor.stdout | default('0') | trim | int) == 0
+  tags: [monitoring]
+
+- name: Verify the metrics endpoint answers locally
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ pushgateway_port }}{{ pushgwmon_metrics_path }}"
+    return_content: true
+  register: pushgwmon_metrics
+  retries: 6
+  delay: 5
+  until: pushgwmon_metrics.status is defined and pushgwmon_metrics.status == 200
+  changed_when: false
+  tags: [monitoring]
+
+# `push_time_seconds` compte un groupe par pousseur : à 0 juste après une
+# installation c'est normal, à 0 sur une passerelle en service depuis des
+# semaines c'est que plus personne ne pousse — ou que la persistance a été
+# perdue au dernier redémarrage.
+- name: Report the health signals
+  ansible.builtin.debug:
+    msg:
+      build: >-
+        {{ pushgwmon_metrics.content.split('\n')
+           | select('match', '^pushgateway_build_info') | list }}
+      groups_pushed: >-
+        {{ pushgwmon_metrics.content.split('\n')
+           | select('match', '^push_time_seconds') | list | length }}
+      last_pushes: >-
+        {{ pushgwmon_metrics.content.split('\n')
+           | select('match', '^push_(time|failure_time)_seconds') | list }}
+  tags: [monitoring]

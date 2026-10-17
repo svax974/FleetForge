@@ -1,0 +1,88 @@
+---
+# Projet docker compose : gabarits, puis `up` sans démontage préalable.
+#
+# L'ancien rôle faisait `down` puis `up --build` à CHAQUE passage : coupure de
+# service et rechargement des modèles en VRAM (plusieurs minutes) même quand
+# rien n'avait changé. Compose recrée ici seulement ce qui a changé.
+
+# ── Reprise d'un déploiement EasyNode ──────────────────────────────────────
+- name: Look for a legacy EasyNode compose project
+  ansible.builtin.stat:
+    path: "{{ aiserver_legacy_home }}/docker-compose.yml"
+  register: aiserver_legacy
+  when: aiserver_legacy_home != aiserver_home
+
+# Mêmes noms de conteneurs, et son `node-exporter` conteneurisé occupe 9100 :
+# le node_exporter natif d'exporter-sys ne pourrait pas démarrer, ou pire,
+# host-preflight verrait répondre l'ancien et conclurait que tout va bien.
+# `down` sans `-v` : les volumes (modèles) sont conservés et repris.
+- name: Stop the legacy EasyNode project (volumes kept)
+  community.docker.docker_compose_v2:
+    project_src: "{{ aiserver_legacy_home }}"
+    state: absent
+    remove_orphans: true
+  become: true
+  when:
+    - aiserver_legacy_home != aiserver_home
+    - aiserver_legacy.stat.exists | default(false)
+
+# ── Gabarits ───────────────────────────────────────────────────────────────
+- name: Deploy the ComfyUI Dockerfile
+  ansible.builtin.template:
+    src: comfyui.Dockerfile.j2
+    dest: "{{ aiserver_home }}/comfyui-docker/Dockerfile"
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: '0644'
+  become: true
+  register: aiserver_dockerfile
+  when:
+    - aiserver_comfyui_build | bool
+    - "'image' in aiserver_types or 'video' in aiserver_types"
+
+- name: Deploy the compose file
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: "{{ aiserver_home }}/docker-compose.yml"
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: '0644'
+  become: true
+
+# ── Démarrage ──────────────────────────────────────────────────────────────
+# Reconstruction seulement quand le Dockerfile a changé : sinon `policy`
+# (construite si absente). `remove_orphans` retire un service désactivé
+# (type ôté de `aiserver_types`, seconde instance llama.cpp abandonnée).
+- name: Start the aiserver services
+  community.docker.docker_compose_v2:
+    project_src: "{{ aiserver_home }}"
+    state: present
+    build: "{{ 'always' if (aiserver_dockerfile.changed | default(false)) else 'policy' }}"
+    pull: missing
+    remove_orphans: true
+  become: true
+
+# llama.cpp répond 503 sur /health tant que le modèle n'est pas en VRAM :
+# plusieurs minutes pour un 32B. ComfyUI répond sur /system_stats une fois ses
+# nœuds chargés.
+- name: Wait for each service to answer its health check
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ item.port }}{{ item.health }}"
+    status_code: [200]
+    timeout: 10
+  register: aiserver_health
+  until: aiserver_health.status | default(0) == 200
+  retries: 90
+  delay: 10
+  loop: "{{ aiserver_endpoints }}"
+  loop_control:
+    label: "{{ item.container }} :{{ item.port }}{{ item.health }}"
+  when: not ansible_check_mode
+
+- name: Report the deployed services
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }} : {{ aiserver_endpoints | map(attribute='container') | join(', ') }}
+      sur {{ aiserver_endpoints | map(attribute='port') | join(', ') }}.
+      Ports publiés sur {{ aiserver_bind_address }} : ils DOIVENT être filtrés
+      par aiserver-security (DOCKER-USER), joué juste après par deploy-aiserver.yml.

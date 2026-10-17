@@ -1,0 +1,23 @@
+---
+# Sécurité de l'orchestrateur « scripting ».
+#
+# Ce service n'écoute sur AUCUN port : pas de règle ufw à poser, et en poser
+# une serait décoratif. Son risque réel est ailleurs — il détient des secrets
+# de grande valeur (clés privées de wallets, identifiants cloud, jeton git) sur
+# disque. Ce rôle vérifie donc ce qui protège effectivement ces secrets, et
+# que le service n'a pas, au fil des versions, ouvert un port d'écoute.
+#
+# Mêmes valeurs que scripting-install (group_vars du parc).
+scripting_install_dir: /opt/scripting
+scripting_repos: []
+scripting_autodeploy_instances: []
+scripting_config_files: []
+scripting_gcp_credentials_file: ""
+scripting_gcp_credentials_dir: "/home/{{ remote_username }}/.ansible"
+scripting_cron_name: scripting
+scripting_cron_file: "/etc/cron.d/{{ scripting_cron_name }}"
+
+# Ports qu'un processus lancé depuis {{ scripting_install_dir }} a le droit
+# d'écouter. Vide : aucun. Toute entrée doit figurer au registre des ports
+# (CLAUDE.local.md) et recevoir son filtrage ufw dans ce rôle.
+scripting_allowed_listen_ports: []

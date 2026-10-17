@@ -71,7 +71,7 @@ whitelist: ["203.0.113.10", "2001:db8::/64"]
 cloudflare_token: CHANGE_ME
 # Plages d'edge Cloudflare (IPv4 + IPv6), données publiques — habituellement
 # déclarées dans group_vars/all.yml. https://www.cloudflare.com/ips/
-# [back-security, proxy-update-papang, proxy-update-web3c]
+# [back-security, proxy-update, proxy-update]
 cloudflare_ips:
   - 173.245.48.0/20
   - 2400:cb00::/32
@@ -82,8 +82,12 @@ cloudflare_ips:
 # Nom canonique du front des proxies (A round-robin sur tout le groupe
 # `proxies`) ; cible des CNAME des services publiés. [cloudflare-dns-update, ollama-install]
 proxy_hostname: "proxy.{{ domain_name }}"
-# Rôle de sécurité appliqué aux proxies de ce parc. [update-ufw-all.yml]
-proxy_security_role: proxy-security-web3c        # ou proxy-security-papang
+# Vhosts du parc : Ansible/parcs/<parc_name>/nginx/ (gitignoré, voir
+# parcs/README.md). [proxy-update]
+# Jeton d'écriture Prometheus remote-write sur les proxies. [proxy-update]
+# proxy_write_token_enabled: false
+# Ouvrir proxy_backindicators_port sur les proxies (défaut : true s'il est déclaré). [proxy-security]
+# proxy_security_backindicators: true
 # Ports d'amont relayés par les proxies vers les back/front applicatifs.
 # [proxy-update-*, proxy-security-*, back-security, front-security]
 proxy_back_port: 9741
@@ -204,7 +208,7 @@ pgadmin_port_https: 15443
 
 
 # ── Registre Docker privé ────────────────────────────────────────────────────
-# [docker-repo-*, proxy-security-*, proxy-update-web3c]
+# [docker-repo-*, proxy-security-*, proxy-update]
 docker_repo_port: 12500
 
 
@@ -219,7 +223,7 @@ bitcoin_dbcache: 8000                            # Mo, accélère l'IBD [rpcbtc-
 zmq_port_hashblock: 28332                        # [rpcbtc-setup]
 zmq_port_rawblock: 28333
 exporter_job: node-btc                           # [rpcbtc-monitoring, rpcbtc-remove, rpcbtc-purge]
-# Ports P2P et RPC de bitcoind. [rpcbtc-security, brk-install, esplora-install, proxy-update-papang]
+# Ports P2P et RPC de bitcoind. [rpcbtc-security, brk-install, esplora-install, proxy-update]
 proxy_port_btcd: 8333
 proxy_port_rpc_btc: 13687
 
@@ -256,7 +260,8 @@ theta_wallet: ""
 
 # ── OpenClaw (gateway d'agents) ──────────────────────────────────────────────
 # [openclaw-install]
-openclaw_openai_api_key: CHANGE_ME               # 🔒
+# openclaw_auth_choice: openai-api-key           # ou `skip` : aucun fournisseur au premier onboarding
+# openclaw_openai_api_key: CHANGE_ME             # 🔒 exigée seulement avec openai-api-key
 # Provider de modèles OpenAI-compatible personnalisé.
 openclaw_custom_provider_name: llm-proxy
 openclaw_custom_provider_base_url: "https://llm.example.com/v1"
@@ -271,7 +276,7 @@ openclaw_telegram_bot_token: CHANGE_ME           # 🔒 @BotFather
 
 
 # ── SearXNG ──────────────────────────────────────────────────────────────────
-# [searxng-install, searxng-security, searxng-monitoring, proxy-update-web3c]
+# [searxng-install, searxng-security, searxng-monitoring, proxy-update]
 searxng_host: station                            # entrée d'inventaire qui porte le service
 searxng_port: 8888
 searxng_hostname: "searxng.{{ domain_name }}"
@@ -280,14 +285,14 @@ searxng_api_key: CHANGE_ME                       # 🔒 en-tête X-Api-Key du vh
 
 
 # ── Rotki ────────────────────────────────────────────────────────────────────
-# [proxy-update-web3c (rotki.conf), rotki-*]
+# [proxy-update (rotki.conf), rotki-*]
 # rotki_host: rotki                              # entrée d'inventaire (défaut : rotki)
 rotki_allowed_proxies: [proxy1, proxy2]
 rotki_api_key: CHANGE_ME                         # 🔒 en-tête X-Api-Key du vhost API
 
 
 # ── FreeLLMAPI ───────────────────────────────────────────────────────────────
-# [freellm-install, freellm-security, freellm-monitoring, proxy-update-web3c]
+# [freellm-install, freellm-security, freellm-monitoring, proxy-update]
 freellm_host: freellm
 freellm_port: 3001
 freellm_hostname: "freellm.{{ domain_name }}"
@@ -300,7 +305,7 @@ freellm_unified_key_local_path: "{{ lookup('ansible.builtin.env', 'HOME') }}/.co
 
 
 # ── StarNet ──────────────────────────────────────────────────────────────────
-# [starnet-*, proxy-update-web3c]
+# [starnet-*, proxy-update]
 starnet_host: starnet
 starnet_hostname: "starnet.{{ domain_name }}"
 starnet_sidecar_port: 8787

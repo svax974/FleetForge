@@ -5,7 +5,7 @@
 #
 # Une fois déployé, l'entrée nginx correspondante doit être appliquée séparément :
 #   ./play.sh papanglabs deploy-umami.yml
-#   ./play.sh papanglabs update-proxy-papang.yml
+#   ./play.sh papanglabs update-proxy.yml
 #
 # Après ce premier déploiement, l'admin doit se connecter au dashboard Umami
 # (identifiants par défaut admin / umami), changer le mot de passe, créer un site, puis coller

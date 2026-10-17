@@ -1,0 +1,9 @@
+[
+    {
+        "targets": [ "{{ ansible_host }}:{{ pushgateway_port }}" ],
+        "labels": {
+            "job": "{{ pushgwmon_job }}",
+            "instance": "{{ inventory_hostname }}"
+        }
+    }
+]

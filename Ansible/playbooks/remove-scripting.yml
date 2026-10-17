@@ -1,0 +1,12 @@
+---
+# Arrête l'orchestrateur « scripting » (retrait de /etc/cron.d/scripting),
+# retire son code, ses venvs, ses instances d'autodéploiement et sa sonde.
+# Conserve la configuration du parc, les identifiants GCP, logs/ et outputs/
+# (voir purge-scripting.yml).
+#
+#   ./play.sh <parc> remove-scripting.yml
+- name: Remove the scripting orchestrator
+  hosts: scripting_servers
+  remote_user: "{{ remote_username }}"
+  roles:
+    - scripting-remove

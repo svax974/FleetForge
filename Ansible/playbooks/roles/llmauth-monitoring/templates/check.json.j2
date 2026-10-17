@@ -1,0 +1,13 @@
+{
+  "service": "llmauth",
+  "up": {"kind": "http", "url": "{{ llmauth_url }}/healthz", "status": [200], "timeout": 5},
+  "extra_checks": [
+    {"name": "container", "kind": "docker", "container": "{{ llmauth_container }}"},
+    {"name": "validate", "kind": "http", "url": "{{ llmauth_url }}/validate", "headers": {"X-API-Key": "{{ llmauth_probe_key }}"}, "status": [401], "timeout": 5}
+  ],
+  "metrics_command": [
+    "{{ svcprobe_lib_dir }}/llmauth-metrics.sh",
+    "{{ llmauth_url }}", "{{ llmauth_db_path }}"
+  ],
+  "metrics_timeout": 10
+}

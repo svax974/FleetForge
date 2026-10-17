@@ -1,0 +1,43 @@
+# llmauth — géré par Ansible (rôle llmauth-install), NE PAS ÉDITER SUR L'HÔTE.
+# Contient le pepper et le jeton d'administration : fichier 0600 root.
+#
+# Les secrets sont échappés pour Compose (`$` → `$$`, sinon interprété comme
+# une interpolation de variable et tronqué en silence) puis encodés en chaîne
+# JSON, donc YAML valide quel que soit leur contenu.
+name: llmauth
+
+services:
+  llmauth:
+    build:
+      context: ./app
+    image: {{ llmauth_image }}
+    container_name: {{ llmauth_container }}
+    restart: unless-stopped
+    user: "{{ llmauth_uid }}:{{ llmauth_uid }}"
+    # 127.0.0.1 UNIQUEMENT : le seul client est le nginx de cette machine.
+    # Voir llmauth-security, qui le VÉRIFIE après coup.
+    ports:
+      - "127.0.0.1:{{ llmauth_port }}:{{ llmauth_port }}"
+    environment:
+      LISTEN_ADDR: "0.0.0.0:{{ llmauth_port }}"
+      DB_PATH: /data/keys.sqlite
+      AUTH_PEPPER: {{ llmauth_pepper | string | replace('$', '$$') | to_json }}
+      ADMIN_TOKEN: {{ llmauth_admin_token | string | replace('$', '$$') | to_json }}
+    volumes:
+      - "{{ llmauth_data_dir }}:/data"
+    # Le process n'écrit que dans /data (base SQLite) ; /tmp pour les fichiers
+    # temporaires éventuels de SQLite.
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - "no-new-privileges:true"
+    # Une ligne de journal par requête validée (middleware `logging`) : sans
+    # plafond, le journal grossit sans fin sur le disque du proxy.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

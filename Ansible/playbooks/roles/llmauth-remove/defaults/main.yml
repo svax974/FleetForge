@@ -1,0 +1,4 @@
+---
+llmauth_base_dir: /opt/llmauth
+llmauth_container: llmauth
+llmauth_port: 19080

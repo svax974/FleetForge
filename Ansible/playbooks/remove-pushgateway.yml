@@ -1,0 +1,15 @@
+---
+# Désinstalle la Pushgateway en conservant son magasin de persistance.
+#
+#   ./play.sh <parc> remove-pushgateway.yml
+#
+# Retire l'unité, le binaire, la cible Prometheus — une cible laissée en place
+# publierait `up=0` indéfiniment — et les règles ufw. Les séries poussées
+# restent sur disque : une réinstallation les retrouve. Pour tout supprimer :
+# `purge-pushgateway.yml`.
+- name: Désinstallation de la Pushgateway (données conservées)
+  hosts: pushgateways
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - pushgateway-remove

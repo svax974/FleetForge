@@ -1,0 +1,42 @@
+---
+# Supervision de la Pushgateway.
+#
+# La passerelle expose Prometheus NATIVEMENT sur son propre port (/metrics) :
+# pas de sonde svcprobe ni d'exporter, une cible directe suffit — premier des
+# trois cas de la convention `-monitoring` (CLAUDE.md § 2). Le signal d'état
+# est `up{job="pushgateway"}` (alerte TargetDown).
+#
+# Ce /metrics mêle DEUX choses, que le job de scrape distingue grâce à
+# `honor_labels: true` :
+#   • les séries PROPRES à la passerelle (`pushgateway_build_info`,
+#     `pushgateway_http_requests_total`, `process_*`) — sans label `job`,
+#     elles reçoivent celui de la cible : `job="pushgateway"` ;
+#   • les séries POUSSÉES, qui gardent le `job` (et l'`instance`, si le
+#     pousseur la met dans sa clé de groupement) déclarés par le pousseur.
+#     Sans `honor_labels`, Prometheus les renommerait `exported_job` et
+#     toutes les séries poussées sembleraient venir de la passerelle.
+#
+# ── État DÉGRADÉ ───────────────────────────────────────────────────────────
+# La panne typique n'est pas la passerelle qui tombe — `up` le voit — mais un
+# POUSSEUR qui s'arrête. La passerelle ne fait jamais expirer une série : la
+# dernière valeur poussée reste servie indéfiniment, identique à une valeur
+# fraîche. Un job mort depuis trois semaines y paraît en parfaite santé.
+#
+# Ce qui le révèle : `push_time_seconds{job=…}`, horodatage du DERNIER push
+# réussi de chaque groupe, que la passerelle ajoute d'elle-même. L'âge
+# `time() - push_time_seconds` est la seule mesure de fraîcheur fiable, à
+# comparer à la période propre de chaque job. Complément :
+# `push_failure_time_seconds`, horodatage du dernier push REFUSÉ (métriques
+# incohérentes) — un pousseur qui échoue garde son dernier `push_time_seconds`
+# et vieillit sans bruit.
+#
+# Un pousseur RETIRÉ volontairement doit voir son groupe supprimé
+# (`curl -X DELETE http://<hôte>:9900/metrics/job/<job>`) : sinon la règle de
+# fraîcheur sonnera indéfiniment — la persistance le fait même survivre aux
+# redémarrages.
+pushgateway_port: 9900
+pushgwmon_job: pushgateway
+pushgwmon_metrics_path: /metrics
+
+# Même valeur que pushgateway-security et fleetforge-monitoring.
+pushgwmon_docker_bridge: "172.17.0.0/16"

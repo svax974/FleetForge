@@ -1,0 +1,97 @@
+---
+# Supervision de l'orchestrateur « scripting » (voir defaults/main.yml).
+#
+# Convention `<service>-monitoring` (CLAUDE.md) : sonde déclarative pour
+# svcprobe, collecteur propre au service pour l'état DÉGRADÉ, cible et
+# ouverture ufw posées par svcprobe-install. Toutes les tâches portent le tag
+# `monitoring` : `./play.sh <parc> deploy-scripting.yml --tags monitoring`
+# réarme la supervision sans retoucher au code ni au cron.
+#
+# Rien ne vit sous /home : l'unité svcprobe a `ProtectHome=true`, un
+# collecteur qui y lirait verrait un répertoire vide et conclurait au silence.
+# Les identifiants GCP (~/.ansible) ne sont donc volontairement pas sondés.
+
+# `public: true` OBLIGATOIRE : sans lui svcprobe_lib_dir, svcprobe_dir et
+# svcprobe_listen_port restent confinés au rôle inclus (svcprobe-install).
+- name: Ensure the shared probe is installed
+  ansible.builtin.include_role:
+    name: svcprobe-install
+    public: true
+  tags: [monitoring]
+
+- name: Deploy the scripting metric collector
+  ansible.builtin.copy:
+    src: scripting-metrics.py
+    dest: "{{ svcprobe_lib_dir }}/scripting-metrics.py"
+    owner: root
+    group: root
+    mode: '0755'
+  become: true
+  tags: [monitoring]
+
+# Hors de checks.d (seuls les *.json de checks.d sont des sondes) : c'est la
+# configuration du collecteur — chemins des dépôts, instances, familles de
+# journaux et leurs seuils, dérivés des mêmes group_vars que l'installation.
+- name: Deploy the collector configuration
+  ansible.builtin.template:
+    src: scripting-metrics.json.j2
+    dest: "{{ svcprobe_dir }}/scripting-metrics.json"
+    owner: root
+    group: root
+    mode: '0644'
+  become: true
+  tags: [monitoring]
+
+# Le cache du collecteur survivrait à un changement de configuration jusqu'à
+# une minute : on le vide pour que la vérification ci-dessous lise du neuf.
+- name: Drop the collector cache
+  ansible.builtin.file:
+    path: /var/lib/svcprobe/scripting.prom
+    state: absent
+  become: true
+  changed_when: false
+  tags: [monitoring]
+
+- name: Deploy the scripting probe
+  ansible.builtin.template:
+    src: check.json.j2
+    dest: "{{ svcprobe_checks_dir }}/scripting.json"
+    owner: root
+    group: root
+    mode: '0644'
+  become: true
+  tags: [monitoring]
+
+# Contrôle immédiat : une sonde à 0 alors que le service est en place est une
+# sonde mal écrite, qui ferait sonner une alerte permanente.
+- name: Verify the probe answers
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ svcprobe_listen_port }}/metrics"
+    return_content: true
+  register: scripting_probe
+  retries: 6
+  delay: 5
+  until: scripting_probe.status is defined and scripting_probe.status == 200
+  changed_when: false
+  tags: [monitoring]
+
+- name: Check the service is reported up with its metrics
+  ansible.builtin.assert:
+    that:
+      - scripting_probe.content is search('service_up\\{service="scripting"\\} 1')
+      - scripting_probe.content is search('scripting_cron_file_present')
+      - scripting_probe.content is not search('svcprobe_metrics_error\\{service="scripting"\\}')
+    fail_msg: >-
+      svcprobe ne rapporte pas scripting en bonne santé. Vérifier
+      {{ scripting_cron_file }}, `systemctl status {{ scripting_cron_unit }}` et
+      `sudo /usr/bin/python3 {{ svcprobe_lib_dir }}/scripting-metrics.py {{ svcprobe_dir }}/scripting-metrics.json`.
+  tags: [monitoring]
+
+- name: Report the probe result
+  ansible.builtin.debug:
+    msg: >-
+      {{ scripting_probe.content.split('\n')
+         | select('search', 'scripting')
+         | reject('match', '^#')
+         | list }}
+  tags: [monitoring]

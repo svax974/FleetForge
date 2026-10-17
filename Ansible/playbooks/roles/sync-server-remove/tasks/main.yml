@@ -57,8 +57,8 @@
       {{ sync_container }} supprimé. Conservés : données ({{ sync_home }}/data),
       image et sources, sauvegardes, CNAME {{ sync_hostname }}, vhost du proxy
       (il répondra 502 tant que le service est absent : le retirer avec
-      `proxy-update-web3c` tasks_from remove-one-site, site sync-{{ sync_instance }}.conf,
-      ou supprimer le gabarit puis rejouer update-proxy-web3c.yml) et les
+      `proxy-update` tasks_from remove-one-site, site sync-{{ sync_instance }}.conf,
+      ou supprimer le gabarit puis rejouer update-proxy.yml) et les
       entrées `docker_ports_rules` des ports {{ app_port | default('?') }} /
       {{ sync_metrics_port | default('?') }} (playbooks/host_vars/ctdapi.yml,
       sans conséquence tant que rien n'écoute dessus, à nettoyer avant de

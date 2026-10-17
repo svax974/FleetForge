@@ -1,0 +1,46 @@
+---
+# Supervision de l'orchestrateur « scripting ».
+#
+# Pas d'endpoint Prometheus, pas de port : sonde déclarative svcprobe (9110)
+# + collecteur propre au service. `service_up{service="scripting"}` vaut 1
+# quand le fichier cron est en place ET que le démon cron tourne — les deux
+# conditions pour que quoi que ce soit s'exécute. Le reste (un cron qui tourne
+# mais dont les tâches ne produisent plus rien) est l'affaire du collecteur.
+
+# Mêmes valeurs que scripting-install (group_vars du parc).
+scripting_install_dir: /opt/scripting
+scripting_repos: []
+scripting_autodeploy_instances: []
+scripting_runtime_dirs: [logs, outputs]
+scripting_cron_name: scripting
+scripting_cron_file: "/etc/cron.d/{{ scripting_cron_name }}"
+
+# Unité du démon cron (Debian/Ubuntu).
+scripting_cron_unit: cron
+
+# Fenêtre de comptage des exécutions cron dans le journal. Une heure couvre
+# l'entrée horaire la plus lente qu'on veuille voir passer.
+scripting_monitoring_cron_window: 3600
+
+# Seuil par défaut d'une famille de journaux (secondes sans écriture).
+scripting_monitoring_default_max_age: 7200
+
+# Familles surveillées, en plus des répertoires `logs/` de chaque dépôt et de
+# chaque instance (surveillés d'office avec le seuil par défaut). Liste de
+# { name, dir, pattern?, max_age? } — par exemple une famille par période de
+# tâches, avec un seuil à sa mesure :
+#   - { name: tasks_m05, dir: "{{ scripting_install_dir }}/scripting/logs",
+#       pattern: "tasks_m05_*", max_age: 1800 }
+#   - { name: tasks_d01, dir: "{{ scripting_install_dir }}/scripting/logs",
+#       pattern: "tasks_d01_*", max_age: 93600 }
+scripting_monitoring_watches: []
+
+# `false` retire les répertoires `logs/` d'office (garder les seules familles
+# déclarées ci-dessus).
+scripting_monitoring_default_watches: true
+
+# Seuils par instance d'autodéploiement ou dépôt, pour les surveillances
+# d'office : { <nom>: <secondes> }. Ex. une instance horaire : 7200 suffit ;
+# une instance qui ne fait rien tant qu'aucun produit n'est à déployer écrit
+# peut-être peu — à mesurer avant de fixer.
+scripting_monitoring_max_age: {}

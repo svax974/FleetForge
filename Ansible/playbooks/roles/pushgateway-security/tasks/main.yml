@@ -1,0 +1,73 @@
+---
+# Ouvre le port de la passerelle aux seules sources légitimes (voir
+# defaults/main.yml). La règle de scrape Prometheus est AUSSI posée par
+# `pushgateway-monitoring`, avec le même commentaire : elle doit pouvoir être
+# réarmée par `--tags monitoring` sans rejouer ce rôle, et la poser deux fois à
+# l'identique ne change rien.
+
+# Une faute de frappe dans la liste laisserait un job pousser dans le vide :
+# ses métriques n'arriveraient jamais, et l'absence d'une série ne déclenche
+# rien tant qu'aucune alerte ne l'attend.
+- name: Fail when an allowed pusher is not in the inventory
+  ansible.builtin.assert:
+    that:
+      - (pushgateway_allowed_hosts | difference(hostvars.keys() | list)) | length == 0
+    fail_msg: >-
+      `pushgateway_allowed_hosts` nomme des entrées absentes de l'inventaire :
+      {{ pushgateway_allowed_hosts | difference(hostvars.keys() | list) | join(', ') }}.
+      Ce sont des NOMS d'inventaire qui sont attendus, pas des adresses.
+
+- name: Warn when no Prometheus host is defined
+  ansible.builtin.debug:
+    msg: >-
+      `prometheus_host` absent de l'inventaire : aucune règle Prometheus posée.
+      La passerelle ne sera pas scrapée et les métriques poussées ne serviront
+      à rien.
+  when: pushgwsec_prometheus_addr | length == 0
+
+- name: Allow the pushgateway port from vpns, Prometheus, pushers and whitelist
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ item.src }}"
+    port: "{{ pushgateway_port }}"
+    comment: "{{ item.comment }}"
+  loop: "{{ pushgwsec_rules }}"
+  loop_control:
+    label: "{{ item.comment }}"
+  become: true
+
+# Pas de DENY explicite : la politique par défaut d'ufw est déjà `deny
+# incoming` (firewall-security), et empiler un refus donnerait l'illusion que
+# c'est LUI qui protège.
+
+# ── Contrôle ───────────────────────────────────────────────────────────────
+# Les règles ci-dessus restent DÉCORATIVES tant qu'ufw est inactif. On le dit
+# à chaque déploiement plutôt que d'activer ufw à l'aveugle, ce qui pourrait
+# couper d'autres services de la machine.
+- name: Check whether ufw is actually active
+  ansible.builtin.command: ufw status
+  become: true
+  register: pushgwsec_ufw_state
+  changed_when: false
+  check_mode: false
+
+- name: Warn when ufw is inactive on this host
+  ansible.builtin.debug:
+    msg: >-
+      ufw est INACTIF sur {{ inventory_hostname }} : les règles de la
+      passerelle sont enregistrées mais AUCUNE n'est appliquée. Le port
+      {{ pushgateway_port }} (sans authentification) est ouvert à quiconque
+      joint la machine.
+  when: "'Status: active' not in pushgwsec_ufw_state.stdout"
+
+- name: Report the effective rules
+  ansible.builtin.shell: "ufw status numbered | grep -F '{{ pushgateway_port }}' || true"
+  become: true
+  register: pushgwsec_ufw
+  changed_when: false
+  check_mode: false
+
+- name: Show them
+  ansible.builtin.debug:
+    var: pushgwsec_ufw.stdout_lines

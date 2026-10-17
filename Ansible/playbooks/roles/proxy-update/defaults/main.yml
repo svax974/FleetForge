@@ -1,0 +1,31 @@
+---
+# Répertoire des gabarits nginx du parc, HORS des rôles :
+#   Ansible/parcs/<parc_name>/nginx/
+#     nginx.conf             (optionnel) configuration globale
+#     sites-enabled/*        vhosts actifs           → /etc/nginx/sites-enabled/
+#     sites-available/*      vhosts inactifs         → /etc/nginx/sites-available/
+#     streams-enabled/*      streams TCP/UDP actifs  → /etc/nginx/streams-enabled/
+#     streams-available/*    streams inactifs        → /etc/nginx/streams-available/
+#     certs/*                🔒 certificats (vault)  → /etc/nginx/certs/
+#     auth/*                 🔒 htpasswd (vault)     → /etc/nginx/auth/
+# Un fichier préfixé `_` est un partiel, inclus par un autre gabarit et jamais
+# déployé seul. Les partiels GÉNÉRIQUES (`_access.inc`, `_sync-vhost.inc`)
+# restent dans ce rôle (templates/) : `{% include '_access.inc' %}` les trouve
+# depuis un gabarit du parc, le répertoire du rôle étant dans le chemin de
+# recherche des gabarits.
+#
+# `playbook_dir` = Ansible/playbooks, quel que soit le cwd : vrai pour play.sh,
+# le TUI, le web et le bureau.
+proxy_update_dir: "{{ playbook_dir }}/../parcs/{{ parc_name }}/nginx"
+
+# Répertoires de /etc/nginx vidés puis reconstruits à chaque passage : le
+# répertoire du parc FAIT FOI, un vhost retiré du dépôt est retiré des proxies.
+proxy_update_subdirs:
+  - sites-enabled
+  - streams-enabled
+  - sites-available
+  - streams-available
+
+# Jeton d'écriture Prometheus (remote-write relayé par les proxies). Seul
+# papanglabs en a l'usage : `true` dans group_vars/papanglabs.yml.
+proxy_write_token_enabled: false

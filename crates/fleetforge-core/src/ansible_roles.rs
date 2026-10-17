@@ -113,8 +113,7 @@ fn get_role_metadata(name: &str) -> (String, String) {
         // Les rôles `mail-*` sont décrits plus bas, marqués dépréciés : ils
         // étaient dupliqués ici, et c'est cette copie-là qui gagnait, si bien
         // que l'UI présentait comme fonctionnels des rôles qui ne le sont plus.
-        "proxy-security-web3c" => ("Sécurité proxy Web3C".into(), "Règles firewall spécifiques aux serveurs proxy de l'organisation Web3C.".into()),
-        "proxy-security-papang" => ("Sécurité proxy PapangLabs".into(), "Règles firewall spécifiques aux serveurs proxy PapangLabs.".into()),
+        "proxy-security" => ("Sécurité proxy".into(), "Règles ufw des proxies de tous les parcs : 80/443 publics, ports VPN, et ports relayés (base, registre Docker, backs) ouverts à la whitelist, aux vpns, backs et fronts — chaque section ne s'applique que si son port est déclaré dans le group_vars du parc.".into()),
         "rpcbtc-security" => ("Sécurité noeud Bitcoin".into(), "Protège les ports RPC et P2P du noeud Bitcoin via UFW.".into()),
         "vpn-security" => ("Sécurité VPN".into(), "Configure le firewall et le routage pour l'infrastructure VPN Pritunl.".into()),
         "monitoring-security" => ("Sécurité monitoring".into(), "Configure les règles firewall pour l'accès à Prometheus et Grafana.".into()),
@@ -194,8 +193,7 @@ fn get_role_metadata(name: &str) -> (String, String) {
         "proxy-install" => ("Installation Nginx proxy".into(), "Installe et configure Nginx comme reverse proxy avec support SSL.".into()),
         "proxy-remove" => ("Suppression proxy Nginx".into(), "Arrête et désinstalle Nginx (configs préservées).".into()),
         "proxy-purge" => ("Purge proxy Nginx".into(), "Supprime Nginx, tous ses fichiers de configuration et les certificats SSL.".into()),
-        "proxy-update-web3c" => ("MAJ proxy Web3C".into(), "Met à jour la configuration Nginx pour les sites et services Web3C.".into()),
-        "proxy-update-papang" => ("MAJ proxy PapangLabs".into(), "Met à jour la configuration Nginx pour les sites et services PapangLabs.".into()),
+        "proxy-update" => ("MAJ vhosts proxy".into(), "Resynchronise nginx.conf, vhosts, streams, certificats et htpasswd des proxies depuis Ansible/parcs/<parc_name>/nginx/ (gitignoré), valide avec nginx -t puis redémarre. Le répertoire du parc fait foi : un vhost qui en sort est retiré des proxies.".into()),
         "proxy-certs-bind9" => ("Certificats SSL (BIND9)".into(), "Gère les certificats Let's Encrypt via le challenge DNS avec BIND9 (RFC2136).".into()),
 
         // Nginx
@@ -326,6 +324,26 @@ fn get_role_metadata(name: &str) -> (String, String) {
         "fleetforge-monitoring" => ("Supervision FleetForge".into(), "Enregistre la cible Prometheus sur le port applicatif : l'application expose /metrics nativement, sans exporter ni sonde svcprobe. Vérifie qu'un scrape_config lit réellement le répertoire de cibles, et surveille l'état dégradé propre au service — répond en HTTP mais ne peut plus rien déployer (`fleetforge_ansible_available`).".into()),
         "fleetforge-remove" => ("Suppression FleetForge".into(), "Arrête le service, retire l'unité systemd, les binaires compilés, la cible Prometheus et les ouvertures de pare-feu. Conserve le code livré, l'arbre Ansible synchronisé et la base locale.".into()),
         "fleetforge-purge" => ("Purge FleetForge".into(), "Suppression, plus le répertoire livré, l'arbre Ansible synchronisé, la base locale (historique des runs, réglages) et le mot de passe d'accès. Ne retire ni Rust, ni Ansible, ni les clés SSH : outils et secrets partagés.".into()),
+        "pushgateway-install" => ("Installation Pushgateway".into(), "Installe la Prometheus Pushgateway en binaire natif épinglé (amd64/arm64, somme sha256 vérifiée, retéléchargé seulement si la version change), sous srvc dans une unité systemd durcie, avec persistance des séries poussées (--persistence.file) pour qu'un redémarrage ne les efface pas en silence.".into()),
+        "pushgateway-security" => ("Sécurité Pushgateway".into(), "Ouvre le port de la passerelle (9900 par défaut, sans authentification) aux seuls vpns, Prometheus, whitelist et pousseurs (groupe aiservers + pushgateway_allowed_hosts), adresses dérivées de l'inventaire ; bridge Docker autorisé si Prometheus est co-localisé.".into()),
+        "pushgateway-monitoring" => ("Supervision Pushgateway".into(), "Enregistre la cible /metrics native sur prometheus_host, ouvre le scrape, vérifie qu'un job lit le répertoire de cibles avec honor_labels: true, et rapporte pushgateway_build_info et push_time_seconds — l'âge du dernier push révèle un pousseur arrêté que la passerelle continuerait de servir.".into()),
+        "pushgateway-remove" => ("Suppression Pushgateway".into(), "Arrête et retire l'unité systemd, le binaire, la cible Prometheus et les règles ufw. Conserve le magasin de persistance.".into()),
+        "pushgateway-purge" => ("Purge Pushgateway".into(), "Suppression, plus le répertoire de données : toutes les séries poussées sont perdues.".into()),
+        "llmauth-install" => ("Installation LLM Auth".into(), "Construit et démarre le service Go de validation des clés d'API (auth_request nginx), publié sur 127.0.0.1 uniquement. Requiert llmauth_pepper et llmauth_admin_token (vault).".into()),
+        "llmauth-security" => ("Sécurité LLM Auth".into(), "Vérifie que le port du service n'écoute que sur la boucle locale et retire toute règle ufw décorative.".into()),
+        "llmauth-monitoring" => ("Supervision LLM Auth".into(), "Sonde svcprobe (/healthz, conteneur, /validate) et collecteur relayant les métriques natives et le nombre de clés actives — à 0, toutes les requêtes sont refusées.".into()),
+        "llmauth-remove" => ("Suppression LLM Auth".into(), "Arrête le conteneur et retire le compose, le contexte de build et la sonde, en conservant la base des clés.".into()),
+        "llmauth-purge" => ("Purge LLM Auth".into(), "Supprime le service, son image et tout son répertoire, base des clés d'API comprise (irréversible).".into()),
+        "aiserver-install" => ("Installation serveur IA".into(), "Déploie en conteneurs llama.cpp, ComfyUI et l'exporter GPU DCGM, avec pilote NVIDIA, runtime Docker GPU et modèles Hugging Face.".into()),
+        "aiserver-security" => ("Sécurité serveur IA".into(), "Filtre les ports publiés du serveur IA dans DOCKER-USER (proxies, vpns, Prometheus, whitelist) et vérifie la chaîne réelle.".into()),
+        "aiserver-monitoring" => ("Supervision serveur IA".into(), "Enregistre les cibles Prometheus llama.cpp, ComfyUI et DCGM et la sonde svcprobe du serveur IA.".into()),
+        "aiserver-remove" => ("Suppression serveur IA".into(), "Arrête les conteneurs du serveur IA et retire pare-feu, sonde et cibles Prometheus en conservant les modèles.".into()),
+        "aiserver-purge" => ("Purge serveur IA".into(), "Supprime le serveur IA avec ses images, volumes de modèles et répertoires, sans toucher à Docker ni au pilote NVIDIA.".into()),
+        "scripting-install" => ("Installation orchestrateur scripting".into(), "Déploie l'orchestrateur scripting : dépôts git mis à jour en place, venvs Python, fichiers du parc (vault, parcs/<parc>/scripting/), instances d'autodéploiement, identifiants GCP et planification /etc/cron.d.".into()),
+        "scripting-security" => ("Sécurité orchestrateur scripting".into(), "Impose 0600 aux secrets de l'orchestrateur, refuse tout jeton dans les remotes git et tout port d'écoute ouvert depuis son répertoire d'installation.".into()),
+        "scripting-monitoring" => ("Supervision orchestrateur scripting".into(), "Sonde svcprobe : présence du cron, exécutions cron récentes, âge des journaux par famille, âge des commits et synchronisation des instances.".into()),
+        "scripting-remove" => ("Suppression orchestrateur scripting".into(), "Arrête l'orchestrateur (retrait du fichier cron) et supprime code, venvs, instances et sonde en conservant configuration, logs et outputs.".into()),
+        "scripting-purge" => ("Purge orchestrateur scripting".into(), "Supprime l'orchestrateur et toutes ses données : répertoire d'installation, secrets du parc, logs, outputs et identifiants GCP.".into()),
         "searxng-install" => ("Installation relai SearXNG".into(), "Déploie SearXNG (Docker) en relai de recherche JSON. Publie le port sur 127.0.0.1 quand tous les proxies autorisés sont sur la même machine, sur 0.0.0.0 sinon. Variables : searxng_port (défaut 8888), searxng_allowed_proxies, searxng_hostname.".into()),
         "searxng-security" => ("Sécurité relai SearXNG".into(), "Restreint le port publié aux seules IP des proxies distants dans la chaîne DOCKER-USER — une règle ufw n'a aucun effet sur un port publié par Docker — et vérifie l'état réel de la chaîne. Ne pose rien quand le port est publié sur la boucle locale.".into()),
         "searxng-monitoring" => ("Supervision relai SearXNG".into(), "Sonde svcprobe (/healthz, conteneur, /config) et collecteur de requête réelle mis en cache : détecte l'instance qui répond mais ne rapporte plus rien, moteurs amont bloqués — état qu'aucune sonde binaire ne voit.".into()),
@@ -356,7 +374,7 @@ fn get_role_metadata(name: &str) -> (String, String) {
         "openclaw-monitoring" => ("Supervision OpenClaw".into(), "Sonde svcprobe (service_up via /healthz, /readyz) — signal HTTP indépendant du mode de déploiement, partagée avec les autres alias de la machine NAT domestique. Pas de check systemd --user : le hardening de svcprobe (NoNewPrivileges, ProtectHome) l'empêche structurellement de sonder l'unité utilisateur de srvc.".into()),
         "openclaw-remove" => ("Suppression OpenClaw".into(), "Arrête et désactive l'unité systemd --user, retire la sonde et les règles ufw du port. Conserve la configuration, le workspace et le jeton de gateway.".into()),
         "openclaw-purge" => ("Purge OpenClaw".into(), "Supprime le binaire, le Node embarqué, la configuration, le workspace, les secrets, le jeton de gateway et le CNAME public. Destructif.".into()),
-        "agenthub-install" => ("Installation AgentCenter".into(), "Publie le CNAME agenthub.web3c.cc vers le front des proxies (Cloudflare) pour le hub AgentCenter (pilotage d'agents IA CLI dans des terminaux tmux). Le vhost est posé par proxy-update-web3c (support WebSocket, ACL parc + whitelist).".into()),
+        "agenthub-install" => ("Installation AgentCenter".into(), "Publie le CNAME agenthub.web3c.cc vers le front des proxies (Cloudflare) pour le hub AgentCenter (pilotage d'agents IA CLI dans des terminaux tmux). Le vhost est posé par proxy-update (support WebSocket, ACL parc + whitelist).".into()),
         "agenthub-security" => ("Sécurité AgentCenter".into(), "Filtre les ports publiés du hub (front app_port 4700, back-lb back_port 4701) dans DOCKER-USER via docker_ports_rules (host_vars/ctdapi.yml, hôte canonique de la machine `ctdapi`) : proxies, whitelist et VPN uniquement. Les règles ufw posées par deploy-full.sh sont décoratives sur un port Docker.".into()),
         "agenthub-deploy" => ("Déploiement AgentCenter".into(), "Orchestre le déploiement du hub via les scripts du dépôt app (scripts/run.sh prod → deploy-full.sh, build local + contexte Docker SSH) depuis le poste de contrôle, attend la santé du hub, puis (tag runner) réinstalle/active le runner AgentCenter sur l'hôte (utilisateur agents, Node 22 embarqué, systemd KillMode=process, HUB_URL en boucle locale). Variables : agenthub_src, agenthub_back_env_file, agenthub_front_env_file, agenthub_runner_token (vault, requis pour le runner).".into()),
         "agenthub-monitoring" => ("Supervision AgentCenter".into(), "Sonde svcprobe du hub (santé HTTP de l'API).".into()),
@@ -444,6 +462,7 @@ fn categorize(name: &str) -> String {
         "Mail".to_string()
     } else if name.starts_with("monitoring-")
         || name.starts_with("prometheus-")
+        || name.starts_with("pushgateway-")
         || name.starts_with("alertmanager-")
         || (name.starts_with("exporter-")
             && !name.starts_with("exporter-llamacpp"))
@@ -484,12 +503,17 @@ fn categorize(name: &str) -> String {
         || name.starts_with("agenthub-")
         || name.starts_with("freellm-")
         || name.starts_with("starnet-")
+        || name.starts_with("aiserver-")
+        || name.starts_with("llmauth-")
     {
         "IA / LLM".to_string()
     } else if name.starts_with("python-") || name.starts_with("tools-") || name.starts_with("scripts-") {
         "Système".to_string()
     } else if name.starts_with("mtbridge-") {
         "Trading".to_string()
+    } else if name.starts_with("scripting-") {
+        // Orchestrateur EasyNode (déploiement des nœuds clients par cron).
+        "Orchestration".to_string()
     } else if name.starts_with("copyfail-") {
         "Sécurité".to_string()
     } else {

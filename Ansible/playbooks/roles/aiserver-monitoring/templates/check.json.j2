@@ -1,0 +1,14 @@
+{
+  "service": "aiserver",
+  "up": {
+    "kind": "command",
+    "argv": {{ (['/bin/bash', svcprobe_lib_dir ~ '/aiserver-health.sh', aiserver_probe_http_timeout | string]
+               + aiserver_probe_pairs) | to_json }},
+    "timeout": {{ (aiserver_endpoints | length) * (aiserver_probe_http_timeout | int) + 5 }}
+  },
+  "extra_checks": [
+{% for e in aiserver_endpoints %}
+    {"name": "{{ e.container }}", "kind": "docker", "container": "{{ e.container }}"}{{ ',' if not loop.last else '' }}
+{% endfor %}
+  ]
+}

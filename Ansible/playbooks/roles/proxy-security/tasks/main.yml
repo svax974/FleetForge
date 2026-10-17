@@ -1,0 +1,193 @@
+---
+# Pare-feu ufw des proxies, pour TOUS les parcs (ex-`proxy-security-web3c` et
+# `proxy-security-papang`, identiques à une section près, fusionnés le
+# 16/10/2026).
+#
+# Chaque section relaie un port qui n'existe pas sur tous les parcs : elle ne
+# s'applique que si son port est déclaré dans group_vars/<parc>.yml. Une
+# section sans port ne doit pas faire échouer le play — elle ne concerne
+# simplement pas ce parc. La section backindicators a en plus son interrupteur
+# (`proxy_security_backindicators`) : papanglabs déclare le port sans que ses
+# proxies l'aient jamais ouvert, et la fusion ne devait RIEN ouvrir de neuf.
+############################# HTTP/HTTPS #############################
+# Configure basic firewall rules for nginx and PriTunl
+- name: Allow HTTPS connections from everywhere
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: any
+    port: 443
+- name: Allow HTTP connections from everywhere
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: any
+    port: 80
+
+############################# VPN #############################
+#- name: Allow TCP VPN connections from everywhere
+#  community.general.ufw:
+#    rule: allow
+#    proto: tcp
+#    from_ip: any
+#    port: "{{ vpn_tcp_port }}"
+- name: Allow TCP VPN connections from localhost only since proxified
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: 127.0.0.1
+    port: "{{ vpn_tcp_port }}"
+  when: vpn_tcp_port is defined
+
+- name: Allow UDP VPN connections from everywhere
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: any
+    port: "{{ vpn_data_port }}"
+  when: vpn_tcp_port is defined
+
+- name: Allow UDP VPN connections from everywhere
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: any
+    port: "{{ vpn_data_port2 }}"
+  when: vpn_tcp_port is defined
+
+############################# DB PROXIES #############################
+# Allow connections to dbproxies on postgres_proxy_port from whitelist
+- name: Allow connections to dbproxies on postgres_proxy_port from whitelist
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ item }}"
+    port: "{{ postgres_proxy_port }}"
+  with_items:
+    "{{ whitelist }}"
+  when: postgres_proxy_port is defined
+
+- name: Allow connections to dbproxies on postgres_proxy_port from vpns
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ hostvars[item].ansible_host }}"
+    port: "{{ postgres_proxy_port }}"
+  loop: "{{ groups['vpns'] | default([]) }}"
+  when: postgres_proxy_port is defined
+
+- name: Allow connections to dbproxies on postgres_proxy_port from backs
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ hostvars[item].ansible_host }}"
+    port: "{{ postgres_proxy_port }}"
+  loop: "{{ groups['backs'] | default([]) }}"
+  when: postgres_proxy_port is defined
+
+############################# DOCKER REPO #############################
+- name: Allow connections to docker-repo on docker_repo_port from whitelist
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ item }}"
+    port: "{{ docker_repo_port }}"
+  with_items:
+    "{{ whitelist }}"
+  when: docker_repo_port is defined
+
+- name: Allow connections to docker-repo on docker_repo_port from vpns
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ hostvars[item].ansible_host }}"
+    port: "{{ docker_repo_port }}"
+  loop: "{{ groups['vpns'] | default([]) }}"
+  when: docker_repo_port is defined
+
+- name: Allow connections to docker-repo on docker_repo_port from backs
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ hostvars[item].ansible_host }}"
+    port: "{{ docker_repo_port }}"
+  loop: "{{ groups['backs'] | default([]) }}"
+  when: docker_repo_port is defined
+
+- name: Allow connections to docker-repo on docker_repo_port from fronts
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ hostvars[item].ansible_host }}"
+    port: "{{ docker_repo_port }}"
+  loop: "{{ groups['fronts'] | default([]) }}"
+  when: docker_repo_port is defined
+
+############################# BACKS SERVER #############################
+- name: Allow connections to backs on proxy_back_port from whitelist
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ item }}"
+    port: "{{ proxy_back_port }}"
+  with_items:
+    "{{ whitelist }}"
+  when: proxy_back_port is defined
+
+- name: Allow connections to backs on proxy_back_port from vpns
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ hostvars[item].ansible_host }}"
+    port: "{{ proxy_back_port }}"
+  loop: "{{ groups['vpns'] | default([]) }}"
+  when: proxy_back_port is defined
+
+- name: Allow connections to back servers on proxy_back_port from dbproxies
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ hostvars[item].ansible_host }}"
+    port: "{{ proxy_back_port }}"
+  loop: "{{ groups['fronts'] | default([]) }}"
+  when: proxy_back_port is defined
+
+- name: Allow connections to backs on proxy_backindicators_port from whitelist
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ item }}"
+    port: "{{ proxy_backindicators_port }}"
+  with_items:
+    "{{ whitelist }}"
+  when:
+    - proxy_backindicators_port is defined
+    - proxy_security_backindicators | default(true) | bool
+
+- name: Allow connections to backs on proxy_backindicators_port from vpns
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ hostvars[item].ansible_host }}"
+    port: "{{ proxy_backindicators_port }}"
+  loop: "{{ groups['vpns'] | default([]) }}"
+  when:
+    - proxy_backindicators_port is defined
+    - proxy_security_backindicators | default(true) | bool
+
+- name: Allow connections to back servers on proxy_backindicators_port from dbproxies
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ hostvars[item].ansible_host }}"
+    port: "{{ proxy_backindicators_port }}"
+  loop: "{{ groups['fronts'] | default([]) }}"
+  when:
+    - proxy_backindicators_port is defined
+    - proxy_security_backindicators | default(true) | bool
+
+########## TODO
+
+# Configure DBs firewall rules
+# Configure back servers firewall rules
+# Configure front servers firewall rules

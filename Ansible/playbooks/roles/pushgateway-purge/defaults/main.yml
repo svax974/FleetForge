@@ -1,0 +1,6 @@
+---
+# Suppression complète : tout ce que fait `pushgateway-remove`, PLUS le
+# répertoire de données — donc le magasin de persistance et toutes les séries
+# poussées qu'il contient. Les pousseurs repartent de zéro : jusqu'à leur
+# prochain passage, une règle de fraîcheur n'a plus rien à évaluer.
+pushgateway_data_dir: "/home/{{ remote_username }}/pushgateway"

@@ -1,0 +1,78 @@
+---
+# Une instance d'autodéploiement (variable de boucle : scripting_instance).
+#
+# L'ancien rôle faisait `cp -r <dépôt> autodeployN` à chaque passage — qui,
+# le répertoire existant déjà, créait autodeployN/<dépôt>/ À L'INTÉRIEUR de
+# la copie au lieu de la rafraîchir. Ici : rsync, qui ne transfère que les
+# différences et retire ce qui a disparu du dépôt source.
+
+- name: "{{ scripting_instance.name }} — directory"
+  ansible.builtin.file:
+    path: "{{ scripting_install_dir }}/{{ scripting_instance.name }}"
+    state: directory
+    mode: '0750'
+
+# Exclus de la copie, donc protégés de `--delete` :
+#   /venv          → lien vers le venv du dépôt source (voir plus bas) ;
+#   /logs /outputs → propres à l'instance, c'est ce que la supervision lit ;
+#   /env_deploy.py → propre à l'instance (liste des produits).
+# La configuration du parc (env.py, .env.prod…) est copiée avec le reste, en
+# conservant ses droits 0600.
+- name: "{{ scripting_instance.name }} — sync from {{ scripting_instance.source_repo }}"
+  ansible.builtin.command:
+    argv:
+      - rsync
+      - -a
+      - --delete
+      - --itemize-changes
+      - --exclude=/venv
+      - --exclude=/logs
+      - --exclude=/outputs
+      - --exclude=/env_deploy.py
+      - "{{ scripting_repo_dirs[scripting_instance.source_repo] }}/"
+      - "{{ scripting_install_dir }}/{{ scripting_instance.name }}/"
+  register: scripting_rsync
+  changed_when: scripting_rsync.stdout | length > 0
+
+# Un venv n'est pas relocalisable : ses scripts portent le chemin absolu du
+# venv d'origine. La copie `cp -r` de l'ancien rôle activait donc DÉJÀ le
+# venv du dépôt source (bin/activate y pointe). Un lien symbolique dit la même
+# chose honnêtement, et évite N installations identiques.
+- name: "{{ scripting_instance.name }} — inspect the venv path"
+  ansible.builtin.stat:
+    path: "{{ scripting_install_dir }}/{{ scripting_instance.name }}/venv"
+  register: scripting_instance_venv
+
+# Copie physique héritée de l'ancien rôle : `file state=link` refuse de
+# remplacer un répertoire non vide.
+- name: "{{ scripting_instance.name }} — drop a copied venv"
+  ansible.builtin.file:
+    path: "{{ scripting_install_dir }}/{{ scripting_instance.name }}/venv"
+    state: absent
+  when:
+    - scripting_instance_venv.stat.exists
+    - not scripting_instance_venv.stat.islnk
+
+- name: "{{ scripting_instance.name }} — link the source venv"
+  ansible.builtin.file:
+    path: "{{ scripting_install_dir }}/{{ scripting_instance.name }}/venv"
+    src: "{{ scripting_repo_dirs[scripting_instance.source_repo] }}/venv"
+    state: link
+    force: true
+
+- name: "{{ scripting_instance.name }} — runtime directories"
+  ansible.builtin.file:
+    path: "{{ scripting_install_dir }}/{{ scripting_instance.name }}/{{ item }}"
+    state: directory
+    mode: '0755'
+  loop: "{{ scripting_runtime_dirs }}"
+
+# Liste des produits que CETTE instance a le droit de déployer. Le JSON d'une
+# liste de chaînes est aussi une liste Python valide.
+- name: "{{ scripting_instance.name }} — env_deploy.py"
+  ansible.builtin.copy:
+    dest: "{{ scripting_install_dir }}/{{ scripting_instance.name }}/env_deploy.py"
+    mode: '0644'
+    content: |
+      # Géré par Ansible (scripting-install) — scripting_autodeploy_instances.
+      AUTO_DEPLOY = {{ scripting_instance.products | to_json }}

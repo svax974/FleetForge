@@ -1,0 +1,3 @@
+---
+llmauth_base_dir: /opt/llmauth
+llmauth_image: "fleetforge/llmauth:local"
