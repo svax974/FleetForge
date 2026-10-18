@@ -34,4 +34,12 @@
     - { role: papangmetrics-deploy, tags: [code] }
     - papangmetrics-api-install
     - papangmetrics-etl-install
+    # Frontal TLS (nginx + wildcard) devant 127.0.0.1:API et 127.0.0.1:ETL
+    # /metrics. Avant api-security, qui ouvre son port et referme les ports en
+    # clair. `papangmetrics_tls_enabled: false` = retour arrière : le vhost est
+    # retiré, l'API réécoute en clair (runbook de rotation PapangWorkspace).
+    - { role: papangmetrics-tls-install, when: papangmetrics_tls_enabled | default(true) | bool, tags: [tls] }
+    - { role: papangmetrics-tls-remove, when: not (papangmetrics_tls_enabled | default(true) | bool), tags: [tls] }
     - papangmetrics-api-security
+    # Sonde svcprobe + preuve de bout en bout (401 sans bearer à travers nginx).
+    - { role: papangmetrics-tls-monitoring, when: papangmetrics_tls_enabled | default(true) | bool }

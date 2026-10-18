@@ -31,3 +31,13 @@ alertmanager_port: 9093
 # `prometheus-alerts-update`, partagé avec la stack web3c. Les redéclarer ici
 # créerait deux sources de vérité pour la même valeur, avec une précédence
 # entre défauts de rôles qui n'est pas lisible à l'œil.
+
+# Bearer des cibles PapangMetrics (/metrics de l'API et de l'ETL exigent
+# `Authorization: Bearer <METRICS_AUTH_TOKEN>`). Même variable de vault que
+# papangmetrics-deploy : une seule valeur, deux consommateurs. Vide = pas
+# d'en-tête (cible ouverte, comportement historique).
+prometheus_papangmetrics_token: "{{ papangmetrics_metrics_auth_token | default('') }}"
+# Fichiers d'identifiants de scrape, montés en RÉPERTOIRE dans le conteneur
+# (/etc/prometheus/secrets) : un fichier renouvelé y est relu, contrairement à
+# un montage fichier par fichier (voir tasks/main.yml).
+prometheus_secrets_dir: "{{ prometheus_home }}/secrets"

@@ -1,0 +1,79 @@
+---
+# Frontal TLS de PapangMetrics (voir defaults/main.yml pour le pourquoi).
+# Joué par deploy-papangmetrics.yml AVANT papangmetrics-api-security, qui ouvre
+# le port TLS et referme les anciens ports en clair.
+#
+# Désactivé (`papangmetrics_tls_enabled: false`, retour arrière) : ce rôle ne
+# fait rien ; c'est papangmetrics-tls-remove qui retire le vhost.
+
+- name: Install nginx (nginx.org stable, same package as the proxies)
+  ansible.builtin.include_role:
+    name: install-nginx
+    apply:
+      become: true
+
+# Le paquet nginx.org livre un site par défaut sur le port 80 : rien ne doit
+# écouter ici en dehors du port TLS du service.
+- name: Remove the stock nginx.org default site
+  ansible.builtin.file:
+    path: /etc/nginx/conf.d/default.conf
+    state: absent
+  become: true
+  notify: reload nginx
+
+# Wildcard *.<domaine> par défi DNS-01 (jeton `cloudflare_token` du parc) :
+# aucun port 80 à ouvrir, même lignée que sur les proxies.
+- name: Issue the wildcard certificate on this machine
+  ansible.builtin.include_role:
+    name: cert-install
+    apply:
+      become: true
+
+- name: Ensure the certbot deploy-hook directory exists
+  ansible.builtin.file:
+    path: /etc/letsencrypt/renewal-hooks/deploy
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  become: true
+
+- name: Reload nginx after every certificate renewal
+  ansible.builtin.template:
+    src: nginx-reload-hook.sh.j2
+    dest: /etc/letsencrypt/renewal-hooks/deploy/papangmetrics-nginx-reload.sh
+    owner: root
+    group: root
+    mode: '0755'
+  become: true
+
+- name: Resolve the allowed sources (single definition, shared with the firewall)
+  ansible.builtin.include_role:
+    name: papangmetrics-api-security
+    tasks_from: sources
+
+- name: Deploy the PapangMetrics TLS vhost
+  ansible.builtin.template:
+    src: papangmetrics-tls.conf.j2
+    dest: "{{ pm_tls_conf }}"
+    owner: root
+    group: root
+    mode: '0644'
+  become: true
+  register: pm_tls_vhost
+  notify: reload nginx
+
+# Une configuration invalide rechargée laisse nginx sur l'ancienne sans erreur
+# visible : on teste ici, et le déploiement s'arrête net.
+- name: Validate the nginx configuration
+  ansible.builtin.command:
+    cmd: nginx -t
+  become: true
+  changed_when: false
+
+- name: Enable and start nginx
+  ansible.builtin.systemd:
+    name: nginx
+    state: started
+    enabled: true
+  become: true

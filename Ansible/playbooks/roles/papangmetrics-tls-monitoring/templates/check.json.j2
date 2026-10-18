@@ -1,0 +1,9 @@
+{
+  "service": "papangmetrics-tls",
+  "up": {"kind": "systemd", "unit": "nginx"},
+  "extra_checks": [
+    {"name": "tls-port", "kind": "tcp", "host": "127.0.0.1", "port": {{ pm_tls_port }}},
+    {"name": "cert-valid-14d", "kind": "command", "timeout": 10,
+     "argv": ["/bin/sh", "-c", "echo | openssl s_client -connect 127.0.0.1:{{ pm_tls_port }} -servername {{ pm_tls_hostname }} 2>/dev/null | openssl x509 -noout -checkend 1209600"]}
+  ]
+}

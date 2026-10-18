@@ -46,6 +46,34 @@
   become: true
   notify: reload prometheus
 
+- name: Create the scrape credentials directory
+  ansible.builtin.file:
+    path: "{{ prometheus_secrets_dir }}"
+    state: directory
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: "0700"
+  become: true
+
+# Lu par le conteneur, qui tourne en root (user: "root" ci-dessous) : 0600 suffit.
+- name: Deploy the PapangMetrics scrape bearer
+  ansible.builtin.copy:
+    content: "{{ prometheus_papangmetrics_token }}"
+    dest: "{{ prometheus_secrets_dir }}/papangmetrics.token"
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: "0600"
+  become: true
+  no_log: true
+  when: prometheus_papangmetrics_token | length > 0
+
+- name: Remove the PapangMetrics scrape bearer when none is configured
+  ansible.builtin.file:
+    path: "{{ prometheus_secrets_dir }}/papangmetrics.token"
+    state: absent
+  become: true
+  when: prometheus_papangmetrics_token | length == 0
+
 - name: Deploy Prometheus configuration
   ansible.builtin.template:
     src: prometheus.yml.j2
@@ -76,6 +104,7 @@
       - "{{ prometheus_home }}/web.yml:/etc/prometheus/web.yml:ro"
       - "{{ prometheus_home }}/rules:/etc/prometheus/rules:ro"
       - "{{ prometheus_home }}/prometheus-configs:/etc/prometheus/prometheus-configs:ro"
+      - "{{ prometheus_secrets_dir }}:/etc/prometheus/secrets:ro"
       - "{{ prometheus_home }}/data:/prometheus"
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"

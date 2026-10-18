@@ -50,17 +50,30 @@ scrape_configs:
       - files:
           - 'prometheus-configs/postfix/*.json'
 
-  # API indicateurs — expose /metrics sur son port applicatif.
+  # API indicateurs. Cible déposée par papangmetrics-api-install : HTTPS par le
+  # frontal TLS de la machine (`__scheme__` dans le file_sd) quand il est actif.
+  # /metrics exige le bearer METRICS_AUTH_TOKEN.
   - job_name: 'papangmetrics-api'
     metrics_path: /metrics
+{% if prometheus_papangmetrics_token | length > 0 %}
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/secrets/papangmetrics.token
+{% endif %}
     file_sd_configs:
       - files:
           - 'prometheus-configs/papangmetrics-api/*.json'
 
   # Worker ETL — porte brk_up, brk_height et etl_block_lag. C'est la source des
   # alertes BRK : l'API de BRK elle-même n'est pas scrapée (localhost only).
+  # Derrière le frontal TLS : `__metrics_path__` = /etl/metrics dans le file_sd.
   - job_name: 'papangmetrics-etl'
     metrics_path: /metrics
+{% if prometheus_papangmetrics_token | length > 0 %}
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/secrets/papangmetrics.token
+{% endif %}
     file_sd_configs:
       - files:
           - 'prometheus-configs/papangmetrics-etl/*.json'

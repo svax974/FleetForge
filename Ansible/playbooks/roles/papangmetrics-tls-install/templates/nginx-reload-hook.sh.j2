@@ -1,0 +1,5 @@
+#!/bin/sh
+# Généré par Ansible (papangmetrics-tls-install) : recharge nginx après un
+# renouvellement certbot, sans quoi il servirait l'ancien certificat jusqu'à
+# son expiration.
+nginx -t -q && systemctl reload nginx

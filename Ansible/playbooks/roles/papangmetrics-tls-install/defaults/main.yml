@@ -1,0 +1,28 @@
+---
+# Frontal TLS de PapangMetrics : nginx sur la machine de l'API, devant
+# 127.0.0.1:<API> et 127.0.0.1:<ETL /metrics>. Chiffre le lien
+# backs PapangWorkspace → PapangMetrics (JWT de service, séries) et les scrapes
+# Prometheus (bearer /metrics), qui traversaient Internet en clair.
+#
+# Port dédié plutôt que 443 : la machine porte aussi bitcoind/BRK/Esplora, et un
+# port propre au service garde une règle ufw et une entrée de registre sans
+# ambiguïté (CLAUDE.local.md). Nom servi : le `hostname` de l'entrée
+# (papangmetrics1.<domaine>, enregistrement A « DNS seul » publié par
+# cloudflare-dns-update) — un CNAME vers les proxies ferait repasser le trafic
+# en clair entre proxy et API, ce qu'on cherche justement à supprimer.
+pm_tls_enabled: "{{ papangmetrics_tls_enabled | default(true) }}"
+pm_tls_port: "{{ papangmetrics_tls_port | default(9744) }}"
+pm_tls_hostname: "{{ hostname }}"
+pm_api_port: "{{ papangmetrics_api_port | default(9743) }}"
+pm_etl_metrics_port: "{{ papangmetrics_etl_metrics_port | default(9611) }}"
+
+# Certificat wildcard *.<domaine> émis sur CETTE machine par cert-install
+# (défi DNS-01 Cloudflare : aucun port 80 à ouvrir).
+pm_tls_cert_dir: "/etc/letsencrypt/live/{{ domain_name }}"
+pm_tls_conf: /etc/nginx/conf.d/papangmetrics-tls.conf
+
+# Au-dessus du timeout de lecture du client PapangWorkspace
+# (PAPANGMETRICS_API_TIMEOUT_MS, 45 s) : l'erreur reste un JSON de l'API, pas un 504 nginx.
+pm_tls_proxy_read_timeout: 60
+# Au-dessus de HTTP_BODY_LIMIT (1mb) : c'est l'API qui répond 413, avec son message.
+pm_tls_client_max_body_size: "2m"

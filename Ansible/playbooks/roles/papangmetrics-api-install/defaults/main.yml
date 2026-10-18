@@ -7,3 +7,9 @@ pm_api_port: "{{ papangmetrics_api_port | default(9743) }}"
 # rester largement supérieure à RestartSec × burst pour être atteignable.
 pm_start_limit_interval: 900
 pm_start_limit_burst: 5
+
+# Frontal TLS (papangmetrics-tls-install) : quand il est actif, Prometheus scrape
+# en HTTPS par le nom de la machine (certificat wildcard), plus par l'IP en clair.
+pm_tls_enabled: "{{ papangmetrics_tls_enabled | default(true) }}"
+pm_tls_port: "{{ papangmetrics_tls_port | default(9744) }}"
+pm_tls_hostname: "{{ hostname }}"

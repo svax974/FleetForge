@@ -3,4 +3,5 @@
   hosts: papangmetrics1
   remote_user: "{{ remote_username }}"
   roles:
+    - papangmetrics-tls-remove
     - papangmetrics-purge

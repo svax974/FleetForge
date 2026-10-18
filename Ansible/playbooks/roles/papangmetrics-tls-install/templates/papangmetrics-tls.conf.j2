@@ -1,0 +1,60 @@
+# Généré par Ansible (papangmetrics-tls-install) — NE PAS ÉDITER SUR L'HÔTE.
+# Frontal TLS de PapangMetrics : seul point d'entrée de l'API et du /metrics de
+# l'ETL, qui n'écoutent que sur 127.0.0.1 (API_HOST / ETL_METRICS_HOST).
+
+upstream papangmetrics_api {
+    server 127.0.0.1:{{ pm_api_port }};
+    # Connexions persistantes vers Node (keepAliveTimeout 65 s côté API, au-delà
+    # du keepalive_timeout amont par défaut de nginx, 60 s).
+    keepalive 16;
+}
+
+upstream papangmetrics_etl_metrics {
+    server 127.0.0.1:{{ pm_etl_metrics_port }};
+}
+
+server {
+    listen {{ pm_tls_port }} ssl;
+    server_name {{ pm_tls_hostname }};
+
+    ssl_certificate     {{ pm_tls_cert_dir }}/fullchain.pem;
+    ssl_certificate_key {{ pm_tls_cert_dir }}/privkey.pem;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_session_cache   shared:papangmetrics_tls:10m;
+    ssl_session_timeout 1d;
+    ssl_session_tickets off;
+
+    server_tokens off;
+    client_max_body_size {{ pm_tls_client_max_body_size }};
+    # Au-delà du keep-alive inactif des clients (PapangWorkspace : 3 s).
+    keepalive_timeout 75s;
+
+    # Profil « service non exposé » (papangmetrics-api-security/tasks/sources.yml),
+    # doublé par ufw sur ce même port. `deny all` OBLIGATOIRE : sans lui les
+    # `allow` sont décoratifs.
+    allow 127.0.0.1;  # sonde locale (papangmetrics-tls-monitoring)
+{% for ip, kinds in pm_tls_allow | dictsort %}
+    allow {{ ip }};  # {{ kinds | unique | join(', ') }}
+{% endfor %}
+    deny all;
+
+    # /metrics de l'ETL (bearer METRICS_AUTH_TOKEN vérifié par l'ETL lui-même).
+    location = /etl/metrics {
+        proxy_pass http://papangmetrics_etl_metrics/metrics;
+        proxy_set_header Host $host;
+    }
+
+    location / {
+        proxy_pass         http://papangmetrics_api;
+        proxy_http_version 1.1;
+        proxy_set_header   Connection "";
+        proxy_set_header   Host $host;
+        # Écrasé, jamais complété : l'API (TRUST_PROXY=loopback) prend cette
+        # valeur pour l'IP client de ses limiteurs ; un X-Forwarded-For fourni
+        # par le client ne doit pas passer.
+        proxy_set_header   X-Forwarded-For $remote_addr;
+        proxy_set_header   X-Forwarded-Proto https;
+        proxy_read_timeout {{ pm_tls_proxy_read_timeout }}s;
+        proxy_send_timeout {{ pm_tls_proxy_read_timeout }}s;
+    }
+}

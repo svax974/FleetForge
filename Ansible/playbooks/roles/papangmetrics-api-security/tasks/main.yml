@@ -1,7 +1,82 @@
 ---
-# Firewall for the PapangMetrics API. Internal-only today (service JWT); the
-# rules pre-authorize the proxies + whitelist for when it is exposed publicly.
+# Firewall for the PapangMetrics API (process natif sous systemd : ufw s'applique
+# réellement, contrairement à un port publié par Docker).
+#
+# Trois états (papangmetrics_tls_enabled / papangmetrics_plaintext_enabled) :
+#   • TLS seul (défaut, `pm_loopback_only`) — l'API (9743) et le /metrics de
+#     l'ETL (9611) n'écoutent que sur 127.0.0.1 ; seul le port TLS de nginx
+#     (pm_tls_port) est ouvert, aux sources de tasks/sources.yml. Les anciennes
+#     ouvertures en clair sont SUPPRIMÉES : une règle laissée sur un port en
+#     boucle locale ne protège rien et brouille le prochain retour arrière.
+#   • transition (TLS + clair) — les deux à la fois, le temps de basculer les
+#     PAPANGMETRICS_API_URL des backs ;
+#   • TLS inactif (retour arrière) — comportement historique, port TLS refermé.
 
+- name: Resolve the allowed sources
+  ansible.builtin.include_tasks: sources.yml
+  tags: [always]
+
+# ── Frontal TLS actif ─────────────────────────────────────────────────────────
+- name: Allow the TLS front from the linked clients, whitelist, vpns and Prometheus
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ item.key }}"
+    port: "{{ pm_tls_port }}"
+    comment: "papangmetrics-tls - {{ item.value | unique | join(',') }}"
+  loop: "{{ pm_tls_allow | dict2items }}"
+  loop_control:
+    label: "{{ item.key }} ({{ item.value | unique | join(',') }})"
+  become: true
+  when: pm_tls_enabled | bool
+  tags: [monitoring, clients]
+
+# Prometheus co-localisé (conteneur) : les scrapes arrivent par le bridge Docker.
+- name: Allow the Prometheus Docker bridge on the TLS front (monitor is local)
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "172.17.0.0/16"
+    port: "{{ pm_tls_port }}"
+    comment: "papangmetrics-tls - prometheus docker scrape"
+  become: true
+  when:
+    - pm_tls_enabled | bool
+    - ansible_host == hostvars[prometheus_host]['ansible_host']
+  tags: [monitoring]
+
+- name: Delete the plaintext API rules (API now on loopback)
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ item }}"
+    port: "{{ pm_api_port }}"
+    delete: true
+  loop: >-
+    {{ (whitelist | default([]))
+       + (groups['proxies'] | default([]) | map('extract', hostvars, 'ansible_host') | list)
+       + (groups['backsindicators'] | default([]) | map('extract', hostvars, 'ansible_host') | list)
+       + ([hostvars[prometheus_host]['ansible_host']] if prometheus_host in hostvars else [])
+       + ['172.17.0.0/16'] }}
+  become: true
+  when: pm_loopback_only | bool
+  tags: [monitoring, clients]
+
+- name: Delete the plaintext ETL metrics rules (ETL /metrics now on loopback)
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ item }}"
+    port: "{{ pm_etl_metrics_port }}"
+    delete: true
+  loop: >-
+    {{ ([hostvars[prometheus_host]['ansible_host']] if prometheus_host in hostvars else [])
+       + ['172.17.0.0/16'] }}
+  become: true
+  when: pm_loopback_only | bool
+  tags: [monitoring]
+
+# ── Accès en clair (TLS inactif, ou transition) : règles historiques ─────────
 - name: Allow API port from whitelist
   community.general.ufw:
     rule: allow
@@ -11,6 +86,7 @@
     comment: "papangmetrics-api - whitelist"
   loop: "{{ whitelist }}"
   become: true
+  when: not (pm_loopback_only | bool)
 
 - name: Allow API port from proxies
   community.general.ufw:
@@ -21,15 +97,12 @@
     comment: "papangmetrics-api - proxy"
   loop: "{{ groups['proxies'] | default([]) }}"
   become: true
+  when: not (pm_loopback_only | bool)
 
-# Les backs applicatifs consomment cette API en HTTP (INDICATOR_SOURCE=api) : sans
+# Les backs applicatifs consomment cette API (INDICATOR_SOURCE=api) : sans
 # cette ouverture, ufw DROP leurs SYN et le back part en timeout de lecture — vu
 # comme un 504 par le proxy, donc comme une erreur CORS par le navigateur, ce qui
-# ne désigne jamais le pare-feu. La règle a longtemps manqué sans conséquence :
-# le back de préprod partage la machine des proxies (`prometheus1`), déjà
-# autorisée juste au-dessus. Le premier back sur sa propre machine
-# (backindicators1-prod) a rendu le trou visible, le 20/08/2026.
-#
+# ne désigne jamais le pare-feu (constat du 20/08/2026, backindicators1-prod).
 # `backsindicators` et pas `backs` : ce dernier contient aussi `api` (cette
 # machine) et `backsrpc`, qui n'ont rien à faire dans cette liste.
 - name: Allow API port from the PapangLabs application backs
@@ -41,12 +114,13 @@
     comment: "papangmetrics-api - back {{ item }}"
   loop: "{{ groups['backsindicators'] | default([]) }}"
   become: true
-  when: ansible_host != hostvars[item].ansible_host
+  when:
+    - not (pm_loopback_only | bool)
+    - ansible_host != hostvars[item].ansible_host
   tags: [clients]
 
 # Tagué `monitoring` comme l'enregistrement des cibles : sans cette ouverture,
-# les cibles apparaissent dans Prometheus mais restent `down`. Les deux doivent
-# donc pouvoir être rejouées ensemble, sans redéployer le code.
+# les cibles apparaissent dans Prometheus mais restent `down`.
 - name: Allow Prometheus (monitor) to scrape API + ETL metrics
   community.general.ufw:
     rule: allow
@@ -58,14 +132,12 @@
     - "{{ pm_api_port }}"
     - "{{ pm_etl_metrics_port }}"
   become: true
-  when: ansible_host != hostvars[prometheus_host]['ansible_host']
+  when:
+    - not (pm_loopback_only | bool)
+    - ansible_host != hostvars[prometheus_host]['ansible_host']
   ignore_errors: true
   tags: [monitoring]
 
-# Cas Prometheus co-localisé : il tourne en conteneur, les scrapes arrivent donc
-# par le bridge Docker et non par l'IP publique de la machine. Même logique que
-# dans `exporter-sys-install` (le test porte sur l'IP, pas sur le nom d'hôte :
-# plusieurs entrées d'inventaire partagent la même machine).
 - name: Allow Prometheus Docker bridge to scrape API + ETL metrics (monitor is local)
   community.general.ufw:
     rule: allow
@@ -77,6 +149,22 @@
     - "{{ pm_api_port }}"
     - "{{ pm_etl_metrics_port }}"
   become: true
-  when: ansible_host == hostvars[prometheus_host]['ansible_host']
+  when:
+    - not (pm_loopback_only | bool)
+    - ansible_host == hostvars[prometheus_host]['ansible_host']
   ignore_errors: true
   tags: [monitoring]
+
+- name: Delete the TLS front rules (rollback to plaintext)
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ item.key }}"
+    port: "{{ pm_tls_port }}"
+    delete: true
+  loop: "{{ pm_tls_allow | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  become: true
+  when: not (pm_tls_enabled | bool)
+  tags: [monitoring, clients]

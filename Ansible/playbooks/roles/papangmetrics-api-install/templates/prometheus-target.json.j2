@@ -1,7 +1,14 @@
 [
     {
+{% if pm_tls_enabled | bool %}
+        "targets": [ "{{ pm_tls_hostname }}:{{ pm_tls_port }}" ],
+{% else %}
         "targets": [ "{{ ansible_host }}:{{ pm_api_port }}" ],
+{% endif %}
         "labels": {
+{% if pm_tls_enabled | bool %}
+            "__scheme__": "https",
+{% endif %}
             "job": "papangmetrics-api",
             "instance": "{{ inventory_hostname }}"
         }

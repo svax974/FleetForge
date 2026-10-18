@@ -1,0 +1,54 @@
+---
+# Retire le frontal TLS de PapangMetrics : vhost, hook de renouvellement, sonde.
+# nginx lui-même n'est arrêté que s'il ne sert plus rien d'autre sur la machine
+# (aucun autre fichier dans conf.d / sites-enabled). Le certificat wildcard et
+# certbot restent : ils appartiennent aux rôles cert-*, et une autre application
+# de la machine peut s'en servir.
+#
+# À jouer AVANT de repasser `papangmetrics_tls_enabled: false` + redéploiement
+# (retour arrière) : l'API réécoute alors sur toutes les interfaces et
+# papangmetrics-api-security rouvre les ports en clair.
+
+- name: Remove the PapangMetrics TLS vhost
+  ansible.builtin.file:
+    path: /etc/nginx/conf.d/papangmetrics-tls.conf
+    state: absent
+  become: true
+
+- name: Remove the certbot reload hook
+  ansible.builtin.file:
+    path: /etc/letsencrypt/renewal-hooks/deploy/papangmetrics-nginx-reload.sh
+    state: absent
+  become: true
+
+- name: Remove the TLS front probe
+  ansible.builtin.file:
+    path: /etc/svcprobe/checks.d/papangmetrics-tls.json
+    state: absent
+  become: true
+
+- name: Look for any other nginx site on this machine
+  ansible.builtin.find:
+    paths: [/etc/nginx/conf.d, /etc/nginx/sites-enabled]
+    patterns: "*"
+    file_type: any
+  become: true
+  register: pm_tls_other_sites
+  failed_when: false
+
+- name: Stop and disable nginx when it serves nothing else
+  ansible.builtin.systemd:
+    name: nginx
+    state: stopped
+    enabled: false
+  become: true
+  when: (pm_tls_other_sites.files | default([]) | length) == 0
+  failed_when: false
+
+- name: Reload nginx when other sites remain
+  ansible.builtin.systemd:
+    name: nginx
+    state: reloaded
+  become: true
+  when: (pm_tls_other_sites.files | default([]) | length) > 0
+  failed_when: false

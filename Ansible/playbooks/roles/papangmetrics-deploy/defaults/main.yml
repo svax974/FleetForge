@@ -46,12 +46,114 @@ pm_etl_backfill_concurrency: 10
 # pendant un backfill — sans aucun gain, la contrainte étant désormais horaire.
 pm_etl_incremental_concurrency: 4
 
-# Admin panel (PapangWorkspace indicatorApi console — tenants/API keys/usage).
+# Admin panel (PapangWorkspace « API access » console — tenants/API keys/usage).
+# ADMIN_PASSWORD (clair) n'est plus rendu : seul le hash scrypt l'est
+# (`node scripts/hash-admin-password.mjs` dans PapangMetrics, mot de passe lu sur
+# stdin). Les trois secrets ci-dessous viennent du vault du parc
+# (group_vars/papanglabs.yml) ; leur absence fait échouer le déploiement
+# (tasks/main.yml) plutôt que de démarrer une API ouverte ou sans admin.
 pm_admin_username: "{{ papangmetrics_admin_username | default('admin') }}"
-pm_admin_password: "{{ papangmetrics_admin_password }}"
-pm_admin_jwt_secret: "{{ papangmetrics_admin_jwt_secret }}"
-pm_admin_jwt_expires_in: "24h"
+pm_admin_password_hash: "{{ papangmetrics_admin_password_hash | default('') }}"
+pm_admin_jwt_secret: "{{ papangmetrics_admin_jwt_secret | default('') }}"
+# Jeton admin court (défaut de l'application : 2h). Était 24h ici.
+pm_admin_jwt_expires_in: "2h"
+# Bearer exigé sur /metrics (API et ETL). Même valeur dans le fichier
+# d'identifiants du scrape Prometheus (prometheus-install).
+pm_metrics_auth_token: "{{ papangmetrics_metrics_auth_token | default('') }}"
 # Default credit quotas applied to new tenants/keys when none is given explicitly.
 pm_default_tenant_credits_quota: "null"
 pm_default_apikey_credits_quota: "null"
 pm_default_period_type: "monthly"
+
+# ── Frontal TLS (rôle papangmetrics-tls-install) ─────────────────────────────
+# Activé : l'API et le /metrics de l'ETL n'écoutent plus que sur 127.0.0.1, le
+# seul point d'entrée est nginx (TLS, wildcard *.{{ domain_name }}) sur
+# pm_tls_port, et l'IP client est lue dans X-Forwarded-For posé par ce nginx
+# local (TRUST_PROXY=loopback). Désactivé (rollback) : écoute sur toutes les
+# interfaces, TRUST_PROXY=false, comme avant.
+#
+# Transition (runbook de rotation) : `papangmetrics_plaintext_enabled: true`
+# garde EN PLUS l'ancien accès en clair (écoute sur toutes les interfaces,
+# ports 9743/9611 ouverts) le temps que les backs PapangWorkspace passent sur
+# l'URL https — sans quoi le déploiement de PapangMetrics les couperait avant
+# que leur PAPANGMETRICS_API_URL ne change. Le remettre à false ensuite.
+pm_tls_enabled: "{{ papangmetrics_tls_enabled | default(true) }}"
+pm_plaintext_enabled: "{{ papangmetrics_plaintext_enabled | default(false) }}"
+pm_loopback_only: "{{ (pm_tls_enabled | bool) and not (pm_plaintext_enabled | bool) }}"
+pm_tls_port: "{{ papangmetrics_tls_port | default(9744) }}"
+# `loopback` dans les deux cas : derrière nginx la socket vient de 127.0.0.1
+# (X-Forwarded-For écrasé par nginx = IP client) ; un appel direct en clair
+# garde l'adresse de sa socket, non approuvée, donc lue telle quelle.
+pm_trust_proxy: "{{ 'loopback' if (pm_tls_enabled | bool) else 'false' }}"
+
+# ── Sécurité HTTP (PapangMetrics README « Sécurité HTTP ») ───────────────────
+# Origines navigateur autorisées (console admin « API access » du front
+# PapangWorkspace) : prod (Cloudflare Pages `main`) et préprod (branche
+# `preprod`, servie sous dev.papanglabs.com — CLIENT_ORIGINS de
+# back/.env.preprod). Le front de dev local vise une API locale
+# (VITE_PAPANGMETRICS_API_URL=http://localhost:9743) : pas d'origine localhost ici.
+pm_cors_origins: "{{ papangmetrics_cors_origins | default(['https://papanglabs.com', 'https://www.papanglabs.com', 'https://dev.papanglabs.com']) }}"
+pm_swagger_enabled: false
+pm_http_body_limit: "1mb"
+pm_service_jwt_issuer: "papangworkspace"
+pm_service_jwt_audience: "papangmetrics"
+pm_service_jwt_max_age: "10m"
+pm_throttle_ttl: 60
+pm_throttle_limit: 120
+pm_throttle_ip_limit: 600
+pm_throttle_service_limit: 20000
+pm_throttle_admin_auth_limit: 5
+pm_throttle_admin_auth_ttl: 900
+pm_api_key_cache_ttl_ms: 30000
+
+# ── Clés publiques du JWT de service : une par environnement PapangWorkspace ─
+# prod, préprod et dev appellent la MÊME instance : chacun signe avec sa propre
+# clé privée, PapangMetrics accepte l'ensemble (JWT_PUBLIC_KEY_PATHS, `kid` =
+# nom de l'environnement). Paires générées HORS dépôt sur le poste de contrôle
+# par PapangMetrics/scripts/generate-service-jwt-keys.sh :
+#   <pm_service_jwt_keys_dir>/<env>/service-jwt.pub
+# Le dossier distant certs/service-jwt.d/ fait foi : un environnement retiré de
+# cette liste voit sa clé SUPPRIMÉE du serveur au déploiement suivant (révocation).
+pm_service_jwt_keys_dir: "{{ lookup('ansible.builtin.env', 'HOME') }}/.secrets/papang"
+pm_service_jwt_envs: [prod, preprod, dev]
+# Clé unique historique (certs/service-jwt.pub, toujours signée par les trois
+# backs tant qu'ils n'ont pas reçu leur clé propre). Retrait :
+# `papangmetrics_service_jwt_legacy_key: false` (group_vars) une fois
+# PAPANGMETRICS_JWT_PRIVATE_KEY_B64 remplacée dans les trois fichiers d'env du
+# back — sa clé privée a circulé dans trois fichiers d'environnement.
+pm_service_jwt_legacy_key: "{{ papangmetrics_service_jwt_legacy_key | default(true) }}"
+
+# ── Base d'indicateurs ───────────────────────────────────────────────────────
+# ATTENTION : timescale (194.163.180.236) et cette machine (45.8.132.134) sont
+# deux VPS distincts sans réseau privé : la connexion traverse Internet EN CLAIR
+# tant que METRICS_DB_SSL=false. Passer à true exige un certificat serveur sur
+# le conteneur TimescaleDB (non géré par timescaledb-install à ce jour) et son
+# CA dans pm_db_ssl_ca_path. Décision ouverte, voir
+# PapangWorkspace/docs/security/ROTATION_RUNBOOK_2026-10-18.md.
+pm_db_ssl: false
+pm_db_ssl_ca_path: ""
+pm_db_pool_max: 10
+pm_db_pool_idle_timeout_ms: 30000
+pm_db_connection_timeout_ms: 10000
+pm_db_statement_timeout_ms: 30000
+pm_db_etl_statement_timeout_ms: 0
+pm_db_maintenance_statement_timeout_ms: 0
+
+# ── Chemin d'écriture de l'ETL et évaluation des formules (défauts applicatifs)
+pm_etl_refetch_slots: { h1: 6, h4: 3, d1: 2, w1: 1, m1: 1 }
+pm_etl_sync_state_flush_every: 500
+pm_etl_brk_http_timeout_ms: 30000
+pm_etl_stuck_warn_ms: 7200000
+pm_formula_eval_max_concurrent: 2
+pm_formula_input_load_concurrency: 4
+pm_formula_input_cache_max_mb: 256
+pm_formula_output_cache_max_entries: 200
+pm_formula_output_cache_max_mb: 128
+pm_formula_write_relative_epsilon: "1e-12"
+pm_metric_id_cache_ttl_ms: 600000
+
+# Purge préparée des anciens metric_job done/failed : DÉSACTIVÉE (opération
+# destructive, PapangWorkspace/docs/security/SECURITY_REVIEW_2026-10-18.md §4).
+pm_metric_job_purge_enabled: false
+pm_metric_job_purge_days: 30
+pm_metric_job_purge_batch: 5000

@@ -1,0 +1,44 @@
+---
+# Sources autorisées sur le frontal TLS de PapangMetrics — UNE seule définition,
+# lue par l'ufw (tasks/main.yml) et par le vhost nginx (papangmetrics-tls-install,
+# `include_role: tasks_from: sources`). Profil « service non exposé » (CLAUDE.md
+# § Accès réseau) : vpns + Prometheus + whitelist + serveurs liés.
+#
+# Serveurs liés = les backs PapangWorkspace qui consomment l'API
+# (INDICATOR_SOURCE=api), groupe `backsindicators` : préprod (backindicators1,
+# même machine que proxy1/prometheus1) et prod (backindicators1-prod). Le back de
+# DEV tourne sur le poste de l'opérateur, couvert par `whitelist`, de même que la
+# console admin « API access » ouverte dans son navigateur.
+#
+# Toutes les sources sont DÉRIVÉES de l'inventaire, jamais recopiées.
+# `pm_tls_extra_sources` : [{ip, comment}] pour un client ponctuel.
+- name: Build the PapangMetrics TLS front sources
+  ansible.builtin.set_fact:
+    pm_tls_sources: >-
+      {{ (whitelist | default([]) | product(['whitelist']) | map('join', '|') | list)
+         + (groups['vpns'] | default([]) | map('extract', hostvars, 'ansible_host')
+            | product(['vpn']) | map('join', '|') | list)
+         + (groups['backsindicators'] | default([]) | map('extract', hostvars, 'ansible_host')
+            | product(['back']) | map('join', '|') | list)
+         + ([hostvars[prometheus_host]['ansible_host'] ~ '|prometheus'] if prometheus_host in hostvars else [])
+         + (pm_tls_extra_sources | default([]) | map(attribute='ip')
+            | product(['extra']) | map('join', '|') | list) }}
+  tags: [always]
+
+# Une même adresse peut porter plusieurs rôles (185.237.252.206 = proxy, vpn,
+# préprod et Prometheus) : une règle par ADRESSE, ses rôles dans le commentaire.
+# La machine elle-même est exclue (nginx la verrait en 127.0.0.1 de toute façon).
+- name: Reset the deduplicated source map (the file is included by two roles)
+  ansible.builtin.set_fact:
+    pm_tls_allow: {}
+  tags: [always]
+
+- name: Deduplicate the sources by address
+  ansible.builtin.set_fact:
+    pm_tls_allow: >-
+      {{ pm_tls_allow | combine({
+           (item.split('|')[0]): (pm_tls_allow[item.split('|')[0]] | default([])) + [item.split('|')[1]]
+         }) }}
+  loop: "{{ pm_tls_sources }}"
+  when: item.split('|')[0] != ansible_host
+  tags: [always]

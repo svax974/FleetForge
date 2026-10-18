@@ -1,7 +1,15 @@
 [
     {
+{% if pm_tls_enabled | bool %}
+        "targets": [ "{{ pm_tls_hostname }}:{{ pm_tls_port }}" ],
+{% else %}
         "targets": [ "{{ ansible_host }}:{{ pm_etl_metrics_port }}" ],
+{% endif %}
         "labels": {
+{% if pm_tls_enabled | bool %}
+            "__scheme__": "https",
+            "__metrics_path__": "/etl/metrics",
+{% endif %}
             "job": "papangmetrics-etl",
             "instance": "{{ inventory_hostname }}"
         }

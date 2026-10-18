@@ -1,3 +1,11 @@
 ---
 pm_api_port: "{{ papangmetrics_api_port | default(9743) }}"
 pm_etl_metrics_port: "{{ papangmetrics_etl_metrics_port | default(9611) }}"
+# Frontal TLS (papangmetrics-tls-install) — voir tasks/main.yml.
+pm_tls_enabled: "{{ papangmetrics_tls_enabled | default(true) }}"
+pm_tls_port: "{{ papangmetrics_tls_port | default(9744) }}"
+# Transition : garde aussi les ports en clair (voir papangmetrics-deploy/defaults).
+pm_plaintext_enabled: "{{ papangmetrics_plaintext_enabled | default(false) }}"
+pm_loopback_only: "{{ (pm_tls_enabled | bool) and not (pm_plaintext_enabled | bool) }}"
+# Clients ponctuels en plus de l'inventaire : [{ip: x.x.x.x, comment: "..."}].
+pm_tls_extra_sources: []

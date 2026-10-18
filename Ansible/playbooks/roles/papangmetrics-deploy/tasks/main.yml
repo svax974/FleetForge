@@ -2,6 +2,48 @@
 # Push the PapangMetrics code to the box, install deps, build, write .env.
 # Shared by the API and ETL service roles.
 
+# ── Secrets requis (vault du parc) ─────────────────────────────────────────
+# Échec AVANT toute modification : un .env rendu sans ces valeurs démarrerait
+# une API sans admin utilisable (hash vide), avec /metrics ouvert (jeton vide)
+# ou un JWT admin forgeable (secret court). Génération et chiffrement :
+# PapangWorkspace/docs/security/ROTATION_RUNBOOK_2026-10-18.md.
+- name: Fail early when a PapangMetrics secret is missing from the vault
+  ansible.builtin.assert:
+    that:
+      - pm_admin_password_hash is match('^scrypt\$')
+      - pm_admin_jwt_secret | length >= 32
+      - pm_metrics_auth_token | length >= 32
+    fail_msg: >-
+      Secret PapangMetrics absent ou trop court dans group_vars/{{ parc_name }}.yml :
+      papangmetrics_admin_password_hash (sortie de scripts/hash-admin-password.mjs),
+      papangmetrics_admin_jwt_secret (≥ 32 car.), papangmetrics_metrics_auth_token
+      (≥ 32 car.). Les chiffrer avec
+      `ansible-vault encrypt_string --stdin-name '<clé>'` (runbook de rotation).
+    quiet: true
+
+# ── Clés publiques du JWT de service (une par environnement) ───────────────
+# Lues sur le poste de contrôle (hors dépôt, generate-service-jwt-keys.sh).
+# Une clé attendue mais absente fait échouer le déploiement : l'API refuserait
+# de démarrer (fichier manquant), ou un environnement serait coupé en silence.
+- name: Check the per-environment service JWT public keys on the control machine
+  ansible.builtin.stat:
+    path: "{{ pm_service_jwt_keys_dir }}/{{ item }}/service-jwt.pub"
+  loop: "{{ pm_service_jwt_envs }}"
+  delegate_to: localhost
+  become: false
+  register: pm_jwt_env_keys
+
+- name: Fail when an environment key is missing locally
+  ansible.builtin.assert:
+    that: item.stat.exists
+    fail_msg: >-
+      Clé publique absente : {{ pm_service_jwt_keys_dir }}/{{ item.item }}/service-jwt.pub.
+      La générer : PapangMetrics/scripts/generate-service-jwt-keys.sh {{ item.item }}
+    quiet: true
+  loop: "{{ pm_jwt_env_keys.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
 - name: Create app directory
   ansible.builtin.file:
     path: "{{ pm_dir }}"
@@ -56,6 +98,91 @@
     - restart papangmetrics-api
     - restart papangmetrics-etl
 
+- name: Create the per-environment key directory
+  ansible.builtin.file:
+    path: "{{ pm_dir }}/certs/service-jwt.d"
+    state: directory
+    owner: "{{ pm_user }}"
+    group: "{{ pm_user }}"
+    mode: '0750'
+  become: true
+
+- name: Deploy the per-environment service JWT public keys
+  ansible.builtin.copy:
+    src: "{{ pm_service_jwt_keys_dir }}/{{ item }}/service-jwt.pub"
+    dest: "{{ pm_dir }}/certs/service-jwt.d/{{ item }}.pub"
+    owner: "{{ pm_user }}"
+    group: "{{ pm_user }}"
+    mode: '0644'
+  loop: "{{ pm_service_jwt_envs }}"
+  become: true
+  notify: restart papangmetrics-api
+
+# Le dossier fait foi (même principe qu'Ansible/keys/<parc>/) : la clé d'un
+# environnement retiré de pm_service_jwt_envs est supprimée — c'est la
+# révocation de cet environnement.
+- name: List the deployed per-environment keys
+  ansible.builtin.find:
+    paths: "{{ pm_dir }}/certs/service-jwt.d"
+    patterns: "*.pub"
+  become: true
+  register: pm_jwt_deployed_keys
+
+- name: Remove the keys of environments no longer listed (revocation)
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ pm_jwt_deployed_keys.files }}"
+  loop_control:
+    label: "{{ item.path | basename }}"
+  when: (item.path | basename | splitext | first) not in pm_service_jwt_envs
+  become: true
+  notify: restart papangmetrics-api
+
+- name: Check for the legacy single service JWT public key on the control machine
+  ansible.builtin.stat:
+    path: "{{ pm_src }}certs/service-jwt.pub"
+  delegate_to: localhost
+  become: false
+  register: pm_jwt_local
+  when: pm_service_jwt_legacy_key | bool
+
+- name: Fail when the legacy key is still expected but missing locally
+  ansible.builtin.assert:
+    that: pm_jwt_local.stat.exists
+    fail_msg: >-
+      pm_service_jwt_legacy_key est vrai mais {{ pm_src }}certs/service-jwt.pub est absent.
+      Le restaurer, ou passer pm_service_jwt_legacy_key à false si les trois backs
+      signent déjà avec leur clé propre.
+    quiet: true
+  when: pm_service_jwt_legacy_key | bool
+
+- name: Deploy the legacy service JWT public key (transition)
+  ansible.builtin.copy:
+    src: "{{ pm_src }}certs/service-jwt.pub"
+    dest: "{{ pm_dir }}/certs/service-jwt.pub"
+    owner: "{{ pm_user }}"
+    group: "{{ pm_user }}"
+    mode: '0644'
+  become: true
+  when: pm_service_jwt_legacy_key | bool
+  notify: restart papangmetrics-api
+
+- name: Remove the legacy service JWT public key once retired
+  ansible.builtin.file:
+    path: "{{ pm_dir }}/certs/service-jwt.pub"
+    state: absent
+  become: true
+  when: not (pm_service_jwt_legacy_key | bool)
+  notify: restart papangmetrics-api
+
+- name: Build the list of accepted service JWT public keys
+  ansible.builtin.set_fact:
+    pm_service_jwt_key_paths: >-
+      {{ pm_service_jwt_envs | map('regex_replace', '^', pm_dir ~ '/certs/service-jwt.d/')
+         | map('regex_replace', '$', '.pub') | list
+         + ([pm_dir ~ '/certs/service-jwt.pub'] if (pm_service_jwt_legacy_key | bool) else []) }}
+
 - name: Write .env
   ansible.builtin.template:
     src: env.j2
@@ -64,6 +191,9 @@
     group: "{{ pm_user }}"
     mode: '0640'
   become: true
+  notify:
+    - restart papangmetrics-api
+    - restart papangmetrics-etl
 
 - name: Run SQL migrations
   ansible.builtin.command:
@@ -71,32 +201,6 @@
     chdir: "{{ pm_dir }}"
   become: true
   become_user: "{{ pm_user }}"
-
-- name: Check for the local service JWT public key
-  ansible.builtin.stat:
-    path: "{{ pm_src }}certs/service-jwt.pub"
-  delegate_to: localhost
-  register: pm_jwt_local
-
-- name: Deploy service JWT public key to the box
-  ansible.builtin.copy:
-    src: "{{ pm_src }}certs/service-jwt.pub"
-    dest: "{{ pm_dir }}/certs/service-jwt.pub"
-    owner: "{{ pm_user }}"
-    group: "{{ pm_user }}"
-    mode: '0644'
-  become: true
-  when: pm_jwt_local.stat.exists
-
-- name: Warn if the service JWT public key is missing
-  ansible.builtin.stat:
-    path: "{{ pm_dir }}/certs/service-jwt.pub"
-  register: pm_jwt_key
-
-- name: Notice — drop the JWT public key to enable API auth
-  ansible.builtin.debug:
-    msg: "service-jwt.pub absent in {{ pm_dir }}/certs — the API will fail to start until it is provided."
-  when: not pm_jwt_key.stat.exists
 
 - name: Make disk-watchdog executable
   ansible.builtin.file:

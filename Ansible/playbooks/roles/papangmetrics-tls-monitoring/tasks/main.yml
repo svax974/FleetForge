@@ -1,0 +1,78 @@
+---
+# Supervision du frontal TLS de PapangMetrics (convention `<service>-monitoring`).
+#
+# 1. sonde d'état : `service_up{service="papangmetrics-tls"}` (unité nginx) ;
+# 2. état dégradé : port TLS qui ne répond plus, certificat servi qui expire
+#    dans moins de 14 jours (renouvellement certbot cassé — cf. l'incident
+#    proxy2 de 2026 décrit dans cert-install) ;
+# 3./4. la cible et l'ufw de svcprobe sont posés par svcprobe-install. Les
+#    cibles papangmetrics-api / -etl passent elles-mêmes PAR ce frontal : un
+#    nginx tombé les fait passer `down` (TargetDown).
+
+- name: Ensure the shared probe is installed
+  ansible.builtin.include_role:
+    name: svcprobe-install
+    public: true
+  tags: [monitoring]
+
+- name: Deploy the TLS front probe
+  ansible.builtin.template:
+    src: check.json.j2
+    dest: "{{ svcprobe_checks_dir }}/papangmetrics-tls.json"
+    owner: root
+    group: root
+    mode: '0644'
+  become: true
+  tags: [monitoring]
+
+# Les redémarrages de l'API/ETL (nouvelle adresse d'écoute, METRICS_AUTH_TOKEN)
+# sont des handlers : on les exécute avant de vérifier la chaîne complète.
+- name: Apply pending restarts before checking the chain
+  ansible.builtin.meta: flush_handlers
+  tags: [monitoring]
+
+# Preuve de bout en bout sans divulguer le jeton : sans Authorization, l'API
+# DOIT répondre 401 au travers de nginx. 200 = /metrics ouvert (jeton absent du
+# .env) ; 403 = refus nginx (allow 127.0.0.1 manquant) ; 502 = API pas sur
+# 127.0.0.1:<port>.
+- name: Check nginx → API (unauthenticated /metrics must be refused by the API)
+  ansible.builtin.uri:
+    url: "https://127.0.0.1:{{ pm_tls_port }}/metrics"
+    validate_certs: false
+    status_code: [401]
+  register: pm_tls_api_check
+  retries: 6
+  delay: 5
+  until: pm_tls_api_check.status == 401
+  tags: [monitoring]
+
+- name: Check nginx → ETL (unauthenticated /etl/metrics must be refused by the ETL)
+  ansible.builtin.uri:
+    url: "https://127.0.0.1:{{ pm_tls_port }}/etl/metrics"
+    validate_certs: false
+    status_code: [401]
+  register: pm_tls_etl_check
+  retries: 6
+  delay: 5
+  until: pm_tls_etl_check.status == 401
+  tags: [monitoring]
+
+- name: Verify the probe answers
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ svcprobe_listen_port }}/metrics"
+    return_content: true
+  register: pm_tls_probe
+  retries: 6
+  delay: 5
+  until: pm_tls_probe.status is defined and pm_tls_probe.status == 200
+  changed_when: false
+  tags: [monitoring]
+
+- name: Fail when the probe reports the TLS front down
+  ansible.builtin.fail:
+    msg: >-
+      La sonde annonce `service_up{service="papangmetrics-tls"} 0` juste après
+      le déploiement : nginx n'est pas actif, ou la sonde est mal écrite.
+  when: >-
+    'service_up{service="papangmetrics-tls"} 0' in (pm_tls_probe.content | default(''))
+  tags: [monitoring]
