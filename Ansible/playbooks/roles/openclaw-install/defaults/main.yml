@@ -138,6 +138,10 @@ openclaw_heartbeat_account_id: ""
 # livre, « Good morning ! ») — et c'est ce texte qui part sur Telegram.
 openclaw_heartbeat_model: ""
 
+# Plugin d'outils Prometheus (prometheus_query/alerts/targets) : code seul,
+# la configuration (instances, secrets) se règle par sa page d'admin.
+openclaw_prometheus_monitor_enabled: true
+
 # ── Veille du parc (`fleet-watch`) ──────────────────────────────────────────
 # Remplace le heartbeat LLM : une automation OpenClaw de type commande (sans
 # modèle) lit Alertmanager toutes les `openclaw_fleetwatch_every`, retire les
@@ -150,7 +154,11 @@ openclaw_fleetwatch_renotify_hours: 6
 # Modèle d'analyse (`provider/model`) ; vide = défaut de l'agent. Jamais un
 # routeur `auto:*` (voir ci-dessus).
 openclaw_fleetwatch_model: "{{ openclaw_heartbeat_model }}"
-openclaw_fleetwatch_thinking: low
+# `low` exige un modèle qui le supporte (ex. opencode-go) ; poe/mimo-v2.6-flash,
+# le défaut de l'agent depuis le 17/10/2026, n'accepte que `off` ou `ultra` et
+# fait échouer `openclaw agent` sinon (constaté le 18/10/2026 : fleet-watch
+# tombait en secours « modèle indisponible » alors que le modèle répondait).
+openclaw_fleetwatch_thinking: "off"
 openclaw_fleetwatch_timeout: 300
 # Instances ignorées EN PLUS des hôtes `monitor: off` : noms d'instance
 # Prometheus qui ne sont pas des noms d'inventaire (le job `mtbridge` expose

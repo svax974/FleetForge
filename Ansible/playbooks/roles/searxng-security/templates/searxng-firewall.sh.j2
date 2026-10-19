@@ -22,20 +22,30 @@ ALLOWED=({{ (searxng_remote_proxies + searxng_extra_allowed_cidrs) | unique | jo
 # shell, et iptables rejette le tiret isolé (« Bad argument `-' »).
 while true; do
   N=$(iptables -L DOCKER-USER --line-numbers -n 2>/dev/null \
-      | awk -v p="dpt:${PORT}" '$0 ~ p {print $1; exit}')
+      | awk '/SearXNG - / {print $1; exit}')
   [ -z "${N}" ] && break
   iptables -D DOCKER-USER "${N}"
 done
 
 {% if searxng_remote_proxies | length > 0 %}
-# Sources autorisées d'abord : elles doivent précéder le DROP final.
+# DEUX défauts cumulés rendaient ces règles décoratives (constaté le 19/10/2026) :
+#  1. `--dport` : DOCKER-USER voit les paquets APRÈS le DNAT de Docker, donc le
+#     port du CONTENEUR (8080), jamais le port publié (8888). On filtre sur le
+#     port d'origine avec `--ctorigdstport`.
+#  2. l'ordre, ci-dessous.
+# INSÉRER (-I), jamais AJOUTER (-A) : Docker place un `-j RETURN` en tête de
+# DOCKER-USER, et une règle ajoutée après lui n'est jamais évaluée. Constaté le
+# 19/10/2026 : DROP à 0 paquet, port 8888 joignable depuis Internet, 267 M de
+# paquets absorbés par le RETURN. Ordre voulu : sources autorisées, puis DROP,
+# puis le RETURN de Docker — donc le DROP est posé d'abord, les sources
+# ensuite au rang 1 pour passer devant lui.
+iptables -I DOCKER-USER 1 -p tcp -m conntrack --ctorigdstport "${PORT}" \
+  -m comment --comment "SearXNG - deny external" -j DROP
+
 for SRC in "${ALLOWED[@]}"; do
-  iptables -A DOCKER-USER -s "${SRC}" -p tcp --dport "${PORT}" \
+  iptables -I DOCKER-USER 1 -s "${SRC}" -p tcp -m conntrack --ctorigdstport "${PORT}" \
     -m comment --comment "SearXNG - allowed proxy" -j RETURN
 done
-
-iptables -A DOCKER-USER -p tcp --dport "${PORT}" \
-  -m comment --comment "SearXNG - deny external" -j DROP
 {% else %}
 # Aucun proxy distant : le port n'est publié que sur 127.0.0.1 et rien ne peut
 # l'atteindre depuis l'extérieur. Le script se contente alors de PURGER les

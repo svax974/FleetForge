@@ -48,6 +48,19 @@ server:
 ui:
   static_use_hash: true
 
+{% if searxng_engines_enabled | length > 0 or searxng_engines_disabled | length > 0 %}
+# Écarts de moteurs par rapport au réglage amont (cf. searxng-install/defaults).
+engines:
+{% for e in searxng_engines_enabled %}
+  - name: "{{ e }}"
+    disabled: false
+{% endfor %}
+{% for e in searxng_engines_disabled %}
+  - name: "{{ e }}"
+    disabled: true
+{% endfor %}
+
+{% endif %}
 outgoing:
   request_timeout: {{ searxng_request_timeout }}
   max_request_timeout: {{ searxng_max_request_timeout }}

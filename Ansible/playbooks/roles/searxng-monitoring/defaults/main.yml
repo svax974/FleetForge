@@ -16,4 +16,7 @@ searxng_probe_query: "open source"
 # Intervalle minimal entre deux requêtes de contrôle réelles (secondes). Voir
 # l'en-tête du collecteur : à la fréquence de scrape, une requête par scrape
 # provoquerait le blocage qu'on cherche à détecter.
-searxng_probe_interval: 300
+# 1 h depuis le 19/10/2026 : l'IP de sortie est déjà bloquée par plusieurs moteurs,
+# on évite d'ajouter 288 requêtes/jour. Les alertes `SearxngNoResults` (30 min)
+# lisent la dernière mesure en cache, elles restent donc valides entre deux sondes.
+searxng_probe_interval: 3600

@@ -66,12 +66,22 @@
   check_mode: false
 
 - name: Verify the port is really filtered
+  vars:
+    sx_lines: "{{ searxng_chain.stdout_lines }}"
   ansible.builtin.assert:
     that:
       # Motif et non égalité : `iptables -S` intercale `-m tcp` et réordonne
       # les options selon la version, une comparaison littérale casserait au
       # premier changement de forme sans qu'aucune règle ne manque.
-      - searxng_chain.stdout is search('--dport ' ~ searxng_port ~ '.*-j DROP')
+      # `--ctorigdstport` et non `--dport` : DOCKER-USER voit le port du conteneur
+      # après DNAT (cf. searxng-firewall.sh.j2).
+      - searxng_chain.stdout is search('--ctorigdstport ' ~ searxng_port ~ '.*-j DROP')
+      # Le DROP doit précéder le `-j RETURN` posé par Docker, sinon il n'est
+      # jamais évalué (le piège exact du 19/10/2026).
+      - >-
+        '-A DOCKER-USER -j RETURN' not in sx_lines
+        or sx_lines.index(sx_lines | select('search', '--ctorigdstport ' ~ searxng_port ~ '.*-j DROP') | first)
+           < sx_lines.index('-A DOCKER-USER -j RETURN')
     fail_msg: >-
       Le port {{ searxng_port }} est publié sur 0.0.0.0 mais aucun DROP ne le
       protège dans DOCKER-USER : le relai est joignable depuis Internet.

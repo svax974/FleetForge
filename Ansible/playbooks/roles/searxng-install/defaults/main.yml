@@ -66,6 +66,14 @@ searxng_default_lang: "auto"
 # est lente. Au-delà, l'appelant a de toute façon abandonné.
 searxng_request_timeout: 6.0
 searxng_max_request_timeout: 15.0
+# Moteurs web. L'IP de sortie est partagée avec tout le NAT domestique et ne peut
+# pas être changée : brave (429), duckduckgo (CAPTCHA) et google cse (429) la
+# refusent depuis le 19/10/2026, et c'étaient les TROIS seuls moteurs web actifs
+# par défaut — d'où des réponses vides. On les coupe (réessayer une IP bloquée
+# prolonge le blocage) et on active des moteurs plus tolérants. À réévaluer :
+# retirer un nom de `searxng_engines_disabled` suffit à le remettre en service.
+searxng_engines_enabled: [bing, mojeek, yahoo, qwant, mwmbl]
+searxng_engines_disabled: [brave, brave.images, brave.videos, brave.news, duckduckgo, google cse]
 # uwsgi. 4/4 est le réglage amont ; un relai interne n'a pas besoin de plus.
 searxng_uwsgi_workers: 4
 searxng_uwsgi_threads: 4

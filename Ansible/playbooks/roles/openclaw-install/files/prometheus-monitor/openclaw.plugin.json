@@ -1,0 +1,81 @@
+{
+  "id": "prometheus-monitor",
+  "name": "Prometheus Monitor",
+  "version": "1.1.0",
+  "description": "Query configured Prometheus instances (alerts, PromQL, targets) with server-side Basic Auth. Admin page: http://<gateway-host>:18789/plugins/prometheus-monitor/admin#token=<adminToken> (see plugins.entries.prometheus-monitor.config.adminToken).",
+  "activation": {
+    "onStartup": true,
+    "onConfigPaths": [
+      "plugins.entries.prometheus-monitor.config"
+    ]
+  },
+  "contracts": {
+    "tools": [
+      "prometheus_instances",
+      "prometheus_alerts",
+      "prometheus_alerts_diff",
+      "prometheus_query",
+      "prometheus_targets",
+      "prometheus_settings"
+    ]
+  },
+  "configContracts": {
+    "secretInputs": {
+      "bundledDefaultEnabled": false,
+      "paths": [
+        {
+          "path": "instances.*.password",
+          "expected": "string",
+          "ownerKind": "route"
+        }
+      ]
+    }
+  },
+  "uiHints": {
+    "instances": {
+      "label": "Instances Prometheus (par parc)"
+    },
+    "adminToken": {
+      "label": "Token d'accès à la page d'admin",
+      "sensitive": true
+    },
+    "notify": {
+      "label": "Canal de notification (doute / décision)"
+    },
+    "reportEmail": {
+      "label": "Email destinataire des récaps"
+    }
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "adminToken": { "type": "string", "default": "" },
+      "instances": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "url": { "type": "string" },
+            "username": { "type": "string", "default": "" },
+            "password": { "type": "string", "default": "" }
+          },
+          "required": ["url"]
+        },
+        "default": {}
+      },
+      "notify": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "channel": { "type": "string", "default": "telegram" },
+          "accountId": { "type": "string", "default": "" },
+          "to": { "type": "string", "default": "" }
+        },
+        "default": {}
+      },
+      "reportEmail": { "type": "string", "default": "" }
+    }
+  }
+}

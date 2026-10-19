@@ -439,6 +439,36 @@
   environment:
     XDG_RUNTIME_DIR: "{{ openclaw_xdg_runtime_dir }}"
 
+# Plugin `prometheus-monitor` (outils prometheus_query/alerts/targets de l'agent).
+# Le CODE seul est déployé : instances, mots de passe et canal de notification
+# se règlent par la page d'admin du plugin (`plugins.entries.prometheus-monitor
+# .config`), secrets compris — rien de tout cela ne vit dans le dépôt.
+# `index.js` enveloppe chaque retour d'outil en `{content:[…]}` : OpenClaw ≥
+# 2026.10 rejette les objets bruts (« details.result.content: expected array »),
+# l'agent réessayait alors en boucle jusqu'au timeout fleet-watch (constaté le
+# 19/10/2026, erreurs depuis le 14/10).
+- name: Create the extensions directory
+  ansible.builtin.file:
+    path: "{{ openclaw_home }}/.openclaw/extensions"
+    state: directory
+    owner: "{{ openclaw_user }}"
+    group: "{{ openclaw_user }}"
+    mode: '0755'
+  become: true
+  when: openclaw_prometheus_monitor_enabled | bool
+
+- name: Deploy the prometheus-monitor plugin
+  ansible.builtin.copy:
+    src: prometheus-monitor/
+    dest: "{{ openclaw_home }}/.openclaw/extensions/prometheus-monitor/"
+    owner: "{{ openclaw_user }}"
+    group: "{{ openclaw_user }}"
+    mode: '0644'
+    directory_mode: '0755'
+  become: true
+  notify: restart openclaw gateway
+  when: openclaw_prometheus_monitor_enabled | bool
+
 - name: Enable and start the OpenClaw gateway
   ansible.builtin.systemd:
     scope: user
