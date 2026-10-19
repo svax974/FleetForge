@@ -99,6 +99,10 @@ pm_http_body_limit: "1mb"
 pm_service_jwt_issuer: "papangworkspace"
 pm_service_jwt_audience: "papangmetrics"
 pm_service_jwt_max_age: "10m"
+# D7 (2026-10-18): only these service key ids may write to PapangMetrics (dev/preprod read-only).
+pm_service_jwt_write_key_ids: "prod"
+# Transition: the legacy single public key is treated as prod for writes until the per-env keys are live.
+pm_service_jwt_legacy_write: true
 pm_throttle_ttl: 60
 pm_throttle_limit: 120
 pm_throttle_ip_limit: 600
