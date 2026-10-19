@@ -15,6 +15,14 @@
     owner: 70
   become: true
 
+- name: TLS material and pg_hba.conf
+  ansible.builtin.include_tasks:
+    file: tls.yml
+    apply:
+      tags: [config, tls]
+  when: tsdb_tls_enabled | bool
+  tags: [config, tls]
+
 # Tagué `config` pour pouvoir ne rejouer que les paramètres du moteur, sans
 # repasser par le bootstrap de la machine (phase 1 du playbook) :
 #   ./play.sh papanglabs deploy-timescaledb-standalone.yml --tags config

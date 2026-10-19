@@ -125,14 +125,16 @@ pm_service_jwt_envs: [prod, preprod, dev]
 pm_service_jwt_legacy_key: "{{ papangmetrics_service_jwt_legacy_key | default(true) }}"
 
 # ── Base d'indicateurs ───────────────────────────────────────────────────────
-# ATTENTION : timescale (194.163.180.236) et cette machine (45.8.132.134) sont
-# deux VPS distincts sans réseau privé : la connexion traverse Internet EN CLAIR
-# tant que METRICS_DB_SSL=false. Passer à true exige un certificat serveur sur
-# le conteneur TimescaleDB (non géré par timescaledb-install à ce jour) et son
-# CA dans pm_db_ssl_ca_path. Décision ouverte, voir
-# PapangWorkspace/docs/security/ROTATION_RUNBOOK_2026-10-18.md.
-pm_db_ssl: false
-pm_db_ssl_ca_path: ""
+# timescale (194.163.180.236) et cette machine (45.8.132.134) sont deux VPS sans
+# réseau privé : la connexion traverse Internet. TLS côté serveur :
+# timescaledb-install/tasks/tls.yml (AC privée). Ici, `papangmetrics_db_ssl: true`
+# (étape du runbook, APRÈS le passage de TimescaleDB en TLS) pose
+# METRICS_DB_SSL=true et le certificat de l'AC (jamais sa clé) : le client vérifie
+# alors la chaîne ET l'IP du serveur (SAN), équivalent de sslmode=verify-full.
+# API, ETL et `npm run migration:run` lisent les mêmes variables.
+pm_db_ssl: "{{ papangmetrics_db_ssl | default(false) }}"
+pm_db_ssl_ca_src: "{{ lookup('ansible.builtin.env', 'HOME') }}/.secrets/papang/timescale-ca/ca.crt"
+pm_db_ssl_ca_path: "{{ (pm_dir ~ '/certs/timescale-ca.crt') if (pm_db_ssl | bool) else '' }}"
 pm_db_pool_max: 10
 pm_db_pool_idle_timeout_ms: 30000
 pm_db_connection_timeout_ms: 10000

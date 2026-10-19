@@ -1,0 +1,94 @@
+---
+# TLS de PostgreSQL (voir defaults/main.yml). Inclus par tasks/main.yml AVANT le
+# rendu de docker-compose.yml, qui monte conf/ et active `ssl=on`.
+
+- name: Check the TimescaleDB TLS material on the control machine
+  ansible.builtin.stat:
+    path: "{{ tsdb_tls_pki_dir }}/{{ item }}"
+  loop: [ca.crt, server.crt, server.key]
+  delegate_to: localhost
+  become: false
+  register: tsdb_tls_local
+
+- name: Fail when the TLS material is missing locally
+  ansible.builtin.assert:
+    that: tsdb_tls_local.results | map(attribute='stat.exists') | list is all
+    fail_msg: >-
+      Matériel TLS absent de {{ tsdb_tls_pki_dir }}. Le générer sur ce poste :
+      roles/timescaledb-install/files/timescale-tls-pki.sh --ip {{ ansible_host }} --dns {{ hostname | default('') }}
+    quiet: true
+
+# Un certificat proche de l'expiration est refusé ICI plutôt que découvert par
+# une coupure de PapangMetrics (rejectUnauthorized) le jour J.
+- name: Check that the server certificate is valid long enough
+  ansible.builtin.command:
+    cmd: >-
+      openssl x509 -in {{ tsdb_tls_pki_dir }}/server.crt -noout
+      -checkend {{ (tsdb_tls_min_days_left | int) * 86400 }}
+  delegate_to: localhost
+  become: false
+  changed_when: false
+  register: tsdb_tls_validity
+  failed_when: false
+
+- name: Fail when the server certificate expires soon
+  ansible.builtin.assert:
+    that: tsdb_tls_validity.rc == 0
+    fail_msg: >-
+      server.crt expire dans moins de {{ tsdb_tls_min_days_left }} jours. Le renouveler :
+      timescale-tls-pki.sh --renew-server --ip {{ ansible_host }}, puis rejouer ce rôle (rechargement, sans redémarrage).
+    quiet: true
+
+# Le client vérifie le nom : le SAN doit contenir l'IP qu'il utilise
+# (papangmetrics-deploy : METRICS_DB_HOST = ansible_host de cette entrée).
+- name: Check that the certificate names this machine's address
+  ansible.builtin.command:
+    cmd: openssl x509 -in {{ tsdb_tls_pki_dir }}/server.crt -noout -checkip {{ ansible_host }}
+  delegate_to: localhost
+  become: false
+  changed_when: false
+  register: tsdb_tls_ip
+  failed_when: "'does match' not in tsdb_tls_ip.stdout"
+
+# Mode exigé sans client listé = plus personne ne joint la base par le réseau.
+- name: Refuse the required mode without any hostssl client
+  ansible.builtin.assert:
+    that: (tsdb_tls_clients | length) > 0 or not (tsdb_tls_required | bool)
+    fail_msg: "tsdb_tls_clients (= tsdb_allowed_ips) est vide : le mode exigé couperait PapangMetrics."
+    quiet: true
+
+- name: Create the configuration and TLS directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: 70
+    mode: '0700'
+  loop: ["{{ tsdb_dir }}/conf", "{{ tsdb_dir }}/conf/tls"]
+  become: true
+
+# PostgreSQL refuse une clé lisible par d'autres que son propriétaire (uid 70
+# de l'image alpine). Rechargement suffisant : PostgreSQL relit certificat et
+# clé sur SIGHUP (renouvellement sans coupure).
+- name: Deploy the server certificate and key (never the CA key)
+  ansible.builtin.copy:
+    src: "{{ tsdb_tls_pki_dir }}/{{ item.name }}"
+    dest: "{{ tsdb_dir }}/conf/tls/{{ item.name }}"
+    owner: 70
+    mode: "{{ item.mode }}"
+  loop:
+    - { name: server.crt, mode: '0644' }
+    - { name: server.key, mode: '0600' }
+  loop_control:
+    label: "{{ item.name }}"
+  become: true
+  no_log: true
+  notify: reload timescaledb
+
+- name: Deploy pg_hba.conf
+  ansible.builtin.template:
+    src: pg_hba.conf.j2
+    dest: "{{ tsdb_dir }}/conf/pg_hba.conf"
+    owner: 70
+    mode: '0600'
+  become: true
+  notify: reload timescaledb

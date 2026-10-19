@@ -59,3 +59,20 @@ tsdb_compress_after: "7 days"
 
 # Disk watchdog: compress chunks when free disk on this host drops below this.
 tsdb_watchdog_threshold_gb: 15
+
+# ── TLS (lien PapangMetrics → TimescaleDB, deux VPS joints par Internet) ─────
+# AC privée + certificat serveur générés sur le POSTE DE CONTRÔLE par
+# files/timescale-tls-pki.sh (SAN = l'IP de l'inventaire, que le client vérifie).
+# La clé de l'AC n'est jamais déployée ; seuls server.crt/server.key le sont, ici.
+tsdb_tls_enabled: "{{ timescaledb_tls_enabled | default(true) }}"
+# Transition : false = `host` (clair) encore accepté à côté de `hostssl`, le temps
+# de basculer PapangMetrics en METRICS_DB_SSL=true. true = tout TCP non chiffré
+# refusé (`hostnossl … reject`) et seuls les clients de `tsdb_tls_clients` admis.
+tsdb_tls_required: "{{ timescaledb_tls_required | default(false) }}"
+tsdb_tls_pki_dir: "{{ lookup('ansible.builtin.env', 'HOME') }}/.secrets/papang/timescale-ca"
+# Clients réseau admis en `hostssl` : la même liste que le filtre DOCKER-USER
+# (timescaledb-security, `tsdb_allowed_ips`), une seule source.
+tsdb_tls_clients: "{{ tsdb_allowed_ips | default([]) }}"
+# Le certificat déployé doit encore valoir au moins ce nombre de jours, sinon
+# le déploiement échoue avec la commande de renouvellement.
+tsdb_tls_min_days_left: 30

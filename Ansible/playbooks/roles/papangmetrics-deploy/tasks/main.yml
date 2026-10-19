@@ -176,6 +176,37 @@
   when: not (pm_service_jwt_legacy_key | bool)
   notify: restart papangmetrics-api
 
+- name: Check the TimescaleDB CA certificate on the control machine
+  ansible.builtin.stat:
+    path: "{{ pm_db_ssl_ca_src }}"
+  delegate_to: localhost
+  become: false
+  register: pm_db_ca_local
+  when: pm_db_ssl | bool
+
+- name: Fail when METRICS_DB_SSL is on without the CA certificate
+  ansible.builtin.assert:
+    that: pm_db_ca_local.stat.exists
+    fail_msg: >-
+      {{ pm_db_ssl_ca_src }} absent : générer l'AC (timescaledb-install/files/timescale-tls-pki.sh)
+      et déployer TimescaleDB en TLS avant de passer papangmetrics_db_ssl à true.
+    quiet: true
+  when: pm_db_ssl | bool
+
+# Le certificat de l'AC, public ; sa clé reste sur le poste de contrôle.
+- name: Deploy the TimescaleDB CA certificate (verification of the DB server)
+  ansible.builtin.copy:
+    src: "{{ pm_db_ssl_ca_src }}"
+    dest: "{{ pm_dir }}/certs/timescale-ca.crt"
+    owner: "{{ pm_user }}"
+    group: "{{ pm_user }}"
+    mode: '0644'
+  become: true
+  when: pm_db_ssl | bool
+  notify:
+    - restart papangmetrics-api
+    - restart papangmetrics-etl
+
 - name: Build the list of accepted service JWT public keys
   ansible.builtin.set_fact:
     pm_service_jwt_key_paths: >-

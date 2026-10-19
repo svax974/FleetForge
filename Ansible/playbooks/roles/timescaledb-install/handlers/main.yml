@@ -3,3 +3,13 @@
   community.docker.docker_compose_v2:
     project_src: "{{ tsdb_dir }}"
     state: restarted
+
+# pg_hba.conf, certificat et clé : relus sur rechargement, sans couper les
+# connexions établies. Ignoré si le conteneur n'existe pas encore (premier
+# déploiement : il démarre ensuite avec la bonne configuration).
+- name: reload timescaledb
+  ansible.builtin.command:
+    cmd: docker exec papangmetrics-timescaledb psql -U {{ tsdb_user }} -d {{ tsdb_db }} -tAc "SELECT pg_reload_conf()"
+  register: tsdb_reload
+  changed_when: true
+  failed_when: tsdb_reload.rc != 0 and 'No such container' not in tsdb_reload.stderr

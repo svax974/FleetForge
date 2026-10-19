@@ -7,3 +7,7 @@ tsdbmon_container: papangmetrics-timescaledb
 tsdbmon_port: "{{ papangmetrics_db_port | default(5432) }}"
 tsdbmon_db: "{{ papangmetrics_db | default('papangmetrics') }}"
 tsdbmon_user: "{{ papangmetrics_user | default('papangmetrics') }}"
+# Certificat TLS servi par PostgreSQL (timescaledb-install/tasks/tls.yml) : la
+# sonde échoue s'il expire dans moins de 30 jours (`-starttls postgres`, sans
+# lire de fichier : svcprobe n'a pas accès au répertoire de la base).
+tsdbmon_tls: "{{ timescaledb_tls_enabled | default(true) }}"

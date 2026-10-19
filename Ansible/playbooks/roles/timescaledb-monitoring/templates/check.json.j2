@@ -2,7 +2,9 @@
   "service": "timescaledb",
   "up": {"kind": "docker", "container": "{{ tsdbmon_container }}"},
   "extra_checks": [
-    {"name": "port", "kind": "tcp", "host": "127.0.0.1", "port": {{ tsdbmon_port }}}
+    {"name": "port", "kind": "tcp", "host": "127.0.0.1", "port": {{ tsdbmon_port }}}{% if tsdbmon_tls | bool %},
+    {"name": "tls-cert-valid-30d", "kind": "command", "timeout": 10,
+     "argv": ["/bin/sh", "-c", "echo | openssl s_client -starttls postgres -connect 127.0.0.1:{{ tsdbmon_port }} 2>/dev/null | openssl x509 -noout -checkend 2592000"]}{% endif %}
   ],
   "metrics_command": [
     "{{ svcprobe_lib_dir }}/postgres-metrics.sh",

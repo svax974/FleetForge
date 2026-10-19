@@ -1,0 +1,25 @@
+# Généré par Ansible (timescaledb-install) — NE PAS ÉDITER SUR L'HÔTE.
+# Monté par RÉPERTOIRE (conf/), lu via `-c hba_file` : une modification est prise
+# en compte par un simple rechargement (handler `reload timescaledb`).
+#
+# TYPE      DATABASE  USER  ADDRESS        METHOD
+# Outils locaux via `docker exec` (sauvegarde, sonde svcprobe, disk-watchdog,
+# restauration) : socket unix et boucle locale DU CONTENEUR, comme l'image par défaut.
+local       all       all                  trust
+host        all       all   127.0.0.1/32   trust
+host        all       all   ::1/128        trust
+{% if tsdb_tls_required | bool %}
+# TLS exigé : toute connexion TCP en clair est refusée avant tout le reste.
+hostnossl   all       all   all            reject
+{% endif %}
+{% for ip in tsdb_tls_clients %}
+hostssl     all       all   {{ ip }}/32    scram-sha-256
+{% endfor %}
+{% if tsdb_tls_required | bool %}
+host        all       all   all            reject
+{% else %}
+# TRANSITION (timescaledb_tls_required: false) : le clair reste accepté, comme
+# avant (filtrage réseau DOCKER-USER inchangé). À fermer une fois PapangMetrics
+# passé en METRICS_DB_SSL=true.
+host        all       all   all            scram-sha-256
+{% endif %}

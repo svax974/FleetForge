@@ -29,6 +29,19 @@ services:
       - "autovacuum_max_workers={{ tsdb_autovacuum_max_workers }}"
       - "-c"
       - "timescaledb.telemetry_level=off"
+{% if tsdb_tls_enabled | bool %}
+      # TLS (tasks/tls.yml) : certificat de l'AC privée, pg_hba.conf géré par Ansible.
+      - "-c"
+      - "ssl=on"
+      - "-c"
+      - "ssl_cert_file=/etc/postgresql/conf/tls/server.crt"
+      - "-c"
+      - "ssl_key_file=/etc/postgresql/conf/tls/server.key"
+      - "-c"
+      - "ssl_min_protocol_version=TLSv1.2"
+      - "-c"
+      - "hba_file=/etc/postgresql/conf/pg_hba.conf"
+{% endif %}
     environment:
       - POSTGRES_DB={{ tsdb_db }}
       - POSTGRES_USER={{ tsdb_user }}
@@ -38,6 +51,10 @@ services:
     volumes:
       - {{ tsdb_dir }}/init.sql:/docker-entrypoint-initdb.d/init.sql
       - {{ tsdb_dir }}/data:/var/lib/postgresql/data
+{% if tsdb_tls_enabled | bool %}
+      # Monté par RÉPERTOIRE : un fichier réécrit par Ansible (nouvel inode) reste visible.
+      - {{ tsdb_dir }}/conf:/etc/postgresql/conf:ro
+{% endif %}
     ports:
       # localhost-only: indicators DB is reached by the co-located ETL/API.
       - '{{ tsdb_bind }}:{{ tsdb_port }}:5432'
