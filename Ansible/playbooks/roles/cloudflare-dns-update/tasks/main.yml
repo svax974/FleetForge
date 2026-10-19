@@ -11,95 +11,10 @@
       et pose-le dans group_vars/<parc>.yml.
     success_msg: "Jeton présent, zone {{ cfdns_zone }}."
 
-# Le filtre porte sur trois conditions, et chacune correspond à une erreur
-# déjà vue : un hôte sans `hostname` n'a pas de nom à publier ; un
-# `ansible_host` qui n'est pas une IPv4 est un gabarit non renseigné
-# (`xxx.xxx.xxx.xxx` sur docker-repo) que Cloudflare refuserait ; un nom hors
-# de la zone appartient à un autre domaine et serait créé au mauvais endroit.
-#
-# Pas d'interrupteur d'exclusion : TOUT `hostname` est synchronisé en A. Un
-# service servi par un vhost sur les proxies plutôt que joint directement ne
-# contourne pas cette règle — il porte un NOM PUBLIC DISTINCT de son
-# `hostname`, déclaré via `proxy_hostname` sur son entrée d'inventaire, et
-# c'est tasks/cnames.yml qui publie le CNAME correspondant vers le front des
-# proxies (avec garde-fou anti-collision A/CNAME). Un A et un CNAME ne pouvant
-# pas coexister sur le même nom, réutiliser le `hostname` comme nom public
-# écraserait le CNAME à chaque exécution : le `hostname` reste l'identité
-# machine (suffixe `-priv`), le CNAME porte le nom de service.
-- name: Build the record list from the inventory
-  ansible.builtin.set_fact:
-    cfdns_records: >-
-      {{ (cfdns_records | default([])) + [{
-           'host': item,
-           'record': hostvars[item].hostname,
-           'value': hostvars[item].ansible_host,
-           'proxied': hostvars[item].cloudflare_proxied | default(cfdns_proxied)
-         }] }}
-  loop: "{{ groups[cfdns_group] | default([]) | sort }}"
-  when:
-    - hostvars[item].hostname is defined
-    - hostvars[item].ansible_host is defined
-    - hostvars[item].ansible_host is match('^[0-9]{1,3}(\.[0-9]{1,3}){3}$')
-    - hostvars[item].hostname is search('\.' ~ cfdns_zone ~ '$')
-
-# Écartés listés, jamais tus : une synchronisation qui saute un hôte en silence
-# se lit comme une synchronisation complète.
-- name: Report the hosts left out
-  ansible.builtin.debug:
-    msg: >-
-      Hors synchronisation : {{ item }}
-      ({{ 'pas de hostname' if hostvars[item].hostname is not defined
-          else ('ansible_host non IPv4 : ' ~ (hostvars[item].ansible_host | default('absent')))
-               if hostvars[item].ansible_host is not defined
-                  or not (hostvars[item].ansible_host is match('^[0-9]{1,3}(\.[0-9]{1,3}){3}$'))
-          else ('nom hors de la zone ' ~ cfdns_zone) }})
-  loop: "{{ groups[cfdns_group] | default([]) | sort }}"
-  when: item not in (cfdns_records | default([]) | map(attribute='host') | list)
-
-# Deux entrées d'inventaire peuvent parfaitement partager une MACHINE — sept le
-# font sur `prometheus1` — mais pas un NOM : les deux enregistrements se
-# succéderaient à chaque exécution, et la zone dirait tantôt l'un tantôt
-# l'autre. Mieux vaut refuser que publier au hasard.
-- name: Fail on duplicate record names
-  ansible.builtin.assert:
-    that:
-      - (cfdns_records | default([]) | map(attribute='record') | list | unique | length)
-        == (cfdns_records | default([]) | length)
-    fail_msg: >-
-      Deux hôtes d'inventaire revendiquent le même nom DNS :
-      {{ cfdns_records | default([]) | map(attribute='record') | list
-         | difference(cfdns_records | default([]) | map(attribute='record') | list | unique) | unique | join(', ') }}.
-      Chaque exécution en publierait un puis l'autre.
-
-- name: Publish the A records
-  community.general.cloudflare_dns:
-    api_token: "{{ cfdns_token }}"
-    zone: "{{ cfdns_zone }}"
-    record: "{{ item.record }}"
-    type: A
-    value: "{{ item.value }}"
-    ttl: "{{ cfdns_ttl }}"
-    proxied: "{{ item.proxied }}"
-    # `solo` fait la différence entre METTRE À JOUR et AJOUTER : sans lui, un
-    # nom déjà présent avec une autre IP gagne un SECOND enregistrement A, et
-    # la zone répond alors en tourniquet entre l'ancienne machine et la
-    # nouvelle — une panne intermittente, donc la pire à diagnostiquer.
-    solo: true
-    state: present
-  loop: "{{ cfdns_records | default([]) }}"
-  loop_control:
-    label: "{{ item.record }} → {{ item.value }}"
-  register: cfdns_published
-
-- name: Summarise
-  ansible.builtin.debug:
-    msg: >-
-      Zone {{ cfdns_zone }} : {{ cfdns_records | default([]) | length }} nom(s) traité(s),
-      {{ cfdns_published.results | default([]) | selectattr('changed', 'defined') | selectattr('changed') | list | length }}
-      modifié(s) —
-      {{ cfdns_published.results | default([]) | selectattr('changed', 'defined') | selectattr('changed')
-         | map(attribute='item.record') | list | join(', ') | default('aucun', true) }}.
-      Le reste de la zone n'a pas été touché.
+# A records de tout le groupe (records.yml, aussi inclus en portée réduite par
+# les rôles `-install` via `cfdns_a_scope`).
+- name: Publish the A records of the inventory hostnames
+  ansible.builtin.include_tasks: records.yml
 
 # Alias CNAME des services (tasks/cnames.yml, qui garantit lui-même le front
 # AVANT de pointer dessus) : un service dont le nom public est déclaré via

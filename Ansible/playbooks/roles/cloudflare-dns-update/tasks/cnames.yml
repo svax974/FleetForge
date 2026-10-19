@@ -51,7 +51,8 @@
     cfdns_cnames: >-
       {{ (cfdns_cnames | default([])) + [{
            'host': item,
-           'record': hostvars[item].proxy_hostname
+           'record': hostvars[item].proxy_hostname,
+           'proxied': hostvars[item].proxy_hostname_proxied | default(false) | bool
          }] }}
   loop: "{{ cfdns_cname_scope | default(groups[cfdns_group] | default([]) | sort) }}"
   when:
@@ -136,12 +137,18 @@
     type: CNAME
     value: "proxy.{{ cfdns_zone }}"
     ttl: "{{ cfdns_ttl }}"
-    proxied: false
+    # Reflète l'état RÉEL de la zone, déclaré par entrée d'inventaire
+    # (`proxy_hostname_proxied: true` = nuage orange). Écrire `false` en dur
+    # ici repasserait en « DNS seul » un nom proxifié à la main — constat du
+    # 19/10/2026 : backindicators(-prod).papanglabs.com résolvent vers des edges
+    # Cloudflare, et leurs vhosts ne laissent passer que les edges (+ VPN,
+    # whitelist) : une synchronisation les aurait rendus injoignables.
+    proxied: "{{ item.proxied }}"
     solo: true
     state: present
   loop: "{{ cfdns_cnames | default([]) }}"
   loop_control:
-    label: "{{ item.record }} → proxy.{{ cfdns_zone }} ({{ item.host }})"
+    label: "{{ item.record }} → proxy.{{ cfdns_zone }} ({{ item.host }}{{ ', proxifié' if item.proxied else '' }})"
   delegate_to: localhost
   become: false
   run_once: true

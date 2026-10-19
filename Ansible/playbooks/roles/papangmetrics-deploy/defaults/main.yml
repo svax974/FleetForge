@@ -90,9 +90,10 @@ pm_trust_proxy: "{{ 'loopback' if (pm_tls_enabled | bool) else 'false' }}"
 # Origines navigateur autorisées (console admin « API access » du front
 # PapangWorkspace) : prod (Cloudflare Pages `main`) et préprod (branche
 # `preprod`, servie sous dev.papanglabs.com — CLIENT_ORIGINS de
-# back/.env.preprod). Le front de dev local vise une API locale
-# (VITE_PAPANGMETRICS_API_URL=http://localhost:9743) : pas d'origine localhost ici.
-pm_cors_origins: "{{ papangmetrics_cors_origins | default(['https://papanglabs.com', 'https://www.papanglabs.com', 'https://dev.papanglabs.com']) }}"
+# back/.env.preprod) et dev local (`./scripts/run.sh dev`, front sur
+# http://localhost:9740 ; front/.env.dev vise aussi cette instance depuis le
+# 19/10/2026). L'origine n'authentifie rien : /admin/* exige le JWT admin.
+pm_cors_origins: "{{ papangmetrics_cors_origins | default(['https://papanglabs.com', 'https://www.papanglabs.com', 'https://dev.papanglabs.com', 'http://localhost:9740']) }}"
 pm_swagger_enabled: false
 pm_http_body_limit: "1mb"
 pm_service_jwt_issuer: "papangworkspace"

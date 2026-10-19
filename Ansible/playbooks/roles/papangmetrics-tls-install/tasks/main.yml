@@ -6,6 +6,20 @@
 # Désactivé (`papangmetrics_tls_enabled: false`, retour arrière) : ce rôle ne
 # fait rien ; c'est papangmetrics-tls-remove qui retire le vhost.
 
+# Le nom servi (`hostname` de l'entrée, papangmetrics1.<domaine>) n'existait
+# pas dans la zone le 19/10/2026 : la synchronisation générique n'avait jamais
+# été rejouée depuis l'ajout de l'entrée. On le garantit ici, en portée
+# réduite à cet hôte : A « DNS seul » vers son ansible_host (un nom proxifié
+# par Cloudflare ne laisserait pas passer le port 9744 et masquerait l'IP des
+# backs, sur laquelle porte tout le filtrage).
+- name: Publish the A record of this machine (DNS only)
+  ansible.builtin.include_role:
+    name: cloudflare-dns-update
+    tasks_from: records
+  vars:
+    cfdns_a_scope:
+      - "{{ inventory_hostname }}"
+
 - name: Install nginx (nginx.org stable, same package as the proxies)
   ansible.builtin.include_role:
     name: install-nginx

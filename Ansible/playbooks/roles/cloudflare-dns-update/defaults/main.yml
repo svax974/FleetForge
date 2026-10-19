@@ -29,7 +29,12 @@ cfdns_token: "{{ cloudflare_token | default('') }}"
 # HTTP/HTTPS et masque l'IP réelle. SSH, scrape Prometheus, remote_write,
 # réplication PostgreSQL — tout cela cesserait de fonctionner, et l'A record ne
 # résoudrait plus vers la machine mais vers un edge Cloudflare.
-# Surchargeable par hôte dans l'inventaire : `cloudflare_proxied: true`.
+# Surchargeable par hôte dans l'inventaire : `cloudflare_proxied: true` (A du
+# `hostname`) ; pour le CNAME du nom de service (`proxy_hostname`), attribut
+# distinct `proxy_hostname_proxied: true` (tasks/cnames.yml) — l'identité
+# machine reste en DNS seul quand le nom public passe par Cloudflare.
+# Avant de jouer update-cloudflare-dns.yml, vérifier que chaque nom proxifié
+# À LA MAIN dans Cloudflare porte l'attribut : sinon il repasse en DNS seul.
 cfdns_proxied: false
 
 # TTL. 1 = automatique côté Cloudflare.
