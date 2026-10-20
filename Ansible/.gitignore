@@ -36,6 +36,10 @@ inventories/*
 # dépôt PRIVÉ du parc, pas ici. Convention : parcs/README.md.
 parcs/*
 !parcs/README.md
+# Clone du dépôt PRIVÉ du parc (svax974/fleetforge-parcs) : parcs/<parc>/, inventaires, group_vars, host_vars,
+# clés publiques, CLAUDE.local.md et .env de prod chiffrés des applications. Les chemins ci-dessus y sont reliés
+# par link-private.sh (liens symboliques, eux aussi ignorés). Convention : parcs/README.md.
+.private/
 
 # host_vars : pare-feu et réglages de chaque machine RÉELLE.
 # Modèle versionné : playbooks/host_vars/machine.yml.template.

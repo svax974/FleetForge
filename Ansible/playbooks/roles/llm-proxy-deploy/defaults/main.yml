@@ -59,3 +59,8 @@ llm_proxy_health_delay: 10
 # Ports Postgres/Redis publiés par le compose du template, qui doivent rester
 # sur 127.0.0.1 (registre des ports, host_vars/ctdapi.yml).
 llm_proxy_infra_ports: [4802, 4803]
+# Identifiant de l'application dans le dépôt privé du parc (.private/apps/apps.yml) :
+# ses .env de prod y sont chiffrés (apps/llm-proxy/{back,front}.env.vault) et restaurés
+# dans le dépôt applicatif avant le déploiement — le vault fait foi. Sans copie
+# dans le dépôt privé, l'étape est sautée et les .env locaux servent tels quels.
+llm_proxy_app_env_id: "llm-proxy"

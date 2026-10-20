@@ -97,3 +97,8 @@ agenthub_runner_ssh_port: "{{ ssh_custom_port }}"
 # (défaut) saute alors l'assert et la tâche ci-dessous ; le chemin manuel
 # (token vaulté + --tags runner) reste disponible avec `false`.
 agenthub_runner_autoprovision: true
+# Identifiant de l'application dans le dépôt privé du parc (.private/apps/apps.yml) :
+# ses .env de prod y sont chiffrés (apps/agenthub/{back,front}.env.vault) et restaurés
+# dans le dépôt applicatif avant le déploiement — le vault fait foi. Sans copie
+# dans le dépôt privé, l'étape est sautée et les .env locaux servent tels quels.
+agenthub_app_env_id: "agenthub"

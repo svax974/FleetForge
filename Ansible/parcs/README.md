@@ -6,7 +6,28 @@ répertoire par parc, nommé d'après `parc_name` (déclaré dans
 `playbooks/group_vars/<parc>.yml`, sans défaut).
 
 Tout ce répertoire est **gitignoré** dans le dépôt public, sauf ce README : son
-contenu se versionne dans le dépôt PRIVÉ du parc.
+contenu se versionne dans le dépôt PRIVÉ du parc, `svax974/fleetforge-parcs`.
+
+## Montage du dépôt privé
+
+```
+cd Ansible
+git clone https://github.com/svax974/fleetforge-parcs.git .private   # .private/ est ignoré ici
+./link-private.sh                                                    # liens symboliques, idempotent
+```
+
+`.private/` reproduit l'arborescence d'`Ansible/`. `link-private.sh` y relie `parcs/<parc>/` et `keys/<parc>/`
+(répertoires entiers), `inventories/*.yml`, `playbooks/group_vars/*.yml`, `playbooks/host_vars/*.yml` (fichier par
+fichier : ces répertoires gardent ici leurs `*.template` publics) et, depuis `repo-root/`, les fichiers non publiés de
+la racine du dépôt (`CLAUDE.md`, `CLAUDE.local.md`, `crates/fleetforge-core/tests/real_inventories.rs`). Les écritures traversent
+les liens (`blockinfile` d'Ansible résout le chemin réel, FleetForge écrit par `std::fs::write`) : un fichier modifié
+ici l'est dans `.private/`, à commiter dans le dépôt privé. Un fichier de parc créé ensuite côté public (nouvel
+inventaire, nouveau parc) : `./link-private.sh --adopt`. Le script refuse d'écraser un fichier qui diffère de sa
+copie privée.
+
+Le dépôt privé porte aussi les `.env` de production des applications du parc, chiffrés en entier par ansible-vault
+(`apps/<app>/{back,front}.env.vault`, liste dans `apps/apps.yml`) : `./app-env.sh status | save <app> | restore
+<app>`. Les rôles `<app>-deploy` (llm-proxy, agenthub) les restaurent avant de lancer le déploiement de l'app.
 
 ```
 parcs/<parc_name>/

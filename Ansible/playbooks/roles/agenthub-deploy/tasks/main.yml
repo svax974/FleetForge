@@ -2,6 +2,27 @@
 # Voir defaults/main.yml pour le choix (orchestrer les scripts du dépôt app,
 # ne pas réimplémenter le build/déploiement en Ansible).
 
+# .env de prod gardés chiffrés dans le dépôt privé du parc (Ansible/.private,
+# voir parcs/README.md) : restaurés dans le dépôt applicatif avant le
+# déploiement par la même commande que l'opérateur (app-env.sh), qui ne
+# réécrit que s'ils diffèrent et garde la copie locale en .env.bak-<date>.
+- name: Check for the vaulted prod env files in the private parc repository
+  ansible.builtin.stat:
+    path: "{{ playbook_dir }}/../.private/apps/{{ agenthub_app_env_id }}"
+  delegate_to: localhost
+  become: false
+  register: agenthub_env_vault_dir
+
+- name: Restore the AgentHub prod env files from the vault
+  ansible.builtin.command:
+    cmd: ./app-env.sh restore {{ agenthub_app_env_id }}
+    chdir: "{{ playbook_dir }}/.."
+  delegate_to: localhost
+  become: false
+  register: agenthub_env_restore
+  changed_when: "'restored from' in agenthub_env_restore.stdout"
+  when: agenthub_env_vault_dir.stat.isdir | default(false)
+
 - name: Fail early when the prod env files are missing on the control machine
   ansible.builtin.stat:
     path: "{{ agenthub_src }}{{ item }}"
