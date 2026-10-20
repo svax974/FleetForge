@@ -1,0 +1,7 @@
+# {{ ansible_managed }} — readonly-user-install
+# Le compte {{ readonly_user_name }} n'élève QUE la passerelle, sans argument : la
+# demande lui parvient par SSH_ORIGINAL_COMMAND, qu'elle valide elle-même.
+# Ne rien ajouter ici — un nouveau besoin est un nouveau verbe de ro-gate, qui
+# caviarde sa sortie ; une règle sudo directe ne caviarderait rien.
+Defaults:{{ readonly_user_name }} env_keep += "SSH_ORIGINAL_COMMAND"
+{{ readonly_user_name }} ALL=(root) NOPASSWD: {{ readonly_user_gate }}

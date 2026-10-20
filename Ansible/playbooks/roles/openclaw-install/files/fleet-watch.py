@@ -3,7 +3,8 @@
 
 Interroge Alertmanager, retire les hôtes volontairement non surveillés, puis
 ne réveille le modèle que si l'ensemble des alertes a CHANGÉ (ou s'il persiste
-depuis plus de `renotify_hours`). Rien d'ouvert = aucun token consommé.
+depuis plus de `renotify_hours`). Un ensemble qui disparaît puis revient dans
+cette fenêtre n'est pas un changement. Rien d'ouvert = aucun token consommé.
 """
 import hashlib
 import json
@@ -55,13 +56,19 @@ def main() -> int:
         save_state({**state, "am_down": True})
         return 0
 
+    state.pop("am_down", None)
     ignored = set(CONF["ignore"])
     open_alerts = [
         a for a in alerts
         if not ({a["labels"].get("instance"), a["labels"].get("node")} & ignored)
     ]
     if not open_alerts:
-        save_state({})
+        # L'empreinte est CONSERVÉE : une alerte qui s'éteint puis se rallume
+        # dans la fenêtre de renvoi n'est pas un nouvel ensemble. L'effacer ici
+        # relançait une analyse complète à chaque oscillation autour du seuil
+        # (constat du 20/10/2026 : SearxngEnginesUnresponsive, deux analyses à
+        # 2 h d'écart, la seconde en timeout).
+        save_state(state)
         return 0
 
     open_alerts.sort(key=lambda a: (a["labels"].get("alertname", ""), a["labels"].get("instance", "")))
@@ -70,6 +77,7 @@ def main() -> int:
     ).hexdigest()
     if (state.get("fingerprint") == fingerprint
             and now - state.get("notified_at", 0) < CONF["renotify_hours"] * 3600):
+        save_state(state)
         return 0
 
     lines = []
@@ -86,7 +94,7 @@ def main() -> int:
 
     msg_file = Path(CONF["state_file"]).with_suffix(".msg")
     msg_file.write_text(message)
-    cmd = [CONF["binary"], "agent", "--message-file", str(msg_file),
+    cmd = [CONF["binary"], "agent", "--agent", CONF["agent"], "--message-file", str(msg_file),
            "--session-id", str(uuid.uuid4()), "--thinking", CONF["thinking"],
            "--channel", CONF["channel"], "--reply-account", CONF["account"],
            "--reply-to", CONF["to"], "--deliver", "--timeout", str(CONF["timeout"])]

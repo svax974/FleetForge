@@ -1,0 +1,51 @@
+---
+# Voir defaults/main.yml. Options de chaque clé : `restrict` (ni pty, ni
+# redirection de port, d'agent ou X11) et `command=` — quoi que demande le
+# client, seule la passerelle s'exécute.
+
+- name: List the read-only keys of the parc
+  ansible.builtin.set_fact:
+    ro_key_files: "{{ query('ansible.builtin.fileglob', playbook_dir ~ '/../keys/' ~ parc_name ~ '/readonly/*.pub') | sort }}"
+
+- name: Install the read-only account
+  when: ro_key_files | length > 0
+  block:
+    - name: Install the read-only gate
+      ansible.builtin.copy:
+        src: ro-gate.py
+        dest: "{{ readonly_user_gate }}"
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Create the read-only account {{ readonly_user_name }}
+      ansible.builtin.user:
+        name: "{{ readonly_user_name }}"
+        shell: /bin/bash
+        password_lock: true
+        create_home: true
+
+    - name: Allow the gate, and only the gate, through sudo
+      ansible.builtin.template:
+        src: sudoers.j2
+        dest: "/etc/sudoers.d/{{ readonly_user_name }}"
+        owner: root
+        group: root
+        mode: "0440"
+        validate: "/usr/sbin/visudo -cf %s"
+
+    - name: Authorize the read-only keys of the parc, bound to the gate
+      ansible.posix.authorized_key:
+        user: "{{ readonly_user_name }}"
+        state: present
+        exclusive: true
+        key_options: 'restrict,command="/usr/bin/sudo -n {{ readonly_user_gate }}"'
+        key: "{{ query('ansible.builtin.file', *ro_key_files) | map('trim') | join('\n') }}"
+
+# Le dossier fait foi jusqu'au bout : vidé, il révoque la dernière clé. Le
+# compte reste (readonly-user-remove le retire), mais plus rien n'y entre.
+- name: Revoke every read-only key when the parc declares none
+  ansible.builtin.file:
+    path: "/home/{{ readonly_user_name }}/.ssh/authorized_keys"
+    state: absent
+  when: ro_key_files | length == 0

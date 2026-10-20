@@ -10,6 +10,9 @@ openclaw_extra_allowed_cidrs: []
 # dupliqué ici, aucun autre rôle du parc ne le définit (motif
 # agenthub-purge).
 openclaw_hostname: "openclaw.{{ domain_name }}"
+# Même valeur que openclaw-install. L'agent watch, son workspace et le clone
+# FleetForge vivent sous openclaw_prefix, retiré en bloc.
+openclaw_ssh_key: "{{ openclaw_home }}/.ssh/id_openclaw"
 
 # Désactivé par défaut : `openclaw-purge` ne sait pas si un AUTRE service sous
 # srvc dépend déjà du lingering. Ne pas désactiver un réglage posé pour

@@ -1,0 +1,13 @@
+---
+# Compte SSH en lecture seule (openclaw-ro) sur les machines du parc, pour les
+# clés de Ansible/keys/<parc>/readonly/. Également joué par setup-server.yml.
+# Plusieurs entrées d'inventaire peuvent désigner la même machine : cibler les
+# entrées canoniques avec --limit évite d'y jouer le rôle plusieurs fois en
+# parallèle (useradd concurrents). Machines web3c au 20/10/2026 :
+#   ./play.sh web3c deploy-readonly-user.yml --limit small1,small3,tradekong,ctdapi,monitor,hub,nuc,proxy2
+- name: Deploy the read-only SSH account
+  hosts: all
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - readonly-user-install

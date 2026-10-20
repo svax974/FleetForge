@@ -189,6 +189,21 @@
   changed_when: true
   when: openclaw_memory_search_provider | length > 0
 
+# Travail de fond qui consomme le modèle sans rien produire de visible (voir
+# defaults, constat du 20/10/2026). Rien de secret : `--batch-json` convient.
+- name: Configure background model work (Skill Workshop review, exec exit wake)
+  ansible.builtin.command:
+    cmd: >-
+      {{ openclaw_binary }} config set --batch-json
+      '{{ [{"path": "skills.workshop.autonomous.mode", "value": openclaw_skill_workshop_mode},
+           {"path": "tools.exec.notifyOnExit", "value": openclaw_exec_notify_on_exit | bool}] | to_json }}'
+    chdir: "{{ openclaw_home }}"
+  become: true
+  become_user: "{{ openclaw_user }}"
+  environment:
+    HOME: "{{ openclaw_home }}"
+  changed_when: true
+
 # Optionnel (openclaw_custom_provider_name vide = sauté). Écrit dans un
 # FICHIER plutôt qu'en argv (`--batch-file`, pas `--batch-json`) : la clé API
 # ne doit jamais apparaître dans la ligne de commande, lisible par tout compte
@@ -305,6 +320,180 @@
     HOME: "{{ openclaw_home }}"
   changed_when: true
   when: openclaw_heartbeat_to | string | length > 0
+
+# Accès du modèle au parc, en lecture seule (voir defaults).
+- name: Ensure the .ssh directory of {{ openclaw_user }} exists
+  ansible.builtin.file:
+    path: "{{ openclaw_home }}/.ssh"
+    state: directory
+    owner: "{{ openclaw_user }}"
+    group: "{{ openclaw_user }}"
+    mode: "0700"
+  become: true
+
+- name: Generate the read-only fleet SSH key (no passphrase)
+  community.crypto.openssh_keypair:
+    path: "{{ openclaw_ssh_key }}"
+    type: ed25519
+    comment: "openclaw@{{ inventory_hostname }}"
+  become: true
+  become_user: "{{ openclaw_user }}"
+  register: openclaw_ssh_keypair
+
+# Le dossier keys/<parc>/readonly/ fait foi pour readonly-user-install.
+- name: Ensure the parc read-only keys folder exists
+  ansible.builtin.file:
+    path: "{{ playbook_dir }}/../keys/{{ parc_name }}/readonly"
+    state: directory
+    mode: "0755"
+  delegate_to: localhost
+  become: false
+
+- name: Copy the public key to the parc read-only keys
+  ansible.builtin.copy:
+    content: "{{ openclaw_ssh_keypair.public_key }} {{ openclaw_ssh_keypair.comment }}\n"
+    dest: "{{ playbook_dir }}/../keys/{{ parc_name }}/readonly/id_openclaw.pub"
+    mode: "0644"
+  delegate_to: localhost
+  become: false
+
+# Alias = noms d'inventaire du parc hors `monitor: off`, c'est-à-dire le champ
+# `instance` des alertes. Plusieurs entrées peuvent désigner la même machine :
+# voulu, l'agent part du nom qu'il lit.
+- name: List the parc hosts the watch agent may reach
+  ansible.builtin.set_fact:
+    openclaw_fleet_hosts: >-
+      {%- set ns = namespace(hosts=[]) -%}
+      {%- for h in groups[parc_name] | default([]) | sort -%}
+      {%- if hostvars[h].monitor | default('on') | string | lower != 'off' -%}
+      {%- set ns.hosts = ns.hosts + [h] -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {{ ns.hosts }}
+
+# Root et non srvc : la config SSH et le seul exécutable autorisé à l'agent
+# `watch` ne doivent pas pouvoir être réécrits par ses propres commandes
+# (une redirection `>` suffirait sur un fichier de srvc).
+- name: Ensure the OpenClaw system configuration directory exists
+  ansible.builtin.file:
+    path: "{{ openclaw_fleet_ssh_config | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  become: true
+
+- name: Render the fleet SSH configuration
+  ansible.builtin.template:
+    src: ssh-config.j2
+    dest: "{{ openclaw_fleet_ssh_config }}"
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+
+- name: Install the fleet-ssh command
+  ansible.builtin.template:
+    src: fleet-ssh.j2
+    dest: "{{ openclaw_fleet_ssh }}"
+    owner: root
+    group: root
+    mode: "0755"
+  become: true
+
+# Agent dédié à fleet-watch (voir defaults). Workspace et base propres : ni la
+# mémoire, ni les skills, ni l'historique de `main`. Création une fois.
+- name: Create the watch agent
+  ansible.builtin.command:
+    cmd: >-
+      {{ openclaw_binary }} agents add {{ openclaw_watch_agent }}
+      --workspace {{ openclaw_watch_workspace }} --non-interactive
+      {{ ('--model ' ~ openclaw_fleetwatch_model) if openclaw_fleetwatch_model | length > 0 else '' }}
+    chdir: "{{ openclaw_home }}"
+    creates: "{{ openclaw_prefix }}/agents/{{ openclaw_watch_agent }}"
+  become: true
+  become_user: "{{ openclaw_user }}"
+  environment:
+    HOME: "{{ openclaw_home }}"
+
+# Dans le workspace de l'agent : c'est la seule arborescence que son `read`
+# peut ouvrir (`fs.workspaceOnly`).
+- name: Clone the FleetForge repository
+  ansible.builtin.git:
+    repo: "{{ openclaw_repo_url }}"
+    dest: "{{ openclaw_repo_dir }}"
+    version: "{{ openclaw_repo_version }}"
+    depth: 1
+    force: true
+  become: true
+  become_user: "{{ openclaw_user }}"
+
+# `minimal` puis ajouts explicites : un outil absent de la liste n'existe pas
+# pour l'agent. `read` confiné à son workspace (le dépôt) : hors de lui,
+# openclaw.json et ses clés API. Ni écriture, ni web, ni sessions, ni
+# mémoire, ni `gateway`.
+- name: Restrict the watch agent tools
+  ansible.builtin.command:
+    cmd: >-
+      {{ openclaw_binary }} config set --batch-json
+      '{{ [{"path": "agents.entries." ~ openclaw_watch_agent ~ ".tools",
+            "value": {"profile": "minimal",
+                      "alsoAllow": ["exec", "process", "read"] + openclaw_watch_prometheus_tools,
+                      "deny": ["gateway", "write", "edit", "apply_patch",
+                               "group:web", "group:sessions", "group:memory", "group:ui"],
+                      "fs": {"workspaceOnly": true},
+                      "exec": {"mode": "allowlist", "notifyOnExit": false}}}] | to_json }}'
+    chdir: "{{ openclaw_home }}"
+  become: true
+  become_user: "{{ openclaw_user }}"
+  environment:
+    HOME: "{{ openclaw_home }}"
+  changed_when: true
+
+# Le document d'approbations de l'hôte fait foi pour l'exécution (le mode
+# `allowlist` de la config n'en est que la demande). Mode allowlist + ask off :
+# une commande hors liste est REFUSÉE aussitôt, sans attendre une approbation
+# que personne ne donnera. Seul fleet-ssh passe, et seulement sous la forme
+# `<instance> <mot> …` — aucun argument en option, ni caractère de shell.
+- name: Read the exec approvals document
+  ansible.builtin.command:
+    cmd: "{{ openclaw_binary }} approvals get --json"
+    chdir: "{{ openclaw_home }}"
+  become: true
+  become_user: "{{ openclaw_user }}"
+  environment:
+    HOME: "{{ openclaw_home }}"
+  register: openclaw_approvals_raw
+  changed_when: false
+
+- name: Allow only fleet-ssh to the watch agent
+  vars:
+    approvals: "{{ (openclaw_approvals_raw.stdout | from_json).file | default({'version': 1}) }}"
+    current: "{{ approvals.get('agents', {}).get(openclaw_watch_agent, {}) }}"
+    arg_pattern: >-
+      ^(?:{{ openclaw_fleet_hosts | map('regex_escape') | join('|') }})(?: [A-Za-z0-9_.@:/=?&%+,][A-Za-z0-9_.@:/=?&%+,-]*)+$
+    desired:
+      security: allowlist
+      ask: "off"
+      askFallback: deny
+      autoAllowSkills: false
+      allowlist:
+        - pattern: "{{ openclaw_fleet_ssh }}"
+          argPattern: "{{ arg_pattern }}"
+  ansible.builtin.command:
+    cmd: "{{ openclaw_binary }} approvals set --stdin"
+    stdin: "{{ approvals | combine({'agents': {openclaw_watch_agent: desired}}, recursive=True) | to_json }}"
+    chdir: "{{ openclaw_home }}"
+  become: true
+  become_user: "{{ openclaw_user }}"
+  environment:
+    HOME: "{{ openclaw_home }}"
+  when: >-
+    current.security | default('') != 'allowlist'
+    or current.ask | default('') != 'off'
+    or current.askFallback | default('') != 'deny'
+    or current.allowlist | default([]) | map(attribute='pattern', default='') | list != [openclaw_fleet_ssh]
+    or current.allowlist | default([]) | map(attribute='argPattern', default='') | list != [arg_pattern]
 
 # Veille du parc : remplace le heartbeat LLM (voir defaults). Le heartbeat natif
 # est mis à 0m ; l'automation `fleet-watch` (commande, sans modèle) le remplace

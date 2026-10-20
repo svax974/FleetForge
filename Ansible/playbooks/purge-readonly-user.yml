@@ -1,0 +1,7 @@
+---
+- name: Purge the read-only SSH account (account, sudo rules, home)
+  hosts: all
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - readonly-user-purge

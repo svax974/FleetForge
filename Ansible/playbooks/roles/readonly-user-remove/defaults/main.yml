@@ -1,0 +1,4 @@
+---
+# Doivent valoir ceux de readonly-user-install.
+readonly_user_name: openclaw-ro
+readonly_user_gate: /usr/local/bin/ro-gate

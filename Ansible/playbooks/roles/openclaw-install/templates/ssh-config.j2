@@ -1,0 +1,16 @@
+# {{ ansible_managed }} — openclaw-install
+# Lu UNIQUEMENT par fleet-ssh (`ssh -F`), jamais par le ssh ordinaire de srvc.
+{% for h in openclaw_fleet_hosts %}
+Host {{ h }}
+  HostName {{ hostvars[h].ansible_host | default(h) }}
+  Port {{ hostvars[h].ansible_port | default(22) }}
+{% endfor %}
+
+Host *
+  User {{ openclaw_ssh_user }}
+  IdentityFile {{ openclaw_ssh_key }}
+  IdentitiesOnly yes
+  BatchMode yes
+  ConnectTimeout 8
+  StrictHostKeyChecking accept-new
+  UserKnownHostsFile ~/.ssh/known_hosts_fleet

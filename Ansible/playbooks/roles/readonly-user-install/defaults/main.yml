@@ -1,0 +1,23 @@
+---
+# Compte SSH en LECTURE SEULE pour les agents qui diagnostiquent le parc sans
+# rien y modifier (OpenClaw, fleet-watch). Transverse : posé sur toutes les
+# machines par setup-server.yml, sans famille dans `ansible_roles`.
+#
+# Le compte n'a AUCUN shell utile : chaque clé porte une commande forcée,
+# la passerelle `ro-gate` (files/ro-gate.py), seule à tourner — en root via
+# sudo, pour lire journaux et conteneurs. Elle n'accepte qu'une liste fermée de
+# verbes en lecture et caviarde tout ce qu'elle rend : ce qui sort part chez le
+# fournisseur du modèle. Caviardage par FORMES, donc incomplet : un secret court
+# sans nom révélateur ni préfixe connu passe en clair (CLAUDE.md, § clés SSH).
+# Sans elle, un compte « simple » lirait encore les
+# fichiers lisibles par tous, `ps` (arguments de lancement) et
+# `systemctl show` (Environment=) — autant de secrets possibles.
+# Ni groupe `docker` (il vaut root), ni `adm`/`systemd-journal` (journaux
+# bruts) : tout passe par la passerelle.
+#
+# Clés : `Ansible/keys/<parc_name>/readonly/*.pub`, sous-dossier que
+# `security-ssh` ne lit pas (fileglob non récursif) — ces clés n'atteignent
+# donc jamais root ni srvc. Le dossier fait foi (`exclusive: true`), y compris
+# vide : il révoque alors toutes les clés. Sans clé, aucun compte n'est créé.
+readonly_user_name: openclaw-ro
+readonly_user_gate: /usr/local/bin/ro-gate

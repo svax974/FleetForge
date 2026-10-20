@@ -61,6 +61,9 @@
     - { role: install-python, become: true }
     - { role: install-docker, become: true }
     - { role: security-create-user, become: true }
+    # Compte openclaw-ro, seulement si le parc déclare des clés en lecture
+    # seule (keys/<parc>/readonly/) : sinon le rôle ne fait rien.
+    - { role: readonly-user-install, become: true }
     # APRÈS security-create-user, et pas avant : les scripts et alias vont dans
     # le home de `remote_username`, qui doit donc exister.
     - { role: install-scripts, become: true }
@@ -94,5 +97,5 @@
         stamp_name: setup-server
         stamp_detail: >-
           security-ssh, set-hostname, install-scripts, install-tools,
-          install-python, install-docker, security-create-user, journald-setup,
-          exporter-sys-install
+          install-python, install-docker, security-create-user,
+          readonly-user-install, journald-setup, exporter-sys-install

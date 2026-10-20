@@ -1,0 +1,12 @@
+---
+# readonly-user-remove, plus le répertoire personnel du compte.
+
+- name: Remove the read-only account and its sudo rules
+  ansible.builtin.include_role:
+    name: readonly-user-remove
+    public: true  # expose readonly_user_name à la tâche suivante
+
+- name: Remove the read-only account home
+  ansible.builtin.file:
+    path: "/home/{{ readonly_user_name }}"
+    state: absent

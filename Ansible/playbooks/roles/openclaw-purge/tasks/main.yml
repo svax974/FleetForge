@@ -22,6 +22,19 @@
     - "{{ openclaw_home }}/.provider-batch.json"
     - "{{ openclaw_home }}/.config/systemd/user/openclaw-gateway.service"
     - "{{ openclaw_home }}/.config/systemd/user/openclaw-gateway.service.d"
+    - "{{ openclaw_ssh_key }}"
+    - "{{ openclaw_ssh_key }}.pub"
+    - "{{ openclaw_home }}/.ssh/known_hosts_fleet"
+    - /etc/openclaw
+
+# Retirée du dossier qui fait foi : le prochain deploy-readonly-user.yml la
+# révoque sur toutes les machines.
+- name: Remove the public key from the parc read-only keys
+  ansible.builtin.file:
+    path: "{{ playbook_dir }}/../keys/{{ parc_name }}/readonly/id_openclaw.pub"
+    state: absent
+  delegate_to: localhost
+  become: false
 
 # Désactivé par défaut (voir defaults/main.yml) : ne pas retirer un réglage
 # dont d'autres services `srvc` pourraient dépendre sans confirmation

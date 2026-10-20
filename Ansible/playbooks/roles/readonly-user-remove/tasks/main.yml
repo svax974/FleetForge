@@ -1,0 +1,18 @@
+---
+# Retire le compte lecture seule et ses élévations sudo. Le répertoire
+# personnel (dont authorized_keys) reste : sans compte, il ne permet aucune
+# connexion. readonly-user-purge le supprime.
+
+- name: Remove the read-only sudo rules and the gate
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "/etc/sudoers.d/{{ readonly_user_name }}"
+    - "{{ readonly_user_gate }}"
+
+- name: Remove the read-only account {{ readonly_user_name }}
+  ansible.builtin.user:
+    name: "{{ readonly_user_name }}"
+    state: absent
+    remove: false

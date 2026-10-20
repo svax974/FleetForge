@@ -26,11 +26,14 @@
   when: openclaw_xdg_runtime_dir is defined
   failed_when: false
 
-- name: Remove the openclaw CLI wrapper
+- name: Remove the openclaw CLI wrapper and the fleet-ssh command
   ansible.builtin.file:
-    path: /usr/local/bin/openclaw
+    path: "{{ item }}"
     state: absent
   become: true
+  loop:
+    - /usr/local/bin/openclaw
+    - /usr/local/bin/fleet-ssh
 
 - name: Close the OpenClaw port
   community.general.ufw:

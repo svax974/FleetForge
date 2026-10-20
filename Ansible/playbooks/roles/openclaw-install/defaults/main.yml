@@ -165,6 +165,65 @@ openclaw_fleetwatch_timeout: 300
 # `mtbridge1`).
 openclaw_fleetwatch_ignore_extra: [mtbridge1]
 
+# ── Travail de fond facturé au modèle ───────────────────────────────────────
+# Constat du 20/10/2026 : 9 234 points Poe dans la journée, dont 4 % pour la
+# seule réponse utile, puis 402 (points épuisés) et plus aucun modèle.
+# - Skill Workshop en `auto` (défaut amont) : après tout run d'au moins
+#   10 itérations, y compris interrompu (timeout), une « experience review »
+#   détachée rejoue le contexte complet sur le même modèle. Les runs de
+#   fleet-watch en font ~30 : 118 requêtes de revue, 7 649 points, rien de
+#   visible. `propose` ne suffit pas, la revue tourne quand même ; seul `off`
+#   l'empêche, et coupe aussi la revue hebdomadaire des skills.
+openclaw_skill_workshop_mode: "off"
+# - Fin d'un exec passé en arrière-plan : OpenClaw ouvre un tour pour le
+#   signaler, sans le contexte du run qui l'a lancé. L'agent a passé
+#   60 itérations à chercher ce qu'était ce processus, puis a envoyé
+#   « Hello — I'm here » sur Telegram (828 points). `process poll` reste
+#   disponible pour suivre un processus dans le run qui l'a lancé.
+openclaw_exec_notify_on_exit: false
+
+# ── Accès du modèle au parc, en lecture seule ───────────────────────────────
+# Constat du 20/10/2026 : chaque analyse fleet-watch passait ~15 itérations à
+# redécouvrir comment joindre les machines (root@, clé à passphrase, port 22)
+# et où était le dépôt (clone obsolète du 07/09), au point de dépasser le
+# timeout. Tout est désormais donné : clé dédiée SANS passphrase (le modèle
+# ne peut pas en saisir), configuration SSH dérivée de l'inventaire, clone frais
+# du dépôt public.
+# La clé publique est recopiée sur le poste de contrôle dans
+# keys/<parc_name>/readonly/ — à COMMITTER dans le dépôt privé du parc — puis
+# posée par `deploy-readonly-user.yml` sur le compte ci-dessous, jamais sur
+# root ni srvc.
+openclaw_ssh_key: "{{ openclaw_home }}/.ssh/id_openclaw"
+# Doit valoir `readonly_user_name` de readonly-user-install.
+openclaw_ssh_user: openclaw-ro
+# Rôles et playbooks seulement : ni inventaire, ni variables, ni secrets du
+# parc (dépôt privé, absent ici). `force` à la mise à jour : c'est un miroir,
+# une modification locale n'a rien à y faire.
+openclaw_repo_url: https://github.com/svax974/FleetForge.git
+openclaw_repo_version: main
+# Dans le workspace de l'agent watch, seul endroit que son `read` peut ouvrir.
+openclaw_repo_dir: "{{ openclaw_watch_workspace }}/FleetForge"
+
+# ── Agent dédié à fleet-watch ───────────────────────────────────────────────
+# L'agent `main` (conversations Telegram) a le profil `coding` : exec libre et
+# `read` sous srvc, donc accès à openclaw.json et à ses clés API. Les analyses
+# automatiques n'en ont pas besoin : elles tournent sous un agent séparé dont
+# `exec` n'accepte QUE fleet-ssh (liste blanche du document d'approbations,
+# arguments fermés) et `read` ne voit que son workspace (le dépôt), sans web
+# ni mémoire. Même hub passe par
+# fleet-ssh et la passerelle ro-gate. `main` reste inchangé.
+openclaw_watch_agent: watch
+openclaw_watch_workspace: "{{ openclaw_prefix }}/workspace-{{ openclaw_watch_agent }}"
+openclaw_watch_prometheus_tools:
+  - prometheus_instances
+  - prometheus_alerts
+  - prometheus_alerts_diff
+  - prometheus_query
+  - prometheus_targets
+# Root, hors de portée des commandes de l'agent (voir tasks).
+openclaw_fleet_ssh: /usr/local/bin/fleet-ssh
+openclaw_fleet_ssh_config: /etc/openclaw/fleet-ssh.conf
+
 # ── Canal Telegram (optionnel) ──────────────────────────────────────────────
 # Jeton du bot, à chiffrer dans group_vars/web3c.yml comme
 # openclaw_openai_api_key (`ansible-vault encrypt_string --stdin-name

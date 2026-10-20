@@ -1,0 +1,28 @@
+#!/bin/bash
+# {{ ansible_managed }} — openclaw-install
+# Seul exécutable que l'agent `{{ openclaw_watch_agent }}` peut lancer (liste blanche exec).
+# Vise le compte lecture seule d'une machine du parc, dont la clé n'exécute que
+# la passerelle ro-gate. Contrôles redondants avec l'argPattern de la liste
+# blanche, volontairement : l'un ne dépend pas de l'autre.
+#   fleet-ssh <instance> <verbe> [arguments]
+set -euo pipefail
+
+case "${1:-}" in
+  {{ openclaw_fleet_hosts | join('|') }}) ;;
+  *)
+    echo "instance inconnue : '${1:-}'. Instances : {{ openclaw_fleet_hosts | join(' ') }}" >&2
+    exit 2
+    ;;
+esac
+
+# Aucun argument en option : ssh relit les options APRÈS le nom d'hôte, et
+# `-o ProxyCommand=…` exécuterait une commande sur CETTE machine.
+for arg in "${@:2}"; do
+  if [[ $arg == -* ]]; then
+    echo "argument refusé : '$arg'" >&2
+    exit 2
+  fi
+done
+
+# `--` avant l'hôte : ssh cesse alors toute lecture d'options.
+exec /usr/bin/ssh -F {{ openclaw_fleet_ssh_config }} -- "$@"

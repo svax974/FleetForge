@@ -1,0 +1,7 @@
+---
+- name: Remove the read-only SSH account and its sudo rules
+  hosts: all
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - readonly-user-remove

@@ -12,4 +12,11 @@ EXCLUSIVE des clés posées sur `root` et sur l'utilisateur de service
   rester, sinon Ansible se coupe lui-même l'accès.
 - Un dossier vide est refusé (assert) plutôt que de vider les comptes.
 
+Sous-dossier `keys/<parc_name>/readonly/*.pub` : clés du compte en LECTURE
+SEULE `openclaw-ro` (`readonly-user-install`, joué par `setup-server.yml` et
+`deploy-readonly-user.yml`), jamais posées sur root ni srvc — `security-ssh`
+ne lit pas les sous-dossiers. Chaque clé n'y lance que la passerelle `ro-gate`
+(commande forcée, sorties caviardées). Même règle : le dossier fait foi, vidé il
+révoque. `id_openclaw.pub` y est déposée par `openclaw-install`.
+
 Le contenu de ce dossier est gitignoré : il décrit qui accède au parc.

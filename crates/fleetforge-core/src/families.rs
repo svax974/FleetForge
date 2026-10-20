@@ -31,6 +31,7 @@ pub const NOT_FAMILIES: &[&str] = &[
     "exporter-sys",
     "copyfail-patch",
     "install-cert",
+    "readonly-user",
     // artefacts posés sur un service existant
     "llamacpp-model",
     "ollama-model",
