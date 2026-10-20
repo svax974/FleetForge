@@ -7,8 +7,9 @@
 #                                # group_vars, host_vars, parc directory), then link them — commit .private/ after
 #
 # Linked: parcs/<parc>/ and keys/<parc>/ (whole directories), inventories/*.yml, playbooks/group_vars/*.yml,
-# playbooks/host_vars/*.yml (file by file: these directories also hold the public *.template files), and every file of
-# .private/repo-root/ at the same path from the repository root (CLAUDE.md, CLAUDE.local.md, tests against the real
+# playbooks/host_vars/*.yml (file by file: these directories also hold the public *.template files), the private files
+# of public roles kept under .private/playbooks/roles/ (encrypted in full with ansible-vault: copy, template and
+# lookup('file') decrypt them on the fly), and every file of .private/repo-root/ at the same path from the repository root (CLAUDE.md, CLAUDE.local.md, tests against the real
 # inventories).
 # Writers follow the links (Ansible blockinfile resolves the real path, FleetForge writes with std::fs::write), so a
 # file edited through a link is edited in .private/.
@@ -77,6 +78,9 @@ done
 while IFS= read -r f; do
   link_one "../${f#"${PRIVATE}/repo-root/"}" "${f}"
 done < <(find "${PRIVATE}/repo-root" -type f 2>/dev/null)
+while IFS= read -r f; do
+  link_one "${f#"${PRIVATE}"/}" "${f}"
+done < <(find "${PRIVATE}/playbooks/roles" -type f 2>/dev/null)
 
 if [[ ${#conflicts[@]} -gt 0 ]]; then
   echo "✖ left untouched, they differ from their private copy (compare, then fix one side and rerun):" >&2

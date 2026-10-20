@@ -19,7 +19,9 @@ git clone https://github.com/svax974/fleetforge-parcs.git .private   # .private/
 `.private/` reproduit l'arborescence d'`Ansible/`. `link-private.sh` y relie `parcs/<parc>/` et `keys/<parc>/`
 (répertoires entiers), `inventories/*.yml`, `playbooks/group_vars/*.yml`, `playbooks/host_vars/*.yml` (fichier par
 fichier : ces répertoires gardent ici leurs `*.template` publics) et, depuis `repo-root/`, les fichiers non publiés de
-la racine du dépôt (`CLAUDE.md`, `CLAUDE.local.md`, `crates/fleetforge-core/tests/real_inventories.rs`). Les écritures traversent
+la racine du dépôt (`CLAUDE.md`, `CLAUDE.local.md`, `crates/fleetforge-core/tests/real_inventories.rs`). Il relie aussi les fichiers
+sensibles que des rôles publics attendent à leur propre chemin (`.private/playbooks/roles/…`, chiffrés en entier par
+ansible-vault : clés FreeLLM, dump Pritunl). Les écritures traversent
 les liens (`blockinfile` d'Ansible résout le chemin réel, FleetForge écrit par `std::fs::write`) : un fichier modifié
 ici l'est dans `.private/`, à commiter dans le dépôt privé. Un fichier de parc créé ensuite côté public (nouvel
 inventaire, nouveau parc) : `./link-private.sh --adopt`. Le script refuse d'écraser un fichier qui diffère de sa
