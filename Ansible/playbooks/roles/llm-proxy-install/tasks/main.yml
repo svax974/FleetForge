@@ -1,0 +1,33 @@
+---
+# ── DNS : alias CNAME vers le front des proxies ─────────────────────────────
+# Convention d'inventaire : le nom public (llm_proxy_hostname) est déclaré sur
+# l'entrée `llm-proxy` via `proxy_hostname`, et c'est la synchronisation
+# générique (update-cloudflare-dns.yml, cloudflare-dns-update/tasks/
+# cnames.yml) qui publie le CNAME vers le front round-robin — jamais un A vers
+# l'IP propre de cet hôte. Le `hostname` de l'entrée reste l'identité machine
+# (llm-proxy-priv), synchronisé en A comme tout hôte.
+#
+# L'inclusion ci-dessous rejoue cette même logique en portée réduite (ce seul
+# hôte) pour garantir le CNAME dès le premier déploiement, sans attendre la
+# synchronisation générique — même mécanisme qu'agenthub-install (CLAUDE.md,
+# « Obligation DNS + vhost pour un service nommé »).
+- name: Ensure the service CNAME to the canonical proxy front
+  ansible.builtin.include_role:
+    name: cloudflare-dns-update
+    tasks_from: cnames
+  vars:
+    cfdns_cname_scope:
+      - "{{ inventory_hostname }}"
+
+# Le parc utilise un certificat WILDCARD par domaine (cert-install/
+# install-cert, `certbot certonly --dns-cloudflare -d "*.{{ domain_name }}"`) :
+# *.web3c.cc couvre déjà llm-proxy.web3c.cc sans action supplémentaire.
+- name: Report DNS + certificate status
+  ansible.builtin.debug:
+    msg: >-
+      CNAME {{ llm_proxy_hostname }} → proxy.{{ domain_name }} garanti (front
+      round-robin entre les proxies {{ groups['proxies'] | default([]) | join(', ') }}).
+      Certificat : déjà couvert par le wildcard *.{{ domain_name }}
+      (cert-install/install-cert) — aucune action cert nécessaire pour ce
+      nouveau nom. Le vhost est poussé par le play suivant de
+      deploy-llm-proxy.yml (rejouable seul : --tags proxy-conf).

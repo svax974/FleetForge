@@ -1,0 +1,14 @@
+---
+# Restriction réseau de LLM Proxy. Les deux ports (front, back-lb) sont
+# PUBLIÉS PAR DOCKER (scripts/docker-compose.yml du template) : invisibles
+# pour ufw (CLAUDE.md, docker-ports-security/defaults). Les règles vivent dans
+# `docker_ports_rules` (host_vars/ctdapi.yml — hôte CANONIQUE de la machine
+# partagée `ctdapi`, pas `llm-proxy` lui-même, une liste par MACHINE) et
+# sont appliquées en jouant ce rôle sur `ctdapi` (voir deploy-llm-proxy.yml) —
+# jouées sur `llm-proxy`, elles seraient un no-op silencieux.
+#
+# Profil : proxies UNIQUEMENT (service public par son vhost, comme les sync-*),
+# Postgres/Redis en profil « non exposé » (voir host_vars/ctdapi.yml).
+
+llm_proxy_front_port: "{{ hostvars['llm-proxy'].app_port | default(4800) }}"
+llm_proxy_back_port: "{{ hostvars['llm-proxy'].back_port | default(4801) }}"

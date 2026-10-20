@@ -1,0 +1,12 @@
+---
+# Supprime LLM Proxy ET ses données : conteneurs, volumes (Postgres, Redis,
+# dossier partagé), images, CNAME DNS. Destructif, non reconstructible sans
+# sauvegarde de la base applicative (accès, jetons de proxy, clés providers).
+#
+#   ./play.sh web3c purge-llm-proxy.yml -e confirm=yes
+- name: Purge LLM Proxy
+  hosts: llm-proxy
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - llm-proxy-purge

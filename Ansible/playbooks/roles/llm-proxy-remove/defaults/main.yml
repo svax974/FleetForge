@@ -1,0 +1,8 @@
+---
+llm_proxy_src: "/Users/steph/Dev/Apps/llm-proxy/"
+llm_proxy_hostname: "llm-proxy.{{ domain_name }}"
+llm_proxy_front_port: "{{ hostvars['llm-proxy'].app_port | default(4800) }}"
+llm_proxy_back_port: "{{ hostvars['llm-proxy'].back_port | default(4801) }}"
+# Repli quand back/.env est absent du poste de contrôle ; sinon PROJECT_NAME
+# y est lu (voir tasks/main.yml).
+llm_proxy_project_name_default: "llm-proxy"

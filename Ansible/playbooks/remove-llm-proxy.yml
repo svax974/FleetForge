@@ -1,0 +1,13 @@
+---
+# Retire LLM Proxy : conteneurs (front/back/back-lb/postgres/redis) et sonde.
+# Conserve les volumes de données (voir purge-llm-proxy.yml). Le filtrage
+# DOCKER-USER, le vhost et le CNAME DNS ne sont pas retirés automatiquement —
+# voir le message de llm-proxy-remove.
+#
+#   ./play.sh web3c remove-llm-proxy.yml
+- name: Remove the LLM Proxy app
+  hosts: llm-proxy
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - llm-proxy-remove

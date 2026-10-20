@@ -164,6 +164,9 @@ fn get_playbook_metadata(name: &str) -> (String, String) {
         "deploy-agenthub" => ("Déploiement AgentCenter".into(), "Déploie le hub AgentCenter sur l'hôte `agenthub` (machine partagée avec ctdapi/dev/rotki) : CNAME agenthub.web3c.cc, vhost proxies (WebSocket), filtrage DOCKER-USER des ports 4700/4701, build + déploiement de l'app via les scripts du dépôt, supervision, puis activation du runner (tag runner, jeton en vault).".into()),
         "remove-agenthub" => ("Suppression AgentCenter".into(), "Arrête le hub et le runner, retire la sonde. Conserve données, volumes et l'entrée docker_ports_rules.".into()),
         "purge-agenthub" => ("Purge AgentCenter".into(), "Supprime le hub (conteneurs, images, volumes nommés) et le CNAME, désactive le runner. Destructif — exige -e confirm=yes.".into()),
+        "deploy-llm-proxy" => ("Déploiement LLM Proxy".into(), "Déploie la passerelle LLM Proxy (OpenAI/Anthropic-compatible) sur l'entrée `llm-proxy` (machine partagée avec ctdapi/agenthub/rotki) : CNAME llm-proxy.web3c.cc, vhost public sur les proxies (passerelles en flux), filtrage DOCKER-USER des ports 4800-4803, build + déploiement de l'app via les scripts du dépôt, supervision.".into()),
+        "remove-llm-proxy" => ("Suppression LLM Proxy".into(), "Arrête l'app (tous ses conteneurs) et retire la sonde. Conserve données, volumes, vhost, CNAME et l'entrée docker_ports_rules.".into()),
+        "purge-llm-proxy" => ("Purge LLM Proxy".into(), "Supprime l'app (conteneurs, images, volumes) et le CNAME. Destructif — exige -e confirm=yes.".into()),
         "deploy-sync-server" => ("Déploiement serveurs de synchro".into(), "Déploie les trois serveurs web3c-sync PUBLICS (iptv 4710, banking 4711, aiteam 4712 ; métriques 9710-9712) en conteneurs sur `ctdapi` (machine partagée) : filtrage DOCKER-USER, image construite sur l'hôte depuis les sources du poste, CNAME, supervision (/metrics natif, sonde, règles d'alerte). Les vhosts se posent par update-proxy.yml, les sauvegardes par deploy-backup.yml. Aucun secret.".into()),
         "remove-sync-server" => ("Suppression serveurs de synchro".into(), "Retire les conteneurs web3c-sync, leurs sondes et cibles Prometheus. Conserve données, image, sauvegardes, CNAME, vhosts et entrées docker_ports_rules.".into()),
         "purge-sync-server" => ("Purge serveurs de synchro".into(), "IRRÉVERSIBLE : supprime une instance web3c-sync et ses données (base, blobs), le CNAME et le cron de sauvegarde. Exige -e sync_purge_confirm=yes et une sauvegarde récente ; toujours avec --limit sync-<instance>. -e sync_purge_backups=yes supprime aussi les archives.".into()),
@@ -290,7 +293,9 @@ fn categorize(name: &str) -> String {
         || name.contains("alertmanager")
     {
         "Monitoring".to_string()
-    } else if name.contains("proxy") || name.contains("cert") {
+    } else if (name.contains("proxy") && !name.contains("llm-proxy")) || name.contains("cert") {
+        // `llm-proxy` est une passerelle LLM, pas un reverse proxy du parc :
+        // rangé plus bas avec l'IA.
         "Proxy / SSL".to_string()
     } else if name.contains("db") || name.contains("pgpool") {
         "Base de données".to_string()
@@ -314,6 +319,7 @@ fn categorize(name: &str) -> String {
         || name.contains("opencode")
         || name.contains("openclaw")
         || name.contains("agenthub")
+        || name.contains("llm-proxy")
         || name.contains("freellm")
         || name.contains("starnet")
         || name.contains("aiserver")

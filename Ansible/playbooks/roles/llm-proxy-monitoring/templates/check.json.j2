@@ -1,0 +1,10 @@
+{
+  "service": "llm-proxy",
+  "up": {"kind": "http", "url": "{{ llm_proxy_svcprobe_health_url }}", "status": [200], "timeout": 10},
+  "extra_checks": [
+    {"name": "front", "kind": "http", "url": "{{ llm_proxy_svcprobe_front_url }}", "status": [200, 301, 302], "timeout": 10},
+    {"name": "back_lb_health", "kind": "http", "url": "{{ llm_proxy_svcprobe_back_lb_health_url }}", "status": [200], "timeout": 10},
+    {"name": "postgres", "kind": "docker", "container": "{{ llm_proxy_postgres_container }}"},
+    {"name": "redis", "kind": "docker", "container": "{{ llm_proxy_redis_container }}"}
+  ]
+}

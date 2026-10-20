@@ -1,0 +1,97 @@
+---
+# Joué sur `ctdapi` (hôte canonique de la machine partagée), pas sur
+# `llm-proxy` — voir defaults/main.yml.
+
+- name: Apply the machine's Docker port rules
+  ansible.builtin.include_role:
+    name: docker-ports-security
+
+# Une machine dont host_vars/ctdapi.yml ignorerait ces deux ports les
+# publierait sur 0.0.0.0 sans aucun filtre, et `ufw status` afficherait
+# néanmoins des DENY rassurants (même garde-fou qu'agenthub-security).
+- name: Fail when an LLM Proxy port is not declared in docker_ports_rules
+  ansible.builtin.assert:
+    that:
+      - (docker_ports_rules | default([]) | selectattr('port', 'equalto', item | int) | list | length) > 0
+    fail_msg: >-
+      Le port {{ item }} (LLM Proxy) est publié par Docker mais absent de
+      `docker_ports_rules` : il serait joignable depuis Internet sans filtre,
+      et ufw n'y peut rien. Ajouter une entrée dans
+      playbooks/host_vars/ctdapi.yml (rôle docker-ports-security), avec
+      `sources` limité aux IP des proxies.
+    success_msg: "Port {{ item }} déclaré dans docker_ports_rules."
+  loop:
+    - "{{ llm_proxy_front_port }}"
+    - "{{ llm_proxy_back_port }}"
+
+# `docker-ports-security` flushe lui-même ses handlers avant de rendre la main
+# (voir agenthub-security pour l'historique) : la chaîne lue ici est donc déjà
+# post-application. Contrôle de l'état RÉEL, pas seulement des variables.
+- name: Read back the DOCKER-USER chain
+  ansible.builtin.command: iptables -S DOCKER-USER
+  become: true
+  register: llm_proxy_chain
+  changed_when: false
+  check_mode: false
+
+- name: Verify the LLM Proxy ports are really dropped by default
+  ansible.builtin.assert:
+    that:
+      # Motif et non égalité : `iptables -S` intercale `-m tcp` et réordonne
+      # les options selon la version (cf. agenthub-security).
+      - llm_proxy_chain.stdout is search('--(dport|ctorigdstport) ' ~ item ~ '.*-j DROP')
+    fail_msg: >-
+      Le port {{ item }} est publié sur 0.0.0.0 mais aucun DROP ne le protège
+      dans DOCKER-USER : LLM Proxy serait joignable depuis Internet en
+      contournant TLS et le vhost des proxies. Vérifier
+      `systemctl status docker-ports-firewall` et `iptables -S DOCKER-USER`
+      sur {{ inventory_hostname }}.
+    success_msg: >-
+      Port {{ item }} filtré dans DOCKER-USER (DROP par défaut, ALLOW explicite
+      pour les proxies).
+  loop:
+    - "{{ llm_proxy_front_port }}"
+    - "{{ llm_proxy_back_port }}"
+  # En simulation (--check), la tâche d'application des règles est sautée par
+  # docker-ports-security : la chaîne n'a pas encore les règles.
+  when: not ansible_check_mode
+
+# Même garantie en IPv6 : Docker publie aussi sur `[::]` (voir
+# agenthub-security). Chaîne absente = Docker en IPv4 seul : rien à vérifier.
+- name: Read back the IPv6 DOCKER-USER chain
+  ansible.builtin.command: ip6tables -S DOCKER-USER
+  become: true
+  register: llm_proxy_chain6
+  changed_when: false
+  check_mode: false
+  failed_when: false
+
+- name: Verify the LLM Proxy ports are dropped in IPv6 too
+  ansible.builtin.assert:
+    that:
+      - llm_proxy_chain6.stdout is search('--(dport|ctorigdstport) ' ~ item ~ '.*-j DROP')
+    fail_msg: >-
+      Port {{ item }} non protégé en IPv6 : la chaîne ip6tables DOCKER-USER
+      existe mais ne porte aucun DROP, donc LLM Proxy resterait joignable par
+      `[::]` en contournant le filtrage IPv4. Vérifier
+      `systemctl status docker-ports-firewall` et
+      `ip6tables -S DOCKER-USER` sur {{ inventory_hostname }}.
+    success_msg: >-
+      Port {{ item }} filtré aussi en IPv6 (DROP par défaut).
+  loop:
+    - "{{ llm_proxy_front_port }}"
+    - "{{ llm_proxy_back_port }}"
+  when:
+    - not ansible_check_mode
+    - llm_proxy_chain6.rc == 0
+
+- name: Report the exposure
+  ansible.builtin.debug:
+    msg: >-
+      Ports {{ llm_proxy_front_port }} (front) et {{ llm_proxy_back_port }}
+      (back-lb) filtrés dans DOCKER-USER sur {{ ansible_host }}, autorisés
+      pour les proxies seuls (+ réseau interne des conteneurs sur
+      {{ llm_proxy_back_port }}, relais front → back). Contrôle depuis une
+      machine non proxy (y compris une IP de la whitelist) :
+      `nc -z {{ hostvars['llm-proxy'].ansible_host }} {{ llm_proxy_front_port }}`
+      doit échouer.

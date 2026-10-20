@@ -1,0 +1,95 @@
+---
+# LLM Proxy — passerelle LLM compatible OpenAI/Anthropic
+# (/api/free|public|private/v1) + UI d'administration. Front React/nginx +
+# back NestJS + Postgres + Redis (Docker Compose, AppTemplate) sur l'entrée
+# d'inventaire `llm-proxy`, MACHINE PARTAGÉE (ctdapi, agenthub, rotki, xbot,
+# docker-repo, dev) : rien ici ne doit toucher aux autres conteneurs/nginx
+# hôte/packages de cette machine.
+#
+#   ./play.sh web3c deploy-llm-proxy.yml
+#
+# Ordre exact des effets de ce playbook :
+#   1. host-preflight (Docker requis)
+#   2. llm-proxy-install  : publie le CNAME llm-proxy.web3c.cc → proxy.web3c.cc
+#      (cert déjà couvert par le wildcard *.web3c.cc, rien à émettre)
+#   3. vhost sur les proxies : sites-enabled/llm-proxy.conf (mode PUBLIC,
+#      passerelles en flux : buffering off, 50 Mo, 600 s)
+#   4. llm-proxy-security (joué sur `ctdapi`, hôte canonique de la machine) :
+#      filtre les ports 4800/4801 dans DOCKER-USER (proxies uniquement) et
+#      4802/4803 (profil « non exposé »)
+#   5. llm-proxy-deploy   : build + démarrage de l'app (scripts du dépôt app,
+#      PAS un docker_container/docker_compose Ansible — voir
+#      llm-proxy-deploy/defaults), attente du front et de la santé de l'API
+#   6. llm-proxy-monitoring : sonde svcprobe (service_up{service="llm-proxy"})
+#
+# Tags :
+#   --tags proxy-conf   rejoue seulement le vhost (reload, pas les autres sites)
+#   --tags monitoring   réarme seulement la sonde
+#
+# Variables utiles : -e llm_proxy_migrate=true (migrations TypeORM avant
+# déploiement), -e llm_proxy_update_common=false (pas de synchro des
+# bibliothèques partagées par run.sh).
+#
+# Prérequis côté poste de contrôle AVANT de lancer ce playbook (voir
+# llm-proxy-deploy/defaults/main.yml pour le détail) : back/.env et front/.env
+# de prod présents dans le dépôt app (jamais générés/vaultés par ce
+# playbook — secrets applicatifs + BACK_HOSTS/FRONT_HOSTS/REMOTE_USER/
+# REMOTE_SSH_PORT/SSH_KEY_FILE/REMOTE_CONTEXT_NAME/PROJECT_NAME attendus par
+# scripts/deploy-full.sh).
+
+# ── Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ───────────────────────
+- name: Contrôle préalable
+  hosts: llm-proxy
+  remote_user: "{{ remote_username }}"
+  roles:
+    - role: host-preflight
+      preflight_require_docker: true
+
+# ── DNS ──────────────────────────────────────────────────────────────────
+- name: Publish the LLM Proxy CNAME
+  hosts: llm-proxy
+  remote_user: "{{ remote_username }}"
+  roles:
+    - llm-proxy-install
+
+# Pousse SEULEMENT sites-enabled/llm-proxy.conf sur chaque proxy. Ni restart,
+# ni resynchronisation des autres vhosts — reload, uniquement si ce fichier a
+# changé (même motif que deploy-agenthub.yml / deploy-freellm.yml).
+- name: Vhost LLM Proxy sur les proxies
+  hosts: proxies
+  remote_user: "{{ remote_username }}"
+  become: true
+  tags: [proxy-conf]
+  tasks:
+    - name: Deploy just the LLM Proxy vhost
+      ansible.builtin.include_role:
+        name: proxy-update
+        tasks_from: deploy-one-site
+      vars:
+        site: llm-proxy.conf
+
+# Le filtrage vit dans DOCKER-USER et non dans ufw : les ports sont publiés par
+# Docker, qui insère ses DNAT en amont de tout ce que gère ufw. Joué sur
+# `ctdapi` — hôte CANONIQUE de la machine partagée, où vit
+# `docker_ports_rules` (host_vars/ctdapi.yml) — PAS sur `llm-proxy`, qui n'a
+# pas son propre host_vars (voir deploy-agenthub.yml pour ce même motif).
+- name: Filter the LLM Proxy ports in DOCKER-USER
+  hosts: ctdapi
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - llm-proxy-security
+
+# ── Déploiement de l'app ───────────────────────────────────────────────────
+- name: Deploy the LLM Proxy app
+  hosts: llm-proxy
+  remote_user: "{{ remote_username }}"
+  roles:
+    - llm-proxy-deploy
+
+# ── Supervision (OBLIGATOIRE, voir CLAUDE.md) ──────────────────────────────
+- name: Supervision du service
+  hosts: llm-proxy
+  remote_user: "{{ remote_username }}"
+  roles:
+    - llm-proxy-monitoring

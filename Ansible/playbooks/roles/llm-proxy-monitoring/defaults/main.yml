@@ -1,0 +1,26 @@
+---
+# Supervision de LLM Proxy (CLAUDE.md, obligation `-monitoring`).
+#
+# Pas de collecteur/exporter dédié : le back NestJS expose bien un /metrics
+# (module infra) mais son activation en prod (vmagent, remote_write) est une
+# décision applicative hors du périmètre de ce rôle (compose `--profile
+# metrics`, non démarré par défaut) — sonde déclarative pour `svcprobe`
+# (port 9110) uniquement, comme agenthub-monitoring/ctdapi-monitoring sur
+# cette même machine.
+#
+# Sonde principale : santé de l'API À TRAVERS le front (chemin réel du vhost
+# des proxies). Sondes secondaires pour distinguer un état DÉGRADÉ : front
+# statique (UI servie, API cassée ou l'inverse), back-lb en direct (relais du
+# front cassé, back sain), Postgres et Redis. Pas de sonde back-worker :
+# back/.env porte BACK_WORKER=off (un seul process API + tâches de fond), le
+# conteneur n'existe pas — à ajouter si l'app repasse à BACK_WORKER=on
+# (modèle : ctdapi-monitoring).
+llm_proxy_svcprobe_health_url: "http://127.0.0.1:{{ hostvars['llm-proxy'].app_port }}/api/v1/health"
+llm_proxy_svcprobe_front_url: "http://127.0.0.1:{{ hostvars['llm-proxy'].app_port }}/"
+llm_proxy_svcprobe_back_lb_health_url: "http://127.0.0.1:{{ hostvars['llm-proxy'].back_port }}/api/v1/health"
+
+# Noms des conteneurs : `container_name` fixés par le compose du template
+# (`${PROJECT_NAME}_postgres`/`_redis`).
+llm_proxy_project_name: "llm-proxy"
+llm_proxy_postgres_container: "{{ llm_proxy_project_name }}_postgres"
+llm_proxy_redis_container: "{{ llm_proxy_project_name }}_redis"

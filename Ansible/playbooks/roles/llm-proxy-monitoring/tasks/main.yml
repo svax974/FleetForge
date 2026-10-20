@@ -1,0 +1,75 @@
+---
+# Convention `<service>-monitoring` (CLAUDE.md) : le rôle dépose une SONDE
+# déclarative pour `svcprobe`, qui expose `service_up{service="llm-proxy"}`
+# et `service_check_up{service="llm-proxy",check="…"}`. Aucun redémarrage
+# n'est nécessaire — svcprobe relit son répertoire de sondes à chaque scrape.
+# La cible Prometheus et l'ouverture du scrape sont celles de svcprobe
+# (svcprobe-install, partagé par tous les services de la machine).
+
+# `public: true` n'est PAS un détail de style : sans lui, les defaults du rôle
+# inclus (svcprobe_checks_dir, svcprobe_lib_dir, svcprobe_listen_port) restent
+# confinés à ses propres tâches (comportement documenté d'`include_role`).
+- name: Ensure the shared probe is installed
+  ansible.builtin.include_role:
+    name: svcprobe-install
+    public: true
+  tags: [monitoring]
+
+- name: Deploy the LLM Proxy probe
+  ansible.builtin.template:
+    src: check.json.j2
+    dest: "{{ svcprobe_checks_dir }}/llm-proxy.json"
+    owner: root
+    group: root
+    mode: '0644'
+  become: true
+  tags: [monitoring]
+
+# Contrôle immédiat : une sonde déposée mais qui répond `service_up 0` alors
+# que le déploiement vient de réussir est une sonde MAL ÉCRITE, et elle ferait
+# sonner une alerte en permanence.
+- name: Verify the probe answers
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ svcprobe_listen_port }}/metrics"
+    return_content: true
+  register: llm_proxy_probe
+  retries: 6
+  delay: 5
+  until: llm_proxy_probe.status is defined and llm_proxy_probe.status == 200
+  changed_when: false
+  tags: [monitoring]
+
+- name: Fail when the probe reports the service down
+  ansible.builtin.fail:
+    msg: >-
+      La sonde répond mais annonce `service_up{service="llm-proxy"} 0` alors
+      que le déploiement vient de réussir : la sonde est mal écrite, ou
+      {{ llm_proxy_svcprobe_health_url }} ne répond pas.
+  when: >-
+    'service_up{service="llm-proxy"} 0' in (llm_proxy_probe.content | default(''))
+  tags: [monitoring]
+
+# Une sonde secondaire à 0 juste après un déploiement réussi est presque
+# toujours un nom de conteneur mal dérivé (voir defaults) : le signaler ici
+# plutôt que de laisser un `service_check_up 0` permanent passer pour une panne.
+- name: Warn when a secondary check reports down
+  ansible.builtin.debug:
+    msg: >-
+      Sonde(s) secondaire(s) à 0 :
+      {{ llm_proxy_probe.content.split('\n')
+         | select('search', 'service_check_up\\{service="llm-proxy"')
+         | select('search', ' 0$')
+         | list }}
+      — vérifier les noms de conteneurs (`docker ps` sur
+      {{ ansible_host }}) contre llm-proxy-monitoring/defaults.
+  when: >-
+    llm_proxy_probe.content | default('') is search('service_check_up\\{service="llm-proxy",[^}]*\\} 0')
+  tags: [monitoring]
+
+- name: Report the probe result
+  ansible.builtin.debug:
+    msg: >-
+      {{ llm_proxy_probe.content.split('\n')
+         | select('search', 'llm-proxy')
+         | list }}
+  tags: [monitoring]

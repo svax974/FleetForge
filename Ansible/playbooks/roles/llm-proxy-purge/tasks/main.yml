@@ -1,0 +1,102 @@
+---
+# Supprime LLM Proxy ET ses données : conteneurs (via llm-proxy-remove),
+# volumes (Postgres, Redis, dossier partagé, vmagent), images, CNAME public.
+# Destructif — la base applicative (utilisateurs, accès, jetons de proxy, clés
+# des providers, journal des requêtes, scores) n'est pas reconstructible sans
+# sauvegarde.
+
+- name: Refuse to purge without explicit confirmation
+  ansible.builtin.assert:
+    that:
+      - (confirm | default('')) == 'yes'
+    fail_msg: >-
+      Purge refusée. Cette opération supprime les volumes de données LLM Proxy
+      (Postgres : utilisateurs, accès, jetons de proxy, clés des providers,
+      journal des requêtes), non reconstructibles sans sauvegarde. Relance
+      avec -e confirm=yes en connaissance de cause.
+
+# Pose aussi le fait `llm_proxy_project_name` (PROJECT_NAME du back/.env de
+# prod), réutilisé ci-dessous.
+- name: Remove the containers and the probe
+  ansible.builtin.include_role:
+    name: llm-proxy-remove
+
+# Volumes : `postgres_data` porte un nom explicite (`${PROJECT_NAME}_postgres_data`,
+# scripts/docker-compose.yml du template) ; les autres (`redis_data`,
+# `shared_directory`, `vmagent_data`) sont préfixés par le projet compose de
+# deploy-full.sh (`<PROJECT_NAME>-back-<hôte>_…`), pas par PROJECT_NAME seul.
+# Listés par l'étiquette compose des deux projets plutôt que devinés, puis
+# filtrés : seul un nom qui commence par `<PROJECT_NAME>_` ou
+# `<PROJECT_NAME>-` est supprimé, quoi que réponde Docker.
+- name: List the LLM Proxy volumes
+  ansible.builtin.shell: |
+    set -euo pipefail
+    {
+      for p in {{ llm_proxy_project_name }}-back-{{ ansible_host | replace('.', '-') }} {{ llm_proxy_project_name }}-front-{{ ansible_host | replace('.', '-') }}; do
+        docker volume ls -q --filter "label=com.docker.compose.project=${p}"
+      done
+      if docker volume inspect "{{ llm_proxy_project_name }}_postgres_data" >/dev/null 2>&1; then
+        echo "{{ llm_proxy_project_name }}_postgres_data"
+      fi
+    } | sort -u
+  args:
+    executable: /bin/bash
+  become: true
+  register: llm_proxy_volumes
+  changed_when: false
+
+- name: Remove the LLM Proxy volumes
+  community.docker.docker_volume:
+    name: "{{ item }}"
+    state: absent
+  loop: >-
+    {{ llm_proxy_volumes.stdout_lines
+       | select('match', '^' ~ (llm_proxy_project_name | regex_escape) ~ '[_-]')
+       | list }}
+  become: true
+
+# Images construites sur l'hôte (contexte Docker SSH) : `<PROJECT_NAME>_back`,
+# l'image du front nommée d'après son projet compose, l'image de base
+# `<project>-nestcli:*`. Même filtre de préfixe que les volumes.
+- name: List the LLM Proxy images
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker images --format '{% raw %}{{.Repository}}:{{.Tag}}{% endraw %}' \
+      | grep -E '^{{ llm_proxy_project_name }}[_-]' || true
+  args:
+    executable: /bin/bash
+  become: true
+  register: llm_proxy_images
+  changed_when: false
+
+- name: Remove the LLM Proxy images
+  community.docker.docker_image_remove:
+    name: "{{ item }}"
+  loop: "{{ llm_proxy_images.stdout_lines }}"
+  become: true
+  ignore_errors: true
+
+# ── DNS : retirer le CNAME public ───────────────────────────────────────────
+- name: Remove the LLM Proxy CNAME
+  community.general.cloudflare_dns:
+    api_token: "{{ cloudflare_token }}"
+    zone: "{{ domain_name }}"
+    record: "{{ llm_proxy_hostname }}"
+    type: CNAME
+    state: absent
+  delegate_to: localhost
+  become: false
+  run_once: true
+  when: cloudflare_token | default('') | length > 0
+
+- name: Remind the operator about the vhost and the firewall rules
+  ansible.builtin.debug:
+    msg: >-
+      LLM Proxy purgé (conteneurs, volumes, images, CNAME DNS). Restent à
+      retirer à la main si les ports doivent être réattribués : le gabarit
+      sites-enabled/llm-proxy.conf (parcs/web3c/nginx, puis
+      ./play.sh web3c update-proxy.yml), les entrées
+      {{ llm_proxy_front_port }}/{{ llm_proxy_back_port }}/4802/4803 de
+      docker_ports_rules (host_vars/ctdapi.yml) et l'entrée `llm-proxy` de
+      l'inventaire — voir la limite de docker-ports-security documentée dans
+      rotki-remove.

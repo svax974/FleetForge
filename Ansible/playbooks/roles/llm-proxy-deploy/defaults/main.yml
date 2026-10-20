@@ -1,0 +1,61 @@
+---
+# Déploiement de l'app LLM Proxy (front/back/Postgres/Redis, Docker Compose,
+# AppTemplate) sur l'hôte `llm-proxy` — via les scripts DU DÉPÔT APP
+# (scripts/run.sh, scripts/deploy-full.sh, scripts/clean-remote.sh), PAS par
+# un docker_container/docker_compose Ansible. Même choix qu'agenthub-deploy
+# (voir ses defaults) : l'app a déjà son propre outillage de déploiement
+# distant (contexte Docker via SSH, réécriture des chemins de contexte de
+# build, migrations optionnelles, bascule back sans coupure…) ; le
+# réimplémenter en Ansible dupliquerait cette logique avec un risque réel de
+# divergence. deploy-full.sh pose aussi SES PROPRES règles ufw sur les ports
+# publiés, décoratives pour un port Docker (CLAUDE.md) — d'où le rôle
+# `llm-proxy-security` séparé, seul mécanisme qui filtre réellement ici.
+#
+# Ansible se contente d'ORCHESTRER : vérifier que les fichiers d'environnement
+# de PROD existent sur le poste de contrôle (jamais générés ni vaultés ici),
+# lancer le script de déploiement, puis attendre que le front et la santé de
+# l'API répondent.
+
+# Dépôt de travail sur le POSTE DE CONTRÔLE (lu/rsyncé par les scripts
+# eux-mêmes, jamais copié par Ansible).
+llm_proxy_src: "/Users/steph/Dev/Apps/llm-proxy/"
+
+# Fichiers d'environnement de PROD attendus par run.sh/deploy-full.sh
+# (back/.env, front/.env — "prod" n'a pas de suffixe, contrairement à
+# .env.preprod/.env.dev). Doivent porter à la fois :
+#   - les secrets applicatifs réels (CRYPT_*, DB_PASSWORD, JWT/ADMIN_*, …) ;
+#   - les variables de déploiement distant attendues par deploy-full.sh
+#     (BACK_HOSTS/FRONT_HOSTS ou REMOTE_HOST = `ansible_host` de l'entrée `llm-proxy`, REMOTE_USER,
+#     REMOTE_SSH_PORT, SSH_KEY_FILE, REMOTE_CONTEXT_NAME, PROJECT_NAME) ;
+#   - NODE_PORT=4801 / FRONT_PORT=4800 (back/.env), VITE_PORT=4800
+#     (front/.env), DB_PORT=4802, REDIS_PORT=4803 — voir inventaire
+#     (`app_port`/`back_port` de l'entrée `llm-proxy`) et le registre des ports ;
+#   - PAS d'`INFRA_BIND` (ou explicitement `127.0.0.1`) : Postgres et Redis
+#     restent sur la boucle locale (contrôlé après déploiement, ci-dessous) ;
+#   - TRUST_PROXY incluant les adresses des proxies (le back y lit l'IP
+#     cliente réelle dans X-Forwarded-For).
+# Ce rôle ne génère ni ne vaulte AUCUN de ces fichiers : ils vivent en clair
+# sur le poste de contrôle, gitignorés côté dépôt app. Aucun secret applicatif
+# n'entre donc dans ce dépôt Ansible.
+llm_proxy_back_env_file: "back/.env"
+llm_proxy_front_env_file: "front/.env"
+
+# Lancer les migrations TypeORM en plus du déploiement (--migrate,
+# scripts/run.sh). `false` par défaut : avec DB_SCHEMA_MODE=sync (back/.env
+# actuel) run.sh les saute de toute façon. Passer `-e llm_proxy_migrate=true`
+# une fois DB_SCHEMA_MODE=migrations|manual et une première migration écrite.
+llm_proxy_migrate: false
+
+# `run.sh prod` synchronise d'abord les bibliothèques partagées
+# (scripts/update_common.sh : commit + push de vx-public/vx-private et commit
+# `chore: bump` dans le dépôt app) — comportement du script lancé à la main,
+# conservé par défaut. `-e llm_proxy_update_common=false` passe
+# `--no-update-common` et déploie l'arbre de travail tel quel.
+llm_proxy_update_common: true
+
+llm_proxy_health_retries: 24
+llm_proxy_health_delay: 10
+
+# Ports Postgres/Redis publiés par le compose du template, qui doivent rester
+# sur 127.0.0.1 (registre des ports, host_vars/ctdapi.yml).
+llm_proxy_infra_ports: [4802, 4803]

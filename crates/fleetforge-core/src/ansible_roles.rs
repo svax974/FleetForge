@@ -384,6 +384,14 @@ fn get_role_metadata(name: &str) -> (String, String) {
         "agenthub-remove" => ("Suppression AgentCenter".into(), "Arrête et retire les conteneurs du hub (clean-remote.sh), arrête et désactive le runner (conservé installé), retire la sonde. Conserve les volumes, l'entrée docker_ports_rules et le CNAME.".into()),
         "agenthub-purge" => ("Purge AgentCenter".into(), "Supprime conteneurs, images et volumes nommés du hub (Postgres, Redis, répertoire partagé : transcripts, archives) et le CNAME ; désactive le runner (binaire et état conservés). Vhost et règles de pare-feu à retirer séparément. Destructif — exige -e confirm=yes.".into()),
 
+        // IA / LLM Proxy (passerelle OpenAI/Anthropic-compatible, AppTemplate)
+        "llm-proxy-install" => ("Installation LLM Proxy".into(), "Publie le CNAME llm-proxy.web3c.cc vers le front des proxies (Cloudflare, portée réduite à l'entrée `llm-proxy`). Le vhost public (passerelles en flux, 50 Mo, 600 s) est posé par deploy-llm-proxy.yml via proxy-update.".into()),
+        "llm-proxy-security" => ("Sécurité LLM Proxy".into(), "Filtre les ports publiés de l'app (front app_port 4800, back-lb back_port 4801 : proxies uniquement ; Postgres 4802 / Redis 4803 : profil non exposé) dans DOCKER-USER via docker_ports_rules (host_vars/ctdapi.yml, hôte canonique de la machine `ctdapi`), et vérifie le DROP par défaut en IPv4 et IPv6.".into()),
+        "llm-proxy-deploy" => ("Déploiement LLM Proxy".into(), "Orchestre le déploiement de l'app via les scripts du dépôt (scripts/run.sh prod → deploy-full.sh, contexte Docker SSH) depuis le poste de contrôle, attend le front et la santé de l'API à travers lui, vérifie que Postgres/Redis restent sur la boucle locale. Variables : llm_proxy_src, llm_proxy_back_env_file, llm_proxy_front_env_file, llm_proxy_migrate, llm_proxy_update_common.".into()),
+        "llm-proxy-monitoring" => ("Supervision LLM Proxy".into(), "Sonde svcprobe : santé de l'API à travers le front (service_up), plus front, back-lb, conteneurs Postgres et Redis en sondes secondaires.".into()),
+        "llm-proxy-remove" => ("Suppression LLM Proxy".into(), "Arrête et retire les conteneurs de l'app (clean-remote.sh, puis passe sur l'hôte par étiquette des projets compose de deploy-full.sh), retire la sonde. Conserve les volumes, l'entrée docker_ports_rules, le vhost et le CNAME.".into()),
+        "llm-proxy-purge" => ("Purge LLM Proxy".into(), "Supprime conteneurs, volumes (Postgres, Redis, répertoire partagé — préfixe du projet uniquement), images et le CNAME. Vhost et règles de pare-feu à retirer séparément. Destructif — exige -e confirm=yes.".into()),
+
         // Synchronisation web3c-sync (serveurs publics iptv / banking / aiteam)
         "sync-server-install" => ("Installation serveur de synchro".into(), "Déploie UNE instance web3c-sync (iptv, banking ou aiteam) : synchronise les sources du poste par rsync, construit l'image sur l'hôte (tag = empreinte du contenu, rejeu idempotent), lance le conteneur durci (lecture seule, cap_drop ALL, non-root 65532, SYNC_TRUST_PROXY avec les /32 des proxies, inscription ouverte), contrôle /v1/health et les routes de notes, garantit le CNAME sync-<instance>. Variables d'inventaire : sync_instance, app_port, sync_metrics_port ; sync_server_src.".into()),
         "sync-server-security" => ("Sécurité serveurs de synchro".into(), "Filtre dans DOCKER-USER (host_vars/ctdapi.yml, hôte canonique de la machine partagée) les ports de service 4710-4712 (proxies uniquement) et de métriques 9710-9712 (Prometheus uniquement, jamais publics), IPv4 et IPv6, et vérifie le DROP par défaut. Joué sur `ctdapi`.".into()),
@@ -504,6 +512,7 @@ fn categorize(name: &str) -> String {
         || name.starts_with("opencode-")
         || name.starts_with("openclaw-")
         || name.starts_with("agenthub-")
+        || name.starts_with("llm-proxy-")
         || name.starts_with("freellm-")
         || name.starts_with("starnet-")
         || name.starts_with("aiserver-")

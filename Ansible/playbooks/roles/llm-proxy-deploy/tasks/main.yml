@@ -1,0 +1,110 @@
+---
+# Voir defaults/main.yml pour le choix (orchestrer les scripts du dépôt app,
+# ne pas réimplémenter le build/déploiement en Ansible).
+
+- name: Fail early when the prod env files are missing on the control machine
+  ansible.builtin.stat:
+    path: "{{ llm_proxy_src }}{{ item }}"
+  delegate_to: localhost
+  become: false
+  loop:
+    - "{{ llm_proxy_back_env_file }}"
+    - "{{ llm_proxy_front_env_file }}"
+  loop_control:
+    label: "{{ item }}"
+  register: llm_proxy_env_stat
+
+- name: Fail when an env file is absent
+  ansible.builtin.fail:
+    msg: >-
+      {{ llm_proxy_src }}{{ item.item }} introuvable sur le poste de contrôle.
+      Ce fichier porte à la fois les secrets applicatifs de prod et les
+      variables de déploiement distant (BACK_HOSTS/FRONT_HOSTS, REMOTE_USER,
+      REMOTE_SSH_PORT, SSH_KEY_FILE, REMOTE_CONTEXT_NAME, PROJECT_NAME — voir
+      scripts/deploy-full.sh --help). Ce rôle ne le génère pas : le préparer
+      avant de rejouer ce playbook (voir llm-proxy-deploy/defaults/main.yml
+      pour le détail des variables attendues).
+  loop: "{{ llm_proxy_env_stat.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: not item.stat.exists
+
+# `run.sh prod` == `deploy-full.sh` (build + démarrage via un contexte Docker
+# SSH), avec la gestion des migrations en amont (voir defaults). Exécuté depuis
+# le poste de contrôle : Ansible n'a pas de contexte Docker vers l'hôte cible,
+# le script en crée/gère un lui-même.
+- name: Deploy the LLM Proxy app (build + push + start, via the app's own tooling)
+  ansible.builtin.command:
+    cmd: >-
+      ./scripts/run.sh prod{{ ' --migrate' if llm_proxy_migrate | bool else '' }}{{ '' if llm_proxy_update_common | bool else ' --no-update-common' }}
+  args:
+    chdir: "{{ llm_proxy_src }}"
+  delegate_to: localhost
+  become: false
+  environment:
+    BACK_ENV_FILE: "{{ llm_proxy_back_env_file }}"
+    FRONT_ENV_FILE: "{{ llm_proxy_front_env_file }}"
+  register: llm_proxy_deploy_run
+  changed_when: true
+
+# Contrôles exécutés SUR l'hôte (boucle locale) plutôt que depuis le poste de
+# contrôle : le port n'est joignable depuis l'extérieur que par les proxies une
+# fois llm-proxy-security appliqué (joué juste avant dans deploy-llm-proxy.yml)
+# — un contrôle en boucle locale reste valide quel que soit l'état du pare-feu
+# ou l'IP du poste de contrôle.
+- name: Wait for the front to answer
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ hostvars['llm-proxy'].app_port }}/"
+    status_code: [200, 301, 302]
+  register: llm_proxy_front_ready
+  until: llm_proxy_front_ready.status is defined and llm_proxy_front_ready.status in [200, 301, 302]
+  retries: "{{ llm_proxy_health_retries }}"
+  delay: "{{ llm_proxy_health_delay }}"
+  changed_when: false
+
+# Santé de l'API À TRAVERS le front (son nginx relaie /api/ vers le back) :
+# c'est exactement le chemin du vhost des proxies, et ça prouve le relais
+# front → back en plus du back lui-même.
+- name: Wait for the API health endpoint through the front
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ hostvars['llm-proxy'].app_port }}/api/v1/health"
+    status_code: [200]
+  register: llm_proxy_back_ready
+  until: llm_proxy_back_ready.status is defined and llm_proxy_back_ready.status == 200
+  retries: "{{ llm_proxy_health_retries }}"
+  delay: "{{ llm_proxy_health_delay }}"
+  changed_when: false
+
+# Postgres et Redis publiés hors boucle locale (`INFRA_BIND=0.0.0.0` dans
+# back/.env) resteraient filtrés par DOCKER-USER (profil « non exposé »), mais
+# contrediraient le registre des ports : on refuse plutôt que de laisser
+# dériver. Aucune écoute (userland-proxy désactivé) = rien à reprocher.
+- name: Collect the listeners of the Postgres/Redis host ports
+  ansible.builtin.shell: >-
+    set -o pipefail;
+    ss -ltnH | awk '{print $4}' | grep -E ':({{ llm_proxy_infra_ports | join('|') }})$' || true
+  args:
+    executable: /bin/bash
+  register: llm_proxy_infra_listeners
+  changed_when: false
+  check_mode: false
+
+- name: Fail when Postgres or Redis listens outside loopback
+  ansible.builtin.assert:
+    that:
+      - llm_proxy_infra_listeners.stdout_lines | reject('match', '^(127\\.0\\.0\\.1|\\[::1\\]):') | list | length == 0
+    fail_msg: >-
+      Postgres/Redis de LLM Proxy écoutent hors boucle locale
+      ({{ llm_proxy_infra_listeners.stdout_lines | join(', ') }}) : retirer
+      `INFRA_BIND` de {{ llm_proxy_src }}{{ llm_proxy_back_env_file }} (ou le
+      mettre à 127.0.0.1) puis redéployer.
+    success_msg: "Postgres/Redis sur la boucle locale uniquement."
+
+- name: Report how the app is exposed
+  ansible.builtin.debug:
+    msg: >-
+      LLM Proxy déployé : front sur 127.0.0.1:{{ hostvars['llm-proxy'].app_port }}
+      (API relayée vers le back-lb {{ hostvars['llm-proxy'].back_port }}).
+      Publiquement joignable via https://{{ llm_proxy_hostname | default('llm-proxy.' ~ domain_name) }}
+      (vhost proxies, mode public — l'app authentifie chaque requête), port
+      hôte filtré dans DOCKER-USER (proxies uniquement) par llm-proxy-security.
