@@ -7,3 +7,8 @@ agenthub_src: "/Users/steph/Dev/Apps/AgentHub/agent-hub/"
 agenthub_hostname: "agenthub.{{ domain_name }}"
 agenthub_front_port: "{{ hostvars['agenthub'].app_port | default(4700) }}"
 agenthub_back_port: "{{ hostvars['agenthub'].back_port | default(4701) }}"
+# Anciens noms du projet (renommage AgentCenter → AgentHub du 2026-10-08) :
+# leurs volumes (`agentcenter_postgres_data`, `agentcenter-back-<hôte>_*`)
+# appartiennent à cette application et sont purgés avec elle.
+agenthub_legacy_project_names:
+  - agentcenter

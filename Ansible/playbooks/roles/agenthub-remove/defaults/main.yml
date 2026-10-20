@@ -4,3 +4,6 @@ agenthub_hostname: "agenthub.{{ domain_name }}"
 agenthub_front_port: "{{ hostvars['agenthub'].app_port | default(4700) }}"
 agenthub_back_port: "{{ hostvars['agenthub'].back_port | default(4701) }}"
 agenthub_runner_ssh_port: "{{ ssh_custom_port }}"
+# Repli quand back/.env est absent du poste de contrôle ; sinon PROJECT_NAME
+# y est lu (voir tasks/main.yml).
+agenthub_project_name_default: "agenthub"

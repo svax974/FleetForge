@@ -264,7 +264,7 @@ theta_wallet: ""
 # openclaw_openai_api_key: CHANGE_ME             # 🔒 exigée seulement avec openai-api-key
 # Provider de modèles OpenAI-compatible personnalisé.
 openclaw_custom_provider_name: llm-proxy
-openclaw_custom_provider_base_url: "https://llm.example.com/v1"
+openclaw_custom_provider_base_url: "https://llm-proxy.example.com/api/public/v1"   # gateway LLM Proxy : /api/free|public|private/v1
 openclaw_custom_provider_models:
   - { id: "auto:reasoning", name: "Auto-Reasoning" }
 openclaw_custom_provider_api_key: CHANGE_ME      # 🔒

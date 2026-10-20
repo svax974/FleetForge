@@ -1,6 +1,7 @@
 ---
 # Supprime AgentHub ET ses données : conteneurs (via agenthub-remove),
-# volumes nommés (Postgres, Redis, dossier partagé), CNAME public. Destructif
+# volumes (base SQLite ou Postgres, Redis, dossier partagé, vmagent, y compris
+# ceux de l'ancien nom AgentCenter), images, CNAME public. Destructif
 # — la base applicative (projets, sessions, historique, clés API) n'est pas
 # reconstructible sans sauvegarde.
 
@@ -14,42 +15,73 @@
       historique, clés API), non reconstructibles sans sauvegarde. Relance
       avec -e confirm=yes en connaissance de cause.
 
+# Pose aussi le fait `agenthub_project_name` (PROJECT_NAME du back/.env de
+# prod), réutilisé ci-dessous.
 - name: Remove the containers and disable the runner
   ansible.builtin.include_role:
     name: agenthub-remove
 
-# Noms de volumes déduits de `PROJECT_NAME` (scripts/docker-compose.yml du
-# template : `postgres_data`/`redis_data`/`shared_directory`/`vmagent_data`,
-# préfixés `<project>_` par Docker Compose v2). Lu directement dans le
-# back/.env de prod sur le poste de contrôle plutôt que supposé en dur : une
-# valeur différente de "agent-hub" (renommage du projet) romprait
-# silencieusement la purge sinon.
-- name: Read PROJECT_NAME from the local back/.env
+# Volumes : seul `postgres_data` porte un nom explicite
+# (`${PROJECT_NAME}_postgres_data`, scripts/docker-compose.yml du template) ;
+# les autres (`sqlite_data`, `redis_data`, `shared_directory`, `vmagent_data`)
+# sont préfixés par le projet compose de deploy-full.sh
+# (`<PROJECT_NAME>-back-<hôte>_…`), pas par PROJECT_NAME seul — la liste en dur
+# `<project>_redis_data`… ne correspondait à aucun volume réel. Listés par
+# l'étiquette compose des projets (nom courant + anciens noms) plutôt que
+# devinés, puis filtrés : seul un nom qui commence par l'un de ces préfixes
+# suivi de `_` ou `-` est supprimé, quoi que réponde Docker.
+- name: Collect the AgentHub project names (current and legacy)
   ansible.builtin.set_fact:
-    agenthub_project_name: >-
-      {{ (lookup('ansible.builtin.file', agenthub_src ~ 'back/.env', errors='ignore')
-          | default('') | regex_findall('^PROJECT_NAME=(.*)$', multiline=True) | first | default('agent-hub')) | trim }}
-  delegate_to: localhost
-  become: false
+    agenthub_purge_projects: "{{ [agenthub_project_name] + agenthub_legacy_project_names }}"
 
-- name: Remove the AgentHub named volumes (Postgres, Redis, shared dir)
-  community.docker.docker_volume:
-    name: "{{ agenthub_project_name }}_{{ item }}"
-    state: absent
-  loop:
-    - postgres_data
-    - redis_data
-    - shared_directory
-    - vmagent_data
+- name: List the AgentHub volumes
+  ansible.builtin.shell: |
+    set -euo pipefail
+    host={{ ansible_host | replace('.', '-') }}
+    {
+      for name in {{ agenthub_purge_projects | join(' ') }}; do
+        for p in "${name}-back-${host}" "${name}-front-${host}"; do
+          docker volume ls -q --filter "label=com.docker.compose.project=${p}"
+        done
+        if docker volume inspect "${name}_postgres_data" >/dev/null 2>&1; then
+          echo "${name}_postgres_data"
+        fi
+      done
+    } | sort -u
+  args:
+    executable: /bin/bash
   become: true
-  ignore_errors: true
+  register: agenthub_volumes
+  changed_when: false
 
-- name: Remove any leftover AgentHub images
+- name: Remove the AgentHub volumes
+  community.docker.docker_volume:
+    name: "{{ item }}"
+    state: absent
+  loop: >-
+    {{ agenthub_volumes.stdout_lines
+       | select('match', '^(' ~ (agenthub_purge_projects | map('regex_escape') | join('|')) ~ ')[_-]')
+       | list }}
+  become: true
+
+# Images construites sur l'hôte (contexte Docker SSH) : `<PROJECT_NAME>_back`,
+# l'image du front nommée d'après son projet compose, l'image de base
+# `<project>-nestcli:*`. Même filtre de préfixe que les volumes.
+- name: List the AgentHub images
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker images --format '{% raw %}{{.Repository}}:{{.Tag}}{% endraw %}' \
+      | grep -E '^({{ agenthub_purge_projects | join('|') }})[_-]' || true
+  args:
+    executable: /bin/bash
+  become: true
+  register: agenthub_images
+  changed_when: false
+
+- name: Remove the AgentHub images
   community.docker.docker_image_remove:
-    name: "{{ agenthub_project_name }}_{{ item }}:latest"
-  loop:
-    - front
-    - back
+    name: "{{ item }}"
+  loop: "{{ agenthub_images.stdout_lines }}"
   become: true
   ignore_errors: true
 

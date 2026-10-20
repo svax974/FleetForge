@@ -2,8 +2,10 @@
 # Arrête et retire les conteneurs AgentHub (via `scripts/clean-remote.sh`
 # du dépôt app, la contrepartie de `run.sh prod`/`deploy-full.sh` — voir
 # agenthub-deploy/defaults pour le choix de ne pas réimplémenter ce mécanisme
-# en Ansible) et désactive le runner. Conserve les volumes de données
-# (Postgres) — leur suppression relève d'agenthub-purge.
+# en Ansible), retire les conteneurs que ce script ne connaît pas (passe par
+# étiquette compose, voir plus bas) et désactive le runner. Conserve les
+# volumes de données (base, dossier partagé) — leur suppression relève
+# d'agenthub-purge.
 #
 # Ne retire PAS le filtrage DOCKER-USER (docker_ports_rules vit dans
 # host_vars/ctdapi.yml, une liste par MACHINE, pas par service — voir la
@@ -16,6 +18,16 @@
   delegate_to: localhost
   become: false
   register: agenthub_remove_env_stat
+
+# PROJECT_NAME lu dans le back/.env de prod plutôt que supposé : il préfixe
+# les conteneurs, les projets compose et les volumes. Le fait survit à ce rôle
+# (set_fact est porté par l'hôte), agenthub-purge le réutilise.
+- name: Read PROJECT_NAME from the local back/.env
+  ansible.builtin.set_fact:
+    agenthub_project_name: >-
+      {{ (lookup('ansible.builtin.file', agenthub_src ~ 'back/.env', errors='ignore')
+          | default('', true) | regex_findall('^PROJECT_NAME=["\']?([^"\'\n]*)', multiline=True)
+          | first | default(agenthub_project_name_default)) | trim }}
 
 - name: Stop and remove the AgentHub containers (front/back/postgres)
   ansible.builtin.command:
@@ -36,8 +48,33 @@
       scripts/clean-remote.sh (lit ce fichier pour REMOTE_HOST/REMOTE_USER/
       SSH_KEY_FILE/PROJECT_NAME) n'a pas pu être lancé. Retirer les conteneurs
       `<PROJECT_NAME>_front`/`_back`/`_postgres` à la main sur
-      {{ hostvars['agenthub'].ansible_host }} si nécessaire.
+      {{ hostvars['agenthub'].ansible_host }} si nécessaire (la passe suivante
+      retire quand même les conteneurs des projets compose
+      {{ agenthub_project_name }}-back-*/-front-*).
   when: not agenthub_remove_env_stat.stat.exists
+
+# clean-remote.sh ne connaît que `<PROJECT_NAME>_front`/`_back`/`_postgres`.
+# Or deploy-full.sh lance le back en projet compose `<PROJECT_NAME>-back-<hôte>`
+# (réplicas `…-back-1`, sans container_name), avec `_back_lb`, `_vmagent` et,
+# selon la configuration, `_redis` : ils resteraient en marche, port back
+# ({{ agenthub_back_port }}) tenu. Passe complémentaire sur l'hôte, par
+# l'étiquette compose des DEUX projets de déploiement — rien d'autre sur la
+# machine ne porte ces étiquettes (même correctif que llm-proxy-remove).
+- name: Remove every container left in the AgentHub compose projects
+  ansible.builtin.shell: |
+    set -euo pipefail
+    for p in {{ agenthub_project_name }}-back-{{ ansible_host | replace('.', '-') }} {{ agenthub_project_name }}-front-{{ ansible_host | replace('.', '-') }}; do
+      ids=$(docker ps -aq --filter "label=com.docker.compose.project=${p}")
+      if [ -n "${ids}" ]; then
+        docker rm -f ${ids} >/dev/null
+        echo "removed ${p}"
+      fi
+    done
+  args:
+    executable: /bin/bash
+  become: true
+  register: agenthub_sweep
+  changed_when: "'removed' in agenthub_sweep.stdout"
 
 - name: Stop and disable the AgentHub runner (keep it installed)
   ansible.builtin.systemd:
