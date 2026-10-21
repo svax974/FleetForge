@@ -1,4 +1,4 @@
 ---
-llamacpp_user: llamacpp
 llamacpp_home: /opt/llamacpp
-llamacpp_src_dir: "{{ llamacpp_home }}/src"
+llamacpp_releases_dir: "{{ llamacpp_home }}/releases"
+llamacpp_current_dir: "{{ llamacpp_home }}/current"

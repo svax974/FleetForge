@@ -1,37 +1,74 @@
 ---
-# Remove llama.cpp — stops and removes every running instance, the binary,
-# the build/source directory and the system user. Model files (data) are preserved.
+# Remove llama.cpp — stops and removes every instance, the engine releases, the
+# probe and the Prometheus targets. Model files (data) are preserved.
+#
+# La sonde et les cibles partent ici et non au purge (CLAUDE.md § 2) : laissées
+# en place, elles publieraient `up=0` indéfiniment et feraient sonner une
+# alerte sur un service volontairement désinstallé. Le compte `srvc`, qui fait
+# tourner les instances, n'est évidemment pas touché.
 
 - name: Discover installed llama.cpp instances
   ansible.builtin.service_facts:
+
+- name: Set discovered instance units
+  ansible.builtin.set_fact:
+    llamacpp_found_units: "{{ ansible_facts.services.keys() | select('match', '^llamacpp-.*\\.service$') | list }}"
 
 - name: Stop and disable llama.cpp instances
   ansible.builtin.systemd:
     name: "{{ item }}"
     state: stopped
     enabled: false
-  loop: "{{ ansible_facts.services.keys() | select('match', '^llamacpp-.*\\.service$') | list }}"
+  loop: "{{ llamacpp_found_units }}"
   ignore_errors: true
 
 - name: Remove llama.cpp instance systemd unit files
   ansible.builtin.file:
     path: "/etc/systemd/system/{{ item }}"
     state: absent
-  loop: "{{ ansible_facts.services.keys() | select('match', '^llamacpp-.*\\.service$') | list }}"
-  notify: reload systemd (llamacpp)
+  loop: "{{ llamacpp_found_units }}"
 
-- name: Remove llama-server binary
+- name: Reload systemd daemon
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+# svcprobe relit /etc/svcprobe/checks.d à CHAQUE scrape : supprimer les
+# fichiers suffit, aucun redémarrage nécessaire. Une sonde par instance
+# supervisée (llamacpp.json, llamacpp-embed.json…).
+- name: Find the llama.cpp probes
+  ansible.builtin.find:
+    paths: /etc/svcprobe/checks.d
+    patterns: "llamacpp*.json"
+  register: llamacpp_probes
+
+- name: Remove the llama.cpp probes
   ansible.builtin.file:
-    path: /usr/local/bin/llama-server
+    path: "{{ item.path }}"
     state: absent
+  loop: "{{ llamacpp_probes.files }}"
 
-- name: Remove llama.cpp source/build directory
+- name: Find the Prometheus targets of this host's instances
+  ansible.builtin.find:
+    paths: "/home/{{ remote_username }}/prometheus/prometheus-configs/node-llamacpp"
+    patterns: "{{ inventory_hostname }}-[0-9]*.json"
+  delegate_to: "{{ prometheus_host }}"
+  register: llamacpp_targets
+
+- name: Remove the Prometheus targets
   ansible.builtin.file:
-    path: "{{ llamacpp_src_dir }}"
+    path: "{{ item.path }}"
     state: absent
+  loop: "{{ llamacpp_targets.files }}"
+  delegate_to: "{{ prometheus_host }}"
 
-- name: Remove llamacpp system user
-  ansible.builtin.user:
-    name: "{{ llamacpp_user }}"
+# `/usr/local/bin/llama-server` et `src/` : emplacements de l'ancien rôle, qui
+# compilait depuis les sources.
+- name: Remove the llama.cpp engine
+  ansible.builtin.file:
+    path: "{{ item }}"
     state: absent
-    remove: false
+  loop:
+    - "{{ llamacpp_current_dir }}"
+    - "{{ llamacpp_releases_dir }}"
+    - "{{ llamacpp_home }}/src"
+    - /usr/local/bin/llama-server

@@ -1,0 +1,21 @@
+---
+# Supervision d'UNE instance llama-server (instance 1 par défaut, la publiée) :
+#   • sonde svcprobe `service_up{service="<llamacppmon_service>"}` sur /health,
+#     qui répond 503 tant que le modèle charge — le port, lui, s'ouvre avant ;
+#   • /metrics natif de llama-server (`--metrics`), cible du job EXISTANT
+#     `node-llamacpp` posée par exporter-llamacpp-install : requests_deferred
+#     (requêtes en file faute de slot libre) et requests_processing révèlent
+#     une instance saturée, que `service_up` voit à 1.
+#
+# Instance locale (`llamacpp_host: 127.0.0.1`) : Prometheus ne peut pas la
+# scraper, `llamacppmon_native_target: false`. Sa dégradation se lit alors à
+# `service_probe_duration_seconds`, et pour une instance d'embeddings à une
+# sonde secondaire qui calcule réellement un vecteur — /health répond 200 même
+# quand /v1/embeddings échoue (modèle chargé sans `--embeddings`, pooling).
+llamacppmon_instance_id: 1
+llamacppmon_port: "{{ (app_port | default(8080)) | int + (llamacppmon_instance_id | int - 1) }}"
+llamacppmon_service: llamacpp
+llamacppmon_native_target: true
+llamacppmon_embeddings: false
+llamacppmon_unit: "llamacpp-{{ llamacppmon_instance_id }}"
+llamacppmon_url: "http://127.0.0.1:{{ llamacppmon_port }}"

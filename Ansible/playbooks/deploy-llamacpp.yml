@@ -1,23 +1,96 @@
 ---
+# llama.cpp (llama-server) — serveur d'inférence, alternative à Ollama, livré
+# avec le modèle de décision Laya.
+#
+#   ./play.sh web3c deploy-llamacpp.yml
+#   ./play.sh web3c deploy-llamacpp.yml --tags monitoring   # supervision seule
+#
+# Vise l'entrée dédiée `lamacpp` (machine hub, CLAUDE.md § 2).
+#
+# Publié par les proxies en MODE PRIVÉ : CNAME lamacpp.web3c.cc posé par
+# llamacpp-install, vhost llamacpp.conf par `./play.sh web3c update-proxy.yml`
+# (à rejouer après le premier déploiement). Le routeur doit rediriger
+# `app_port` vers hub (hors Ansible) : sans redirection, le vhost
+# répond 502 et la cible node-llamacpp reste `down`.
+#
+# ── Laya ───────────────────────────────────────────────────────────────────
+# Alternative open source (Apache-2.0) à Jev : modèle « système 1 » de
+# DÉCISIONS typées (choix, oui/non, score), pas un modèle de conversation.
+# Encodeur ModernBERT de 0,4 Md de paramètres, appelé par POST /v1/systemone
+# (llama.cpp ≥ PR #29818, 02/10/2026). Q8_0 plutôt que BF16 sur un N100 : le
+# processeur n'a ni AVX512-BF16 ni AMX, BF16 y est converti à la volée, alors
+# que Q8_0 passe par les produits scalaires entiers AVX-VNNI qu'il possède —
+# moitié moins de mémoire lue (449 Mo contre 844 Mo) pour une perte
+# négligeable sur un classifieur. Révision Hugging Face ÉPINGLÉE et vérifiée
+# par empreinte : un fichier republié en amont fait échouer le déploiement
+# au lieu d'être servi sans que personne ne le sache.
+#
+# D'autres modèles s'ajoutent à côté par `deploy-llamacpp-model.yml`
+# (`llamacpp_instance_id` ≥ 2, ports suivants, non publiés).
+
 # ── Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ───────────────────────
-# Échoue immédiatement si le parc n'a pas d'hôte de supervision utilisable,
-# puis vérifie — et répare — le socle de la machine, node_exporter et sa cible
-# Prometheus. Un service déployé sans supervision est un service dont personne
-# ne saura qu'il est tombé.
-# Les contrôles bloquants portent le tag `always` : ils s'appliquent même à un
-# rejeu ciblé par `--tags`.
 - name: Contrôle préalable
-  hosts: all
+  hosts: lamacpp
   remote_user: "{{ remote_username }}"
   roles:
     - role: host-preflight
       preflight_require_docker: false
 
-- name: Install llama.cpp engine
-  hosts: all
+# Pare-feu AVANT le démarrage de l'instance : llama-server écoute sur 0.0.0.0
+# sans authentification, refermer fait partie du déploiement.
+- name: llama.cpp et modèle Laya
+  hosts: lamacpp
   remote_user: "{{ remote_username }}"
   become: true
-  tags: deploy
-
+  vars:
+    llamacpp_instance_id: 1
+    llamacpp_model_name: laya-q8_0
+    llamacpp_model_url: https://huggingface.co/ggml-org/Laya-GGUF/resolve/845f314dd047fc2444a5289a4d50c1e1d59e27e1/Laya-Q8_0.gguf
+    llamacpp_model_checksum: sha256:c06528c5746d3bb8baa72a27938be95abbfd0b226f8471e8a9e365ed0bb066d2
+    llamacpp_ctx_size: 0
   roles:
     - llamacpp-install
+    - llamacpp-security
+    - llamacpp-model-install
+    - llamacpp-monitoring
+
+# ── Embeddings de la mémoire d'OpenClaw ─────────────────────────────────────
+# Remplacent Ollama depuis le 21/10/2026 (seul client d'Ollama, qui a été
+# purgé ensuite). EmbeddingGemma 300M, QAT Q8_0 (licence Gemma), multilingue :
+# le fichier que la doc d'OpenClaw cite pour un llama.cpp local.
+#
+# granite-embedding 278M, servi jusque-là par Ollama, a été essayé ici et
+# écarté : 512 tokens au plus par entrée (positions apprises de XLM-RoBERTa).
+# OpenClaw découpe en 400 « tokens » estimés à 4 caractères — figé dans son
+# code, non configurable — et un fragment de journal de session en faisait
+# 582 : llama-server le refuse (Ollama tronquait en silence) et l'index entier
+# échoue. EmbeddingGemma accepte 2048 tokens par entrée. bge-m3 (568 M), lui,
+# saturait les 4 cœurs du N100, requêtes de 30 à 48 s.
+#
+# Instance LOCALE (127.0.0.1) : son seul client, la gateway OpenClaw, tourne
+# sur la même machine (`openclaw_memory_search_base_url`). Rien à filtrer,
+# rien à scraper de l'extérieur — sonde svcprobe seule, qui calcule un vrai
+# vecteur.
+#
+# 2 slots × 2048 tokens. Un modèle d'embeddings traite chaque entrée en UN
+# lot physique : `--ubatch-size` doit couvrir l'entrée la plus longue, faute
+# de quoi llama-server répond 500 « input is too large to process ».
+- name: Embeddings de la mémoire d'OpenClaw
+  hosts: lamacpp
+  remote_user: "{{ remote_username }}"
+  become: true
+  vars:
+    llamacpp_instance_id: 2
+    llamacpp_host: 127.0.0.1
+    llamacpp_model_name: embeddinggemma-300m-qat-q8_0
+    llamacpp_model_url: https://huggingface.co/ggml-org/embeddinggemma-300m-qat-q8_0-GGUF/resolve/66f974f8cd48cc3b9c41c516b95508e75b4bee64/embeddinggemma-300m-qat-Q8_0.gguf
+    llamacpp_model_checksum: sha256:6fa0c02a9c302be6f977521d399b4de3a46310a4f2621ee0063747881b673f67
+    llamacpp_ctx_size: 4096
+    llamacpp_extra_args: --embeddings --parallel 2 --batch-size 2048 --ubatch-size 2048
+    llamacppmon_instance_id: 2
+    llamacppmon_service: llamacpp-embed
+    llamacppmon_native_target: false
+    llamacppmon_embeddings: true
+  roles:
+    - llamacpp-model-install
+    - llamacpp-monitoring

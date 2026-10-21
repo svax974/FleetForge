@@ -35,6 +35,15 @@
   roles:
     - astar-install
 
+# ── Pare-feu ───────────────────────────────────────────────────────────────
+# P2P (30333/30334) et RPC (9944) publics : sans règle, l'activation d'ufw
+# — refus entrant par défaut — coupe le nœud de ses pairs.
+- name: Pare-feu du nœud
+  hosts: all
+  remote_user: "{{ remote_username }}"
+  roles:
+    - astar-security
+
 # ── Supervision (OBLIGATOIRE, voir CLAUDE.md) ──────────────────────────────
 # Astar expose Prometheus nativement : pas d'exporter à écrire, deux cibles à
 # enregistrer (parachaîne 9615 et relais 9616). Le rôle vérifie ensuite que

@@ -1,0 +1,10 @@
+{
+  "service": "{{ llamacppmon_service }}",
+  "up": {"kind": "http", "url": "{{ llamacppmon_url }}/health", "status": [200], "timeout": 10},
+  "extra_checks": [
+{% if llamacppmon_embeddings %}
+    {"name": "embed", "kind": "command", "timeout": 10, "argv": ["curl", "-sf", "-m", "10", "-o", "/dev/null", "-H", "Content-Type: application/json", "-d", "{\"input\": \"ping\"}", "{{ llamacppmon_url }}/v1/embeddings"]},
+{% endif %}
+    {"name": "unit", "kind": "systemd", "unit": "{{ llamacppmon_unit }}"}
+  ]
+}

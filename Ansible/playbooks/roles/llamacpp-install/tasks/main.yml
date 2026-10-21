@@ -1,23 +1,20 @@
 ---
-# Build and install llama.cpp (llama-server) from source for LLM inference serving.
-# Model instances are created separately by the llamacpp-model-install role.
+# Installe le moteur llama.cpp (llama-server) depuis la release précompilée
+# ggml-org épinglée par `llamacpp_version`. Aucun modèle n'est servi ici : les
+# instances sont créées par `llamacpp-model-install`.
+#
+# Plusieurs releases peuvent coexister sous {{ llamacpp_releases_dir }} ;
+# `current` désigne l'active. Revenir en arrière = rejouer avec l'ancienne
+# `llamacpp_version`, rien n'est retéléchargé.
 
-- name: Install build dependencies
+# Les bibliothèques CPU sont liées à OpenMP (libgomp), absent d'une Ubuntu
+# minimale. libssl3 et libstdc++ font partie du socle.
+- name: Install runtime dependencies
   ansible.builtin.apt:
     name:
-      - git
-      - cmake
-      - build-essential
+      - libgomp1
     state: present
     update_cache: true
-
-- name: Create llamacpp system user
-  ansible.builtin.user:
-    name: "{{ llamacpp_user }}"
-    system: true
-    shell: /usr/sbin/nologin
-    home: "{{ llamacpp_home }}"
-    create_home: false
 
 - name: Create llama.cpp directories
   ansible.builtin.file:
@@ -28,41 +25,54 @@
     mode: '0755'
   loop:
     - "{{ llamacpp_home }}"
+    - "{{ llamacpp_releases_dir }}"
     - "{{ llamacpp_models_dir }}"
+  register: llamacpp_dirs
 
-- name: Check if llama-server is already built
-  ansible.builtin.stat:
-    path: /usr/local/bin/llama-server
-  register: llamacpp_binary
-
-- name: Clone llama.cpp source
-  ansible.builtin.git:
-    repo: https://github.com/ggml-org/llama.cpp.git
-    dest: "{{ llamacpp_src_dir }}"
-    version: "{{ llamacpp_version }}"
-    force: true
-  when: not llamacpp_binary.stat.exists
-
-- name: Configure llama.cpp build
-  ansible.builtin.command: "cmake -B build {{ llamacpp_cmake_extra_flags }}"
-  args:
-    chdir: "{{ llamacpp_src_dir }}"
-  when: not llamacpp_binary.stat.exists
-
-- name: Build llama-server (this can take a while)
-  ansible.builtin.command: >-
-    cmake --build build --config Release --target llama-server
-    -j{{ ansible_processor_vcpus | default(ansible_processor_count) | default(2) }}
-  args:
-    chdir: "{{ llamacpp_src_dir }}"
-  when: not llamacpp_binary.stat.exists
-
-- name: Install llama-server binary
-  ansible.builtin.copy:
-    src: "{{ llamacpp_src_dir }}/build/bin/llama-server"
-    dest: /usr/local/bin/llama-server
+# En `--check` sur une machine vierge, les répertoires ne sont pas créés : les
+# deux tâches suivantes échoueraient sur une destination absente.
+# L'archive contient un unique répertoire `llama-<version>/` : binaires et
+# bibliothèques côte à côte, liés par RPATH=$ORIGIN.
+- name: Download and unpack llama.cpp {{ llamacpp_version }}
+  ansible.builtin.unarchive:
+    src: "{{ llamacpp_release_url }}"
+    dest: "{{ llamacpp_releases_dir }}"
     remote_src: true
-    owner: root
-    group: root
-    mode: '0755'
-  when: not llamacpp_binary.stat.exists
+    owner: "{{ llamacpp_user }}"
+    group: "{{ llamacpp_user }}"
+    creates: "{{ llamacpp_releases_dir }}/llama-{{ llamacpp_version }}/llama-server"
+  when: not (ansible_check_mode and llamacpp_dirs is changed)
+
+- name: Point current at llama.cpp {{ llamacpp_version }}
+  ansible.builtin.file:
+    src: "{{ llamacpp_releases_dir }}/llama-{{ llamacpp_version }}"
+    dest: "{{ llamacpp_current_dir }}"
+    state: link
+    owner: "{{ llamacpp_user }}"
+    group: "{{ llamacpp_user }}"
+  notify: restart llamacpp instances
+  when: not (ansible_check_mode and llamacpp_dirs is changed)
+
+# Contrôle immédiat : une bibliothèque manquante ou une glibc trop ancienne se
+# verrait sinon au premier démarrage d'instance, en boucle de redémarrage.
+- name: Check that llama-server runs on this machine
+  ansible.builtin.command: "{{ llamacpp_current_dir }}/llama-server --version"
+  register: llamacpp_version_check
+  changed_when: false
+
+- name: Report the installed version
+  ansible.builtin.debug:
+    msg: "{{ (llamacpp_version_check.stdout | default('') ~ llamacpp_version_check.stderr | default('')).split('\n') | select('search', 'version') | list }}"
+
+# Nom public (`proxy_hostname` de l'entrée) : CNAME vers le front des proxies,
+# publié dès l'installation sans attendre update-cloudflare-dns.yml (CLAUDE.md
+# § 2, modèle agenthub-install). Le vhost, lui, se pose par
+# `./play.sh web3c update-proxy.yml`.
+- name: Ensure the service CNAME to the canonical proxy front
+  ansible.builtin.include_role:
+    name: cloudflare-dns-update
+    tasks_from: cnames
+  vars:
+    cfdns_cname_scope:
+      - "{{ inventory_hostname }}"
+  when: proxy_hostname is defined

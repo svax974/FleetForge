@@ -1,7 +1,8 @@
 ---
 # Download a GGUF model and (re)start a dedicated llama-server instance serving it.
 # Requires: llamacpp_model_name, llamacpp_model_url
-# Optional: llamacpp_instance_id (default 1), llamacpp_ctx_size, llamacpp_extra_args
+# Optional: llamacpp_instance_id (default 1), llamacpp_model_checksum, llamacpp_host,
+#           llamacpp_ctx_size, llamacpp_threads, llamacpp_extra_args
 # Multiple instances can run side by side on the same host — each instance_id gets
 # its own systemd service and port (llamacpp_base_port + instance_id - 1).
 
@@ -17,22 +18,24 @@
 
 - name: Verify llama-server is installed
   ansible.builtin.stat:
-    path: /usr/local/bin/llama-server
+    path: "{{ llamacpp_current_dir }}/llama-server"
   register: llamacpp_binary
 
 - name: Fail if llama.cpp is not installed
   ansible.builtin.fail:
     msg: "llama-server is not installed. Run the llamacpp-install role first."
-  when: not llamacpp_binary.stat.exists
+  when: not llamacpp_binary.stat.exists and not ansible_check_mode
 
 - name: Download GGUF model {{ llamacpp_model_name }}
   ansible.builtin.get_url:
     url: "{{ llamacpp_model_url }}"
     dest: "{{ llamacpp_models_dir }}/{{ llamacpp_model_name }}.gguf"
+    checksum: "{{ llamacpp_model_checksum | default(omit, true) }}"
     owner: "{{ llamacpp_user }}"
     group: "{{ llamacpp_user }}"
     mode: '0644'
     timeout: 3600
+  notify: restart llamacpp instance
 
 - name: Deploy systemd service for llama.cpp instance {{ llamacpp_instance_id }}
   ansible.builtin.template:
@@ -43,18 +46,43 @@
     mode: '0644'
   notify: restart llamacpp instance
 
-- name: Reload systemd daemon
-  ansible.builtin.systemd:
-    daemon_reload: true
-
 - name: Enable and start llama.cpp instance {{ llamacpp_instance_id }}
   ansible.builtin.systemd:
     name: "llamacpp-{{ llamacpp_instance_id }}"
     state: started
     enabled: true
+    daemon_reload: true
 
+- name: Apply a pending restart before checking the instance
+  ansible.builtin.meta: flush_handlers
+
+# /health et non le port : le serveur écoute avant d'avoir chargé le modèle et
+# répond 503 « Loading model » jusque-là.
 - name: Wait for llama.cpp instance {{ llamacpp_instance_id }} to be ready
-  ansible.builtin.wait_for:
-    port: "{{ llamacpp_port }}"
-    delay: 3
-    timeout: 60
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ llamacpp_port }}/health"
+    status_code: 200
+  register: llamacpp_health
+  retries: 30
+  delay: 5
+  until: llamacpp_health.status == 200
+  changed_when: false
+
+# `output_modalities` dit comment l'instance doit être appelée : `decisions`
+# = modèle de décision, servi par /v1/systemone (Laya) ; `text` = génératif,
+# /v1/chat/completions.
+- name: Read what instance {{ llamacpp_instance_id }} serves
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ llamacpp_port }}/v1/models"
+    return_content: true
+  register: llamacpp_models
+  changed_when: false
+
+- name: Report the served model
+  ansible.builtin.debug:
+    msg: >-
+      {{ llamacpp_models.json.data | default([])
+         | map(attribute='id') | list }} sur le port {{ llamacpp_port }} —
+      sorties : {{ llamacpp_models.json.data | default([])
+         | map(attribute='architecture', default={})
+         | map(attribute='output_modalities', default=[]) | list }}

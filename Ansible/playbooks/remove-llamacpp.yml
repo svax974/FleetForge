@@ -1,8 +1,18 @@
 ---
-- name: Remove llama.cpp engine (all instances stopped, models preserved)
-  hosts: all
+# Désinstalle llama.cpp en conservant les modèles téléchargés.
+#
+#   ./play.sh web3c remove-llamacpp.yml
+#
+# Arrête et supprime toutes les instances, le moteur, la sonde et les cibles
+# Prometheus — laissées en place, elles publieraient `up=0` indéfiniment.
+# Conserve /opt/llamacpp/models : une réinstallation les retrouve en place.
+# Pour tout supprimer : `purge-llamacpp.yml`.
+#
+# Vise l'entrée dédiée `lamacpp` (machine hub, CLAUDE.md § 2).
+
+- name: Désinstallation de llama.cpp (modèles conservés)
+  hosts: lamacpp
   remote_user: "{{ remote_username }}"
   become: true
-
   roles:
     - llamacpp-remove

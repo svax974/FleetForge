@@ -1,0 +1,70 @@
+---
+# Ordre imposé : ufw évalue ses règles séquentiellement et la première qui
+# matche gagne. Les autorisations doivent donc être posées AVANT le refus par
+# défaut, sinon le refus les couvre toutes et le service devient injoignable.
+# `community.general.ufw` ajoute en queue, l'ordre des tâches suffit.
+
+- name: Allow the llama.cpp API from proxies, vpns, Prometheus and whitelist
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    port: "{{ llamacppsec_port }}"
+    from_ip: "{{ item }}"
+    comment: "llama.cpp API"
+  loop: "{{ llamacppsec_sources | unique }}"
+  become: true
+
+- name: Deny the llama.cpp API from anywhere else
+  community.general.ufw:
+    rule: deny
+    proto: tcp
+    port: "{{ llamacppsec_port }}"
+    comment: "llama.cpp API - default deny"
+  become: true
+
+# Le refus ci-dessus ne protège rien si llama-server venait à tourner en
+# conteneur avec `-p` : Docker insère ses DNAT en amont d'ufw (CLAUDE.md).
+# C'est le cas de la famille `aiserver`, qui sert aussi llama-server — on
+# vérifie qu'elle n'a pas pris ce port plutôt que de le supposer.
+- name: Check that the port is not published by Docker
+  ansible.builtin.shell: >-
+    docker ps --format '{% raw %}{{.Ports}}{% endraw %}' 2>/dev/null
+    | grep -c ':{{ llamacppsec_port }}->' || true
+  args:
+    executable: /bin/bash
+  register: llamacppsec_docker
+  changed_when: false
+  check_mode: false
+  become: true
+
+- name: Fail when the port is published by a container
+  ansible.builtin.fail:
+    msg: >-
+      Le port {{ llamacppsec_port }} est publié par un conteneur : les règles ufw
+      posées ci-dessus n'ont AUCUN effet dessus. Le filtrage doit passer par la
+      chaîne DOCKER-USER — ajouter l'entrée dans les host_vars de l'entrée
+      canonique de la machine et jouer `docker-ports-security`.
+  when: (llamacppsec_docker.stdout | default('0') | trim | int) > 0
+
+# ── Contrôle ───────────────────────────────────────────────────────────────
+# Les règles ci-dessus restent DÉCORATIVES tant qu'ufw est inactif — l'état de
+# la machine hub depuis le 09/09/2026, par décision opérateur (voir
+# openclaw-security). Avec la redirection routeur nécessaire au vhost, l'API
+# serait alors joignable sans filtre depuis Internet : on le signale à chaque
+# déploiement plutôt que d'activer ufw à l'aveugle.
+- name: Check whether ufw is actually active
+  ansible.builtin.command: ufw status
+  become: true
+  register: llamacppsec_ufw_state
+  changed_when: false
+  check_mode: false
+
+- name: Warn when ufw is inactive on this host
+  ansible.builtin.debug:
+    msg: >-
+      ufw est INACTIF sur {{ inventory_hostname }} : les règles llama.cpp sont
+      enregistrées mais AUCUNE n'est appliquée. Si le routeur redirige
+      {{ llamacppsec_port }} vers cette machine, l'API (sans authentification)
+      est ouverte à Internet. Activer ufw après avoir vérifié les autres
+      services de la machine.
+  when: "'Status: active' not in llamacppsec_ufw_state.stdout"

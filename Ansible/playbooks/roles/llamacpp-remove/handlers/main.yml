@@ -1,4 +1,0 @@
----
-- name: reload systemd (llamacpp)
-  ansible.builtin.systemd:
-    daemon_reload: true

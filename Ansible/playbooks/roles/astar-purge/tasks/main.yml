@@ -74,3 +74,22 @@
   become: true
   when: prometheus_host is defined and prometheus_host in hostvars
   ignore_errors: true
+
+# Règles publiques posées par `astar-security` (P2P, RPC).
+- name: Load the public ports declared by astar-security
+  ansible.builtin.include_role:
+    name: astar-security
+    tasks_from: vars
+    public: true
+
+- name: Remove the Astar public port rules
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    port: "{{ item.port | string }}"
+    delete: true
+  loop: "{{ astarsec_public_ports }}"
+  loop_control:
+    label: "{{ item.port }}"
+  become: true
+  ignore_errors: true

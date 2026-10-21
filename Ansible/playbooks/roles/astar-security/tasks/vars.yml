@@ -1,0 +1,6 @@
+---
+# Point d'entrée vide : `include_role` avec `tasks_from: vars` et `public: true`
+# expose `astarsec_public_ports` à l'appelant — `astar-purge` retire ainsi
+# exactement les règles posées ici.
+- name: Expose the Astar firewall defaults
+  ansible.builtin.meta: noop

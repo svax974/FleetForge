@@ -1,0 +1,5 @@
+---
+# `try-restart` ne relance que les instances déjà actives : un changement de
+# version ne démarre pas une instance arrêtée volontairement.
+- name: restart llamacpp instances
+  ansible.builtin.command: systemctl try-restart 'llamacpp-*.service'

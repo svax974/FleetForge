@@ -1,6 +1,6 @@
 ---
 - name: Remove a llama.cpp model instance and its Prometheus target
-  hosts: all
+  hosts: lamacpp
   remote_user: "{{ remote_username }}"
   become: true
 
@@ -8,7 +8,7 @@
     - llamacpp-model-remove
 
 - name: Remove llama.cpp instance Prometheus target from monitor
-  hosts: all
+  hosts: lamacpp
   remote_user: "{{ remote_username }}"
   become: false
 

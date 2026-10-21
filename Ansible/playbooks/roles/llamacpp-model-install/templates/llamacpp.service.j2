@@ -1,19 +1,26 @@
 [Unit]
 Description=llama.cpp inference server — instance {{ llamacpp_instance_id }} ({{ llamacpp_model_name }})
-After=network.target
+Wants=network-online.target
+After=network-online.target
 
 [Service]
 Type=simple
 User={{ llamacpp_user }}
-ExecStart=/usr/local/bin/llama-server \
+Group={{ llamacpp_user }}
+ExecStart={{ llamacpp_current_dir }}/llama-server \
   --model {{ llamacpp_models_dir }}/{{ llamacpp_model_name }}.gguf \
-  --host 0.0.0.0 \
+  --alias {{ llamacpp_model_name }} \
+  --host {{ llamacpp_host }} \
   --port {{ llamacpp_port }} \
   --ctx-size {{ llamacpp_ctx_size }} \
+  --threads {{ llamacpp_threads }} \
   --metrics \
   {{ llamacpp_extra_args }}
 Restart=on-failure
 RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
 
 [Install]
 WantedBy=multi-user.target

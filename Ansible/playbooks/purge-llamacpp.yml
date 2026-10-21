@@ -1,8 +1,18 @@
 ---
-- name: Purge llama.cpp (engine, all instances, all models, Prometheus targets)
-  hosts: all
+# Supprime llama.cpp ET tous les modèles téléchargés.
+#
+#   ./play.sh web3c purge-llamacpp.yml
+#
+# Tout ce que fait `remove-llamacpp.yml`, plus /opt/llamacpp (modèles compris),
+# les règles de pare-feu posées par `llamacpp-security` et le CNAME public.
+# Retirer en même temps le `proxy_hostname` de l'entrée `lamacpp`, sinon
+# update-cloudflare-dns.yml republiera le CNAME.
+#
+# Vise l'entrée dédiée `lamacpp` (machine hub, CLAUDE.md § 2).
+
+- name: Purge de llama.cpp (modèles compris)
+  hosts: lamacpp
   remote_user: "{{ remote_username }}"
   become: true
-
   roles:
     - llamacpp-purge

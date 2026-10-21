@@ -173,20 +173,24 @@
 # Moteur d'embeddings de la mémoire. Vide = défaut d'OpenClaw (openai, qui exige
 # une clé). Sans fallback explicite (`none`), une panne du moteur retomberait
 # sur un fournisseur sans clé. Rien de secret ici : `--batch-json` convient.
-# Pas de `notify` : la gateway recharge `memory.search` à chaud.
+# `config set` réclame un redémarrage de la gateway pour `memory.search`
+# (« Restart the gateway to apply », constaté le 21/10/2026, v2026.10.4).
 - name: Configure the memory search embeddings
   ansible.builtin.command:
     cmd: >-
       {{ openclaw_binary }} config set --batch-json
-      '{{ [{"path": "memory.search.provider", "value": openclaw_memory_search_provider},
-           {"path": "memory.search.model", "value": openclaw_memory_search_model},
-           {"path": "memory.search.fallback", "value": openclaw_memory_search_fallback}] | to_json }}'
+      '{{ ([{"path": "memory.search.provider", "value": openclaw_memory_search_provider},
+            {"path": "memory.search.model", "value": openclaw_memory_search_model},
+            {"path": "memory.search.fallback", "value": openclaw_memory_search_fallback}]
+           + ([{"path": "memory.search.remote.baseUrl", "value": openclaw_memory_search_base_url}]
+              if openclaw_memory_search_base_url | length > 0 else [])) | to_json }}'
     chdir: "{{ openclaw_home }}"
   become: true
   become_user: "{{ openclaw_user }}"
   environment:
     HOME: "{{ openclaw_home }}"
   changed_when: true
+  notify: restart openclaw gateway
   when: openclaw_memory_search_provider | length > 0
 
 # Travail de fond qui consomme le modèle sans rien produire de visible (voir

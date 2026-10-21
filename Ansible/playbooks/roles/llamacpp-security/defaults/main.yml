@@ -1,0 +1,29 @@
+---
+# llama-server écoute sur 0.0.0.0 et n'a aucune authentification (pas de
+# `--api-key`) : qui joint le port consomme le CPU de la machine — tout le
+# CPU sur un N100.
+#
+# Service publié par les proxies (lamacpp.web3c.cc) : le port est ouvert aux
+# proxies + vpns + Prometheus + whitelist, refusé à tout le reste (CLAUDE.md
+# § 1, « Accès réseau »). Prometheus y lit aussi /metrics natif. Le MODE
+# (privé/public) ne joue que sur le vhost.
+#
+# Seul le port de l'instance 1 (`app_port`) est concerné : c'est le seul que
+# le vhost vise. Les instances suivantes ne sont joignables que par Prometheus
+# (exporter-llamacpp-install).
+
+llamacppsec_port: "{{ app_port | default(8080) }}"
+
+# Sources autorisées en plus (dépannage). À garder vide : chaque entrée est une
+# exception qui survit à celui qui l'a posée. L'accès local (127.0.0.1) n'est
+# pas concerné : ufw laisse passer `lo`, la sonde svcprobe fonctionne.
+llamacppsec_extra_allowed: []
+
+# Sources, toutes DÉRIVÉES de l'inventaire. Partagé avec `llamacpp-purge`, qui
+# doit retirer exactement les mêmes règles.
+llamacppsec_sources: >-
+  {{ (whitelist | default([]))
+     + (groups['proxies'] | default([]) | map('extract', hostvars, 'ansible_host') | list)
+     + (groups['vpns'] | default([]) | map('extract', hostvars, 'ansible_host') | list)
+     + ([hostvars[prometheus_host].ansible_host] if (prometheus_host is defined and prometheus_host in hostvars) else [])
+     + llamacppsec_extra_allowed }}

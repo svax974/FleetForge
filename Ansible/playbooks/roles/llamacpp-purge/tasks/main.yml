@@ -1,76 +1,77 @@
 ---
-# Purge llama.cpp — removes the binary, every instance, ALL downloaded models,
-# and cleans up the Prometheus target/firewall rule for every discovered instance.
+# Purge llama.cpp — everything `llamacpp-remove` does, plus ALL downloaded
+# models, the firewall rules and the public CNAME.
 # WARNING: all GGUF models are deleted and must be re-downloaded.
 
+# Avant `llamacpp-remove`, qui supprime les unités : leurs numéros donnent les
+# ports dont exporter-llamacpp-install a ouvert le scrape.
 - name: Discover installed llama.cpp instances
   ansible.builtin.service_facts:
 
 - name: Set discovered instance ids
   ansible.builtin.set_fact:
-    llamacpp_found_instances: "{{ ansible_facts.services.keys() | select('match', '^llamacpp-.*\\.service$') | map('regex_replace', '^llamacpp-(.*)\\.service$', '\\1') | list }}"
+    llamacpp_found_instances: "{{ ansible_facts.services.keys() | select('match', '^llamacpp-[0-9]+\\.service$') | map('regex_replace', '^llamacpp-([0-9]+)\\.service$', '\\1') | list }}"
 
-- name: Stop and disable llama.cpp instances
-  ansible.builtin.systemd:
-    name: "llamacpp-{{ item }}"
-    state: stopped
-    enabled: false
-  loop: "{{ llamacpp_found_instances }}"
-  ignore_errors: true
+- name: Remove instances, engine, probe and Prometheus targets
+  ansible.builtin.include_role:
+    name: llamacpp-remove
 
-- name: Remove llama.cpp instance systemd unit files
-  ansible.builtin.file:
-    path: "/etc/systemd/system/llamacpp-{{ item }}.service"
-    state: absent
-  loop: "{{ llamacpp_found_instances }}"
-
-- name: Reload systemd daemon
-  ansible.builtin.systemd:
-    daemon_reload: true
-
-- name: Remove llama-server binary
-  ansible.builtin.file:
-    path: /usr/local/bin/llama-server
-    state: absent
-
-- name: Remove llama.cpp home directory (source, build, all models)
+- name: Remove llama.cpp home directory (all models)
   ansible.builtin.file:
     path: "{{ llamacpp_home }}"
     state: absent
 
-- name: Remove llamacpp system user
-  ansible.builtin.user:
-    name: "{{ llamacpp_user }}"
-    state: absent
-    remove: true
-
-- name: Set prometheus home on monitoring host
-  ansible.builtin.set_fact:
-    prometheus_home: "/home/{{ remote_username }}/prometheus"
-
-- name: Remove Prometheus target files for all discovered instances
-  ansible.builtin.file:
-    path: "{{ prometheus_home }}/prometheus-configs/node-llamacpp/{{ inventory_hostname }}-{{ item }}.json"
-    state: absent
-  loop: "{{ llamacpp_found_instances }}"
-  delegate_to: "{{ prometheus_host }}"
-  ignore_errors: true
-
-- name: Reload Prometheus container
-  community.docker.docker_container:
-    name: prometheus
-    state: started
-    restart: yes
-  delegate_to: "{{ prometheus_host }}"
-  ignore_errors: true
-
-- name: Close UFW rules for discovered instance ports
+- name: Close the Prometheus scrape rule of each discovered instance
   community.general.ufw:
     rule: allow
     src: "{{ hostvars[prometheus_host]['ansible_host'] }}"
-    port: "{{ llamacpp_base_port + (item | int - 1) }}"
+    port: "{{ llamacpp_base_port | int + (item | int - 1) }}"
     proto: tcp
     delete: true
   loop: "{{ llamacpp_found_instances }}"
-  become: yes
   ignore_errors: true
+
+- name: Load the firewall sources computed by llamacpp-security
+  ansible.builtin.include_role:
+    name: llamacpp-security
+    tasks_from: vars
+    public: true
+
+# Les autorisations sont posées par source (`llamacpp-security`) : les
+# supprimer impose de rejouer la même liste. Un `delete` sans `from_ip` ne
+# matcherait que la règle générique et laisserait les autres en place.
+- name: Remove the per-source llama.cpp allow rules
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    port: "{{ llamacppsec_port }}"
+    from_ip: "{{ item }}"
+    delete: true
+  loop: "{{ llamacppsec_sources | unique }}"
+  ignore_errors: true
+
+- name: Remove the llama.cpp default-deny rule
+  community.general.ufw:
+    rule: deny
+    proto: tcp
+    port: "{{ llamacppsec_port }}"
+    delete: true
+  ignore_errors: true
+
+# ── DNS : retirer le CNAME public ───────────────────────────────────────────
+# Symétrique de la publication (llamacpp-install). Le `proxy_hostname` de
+# l'entrée doit être retiré EN MÊME TEMPS — sinon la prochaine
+# update-cloudflare-dns.yml republierait le record.
+- name: Remove the llama.cpp CNAME
+  community.general.cloudflare_dns:
+    api_token: "{{ cloudflare_token }}"
+    zone: "{{ domain_name }}"
+    record: "{{ proxy_hostname }}"
+    type: CNAME
+    state: absent
+  delegate_to: localhost
+  become: false
+  run_once: true
+  when:
+    - proxy_hostname is defined
+    - cloudflare_token | default('') | length > 0

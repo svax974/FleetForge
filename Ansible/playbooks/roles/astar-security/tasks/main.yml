@@ -1,0 +1,16 @@
+---
+# Règles ufw du collator Astar : tous ses ports d'écoute en dehors des
+# métriques sont publics (voir defaults). Sans ces règles, activer ufw sur la
+# machine — refus entrant par défaut — couperait le nœud de ses pairs et du
+# client de son RPC, sans autre symptôme qu'un nombre de pairs qui s'effondre.
+
+- name: Allow the Astar public ports
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    port: "{{ item.port | string }}"
+    comment: "{{ item.comment }}"
+  loop: "{{ astarsec_public_ports }}"
+  loop_control:
+    label: "{{ item.port }}"
+  become: true

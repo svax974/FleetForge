@@ -1,6 +1,6 @@
 ---
 - name: Deploy a llama.cpp model instance
-  hosts: all
+  hosts: lamacpp
   remote_user: "{{ remote_username }}"
   become: true
   tags: deploy
@@ -9,7 +9,7 @@
     - llamacpp-model-install
 
 - name: Register llama.cpp instance Prometheus target on monitor
-  hosts: all
+  hosts: lamacpp
   remote_user: "{{ remote_username }}"
   become: false
   tags: monitoring

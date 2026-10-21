@@ -1,0 +1,15 @@
+---
+# Ports du collator Astar ouverts à TOUS, par décision opérateur du 21/10/2026 :
+#   • 30333 — P2P de la parachaîne (`--port 30333`, astar.service.j2) ;
+#   • 30334 — P2P du nœud de relais embarqué (port suivant, défaut du binaire) ;
+#   • 9944  — RPC (`--rpc-external --rpc-methods Safe`), CONSOMMÉ : seules les
+#     méthodes « Safe » sont servies, aucune ne touche aux clés du nœud.
+# Un P2P filtré isole le nœud de ses pairs ; le RPC, lui, est une exposition
+# assumée, à réexaminer si `--rpc-methods` change.
+#
+# Les métriques (9615/9616) ne sont PAS ici : astar-monitoring les ouvre à
+# Prometheus seul.
+astarsec_public_ports:
+  - { port: 30333, comment: "Astar - P2P parachain" }
+  - { port: 30334, comment: "Astar - P2P relay chain" }
+  - { port: 9944, comment: "Astar - RPC (Safe methods)" }

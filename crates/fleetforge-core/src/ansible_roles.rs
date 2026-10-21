@@ -162,6 +162,7 @@ fn get_role_metadata(name: &str) -> (String, String) {
         "docker-repo-monitoring" => ("Supervision registre Docker".into(), "Sonde HTTP de l'API /v2/ du registre (200 ou 401) et état du conteneur.".into()),
         "mailserver-monitoring" => ("Supervision relai SMTP".into(), "Exporter Postfix (cible + scrape) et sonde svcprobe sur Postfix, Dovecot, OpenDKIM et les ports 25/587/993. Extrait de mailserver-setup pour être rejouable seul.".into()),
         "ollama-monitoring" => ("Supervision Ollama".into(), "Sonde HTTP sur /api/tags — le démon accepte les connexions bien avant de pouvoir servir un modèle — plus son unité systemd.".into()),
+        "llamacpp-monitoring" => ("Supervision llama.cpp".into(), "Sonde HTTP sur /health — 503 tant que le modèle charge, alors que le port est déjà ouvert — plus l'unité de l'instance publiée, et cible /metrics native (job node-llamacpp : requêtes en attente de slot).".into()),
         "grafana-monitoring" => ("Supervision Grafana".into(), "Cible native /metrics plus sonde /api/health, qui distingue « Grafana répond » de « Grafana répond ET sa base interne est joignable ».".into()),
         "alertmanager-monitoring" => ("Supervision Alertmanager".into(), "Enregistre la cible native /metrics d'Alertmanager — le maillon qui ÉMET les alertes, et dont la chute ne serait signalée par rien d'autre.".into()),
         "backup-security" => ("Sécurité destination de sauvegarde".into(), "Ouvre SSH sur l'hôte de destination pour chaque source déclarée en `backup_sources`. Sans lui, la source ne peut rien pousser.".into()),
@@ -303,12 +304,13 @@ fn get_role_metadata(name: &str) -> (String, String) {
         "ollama-model-remove" => ("Suppression modèle Ollama".into(), "Supprime un modèle spécifique d'Ollama (nécessite la variable ollama_model_name).".into()),
 
         // IA / llama.cpp
-        "llamacpp-install" => ("Installation llama.cpp".into(), "Compile llama-server depuis les sources (cmake) et crée l'utilisateur système et les répertoires partagés. Aucune instance n'est démarrée.".into()),
-        "llamacpp-remove" => ("Suppression llama.cpp".into(), "Arrête et supprime toutes les instances llama-server détectées, le binaire et les sources compilées (modèles préservés).".into()),
-        "llamacpp-purge" => ("Purge llama.cpp".into(), "Supprime le binaire, toutes les instances, tous les modèles GGUF et les entrées Prometheus associées pour chaque instance détectée.".into()),
-        "llamacpp-model-install" => ("Déploiement modèle llama.cpp".into(), "Télécharge un modèle GGUF et démarre une instance llama-server dédiée (systemd + port propres). Variables : llamacpp_model_name, llamacpp_model_url (requis), llamacpp_instance_id (défaut : 1).".into()),
+        "llamacpp-install" => ("Installation llama.cpp".into(), "Installe llama-server depuis la release précompilée ggml-org épinglée (llamacpp_version, binaire CPU à variantes par génération de processeur), sous srvc, et publie le CNAME du nom public (proxy_hostname). Aucune instance n'est démarrée.".into()),
+        "llamacpp-remove" => ("Suppression llama.cpp".into(), "Arrête et supprime toutes les instances llama-server détectées, le moteur, la sonde et les cibles Prometheus (modèles préservés).".into()),
+        "llamacpp-purge" => ("Purge llama.cpp".into(), "Fait tout ce que llamacpp-remove fait, plus : tous les modèles GGUF, les règles de pare-feu et le CNAME public.".into()),
+        "llamacpp-security" => ("Sécurité llama.cpp".into(), "Restreint le port de l'instance publiée (app_port, API sans authentification) aux proxies, vpns, Prometheus et whitelist, refus par défaut ensuite ; refuse un port publié par Docker et signale un ufw inactif.".into()),
+        "llamacpp-model-install" => ("Déploiement modèle llama.cpp".into(), "Télécharge un modèle GGUF (empreinte vérifiée si llamacpp_model_checksum) et démarre une instance llama-server dédiée (systemd + port propres, sous srvc), puis attend /health. Variables : llamacpp_model_name, llamacpp_model_url (requis), llamacpp_instance_id (défaut : 1).".into()),
         "llamacpp-model-remove" => ("Suppression modèle llama.cpp".into(), "Arrête l'instance llama-server et supprime son fichier GGUF. Variables : llamacpp_model_name (requis), llamacpp_instance_id (défaut : 1).".into()),
-        "exporter-llamacpp-install" => ("Exporteur llama.cpp".into(), "Enregistre le endpoint Prometheus natif de l'instance llama-server (--metrics, /metrics) sur le serveur de monitoring et ouvre le firewall. Variable : llamacpp_instance_id (défaut : 1).".into()),
+        "exporter-llamacpp-install" => ("Exporteur llama.cpp".into(), "Enregistre le endpoint Prometheus natif de l'instance llama-server (--metrics, /metrics, job node-llamacpp) sur le serveur de monitoring et ouvre le firewall. Variable : llamacpp_instance_id (défaut : 1).".into()),
         "exporter-llamacpp-remove" => ("Suppression exporteur llama.cpp".into(), "Retire l'instance llama.cpp des targets Prometheus et ferme le port firewall. Variable : llamacpp_instance_id (défaut : 1).".into()),
 
         // DNS / Cloudflare
@@ -412,7 +414,8 @@ fn get_role_metadata(name: &str) -> (String, String) {
         "opencode-model-update" => ("Mise à jour modèle opencode".into(), "Réécrit la seule clé `model` de la configuration existante — les blocs ajoutés à la main sont préservés — après contrôle de l'identifiant contre le catalogue OpenCode Zen PUIS appel réel au modèle : figurer au catalogue ne prouve pas que le palier gratuit répond encore. Un modèle muet n'atteint jamais la configuration. Variables : opencode_model (requis), opencode_smoke_test, opencode_model_reset_selection (efface le modèle mémorisé par le TUI, qui prime sinon sur le défaut).".into()),
 
         // Astar
-        "astar-install" => ("Installation noeud Astar".into(), "Télécharge la dernière release GitHub d'Astar, crée l'utilisateur système et configure le service systemd (chaîne, nom du noeud via astar_node_name).".into()),
+        "astar-security" => ("Sécurité noeud Astar".into(), "Ouvre à tous les ports publics du collator : P2P parachaîne 30333, P2P relais 30334 et RPC 9944 (méthodes Safe), par décision opérateur. Sans eux, activer ufw couperait le noeud de ses pairs.".into()),
+        "astar-install" => ("Installation noeud Astar".into(), "Télécharge la dernière release GitHub d'Astar, crée l'utilisateur système et configure le service systemd (chaîne, nom du noeud via astar_node_name), plafonne sa mémoire (MemoryHigh, MALLOC_ARENA_MAX) et abaisse vm.swappiness.".into()),
         "astar-remove" => ("Suppression noeud Astar".into(), "Arrête le service, supprime le binaire, l'utilisateur système et la cible Prometheus (blockchain préservée).".into()),
         "astar-purge" => ("Purge noeud Astar".into(), "Supprime le service, le binaire, l'utilisateur, la cible Prometheus et toute la blockchain Astar (~500 GB). Exige -e confirm=yes.".into()),
         "astar-monitoring" => ("Supervision noeud Astar".into(), "Enregistre les deux endpoints Prometheus natifs du collator — parachaîne 9615 et relais 9616 — ouvre le scrape et vérifie que substrate_block_height est réellement exposé. Remplace exporter-astar-install.".into()),

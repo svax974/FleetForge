@@ -21,10 +21,15 @@
     enabled: no
   ignore_errors: true
 
-- name: Remove ollama binary
+# Le script officiel pose, à côté du binaire, ses bibliothèques d'exécution
+# (CUDA, ROCm : 4,7 Go sur hub, constaté le 21/10/2026) — moteur, pas données.
+- name: Remove ollama binary and its runtime libraries
   ansible.builtin.file:
-    path: /usr/local/bin/ollama
+    path: "{{ item }}"
     state: absent
+  loop:
+    - /usr/local/bin/ollama
+    - /usr/local/lib/ollama
 
 - name: Remove systemd service file and drop-in directory
   ansible.builtin.file:

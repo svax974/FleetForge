@@ -1,4 +1,3 @@
 ---
-llamacpp_user: llamacpp
 llamacpp_home: /opt/llamacpp
-llamacpp_base_port: 8080
+llamacpp_base_port: "{{ app_port | default(8080) }}"

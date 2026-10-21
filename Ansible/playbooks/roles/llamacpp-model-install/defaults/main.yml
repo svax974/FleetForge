@@ -1,9 +1,24 @@
 ---
 llamacpp_instance_id: 1
-llamacpp_base_port: 8080
-llamacpp_port: "{{ llamacpp_base_port + (llamacpp_instance_id | int - 1) }}"
-llamacpp_user: llamacpp
+# Instance 1 = port de l'entrée (`app_port`), le seul publié par les proxies.
+# Les instances suivantes prennent les ports suivants, non publiés.
+llamacpp_base_port: "{{ app_port | default(8080) }}"
+llamacpp_port: "{{ llamacpp_base_port | int + (llamacpp_instance_id | int - 1) }}"
+llamacpp_user: "{{ remote_username }}"
+# 127.0.0.1 pour une instance dont les seuls clients tournent sur la machine
+# (embeddings d'OpenClaw) : rien à filtrer, rien à exposer.
+llamacpp_host: 0.0.0.0
 llamacpp_home: /opt/llamacpp
+llamacpp_current_dir: "{{ llamacpp_home }}/current"
 llamacpp_models_dir: "{{ llamacpp_home }}/models"
+# `sha256:<empreinte>` — vide = pas de contrôle. À renseigner dès que la source
+# publie l'empreinte (Hugging Face : champ `lfs.oid` de l'API /tree).
+llamacpp_model_checksum: ""
+# 0 = contexte d'entraînement lu dans le GGUF (Laya : petit encodeur, sans
+# cache KV). À éviter pour un gros modèle génératif : il réserverait un cache
+# KV de la taille de son contexte maximal.
 llamacpp_ctx_size: 4096
+# Un cœur laissé aux autres services de la machine : sur hub (N100, 4 cœurs
+# sans hyperthreading), le collator Astar et OpenClaw tournent à côté.
+llamacpp_threads: "{{ [(ansible_facts.processor_cores | int) * (ansible_facts.processor_count | int) - 1, 1] | max }}"
 llamacpp_extra_args: ""

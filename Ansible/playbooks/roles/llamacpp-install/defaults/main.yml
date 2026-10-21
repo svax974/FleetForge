@@ -1,7 +1,25 @@
 ---
-llamacpp_user: llamacpp
+# Les instances tournent sous `srvc` (CLAUDE.md § 2) : il lit leurs fichiers,
+# leurs journaux et leurs modèles sans détour par un compte système dédié.
+llamacpp_user: "{{ remote_username }}"
 llamacpp_home: /opt/llamacpp
-llamacpp_src_dir: "{{ llamacpp_home }}/src"
+llamacpp_releases_dir: "{{ llamacpp_home }}/releases"
+# Lien vers la release active : les unités systemd ne connaissent que lui, un
+# changement de version ne réécrit donc aucune unité.
+llamacpp_current_dir: "{{ llamacpp_home }}/current"
 llamacpp_models_dir: "{{ llamacpp_home }}/models"
-llamacpp_version: master
-llamacpp_cmake_extra_flags: ""
+
+# Release ÉPINGLÉE : v0.7.0 (15/10/2026) est publiée sous le tag de build
+# b11669. `/v1/systemone` (modèles de décision : Laya…) date du 02/10/2026
+# (PR #29818) — ne pas descendre en dessous. Un `master` compilé sur place,
+# l'ancien comportement du rôle, changeait de version à chaque machine neuve
+# et prenait une vingtaine de minutes sur un N100.
+llamacpp_version: b11669
+
+# Variante du binaire publié par ggml-org. `ubuntu-x64` (CPU) embarque une
+# bibliothèque par génération de processeur (libggml-cpu-alderlake.so pour un
+# N100 : AVX2 + AVX-VNNI) choisie au démarrage. `ubuntu-vulkan-x64` viserait
+# l'iGPU, sans gain pour un petit encodeur comme Laya.
+llamacpp_variant: ubuntu-x64
+llamacpp_release_url: >-
+  https://github.com/ggml-org/llama.cpp/releases/download/{{ llamacpp_version }}/llama-{{ llamacpp_version }}-bin-{{ llamacpp_variant }}.tar.gz

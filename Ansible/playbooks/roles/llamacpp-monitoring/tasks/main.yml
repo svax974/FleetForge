@@ -1,0 +1,54 @@
+---
+# Supervision de llama.cpp. Convention `<service>-monitoring` (CLAUDE.md) :
+# sonde d'état, métriques de dégradation, cible Prometheus et ouverture ufw du
+# scrape, tout tagué `monitoring`.
+
+# `public: true` OBLIGATOIRE : sans lui les defaults de svcprobe-install
+# (svcprobe_checks_dir, svcprobe_listen_port) restent confinés à ses tâches.
+- name: Ensure the shared probe is installed
+  ansible.builtin.include_role:
+    name: svcprobe-install
+    public: true
+  tags: [monitoring]
+
+- name: Deploy the llama.cpp probe
+  ansible.builtin.template:
+    src: check.json.j2
+    dest: "{{ svcprobe_checks_dir }}/{{ llamacppmon_service }}.json"
+    owner: root
+    group: root
+    mode: '0644'
+  become: true
+  tags: [monitoring]
+
+# Contrôle immédiat : une sonde qui répond `service_up 0` alors que le service
+# tourne est une sonde mal écrite, et sonnerait en permanence.
+- name: Verify the probe answers
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ svcprobe_listen_port }}/metrics"
+    return_content: true
+  register: llamacppmon_probe
+  retries: 6
+  delay: 5
+  until: llamacppmon_probe.status is defined and llamacppmon_probe.status == 200
+  changed_when: false
+  tags: [monitoring]
+
+- name: Report the probe result
+  ansible.builtin.debug:
+    msg: >-
+      {{ llamacppmon_probe.content.split('\n')
+         | select('search', '"' ~ llamacppmon_service ~ '"')
+         | list }}
+  tags: [monitoring]
+
+# Cible /metrics native (job node-llamacpp) et son ouverture ufw : le rôle
+# partagé avec deploy-llamacpp-model.yml. Sautée pour une instance locale.
+- name: Register the native metrics target
+  ansible.builtin.import_role:
+    name: exporter-llamacpp-install
+  vars:
+    llamacpp_instance_id: "{{ llamacppmon_instance_id }}"
+    llamacpp_port: "{{ llamacppmon_port }}"
+  when: llamacppmon_native_target | bool
+  tags: [monitoring]

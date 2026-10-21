@@ -11,14 +11,6 @@
     state: absent
   delegate_to: "{{ prometheus_host }}"
 
-- name: Reload Prometheus container
-  community.docker.docker_container:
-    name: prometheus
-    state: started
-    restart: yes
-  delegate_to: "{{ prometheus_host }}"
-  ignore_errors: true
-
 - name: Remove UFW rule for Prometheus scrape port {{ llamacpp_port }}
   community.general.ufw:
     rule: allow
