@@ -12,6 +12,18 @@
 # Le rejeu est sans risque : le gabarit est idempotent et le service n'est
 # redémarré que si le fichier d'unité change réellement.
 
+# Réglage de la MACHINE : le noyau n'a pas de swappiness par cgroup. Appliqué à
+# chaud (`reload: true`), sans redémarrer le nœud.
+- name: Lower vm.swappiness so the kernel stops swapping the node out
+  ansible.posix.sysctl:
+    name: vm.swappiness
+    value: "{{ astar_swappiness }}"
+    sysctl_file: /etc/sysctl.d/99-astar.conf
+    sysctl_set: true
+    state: present
+    reload: true
+  when: astar_swappiness | default('') | string | length > 0
+
 - name: Deploy systemd service file
   ansible.builtin.template:
     src: astar.service.j2

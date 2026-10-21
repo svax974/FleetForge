@@ -49,6 +49,11 @@
 # enregistrer (parachaîne 9615 et relais 9616). Le rôle vérifie ensuite que
 # `substrate_block_height` est réellement exposé — sans cette série, tout le
 # groupe d'alertes `astar` serait décoratif.
+# Il dépose aussi la sonde svcprobe (`service_up`, RSS, swap, CPU et cgroup du
+# collator, que l'endpoint natif ne publie pas) et vérifie qu'elle émet bien
+# `astar_process_resident_memory_bytes`. Les alertes correspondantes
+# (AstarSwapHigh, AstarMemoryHigh, AstarProcessMetricsMissing) vivent dans
+# `prometheus-alerts-update` : `./play.sh web3c deploy-monitoring.yml`.
 - name: Supervision du nœud
   hosts: all
   remote_user: "{{ remote_username }}"

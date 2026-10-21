@@ -416,9 +416,9 @@ fn get_role_metadata(name: &str) -> (String, String) {
         // Astar
         "astar-security" => ("Sécurité noeud Astar".into(), "Ouvre à tous les ports publics du collator : P2P parachaîne 30333, P2P relais 30334 et RPC 9944 (méthodes Safe), par décision opérateur. Sans eux, activer ufw couperait le noeud de ses pairs.".into()),
         "astar-install" => ("Installation noeud Astar".into(), "Télécharge la dernière release GitHub d'Astar, crée l'utilisateur système et configure le service systemd (chaîne, nom du noeud via astar_node_name), plafonne sa mémoire (MemoryHigh, MALLOC_ARENA_MAX) et abaisse vm.swappiness.".into()),
-        "astar-remove" => ("Suppression noeud Astar".into(), "Arrête le service, supprime le binaire, l'utilisateur système et la cible Prometheus (blockchain préservée).".into()),
-        "astar-purge" => ("Purge noeud Astar".into(), "Supprime le service, le binaire, l'utilisateur, la cible Prometheus et toute la blockchain Astar (~500 GB). Exige -e confirm=yes.".into()),
-        "astar-monitoring" => ("Supervision noeud Astar".into(), "Enregistre les deux endpoints Prometheus natifs du collator — parachaîne 9615 et relais 9616 — ouvre le scrape et vérifie que substrate_block_height est réellement exposé. Remplace exporter-astar-install.".into()),
+        "astar-remove" => ("Suppression noeud Astar".into(), "Arrête le service, supprime le binaire, l'utilisateur système, la cible Prometheus et la sonde svcprobe (blockchain préservée).".into()),
+        "astar-purge" => ("Purge noeud Astar".into(), "Supprime le service, le binaire, l'utilisateur, la cible Prometheus, la sonde svcprobe, le réglage swappiness et toute la blockchain Astar (~500 GB). Exige -e confirm=yes.".into()),
+        "astar-monitoring" => ("Supervision noeud Astar".into(), "Enregistre les deux endpoints Prometheus natifs du collator — parachaîne 9615 et relais 9616 — ouvre le scrape vérifie que substrate_block_height est réellement exposé, et ajoute via svcprobe service_up et la consommation du processus (RSS, swap, CPU, cgroup). Remplace exporter-astar-install.".into()),
 
         // Theta Edge
         "theta-edge-install" => ("Installation noeuds Theta Edge".into(), "Déploie theta_edge_instances noeuds Theta Edge (Docker Compose, une identité par instance, RPC sur 127.0.0.1:17888+(N-1)×10) puis rapatrie sur le poste le keystore, la mnémonique du wallet interne et le Summary de staking de chaque instance. Nécessite theta_passwd (vault).".into()),

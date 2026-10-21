@@ -180,6 +180,15 @@ prom_alert_astar_sync_lag: 100
 # de 5, le nœud est en train de s'isoler du réseau.
 prom_alert_astar_min_peers: 5
 
+# Swap du collator toléré durablement. 2 Gio : un peu de swap est normal (pages
+# froides), mais hub en avait 11,7 Gio avant `MemoryHigh` + `MALLOC_ARENA_MAX`.
+prom_alert_astar_swap_bytes: 2147483648
+
+# RSS du collator tolérée durablement. 8 Gio, sous le `MemoryHigh` de 9G posé par
+# `astar-install` : une RSS qui s'en approche de façon soutenue signale que le
+# plafond va commencer à ralentir le nœud.
+prom_alert_astar_rss_bytes: 8589934592
+
 # ── Nœuds Theta Edge (groupe `theta`) ─────────────────────────────────────────
 # Retard toléré sur la hauteur finalisée du réseau. ~6 s par bloc : 100 blocs
 # font une dizaine de minutes, au-delà le nœud ne suit plus.

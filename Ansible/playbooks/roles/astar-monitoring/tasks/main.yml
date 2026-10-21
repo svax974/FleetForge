@@ -96,3 +96,50 @@
       tourne bien avec `--prometheus-external --prometheus-port
       {{ astarmon_port_parachain }}`.
   tags: [monitoring]
+
+# ── Consommation du processus (svcprobe) ───────────────────────────────────
+# L'endpoint natif ne publie aucune série `process_*` : RSS, swap et CPU du
+# collator n'existent nulle part dans Prometheus. La sonde partagée (port 9110,
+# un exporter par HÔTE) les ajoute et apporte `service_up{service="astar"}`.
+# Détail et incidents de référence : en-tête de files/astar-metrics.sh.
+- name: Ensure the shared probe is installed
+  ansible.builtin.include_role:
+    name: svcprobe-install
+    public: true
+  tags: [monitoring]
+
+- name: Deploy the Astar metric collector
+  ansible.builtin.copy:
+    src: astar-metrics.sh
+    dest: "{{ svcprobe_lib_dir }}/astar-metrics.sh"
+    owner: root
+    group: root
+    mode: '0755'
+  become: true
+  tags: [monitoring]
+
+- name: Deploy the Astar probe
+  ansible.builtin.template:
+    src: check.json.j2
+    dest: "{{ svcprobe_checks_dir }}/astar.json"
+    owner: root
+    group: root
+    mode: '0644'
+  become: true
+  tags: [monitoring]
+
+# svcprobe met 10 s en cache : attendre l'expiration avant de conclure que la
+# série manque.
+- name: Read the probe exposition
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ svcprobe_listen_port }}/metrics"
+    return_content: true
+  register: astarmon_probe
+  retries: 6
+  delay: 5
+  until: >-
+    astarmon_probe.status | default(0) == 200
+    and 'astar_process_resident_memory_bytes' in (astarmon_probe.content | default(''))
+  changed_when: false
+  check_mode: false
+  tags: [monitoring]

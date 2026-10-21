@@ -111,3 +111,32 @@ astar_relay_rpc_urls: []
 # travail (contre 5,2 Go à l'arrêt, 14,8 Go du temps de l'OOM). Vérifier que
 # cela se stabilise et ne redérive pas vers le plafond des 15 Go.
 astar_pool_type: ""
+
+# ── Mémoire (hub, 15/10/2026 → mesures du 21/10/2026) ─────────────────────────
+# Constat sur hub après 39 jours sans redémarrage : RSS anonyme 6,7 Go ET 11,7 Go
+# en swap, soit ~18,5 Go pour un processus sur une machine de 15,7 Go, alors que
+# le cache d'état n'en pèse que 0,8 (`substrate_state_cache_bytes`). 264 tas
+# malloc de 64 Mo (arènes glibc) concentrent 5,9 Go des 6,6 Go de RSS : le
+# binaire n'embarque pas jemalloc et ses 42 threads éparpillent leurs
+# allocations sur autant d'arènes qui ne se rendent jamais à l'OS.
+#
+# Plafond de mémoire « souple » (`MemoryHigh`) : au-delà, le noyau récupère
+# d'abord le cache de fichiers du cgroup puis envoie les pages d'astar en swap,
+# au lieu de laisser le nœud affamer ollama/llama-server/openclaw, qui partagent
+# la machine. Vide : aucune limite. Volontairement PAS de `MemoryMax` : le tuer
+# rouvrirait l'incident OOM du 15/08, dont la cause (non-finalisation) est
+# pourtant réglée — ce serait échanger un ralentissement contre un arrêt.
+astar_memory_high: "9G"
+
+# Nombre maximal d'arènes glibc (`MALLOC_ARENA_MAX`). Défaut glibc : 8 × cœurs.
+# 2 réduit nettement la fragmentation d'un processus multi-threadé qui vit des
+# semaines, au prix d'un peu de contention sur malloc, négligeable ici (le nœud
+# est borné par les E/S de RocksDB, pas par l'allocateur). 0 : ne pas poser la
+# variable. N'agit qu'au prochain démarrage du processus.
+astar_malloc_arena_max: 2
+
+# `vm.swappiness` de la MACHINE (le noyau n'a pas de réglage par service).
+# 60 par défaut : il pousse les pages d'astar vers le swap pour agrandir le cache
+# de fichiers. 10 ne l'interdit pas, il le rend un dernier recours. Vide : on ne
+# touche pas au réglage.
+astar_swappiness: 10

@@ -17,6 +17,18 @@
   become: true
   when: prometheus_host is defined and prometheus_host in hostvars
 
+# La sonde part avec le service : laissée en place, elle publierait
+# `service_up 0` indéfiniment. svcprobe lui-même reste (autres services).
+- name: Remove the Astar probe and its collector
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ svcprobe_checks_dir | default('/etc/svcprobe/checks.d') }}/astar.json"
+    - "{{ svcprobe_lib_dir | default('/usr/local/lib/svcprobe') }}/astar-metrics.sh"
+  become: true
+  tags: [monitoring]
+
 - name: Stop and disable astar service
   ansible.builtin.systemd:
     name: astar

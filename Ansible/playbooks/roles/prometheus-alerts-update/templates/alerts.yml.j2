@@ -459,6 +459,61 @@ groups:
             Le nœud s'isole. Vérifier que le port 30333 est bien joignable et
             la résolution DNS fonctionnelle.
 
+      # ── Consommation du processus ────────────────────────────────────────
+      # Séries `astar_process_*` du job `svcprobe` (collecteur posé par
+      # `astar-monitoring`) : l'endpoint natif ne publie aucune série
+      # `process_*`. node_exporter ne voit que la machine entière.
+      # Le swap d'abord : `MemoryHigh` garde la RSS basse en envoyant le surplus
+      # en swap, c'est donc lui qui trahit une dérive. Constat du 21/10/2026
+      # sur hub : 6,7 Go de RSS + 11,7 Go en swap après 39 jours, sans alerte.
+      - alert: AstarSwapHigh
+        expr: astar_process_swap_bytes > {{ prom_alert_astar_swap_bytes }}
+        for: 30m
+        keep_firing_for: {{ prom_alert_flap_grace }}
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Astar a {{ '{{' }} $value | humanize1024 {{ '}}' }}o en swap sur {{ '{{' }} $labels.instance {{ '}}' }}'
+          description: >-
+            Le collator dérive en mémoire (fragmentation des arènes malloc
+            probable, voir `astar_malloc_arena_max`). Comparer
+            astar_process_anon_memory_bytes dans le temps ; un redémarrage
+            remet les compteurs à zéro.
+
+      # Sans `MemoryHigh`, ou si le surplus ne peut plus partir en swap, c'est
+      # la RSS qui monte vers l'OOM (14,8 Go sur 15,7 Go le 15/08/2026).
+      - alert: AstarMemoryHigh
+        expr: astar_process_resident_memory_bytes > {{ prom_alert_astar_rss_bytes }}
+        for: 30m
+        keep_firing_for: {{ prom_alert_flap_grace }}
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Astar occupe {{ '{{' }} $value | humanize1024 {{ '}}' }}o de RSS sur {{ '{{' }} $labels.instance {{ '}}' }}'
+          description: >-
+            Mémoire résidente du collator durablement élevée. Le nœud finalise
+            peut-être normalement : c'est la marge de la machine qui fond.
+
+      # Le contrôle que le fichier réclame partout ailleurs : si la sonde de
+      # consommation cesse d'émettre alors que le service tourne, les deux
+      # règles ci-dessus deviennent décoratives sans que rien ne le dise
+      # (collecteur illisible, cgroup absent, `svcprobe_metrics_error`).
+      - alert: AstarProcessMetricsMissing
+        expr: >-
+          service_up{service="astar"} == 1
+          unless on (instance) astar_process_resident_memory_bytes
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Plus de métriques de consommation Astar sur {{ '{{' }} $labels.instance {{ '}}' }}'
+          description: >-
+            Le service tourne mais la sonde ne publie plus
+            astar_process_resident_memory_bytes : les alertes AstarSwapHigh et
+            AstarMemoryHigh ne voient plus rien. Chercher
+            svcprobe_metrics_error{service="astar"} et rejouer
+            `./play.sh web3c deploy-astar.yml --limit hub --tags monitoring`.
+
 {% endif %}
 {% if 'theta' in prom_alert_groups %}
 

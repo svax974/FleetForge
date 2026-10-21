@@ -6,6 +6,12 @@ Wants=network.target
 [Service]
 User={{ astar_user }}
 Group={{ astar_user }}
+{% if astar_memory_high | default('') | length > 0 %}
+MemoryHigh={{ astar_memory_high }}
+{% endif %}
+{% if astar_malloc_arena_max | default(0) | int > 0 %}
+Environment=MALLOC_ARENA_MAX={{ astar_malloc_arena_max }}
+{% endif %}
 ExecStart={{ astar_binary }} \
   --name "{{ astar_node_name }}" \
   --chain {{ astar_chain }} \

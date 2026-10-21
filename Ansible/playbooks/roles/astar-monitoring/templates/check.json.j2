@@ -1,0 +1,13 @@
+{
+  "service": "astar",
+  "up": {"kind": "systemd", "unit": "astar"},
+  "extra_checks": [
+    {"name": "p2p", "kind": "tcp", "host": "127.0.0.1", "port": 30333},
+    {"name": "rpc", "kind": "tcp", "host": "127.0.0.1", "port": 9944}
+  ],
+  "metrics_command": [
+    "{{ svcprobe_lib_dir }}/astar-metrics.sh",
+    "astar"
+  ],
+  "metrics_timeout": 10
+}
