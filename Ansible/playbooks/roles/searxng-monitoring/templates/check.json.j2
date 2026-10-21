@@ -7,7 +7,7 @@
   ],
   "metrics_command": [
     "{{ svcprobe_lib_dir }}/searxng-metrics.sh",
-    "{{ searxng_url }}", "{{ searxng_probe_query }}", "{{ searxng_probe_interval | string }}"
+    "{{ searxng_url }}", {{ searxng_probe_queries | join('|') | to_json }}, "{{ searxng_probe_interval | string }}"
   ],
   "metrics_timeout": 30
 }

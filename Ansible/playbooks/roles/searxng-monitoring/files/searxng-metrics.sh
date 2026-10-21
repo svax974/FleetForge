@@ -14,12 +14,15 @@
 # scrape ferait près de 6 000 recherches par jour vers les moteurs amont, soit
 # exactement le comportement qui déclenche le blocage qu'on cherche à détecter.
 #
-# Usage : searxng-metrics.sh [base_url] [requête] [intervalle_secondes]
+# Usage : searxng-metrics.sh [base_url] [requête|requête…] [intervalle_secondes]
+#
+# Plusieurs requêtes séparées par `|` sont jouées à tour de rôle, une par
+# intervalle : la même requête répétée depuis la même IP signe un robot.
 
 set -uo pipefail
 
 BASE="${1:-http://127.0.0.1:8888}"
-QUERY="${2:-open source}"
+QUERIES="${2:-open source}"
 INTERVAL="${3:-300}"
 CACHE_DIR=/var/lib/svcprobe
 CACHE="${CACHE_DIR}/searxng.prom"
@@ -35,6 +38,9 @@ if [ -f "${CACHE}" ]; then
   fi
 fi
 
+IFS='|' read -r -a QLIST <<< "${QUERIES}"
+QUERY="${QLIST[$(( NOW / INTERVAL % ${#QLIST[@]} ))]}"
+
 START=$(date +%s.%N)
 BODY=$(curl -sS -m 25 -G "${BASE}/search" \
          --data-urlencode "q=${QUERY}" \
@@ -46,6 +52,8 @@ DURATION=$(awk -v a="${START}" -v b="${END}" 'BEGIN { printf "%.3f", b - a }')
 SUCCESS=0
 RESULTS=0
 UNRESPONSIVE=0
+CONTRIBUTING=0
+PER_ENGINE=""
 
 # `jq -e .` valide le JSON : un 403 (format JSON désactivé) ou une page
 # d'erreur HTML renvoient un corps non vide qu'un simple test de code de retour
@@ -62,8 +70,23 @@ if [ "${RC}" -eq 0 ] && printf '%s' "${BODY}" | jq -e . >/dev/null 2>&1; then
   # leur montée continue précède la stérilité complète, c'est le signal
   # précoce que la sonde de disponibilité ne donnera jamais.
   UNRESPONSIVE=$(printf '%s' "${BODY}" | jq '(.unresponsive_engines // []) | length')
+  # Moteurs qui ont RÉELLEMENT rapporté quelque chose. Le compte des muets ne
+  # suffit pas : bing renvoie par intermittence une page « Aucun résultat »
+  # sans la moindre erreur, et le 20/10/2026 les 55 résultats d'une recherche
+  # venaient tous de mwmbl, alors que `results` semblait sain et que seuls
+  # trois moteurs étaient comptés muets.
+  CONTRIBUTING=$(printf '%s' "${BODY}" | jq '[(.results // [])[] | (.engines // [])[]] | unique | length')
+  # Détail par moteur, pour savoir LEQUEL a cessé sans ouvrir l'instance :
+  # résultats des contributeurs, 0 pour les muets. Un moteur silencieux sans
+  # erreur n'a pas de série — c'est le compte ci-dessus qui le révèle.
+  PER_ENGINE=$(printf '%s' "${BODY}" | jq -r '
+    ([(.results // [])[] | (.engines // [])[]] | group_by(.) | map({key: .[0], value: length}))
+    + [(.unresponsive_engines // [])[] | {key: .[0], value: 0}]
+    | unique_by(.key)[]
+    | "searxng_engine_results{engine=\"\(.key | gsub("[\"\\\\]"; ""))\"} \(.value)"')
   [ -n "${RESULTS}" ] || RESULTS=0
   [ -n "${UNRESPONSIVE}" ] || UNRESPONSIVE=0
+  [ -n "${CONTRIBUTING}" ] || CONTRIBUTING=0
 fi
 
 {
@@ -76,6 +99,12 @@ fi
   echo "# HELP searxng_query_unresponsive_engines Moteurs amont sans réponse sur la requête de contrôle."
   echo "# TYPE searxng_query_unresponsive_engines gauge"
   echo "searxng_query_unresponsive_engines ${UNRESPONSIVE}"
+  echo "# HELP searxng_query_engines_contributing Moteurs ayant rapporté au moins un résultat sur la requête de contrôle."
+  echo "# TYPE searxng_query_engines_contributing gauge"
+  echo "searxng_query_engines_contributing ${CONTRIBUTING}"
+  echo "# HELP searxng_engine_results Résultats rapportés par moteur sur la requête de contrôle (0 : moteur sans réponse)."
+  echo "# TYPE searxng_engine_results gauge"
+  [ -z "${PER_ENGINE}" ] || printf '%s\n' "${PER_ENGINE}"
   echo "# HELP searxng_query_duration_seconds Durée de la requête de contrôle."
   echo "# TYPE searxng_query_duration_seconds gauge"
   echo "searxng_query_duration_seconds ${DURATION}"

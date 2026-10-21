@@ -219,3 +219,10 @@ prom_alert_searxng_empty_for: "30m"
 # d'un métamoteur ; au-delà, la qualité des résultats se dégrade avant toute
 # panne visible.
 prom_alert_searxng_max_unresponsive: 3
+
+# Moteurs CONTRIBUTEURS minimum (au moins un résultat sur la requête de
+# contrôle). Six ou sept servent d'ordinaire ; deux, c'est un relai qui ne
+# tient plus qu'à un fil. La requête de contrôle est horaire depuis le
+# 19/10/2026 (searxng_probe_interval) : 90 min couvrent deux mesures.
+prom_alert_searxng_min_contributing: 3
+prom_alert_searxng_few_engines_for: "90m"

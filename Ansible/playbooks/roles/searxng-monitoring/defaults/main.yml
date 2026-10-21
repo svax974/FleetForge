@@ -9,10 +9,19 @@ searxng_container: searxng
 searxng_port: 8888
 searxng_url: "http://127.0.0.1:{{ searxng_port }}"
 
-# Requête de contrôle. Volontairement banale et sans intérêt commercial : elle
-# part vers de vrais moteurs, elle n'a pas à ressembler à une recherche
-# opérationnelle.
-searxng_probe_query: "open source"
+# Requêtes de contrôle, jouées à tour de rôle (une par intervalle).
+# Volontairement banales et sans intérêt commercial : elles partent vers de
+# vrais moteurs, elles n'ont pas à ressembler à une recherche opérationnelle.
+# Plusieurs plutôt qu'une : la même requête toutes les heures depuis la même
+# IP est la signature d'un robot, et un moteur qui ne connaît pas un terme
+# passerait pour bloqué. Pas de `|` dans une requête, c'est le séparateur.
+searxng_probe_queries:
+  - "open source"
+  - "linux kernel scheduler"
+  - "recette gratin dauphinois"
+  - "histoire de la photographie"
+  - "weather forecast api"
+  - "python dataclass example"
 # Intervalle minimal entre deux requêtes de contrôle réelles (secondes). Voir
 # l'en-tête du collecteur : à la fréquence de scrape, une requête par scrape
 # provoquerait le blocage qu'on cherche à détecter.

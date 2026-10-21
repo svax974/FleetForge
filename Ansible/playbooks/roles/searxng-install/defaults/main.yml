@@ -67,13 +67,25 @@ searxng_default_lang: "auto"
 searxng_request_timeout: 6.0
 searxng_max_request_timeout: 15.0
 # Moteurs web. L'IP de sortie est partagée avec tout le NAT domestique et ne peut
-# pas être changée : brave (429), duckduckgo (CAPTCHA) et google cse (429) la
-# refusent depuis le 19/10/2026, et c'étaient les TROIS seuls moteurs web actifs
-# par défaut — d'où des réponses vides. On les coupe (réessayer une IP bloquée
-# prolonge le blocage) et on active des moteurs plus tolérants. À réévaluer :
-# retirer un nom de `searxng_engines_disabled` suffit à le remettre en service.
-searxng_engines_enabled: [bing, mojeek, yahoo, qwant, mwmbl]
-searxng_engines_disabled: [brave, brave.images, brave.videos, brave.news, duckduckgo, google cse]
+# pas être changée. Réessayer un moteur qui la refuse prolonge le blocage : il
+# est coupé ici plutôt que laissé à échouer à chaque requête.
+# Mesure du 21/10/2026, image 2026.10.19, trois requêtes par moteur :
+#   • servent : yahoo, brave, google cse, yandex, yep, mwmbl ; bing par
+#     intermittence (une page « Aucun résultat » sans erreur, que
+#     searxng_query_engines_contributing est seul à voir) ;
+#   • refusent l'IP, y compris à un `curl` ordinaire : qwant (403, code 22),
+#     mojeek (403 « automated queries »), google (accès refusé), duckduckgo
+#     (CAPTCHA).
+# Avec l'image du 11/09/2026, yahoo échouait sur le défi anti-robot `/_bv/`,
+# brave sur un 429 et google cse sur « unusual traffic » : trois moteurs
+# perdus faute de mise à jour (d'où `pull`). Retirer un nom de
+# `searxng_engines_disabled` suffit à le remettre en service.
+searxng_engines_enabled: [bing, yahoo, brave, google cse, yandex, yep, mwmbl]
+searxng_engines_disabled: [qwant, mojeek, google, duckduckgo, brave.images, brave.videos, brave.news]
+# Les moteurs suivent les changements de page des moteurs amont : une image
+# figée en perd un par mois sans rien signaler. `always` ne la rafraîchit qu'au
+# déploiement, le conteneur n'est recréé que si l'image a changé.
+searxng_image_pull: always
 # uwsgi. 4/4 est le réglage amont ; un relai interne n'a pas besoin de plus.
 searxng_uwsgi_workers: 4
 searxng_uwsgi_threads: 4

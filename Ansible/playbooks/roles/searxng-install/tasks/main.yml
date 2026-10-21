@@ -70,6 +70,7 @@
   community.docker.docker_container:
     name: "{{ searxng_container }}"
     image: "{{ searxng_image }}"
+    pull: "{{ searxng_image_pull }}"
     state: started
     restart_policy: always
     # L'adresse de publication est la mesure de sécurité principale : sur une

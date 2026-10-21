@@ -578,6 +578,24 @@ groups:
             La qualité des résultats se dégrade avant toute panne visible.
             Vérifier `/stats/errors` sur l'instance.
 
+      # Le relai rapporte des résultats, mais d'une ou deux sources seulement.
+      # Ni `results` ni le compte des muets ne le voient : le 20/10/2026, les
+      # 55 résultats d'une recherche venaient tous de mwmbl, bing renvoyant
+      # une page vide sans erreur. `for` couvre deux requêtes de contrôle.
+      - alert: SearxngFewEngines
+        expr: searxng_query_success == 1 and searxng_query_engines_contributing < {{ prom_alert_searxng_min_contributing | default(3) }}
+        for: {{ prom_alert_searxng_few_engines_for | default('90m') }}
+        keep_firing_for: {{ prom_alert_flap_grace }}
+        labels:
+          severity: warning
+        annotations:
+          summary: "SearXNG ne tient plus qu'à {{ '{{' }} $value {{ '}}' }} moteur(s) amont"
+          description: >-
+            Résultats d'une ou deux sources seulement. `searxng_engine_results`
+            donne le détail par moteur : désactiver ceux qui refusent l'IP de
+            sortie (searxng_engines_disabled) et rejouer deploy-searxng.yml,
+            qui tire aussi la dernière image.
+
 {% endif %}
 {% if 'sync' in prom_alert_groups %}
 
