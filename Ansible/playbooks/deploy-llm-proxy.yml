@@ -1,6 +1,6 @@
 ---
 # LLM Proxy — passerelle LLM compatible OpenAI/Anthropic
-# (/api/free|public|private/v1) + UI d'administration. Front React/nginx +
+# (/api/v1, routes d'images /api/images/(create|edit)/v1) + UI d'administration. Front React/nginx +
 # back NestJS + Postgres + Redis (Docker Compose, AppTemplate) sur l'entrée
 # d'inventaire `llm-proxy`, MACHINE PARTAGÉE (ctdapi, agenthub, rotki, xbot,
 # docker-repo, dev) : rien ici ne doit toucher aux autres conteneurs/nginx
@@ -13,7 +13,7 @@
 #   2. llm-proxy-install  : publie le CNAME llm-proxy.web3c.cc → proxy.web3c.cc
 #      (cert déjà couvert par le wildcard *.web3c.cc, rien à émettre)
 #   3. vhost sur les proxies : sites-enabled/llm-proxy.conf (mode PUBLIC,
-#      passerelles en flux : buffering off, 50 Mo, 600 s)
+#      passerelle en flux : buffering off, 50 Mo, 600 s)
 #   4. llm-proxy-security (joué sur `ctdapi`, hôte canonique de la machine) :
 #      filtre les ports 4800/4801 dans DOCKER-USER (proxies uniquement) et
 #      4802/4803 (profil « non exposé »)
