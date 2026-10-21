@@ -202,7 +202,13 @@ prom_alert_backup_downtime_seconds: 3600
 # 19, 21, 22 — pas de 20) sans que ce soit une panne. 48 h faisait flapper
 # l'alerte sur cette seule variabilité de cadence ; 72 h absorbe un jour sauté
 # tout en gardant la détection d'une interruption réelle.
-prom_alert_dmarc_stale_seconds: 259200
+# Remonté à 7 jours le 21/10/2026 : sur web3c, Google n'a plus émis de rapport
+# pour the.web3c.cc du 16 au 21/10 alors que le domaine lui envoyait 10 à 16
+# messages par jour, tous `dmarc=pass` — chaîne vérifiée de bout en bout (DNS,
+# transfert Cloudflare, boîte, exporter), rien de cassé. Cette règle ne sert
+# qu'à voir un `rua` rompu ; les anomalies d'un rapport relèvent de
+# DmarcUnalignedMail.
+prom_alert_dmarc_stale_seconds: 604800
 
 # ── Relai SearXNG (groupe `searxng`) ──────────────────────────────────────────
 # Séries alimentées par le collecteur svcprobe du rôle `searxng-monitoring`,

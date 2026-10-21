@@ -50,15 +50,14 @@
          | map('regex_replace', '^', prometheus_home ~ '/prometheus-configs/')
          | list }}
 
-- name: Generate bcrypt hash for Prometheus password
-  ansible.builtin.command:
-    cmd: python3 -c "import bcrypt; print(bcrypt.hashpw(b'{{ prometheus_pass }}', bcrypt.gensalt(rounds=12)).decode())"
-  register: _bcrypt_result
-  changed_when: false
-
-- name: Set prometheus password hash fact
-  ansible.builtin.set_fact:
-    prometheus_pass_hash: "{{ _bcrypt_result.stdout }}"
+# Tâches partagées avec prometheus-install : clair par l'entrée standard,
+# empreinte conservée tant qu'elle correspond au mot de passe.
+- name: Hash the Prometheus password
+  ansible.builtin.include_role:
+    name: prometheus-install
+    tasks_from: web_password
+  vars:
+    prometheus_web_file: "{{ prometheus_home }}/web.yml"
 
 - name: Deploy Prometheus web config (basic auth)
   ansible.builtin.template:
