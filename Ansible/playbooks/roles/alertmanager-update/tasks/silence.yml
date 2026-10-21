@@ -1,0 +1,64 @@
+---
+# Pose le silence et retient son identifiant dans `alertmanager_silence_id`,
+# un fait de l'hôte courant : `unsilence` le retrouve dans un play suivant.
+#
+# Non bloquant : un Alertmanager injoignable ne doit pas empêcher un
+# déploiement, il le rend seulement bruyant. L'échec est dit, pas tu.
+
+- name: Fail when the silence has no matcher
+  ansible.builtin.assert:
+    that: alertmanager_silence_matchers | length > 0
+    fail_msg: >-
+      alertmanager_silence_matchers est vide : un silence sans matcher est
+      refusé par Alertmanager, et un matcher trop large ferait taire le parc.
+
+# Le corps est conservé : `unsilence` le renvoie avec l'identifiant et une
+# nouvelle fin. Alertmanager ayant réécrit `startsAt` à sa réception, il ne
+# met pas à jour en place : il expire l'original et en crée un autre, d'où un
+# nouvel identifiant (vérifié le 21/10/2026, aucun silence laissé actif). `isRegex` est
+# obligatoire dans l'API v2 : faux par défaut, sans écraser celui d'un matcher
+# qui le déclare.
+- name: Build the silence
+  ansible.builtin.set_fact:
+    alertmanager_silence_body:
+      matchers: >-
+        {%- set ns = namespace(m=[]) -%}
+        {%- for m in alertmanager_silence_matchers -%}
+        {%- set ns.m = ns.m + [{'isRegex': false} | combine(m)] -%}
+        {%- endfor -%}
+        {{ ns.m }}
+      startsAt: "{{ '%Y-%m-%dT%H:%M:%SZ' | strftime(now().timestamp() | int, utc=true) }}"
+      endsAt: "{{ '%Y-%m-%dT%H:%M:%SZ' | strftime(now().timestamp() | int + alertmanager_silence_minutes * 60, utc=true) }}"
+      createdBy: "ansible@{{ lookup('ansible.builtin.env', 'USER') | default('fleetforge', true) }}"
+      comment: "{{ alertmanager_silence_comment }} ({{ inventory_hostname }})"
+
+- name: Silence the alerts during the intervention
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ alertmanager_port | default(9093) }}/api/v2/silences"
+    method: POST
+    body_format: json
+    body: "{{ alertmanager_silence_body }}"
+  delegate_to: "{{ alertmanager_host }}"
+  register: alertmanager_silence
+  failed_when: false
+  when: alertmanager_host is defined and alertmanager_host in hostvars
+
+- name: Keep the silence id for the end of the intervention
+  ansible.builtin.set_fact:
+    alertmanager_silence_id: "{{ alertmanager_silence.json.silenceID }}"
+  when: alertmanager_silence.json.silenceID is defined
+
+- name: Report the silence
+  ansible.builtin.debug:
+    msg: >-
+      Silence {{ alertmanager_silence_id }} posé jusqu'à
+      {{ alertmanager_silence_body.endsAt }} sur
+      {{ alertmanager_silence_matchers | map(attribute='name') | zip(alertmanager_silence_matchers | map(attribute='value')) | map('join', '=') | join(', ') }}.
+  when: alertmanager_silence_id is defined
+
+- name: Warn when the alerts could not be silenced
+  ansible.builtin.debug:
+    msg: >-
+      Silence NON posé ({{ alertmanager_silence.msg | default('aucun alertmanager_host dans ce parc') }}) :
+      les alertes de cette intervention partiront normalement.
+  when: alertmanager_silence_id is not defined

@@ -17,11 +17,13 @@
 #      timeout 1h, buffering off sur /api/v1/agenthub/ws/)
 #   4. agenthub-security (joué sur `ctdapi`, hôte canonique de la machine) :
 #      filtre les ports 4700/4701 dans DOCKER-USER (proxies + whitelist + VPN)
-#   5. agenthub-deploy   : build+push+démarrage de l'app (scripts du dépôt
+#   5. silence Alertmanager sur service="agenthub" (alertmanager-update)
+#   6. agenthub-deploy   : build+push+démarrage de l'app (scripts du dépôt
 #      app, PAS un docker_container/docker_compose Ansible — voir
 #      agenthub-deploy/defaults) puis activation du runner (déjà installé,
 #      voir --tags runner)
-#   6. agenthub-monitoring : sonde svcprobe (service_up{service="agenthub"})
+#   7. agenthub-monitoring : sonde svcprobe (service_up{service="agenthub"})
+#   8. silence raccourci à 20 min (retombée des alertes de la coupure)
 #
 # Tags :
 #   --tags proxy-conf   rejoue seulement le vhost (reload, pas les autres sites)
@@ -85,6 +87,25 @@
   roles:
     - agenthub-security
 
+# ── Silence pendant le déploiement ─────────────────────────────────────────
+# `deploy-full.sh` coupe le service le temps du build : ~30 min le 21/10/2026,
+# assez pour que ServiceDown parte (10 min) et que la veille OpenClaw analyse
+# une panne qui n'en était pas une. Limité à agenthub : les autres services de
+# la machine restent surveillés. Hors tags (`--tags runner`, `proxy-conf`,
+# `monitoring` ne coupent pas le service).
+- name: Silence the AgentHub alerts during the deploy
+  hosts: agenthub
+  remote_user: "{{ remote_username }}"
+  gather_facts: false
+  tasks:
+    - name: Silence service="agenthub"
+      ansible.builtin.include_role:
+        name: alertmanager-update
+        tasks_from: silence
+      vars:
+        alertmanager_silence_matchers: [{ name: service, value: agenthub }]
+        alertmanager_silence_comment: "deploy-agenthub.yml"
+
 # ── Déploiement de l'app + activation du runner ────────────────────────────
 - name: Deploy the AgentHub app and activate its runner
   hosts: agenthub
@@ -98,3 +119,15 @@
   remote_user: "{{ remote_username }}"
   roles:
     - agenthub-monitoring
+
+# Après la sonde : le service répond de nouveau, le silence ne couvre plus que
+# la retombée des alertes de la coupure (`keep_firing_for`).
+- name: End the AgentHub silence
+  hosts: agenthub
+  remote_user: "{{ remote_username }}"
+  gather_facts: false
+  tasks:
+    - name: Shorten the silence
+      ansible.builtin.include_role:
+        name: alertmanager-update
+        tasks_from: unsilence

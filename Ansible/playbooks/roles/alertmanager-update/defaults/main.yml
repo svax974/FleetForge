@@ -1,0 +1,32 @@
+---
+# Silence Alertmanager posé le temps d'une intervention (redéploiement), puis
+# raccourci à sa fin. Inclus par les `deploy-*` dont le déploiement interrompt
+# le service :
+#
+#   - ansible.builtin.include_role:
+#       name: alertmanager-update
+#       tasks_from: silence          # au début ; `unsilence` à la fin
+#     vars:
+#       alertmanager_silence_matchers: [{ name: service, value: agenthub }]
+#
+# Un silence fait aussi taire la veille OpenClaw (fleet-watch ne lit que les
+# alertes `silenced=false`).
+
+# Matchers de l'API v2 (`name`, `value`, `isRegex` facultatif). OBLIGATOIRE et
+# aussi étroit que possible : sur une machine partagée, `instance` seul ferait
+# taire tous les autres services de la machine.
+alertmanager_silence_matchers: []
+
+# Durée initiale : un plafond, pas une estimation. Si le déploiement échoue
+# avant `unsilence`, le silence expire seul au bout de ce délai.
+alertmanager_silence_minutes: 60
+
+# Durée restante une fois l'intervention terminée. Le silence n'est PAS levé
+# aussitôt : une alerte partie pendant la coupure reste ouverte
+# `prom_alert_flap_grace` (15 min, `keep_firing_for`) après le retour du
+# service, et lever le silence plus tôt l'enverrait pour un service déjà
+# revenu — exactement le message reçu le 21/10/2026 après le redéploiement
+# d'agenthub. 15 min + une évaluation et un cycle de notification de marge.
+alertmanager_silence_tail_minutes: 20
+
+alertmanager_silence_comment: "Intervention Ansible"

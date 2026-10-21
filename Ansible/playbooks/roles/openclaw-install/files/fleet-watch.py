@@ -45,6 +45,17 @@ def fetch_alerts() -> list:
         return json.load(r)
 
 
+def resolve_machine(instance: str) -> str | None:
+    """Nom d'inventaire à passer à fleet-ssh. Une `instance` n'en est pas
+    toujours un : llamacpp numérote ses instances (`lamacpp-1` pour l'entrée
+    `lamacpp`), et l'agent tournait alors en rond sur « instance inconnue »
+    (constat du 21/10/2026, analyse de 07:56)."""
+    if instance in CONF["hosts"]:
+        return instance
+    prefixes = [h for h in CONF["hosts"] if instance.startswith(h + "-")]
+    return max(prefixes, key=len) if prefixes else None
+
+
 def main() -> int:
     state = load_state()
     now = time.time()
@@ -71,10 +82,13 @@ def main() -> int:
         save_state(state)
         return 0
 
-    open_alerts.sort(key=lambda a: (a["labels"].get("alertname", ""), a["labels"].get("instance", "")))
-    fingerprint = hashlib.sha1(
-        json.dumps([(a["labels"].get("alertname"), a["labels"].get("instance")) for a in open_alerts]).encode()
-    ).hexdigest()
+    # `service` fait partie de l'identité : svcprobe expose tous les services
+    # d'une machine sous un même `instance`, deux services tombés à la suite y
+    # étaient donc indiscernables.
+    key = lambda a: (a["labels"].get("alertname", ""), a["labels"].get("instance", ""),
+                     a["labels"].get("service", ""))
+    open_alerts.sort(key=key)
+    fingerprint = hashlib.sha1(json.dumps([key(a) for a in open_alerts]).encode()).hexdigest()
     if (state.get("fingerprint") == fingerprint
             and now - state.get("notified_at", 0) < CONF["renotify_hours"] * 3600):
         save_state(state)
@@ -83,28 +97,43 @@ def main() -> int:
     lines = []
     for a in open_alerts:
         lb, an = a["labels"], a.get("annotations", {})
-        host = CONF["hosts"].get(lb.get("instance", ""), {})
+        machine = resolve_machine(lb.get("instance", ""))
         lines.append(json.dumps({
             "alertname": lb.get("alertname"), "instance": lb.get("instance"),
-            "job": lb.get("job"), "severity": lb.get("severity"),
+            "service": lb.get("service"), "job": lb.get("job"), "severity": lb.get("severity"),
             "depuis": a.get("startsAt"), "resume": an.get("summary") or an.get("description"),
-            "hote": host,
+            "machine": machine, "hote": CONF["hosts"].get(machine, {}),
         }, ensure_ascii=False))
     message = CONF["prompt"] + "\n\nAlertes ouvertes (hors hôtes non surveillés) :\n" + "\n".join(lines)
 
     msg_file = Path(CONF["state_file"]).with_suffix(".msg")
     msg_file.write_text(message)
+    # Pas de `--deliver` : en échec, l'agent envoyait lui-même son message
+    # d'erreur (« Request timed out… »), puis ce script le sien — deux messages
+    # pour un incident. La réponse est lue sur stdout et envoyée ici, une fois.
     cmd = [CONF["binary"], "agent", "--agent", CONF["agent"], "--message-file", str(msg_file),
            "--session-id", str(uuid.uuid4()), "--thinking", CONF["thinking"],
-           "--channel", CONF["channel"], "--reply-account", CONF["account"],
-           "--reply-to", CONF["to"], "--deliver", "--timeout", str(CONF["timeout"])]
+           "--channel", CONF["channel"], "--timeout", str(CONF["timeout"])]
     if CONF["model"]:
         cmd += ["--model", CONF["model"]]
-    res = subprocess.run(cmd, check=False, timeout=CONF["timeout"] + 60)
-    if res.returncode != 0:
-        # Le modèle est indisponible : on prévient sans lui, une seule fois par ensemble d'alertes.
-        send("⚠️ Alertes ouvertes mais analyse impossible (modèle indisponible) :\n"
-             + "\n".join(f"- {a['labels'].get('alertname')} sur {a['labels'].get('instance')}" for a in open_alerts))
+    try:
+        res = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=CONF["timeout"] + 60)
+        reply = res.stdout.strip()
+        ok = res.returncode == 0 and reply
+    except subprocess.TimeoutExpired:
+        reply, ok = "timed out", False
+    if not ok:
+        # Un délai dépassé n'est pas un modèle indisponible : le 21/10/2026, le
+        # modèle répondait en 200 depuis 5 min, l'agent tournait en rond.
+        if "timed out" in reply:
+            reason = f"analyse interrompue au bout de {CONF['timeout']} s"
+        else:
+            reason = f"analyse impossible ({reply or 'réponse vide'})"
+        send(f"⚠️ Alertes ouvertes, {reason} :\n" + "\n".join(
+            f"- {a['labels'].get('alertname')} : {a['labels'].get('service') or a['labels'].get('job')}"
+            f" sur {a['labels'].get('instance')}" for a in open_alerts))
+    else:
+        send(reply)
     save_state({"fingerprint": fingerprint, "notified_at": now})
     return 0
 

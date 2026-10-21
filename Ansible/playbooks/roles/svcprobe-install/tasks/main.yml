@@ -146,6 +146,30 @@
   check_mode: false
   tags: [monitoring]
 
+# Nom de la cible = entrée CANONIQUE de la machine, celle qui porte
+# `host_vars/<entrée>.yml` (ctdapi, monitor, prometheus1). Le premier arrivé
+# l'emportait auparavant : sur la machine de ctdapi, c'est `rotki` qui avait
+# déployé svcprobe le premier, si bien que l'arrêt d'agenthub sortait en
+# « ServiceDown sur rotki » (constat du 21/10/2026) — et que l'agent de veille
+# a cherché la panne du côté de rotki. Sans entrée canonique, la cible déjà
+# enregistrée garde son nom, sinon c'est l'entrée courante.
+# Machine = adresse + port SSH (NAT domestique : hub et proxy2 partagent l'IP).
+- name: Name the svcprobe target after the machine's canonical entry
+  ansible.builtin.set_fact:
+    svcprobe_instance: >-
+      {%- set ns = namespace(canonical='') -%}
+      {%- for h in groups['all'] | sort -%}
+      {%- if not ns.canonical
+            and hostvars[h].ansible_host | default(h) == ansible_host
+            and (hostvars[h].ansible_port | default(22)) | string == (ansible_port | default(22)) | string
+            and lookup('ansible.builtin.fileglob', playbook_dir ~ '/host_vars/' ~ h ~ '.yml') -%}
+      {%- set ns.canonical = h -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {{ ns.canonical
+         or (svcprobe_existing_target.stdout_lines | default([]) | map('basename') | map('splitext') | map('first') | first | default(inventory_hostname)) }}
+  tags: [monitoring]
+
 - name: Create the svcprobe target directory on the Prometheus host
   ansible.builtin.file:
     path: "/home/{{ remote_username }}/prometheus/prometheus-configs/{{ svcprobe_job }}"
@@ -157,26 +181,28 @@
   become: true
   tags: [monitoring]
 
+# Toutes les entrées de la machine écrivent le MÊME fichier : idempotent.
 - name: Deploy the svcprobe Prometheus target
   ansible.builtin.template:
     src: prometheus-target.json.j2
-    dest: "/home/{{ remote_username }}/prometheus/prometheus-configs/{{ svcprobe_job }}/{{ inventory_hostname }}.json"
+    dest: "/home/{{ remote_username }}/prometheus/prometheus-configs/{{ svcprobe_job }}/{{ svcprobe_instance }}.json"
     owner: "{{ remote_username }}"
     group: "{{ remote_username }}"
     mode: '0644'
   delegate_to: "{{ prometheus_host }}"
   become: true
-  when: (svcprobe_existing_target.stdout | default('')) | length == 0
   tags: [monitoring]
 
-- name: Note the inventory name carrying the svcprobe scrape
-  ansible.builtin.debug:
-    msg: >-
-      {{ ansible_host }} est déjà scrapé sous
-      « {{ svcprobe_existing_target.stdout_lines | first | basename | splitext | first }} » :
-      les sondes déposées par {{ inventory_hostname }} y sont incluses, aucune
-      seconde cible n'est créée.
-  when: (svcprobe_existing_target.stdout | default('')) | length > 0
+# Une cible laissée sous l'ancien nom doublerait chaque `service_up`, donc
+# chaque alerte.
+- name: Remove the svcprobe targets of this machine registered under another name
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ svcprobe_existing_target.stdout_lines | default([]) }}"
+  when: item | basename != svcprobe_instance ~ '.json'
+  delegate_to: "{{ prometheus_host }}"
+  become: true
   tags: [monitoring]
 
 # Les handlers ne sont vidés qu'en FIN de play. Or ce rôle est inclus par les

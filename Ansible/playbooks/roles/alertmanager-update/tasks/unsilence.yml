@@ -1,0 +1,30 @@
+---
+# Fin d'intervention : le silence posé par `silence` n'est pas levé mais
+# raccourci à `alertmanager_silence_tail_minutes`, le temps que retombent les
+# alertes maintenues par `keep_firing_for` (voir defaults). Sans identifiant
+# (silence non posé, ou `--check`), rien à faire.
+
+- name: Shorten the silence to the alert grace period
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ alertmanager_port | default(9093) }}/api/v2/silences"
+    method: POST
+    body_format: json
+    body: >-
+      {{ alertmanager_silence_body | combine({
+           'id': alertmanager_silence_id,
+           'endsAt': '%Y-%m-%dT%H:%M:%SZ' | strftime(now().timestamp() | int + alertmanager_silence_tail_minutes * 60, utc=true)}) }}
+  delegate_to: "{{ alertmanager_host }}"
+  register: alertmanager_unsilence
+  failed_when: false
+  when: alertmanager_silence_id is defined
+
+- name: Report the end of the silence
+  ansible.builtin.debug:
+    msg: >-
+      {{ ('Silence ' ~ alertmanager_unsilence.json.silenceID ~ ' maintenu encore '
+          ~ alertmanager_silence_tail_minutes ~ ' min, le temps que retombent les alertes de la coupure.')
+         if alertmanager_unsilence.json.silenceID is defined
+         else ('Silence ' ~ alertmanager_silence_id ~ ' NON raccourci ('
+               ~ alertmanager_unsilence.msg | default('?') ~ ') : il expirera à '
+               ~ alertmanager_silence_body.endsAt ~ '.') }}
+  when: alertmanager_silence_id is defined

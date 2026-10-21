@@ -436,6 +436,11 @@
 # pour l'agent. `read` confiné à son workspace (le dépôt) : hors de lui,
 # openclaw.json et ses clés API. Ni écriture, ni web, ni sessions, ni
 # mémoire, ni `gateway`.
+# `loopDetection` (désactivé par défaut, recommandé par OpenClaw pour les petits
+# modèles) : averti puis bloqué quand il répète un appel sans progrès. Sans
+# lui, mimo-v2.6-flash a relancé huit fois `status agenthub` à l'identique
+# jusqu'au timeout (constat du 21/10/2026, aucune des 4 analyses depuis le
+# 20/10 n'avait abouti).
 - name: Restrict the watch agent tools
   ansible.builtin.command:
     cmd: >-
@@ -446,6 +451,7 @@
                       "deny": ["gateway", "write", "edit", "apply_patch",
                                "group:web", "group:sessions", "group:memory", "group:ui"],
                       "fs": {"workspaceOnly": true},
+                      "loopDetection": {"enabled": true},
                       "exec": {"mode": "allowlist", "notifyOnExit": false}}}] | to_json }}'
     chdir: "{{ openclaw_home }}"
   become: true
