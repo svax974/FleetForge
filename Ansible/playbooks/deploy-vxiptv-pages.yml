@@ -1,0 +1,41 @@
+---
+# Pages publiques de VxIPTV sur https://www.web3c.cc/vxiptv/ (politique de
+# confidentialité, conditions, support, playlist de démonstration). Fichiers
+# déposés dans le docroot du WordPress de `www`, servis directement par Apache ;
+# rien à changer côté nginx, DNS ou certificat.
+#
+#   ./play.sh web3c deploy-vxiptv-pages.yml --check --diff
+#   ./play.sh web3c deploy-vxiptv-pages.yml
+#
+# Sources : $VXIPTV_WORKSPACE (défaut ~/Dev/Apps/vxiptv-workspace), docs/legal et
+# docs/store. À REJOUER après restore-wordpress.yml ou purge-wordpress.yml.
+# Retrait : remove-vxiptv-pages.yml / purge-vxiptv-pages.yml.
+
+# ── Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ───────────────────────
+- name: Contrôle préalable
+  hosts: www
+  remote_user: "{{ remote_username }}"
+  roles:
+    - role: host-preflight
+      preflight_require_docker: false
+
+- name: Publish VxIPTV pages
+  hosts: www
+  remote_user: "{{ remote_username }}"
+  become: true
+  vars:
+    vxiptv_src: "{{ lookup('env', 'VXIPTV_WORKSPACE') | default(lookup('env', 'HOME') ~ '/Dev/Apps/vxiptv-workspace', true) }}"
+  roles:
+    - role: site-pages-install
+      site_pages_dir: vxiptv
+      site_pages_files:
+        - { src: "{{ vxiptv_src }}/docs/legal/privacy.html", dest: privacy.html }
+        - { src: "{{ vxiptv_src }}/docs/legal/terms.html", dest: terms.html }
+        - { src: "{{ vxiptv_src }}/docs/legal/support.html", dest: support.html }
+        - { src: "{{ vxiptv_src }}/docs/store/demo-playlist.m3u", dest: demo-playlist.m3u }
+      site_pages_htaccess: |
+        # Géré par Ansible (deploy-vxiptv-pages.yml)
+        Options -Indexes
+        DirectoryIndex support.html
+        AddType "audio/x-mpegurl; charset=utf-8" .m3u
+        AddDefaultCharset utf-8

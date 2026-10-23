@@ -1,0 +1,47 @@
+---
+# Pages légales de SoSimpleBank sur https://www.web3c.cc/sosimplebank/legal/
+# (privacy, terms, et variantes .en / .es). Même schéma que deploy-vxiptv-pages.yml.
+# Les liens absolus `/legal/…` des pages sont réécrits en `/sosimplebank/legal/…` ;
+# les URL sans extension (`/legal/privacy`) sont servies par réécriture Apache,
+# comme sur Firebase Hosting (`firebase.json`).
+#
+#   ./play.sh web3c deploy-sosimplebank-pages.yml --check --diff
+#   ./play.sh web3c deploy-sosimplebank-pages.yml
+#
+# Sources : $SOSIMPLEBANK_WORKSPACE (défaut ~/Dev/Apps/sosimplebank-workspace),
+# apps/sosimplebank/public/legal. À REJOUER après restore-wordpress.yml ou
+# purge-wordpress.yml. Retrait : remove-/purge-sosimplebank-pages.yml.
+
+# ── Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ───────────────────────
+- name: Contrôle préalable
+  hosts: www
+  remote_user: "{{ remote_username }}"
+  roles:
+    - role: host-preflight
+      preflight_require_docker: false
+
+- name: Publish SoSimpleBank legal pages
+  hosts: www
+  remote_user: "{{ remote_username }}"
+  become: true
+  vars:
+    ssb_src: "{{ lookup('env', 'SOSIMPLEBANK_WORKSPACE') | default(lookup('env', 'HOME') ~ '/Dev/Apps/sosimplebank-workspace', true) }}/apps/sosimplebank/public/legal"
+  roles:
+    - role: site-pages-install
+      site_pages_dir: sosimplebank/legal
+      site_pages_files:
+        - { src: "{{ ssb_src }}/privacy.html", dest: privacy.html }
+        - { src: "{{ ssb_src }}/privacy.en.html", dest: privacy.en.html }
+        - { src: "{{ ssb_src }}/privacy.es.html", dest: privacy.es.html }
+        - { src: "{{ ssb_src }}/terms.html", dest: terms.html }
+        - { src: "{{ ssb_src }}/terms.en.html", dest: terms.en.html }
+        - { src: "{{ ssb_src }}/terms.es.html", dest: terms.es.html }
+      site_pages_replace:
+        - { regexp: 'href="/legal/', replace: 'href="/sosimplebank/legal/' }
+      site_pages_htaccess: |
+        # Géré par Ansible (deploy-sosimplebank-pages.yml)
+        Options -Indexes
+        AddDefaultCharset utf-8
+        RewriteEngine On
+        RewriteBase /sosimplebank/legal/
+        RewriteRule ^(privacy|terms)(\.en|\.es)?$ $1$2.html [L]

@@ -1,0 +1,11 @@
+---
+# Purge des pages VxIPTV : identique à remove (aucune donnée hors du dossier).
+#
+#   ./play.sh web3c purge-vxiptv-pages.yml
+- name: Purge VxIPTV pages
+  hosts: www
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - role: site-pages-purge
+      site_pages_dir: vxiptv

@@ -271,6 +271,9 @@ fn get_role_metadata(name: &str) -> (String, String) {
         "docker-repo-purge" => ("Purge registre Docker".into(), "Supprime le conteneur du registre et toutes les images stockées.".into()),
 
         // WordPress
+        "site-pages-install" => ("Pages statiques sur www".into(), "Publie des fichiers statiques (docs légaux d'une application) dans un sous-dossier du docroot WordPress de www, avec .htaccess et réécriture de liens.".into()),
+        "site-pages-remove" => ("Suppression pages statiques".into(), "Supprime le sous-dossier publié par site-pages-install.".into()),
+        "site-pages-purge" => ("Purge pages statiques".into(), "Identique à la suppression (aucune donnée hors du dossier).".into()),
         "wordpress-install" => ("Installation WordPress".into(), "Déploie Apache2, MySQL et WordPress avec configuration complète.".into()),
         "wordpress-security" => ("Sécurité WordPress".into(), "Filtre le port d'Apache (ufw) : proxies, vpns, Prometheus et whitelist.".into()),
         "wordpress-remove" => ("Suppression WordPress".into(), "Arrête et désinstalle Apache2/MySQL (fichiers et BDD préservés).".into()),

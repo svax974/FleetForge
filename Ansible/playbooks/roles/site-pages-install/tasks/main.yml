@@ -1,0 +1,64 @@
+---
+# Publie des pages statiques sous https://www.web3c.cc/<site_pages_dir>/ (docs
+# légaux d'une application). Idempotent : à rejouer après toute mise à jour des
+# sources et après chaque restore-wordpress.yml / purge-wordpress.yml, qui
+# effacent le docroot.
+
+- name: Refuse an empty or absolute site_pages_dir
+  ansible.builtin.assert:
+    that:
+      - site_pages_dir is defined
+      - site_pages_dir | length > 0
+      - not site_pages_dir.startswith('/')
+      - "'..' not in site_pages_dir"
+    fail_msg: "site_pages_dir doit être un chemin relatif non vide, sans '..'"
+
+- name: Refuse missing source files (control node)
+  ansible.builtin.stat:
+    path: "{{ item.src }}"
+  delegate_to: localhost
+  become: false
+  register: site_pages_src_stat
+  loop: "{{ site_pages_files }}"
+  loop_control:
+    label: "{{ item.src }}"
+  failed_when: not site_pages_src_stat.stat.exists
+
+- name: Create the site directory
+  ansible.builtin.file:
+    path: "{{ site_pages_docroot }}/{{ site_pages_dir }}"
+    state: directory
+    owner: www-data
+    group: www-data
+    mode: "0755"
+
+- name: Copy the pages
+  ansible.builtin.copy:
+    src: "{{ item.src }}"
+    dest: "{{ site_pages_docroot }}/{{ site_pages_dir }}/{{ item.dest }}"
+    owner: www-data
+    group: www-data
+    mode: "0644"
+  loop: "{{ site_pages_files }}"
+  loop_control:
+    label: "{{ item.dest }}"
+
+- name: Rewrite links in the HTML pages
+  ansible.builtin.replace:
+    path: "{{ site_pages_docroot }}/{{ site_pages_dir }}/{{ item.0.dest }}"
+    regexp: "{{ item.1.regexp }}"
+    replace: "{{ item.1.replace }}"
+  loop: "{{ site_pages_files | selectattr('dest', 'match', '.*\\.html$') | list | product(site_pages_replace) | list }}"
+  loop_control:
+    label: "{{ item.0.dest }}"
+  # En --check les fichiers copiés n'existent pas encore sur l'hôte.
+  when: not ansible_check_mode
+
+- name: Write the .htaccess of the site directory
+  ansible.builtin.copy:
+    content: "{{ site_pages_htaccess }}"
+    dest: "{{ site_pages_docroot }}/{{ site_pages_dir }}/.htaccess"
+    owner: www-data
+    group: www-data
+    mode: "0644"
+  when: site_pages_htaccess | length > 0

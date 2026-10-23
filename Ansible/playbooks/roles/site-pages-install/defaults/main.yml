@@ -1,0 +1,18 @@
+---
+# Docroot du WordPress de www.web3c.cc (voir wordpress-install). Un dossier réel
+# posé dessous est servi tel quel par Apache : .htaccess WordPress ne réécrit que
+# ce qui n'est ni fichier ni dossier.
+site_pages_docroot: /var/www/html/wordpress
+
+# Sous-dossier publié (relatif au docroot), ex. `vxiptv` → https://www.web3c.cc/vxiptv/
+# À définir par le playbook appelant.
+# site_pages_dir: vxiptv
+
+# Fichiers à publier : liste de { src: <chemin sur le poste de contrôle>, dest: <nom> }.
+site_pages_files: []
+
+# Contenu du .htaccess posé dans le dossier ('' = aucun).
+site_pages_htaccess: ""
+
+# Remplacements appliqués aux fichiers .html après copie : liste de { regexp, replace }.
+site_pages_replace: []

@@ -1,0 +1,18 @@
+---
+# Retire les pages statiques publiées par site-pages-install : supprime le
+# sous-dossier site_pages_dir. Rien d'autre n'est touché (WordPress, Apache).
+# Pas de données propres au service : site-pages-purge fait donc la même chose.
+
+- name: Refuse an empty or absolute site_pages_dir
+  ansible.builtin.assert:
+    that:
+      - site_pages_dir is defined
+      - site_pages_dir | length > 0
+      - not site_pages_dir.startswith('/')
+      - "'..' not in site_pages_dir"
+    fail_msg: "site_pages_dir doit être un chemin relatif non vide, sans '..'"
+
+- name: Remove the site directory
+  ansible.builtin.file:
+    path: "{{ site_pages_docroot | default('/var/www/html/wordpress') }}/{{ site_pages_dir }}"
+    state: absent

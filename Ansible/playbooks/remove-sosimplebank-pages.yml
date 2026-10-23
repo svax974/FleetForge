@@ -1,0 +1,11 @@
+---
+# Retire https://www.web3c.cc/sosimplebank/legal/ (supprime le dossier du docroot).
+#
+#   ./play.sh web3c remove-sosimplebank-pages.yml
+- name: Remove SoSimpleBank pages
+  hosts: www
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - role: site-pages-remove
+      site_pages_dir: sosimplebank/legal

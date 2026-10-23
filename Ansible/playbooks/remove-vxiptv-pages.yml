@@ -1,0 +1,11 @@
+---
+# Retire https://www.web3c.cc/vxiptv/ (supprime le dossier du docroot).
+#
+#   ./play.sh web3c remove-vxiptv-pages.yml
+- name: Remove VxIPTV pages
+  hosts: www
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - role: site-pages-remove
+      site_pages_dir: vxiptv

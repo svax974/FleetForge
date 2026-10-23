@@ -1,0 +1,5 @@
+---
+# Purge = remove : ces pages n'ont ni données ni configuration hors du dossier.
+- name: Remove the site directory
+  ansible.builtin.include_role:
+    name: site-pages-remove
