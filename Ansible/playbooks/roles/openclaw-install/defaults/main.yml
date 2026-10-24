@@ -223,6 +223,13 @@ openclaw_repo_url: https://github.com/svax974/FleetForge.git
 openclaw_repo_version: main
 # Dans le workspace de l'agent watch, seul endroit que son `read` peut ouvrir.
 openclaw_repo_dir: "{{ openclaw_watch_workspace }}/FleetForge"
+# Index des playbooks et des fichiers de chaque rôle. OpenClaw n'a aucun outil
+# pour lister un répertoire (`group:fs` = read, write, edit, apply_patch) et
+# l'`exec` de l'agent watch n'accepte que fleet-ssh : sans index, il ne peut
+# ouvrir que les chemins qu'il devine. Constat du 24/10/2026 : analyse d'un
+# échec Postfix sans pouvoir nommer `deploy-mailserver.yml`. Hors du clone :
+# `force` le réinitialise à chaque déploiement.
+openclaw_repo_index: "{{ openclaw_watch_workspace }}/FleetForge-INDEX.md"
 
 # ── Agent dédié à fleet-watch ───────────────────────────────────────────────
 # L'agent `main` (conversations Telegram) a le profil `coding` : exec libre et

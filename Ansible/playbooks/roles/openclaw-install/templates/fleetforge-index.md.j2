@@ -1,0 +1,28 @@
+# Index du dépôt FleetForge — généré par openclaw-install, NE PAS ÉDITER
+
+L'outil `read` n'ouvre que des FICHIERS, jamais un répertoire : partir des
+chemins ci-dessous, relatifs à {{ openclaw_repo_dir }}. Régénéré à chaque
+déploiement d'OpenClaw, en même temps que le clone.
+
+Un rôle `<service>-<action>` vit sous Ansible/playbooks/roles/<rôle>/ :
+tasks/main.yml (point d'entrée), defaults/main.yml (variables et leur
+raison d'être), templates/ et files/. Un service se déploie par
+`deploy-<famille>.yml`, se retire par `remove-<famille>.yml` / `purge-<famille>.yml`.
+Règles d'alerte : Ansible/playbooks/roles/prometheus-alerts-update/templates/alerts.yml.j2.
+
+## Playbooks — Ansible/playbooks/
+
+{% for name in openclaw_repo_playbooks.files | map(attribute='path') | map('basename') | sort %}
+- {{ name }}
+{% endfor %}
+
+## Rôles — Ansible/playbooks/roles/<rôle>/<fichier>
+
+{% set ns = namespace(roles={}) %}
+{% for path in openclaw_repo_role_files.files | map(attribute='path') | sort %}
+{% set parts = (path | relpath(openclaw_repo_dir ~ '/Ansible/playbooks/roles')).split('/', 1) %}
+{% set _ = ns.roles.setdefault(parts[0], []).append(parts[1]) %}
+{% endfor %}
+{% for role, files in ns.roles | dictsort %}
+- {{ role }} : {{ files | join(', ') }}
+{% endfor %}

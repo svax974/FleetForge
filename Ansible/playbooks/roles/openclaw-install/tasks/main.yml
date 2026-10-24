@@ -451,6 +451,29 @@
   become: true
   become_user: "{{ openclaw_user }}"
 
+# Index du dépôt pour l'agent watch (voir defaults) : son `read` ne liste pas
+# les répertoires.
+- name: List the FleetForge playbooks
+  ansible.builtin.find:
+    paths: "{{ openclaw_repo_dir }}/Ansible/playbooks"
+    patterns: "*.yml"
+  register: openclaw_repo_playbooks
+
+- name: List the FleetForge role files
+  ansible.builtin.find:
+    paths: "{{ openclaw_repo_dir }}/Ansible/playbooks/roles"
+    recurse: true
+  register: openclaw_repo_role_files
+
+- name: Write the repository index for the watch agent
+  ansible.builtin.copy:
+    content: "{{ lookup('ansible.builtin.template', 'fleetforge-index.md.j2') }}"
+    dest: "{{ openclaw_repo_index }}"
+    owner: "{{ openclaw_user }}"
+    group: "{{ openclaw_user }}"
+    mode: '0644'
+  become: true
+
 # `minimal` puis ajouts explicites : un outil absent de la liste n'existe pas
 # pour l'agent. `read` confiné à son workspace (le dépôt) : hors de lui,
 # openclaw.json et ses clés API. Ni écriture, ni web, ni sessions, ni
