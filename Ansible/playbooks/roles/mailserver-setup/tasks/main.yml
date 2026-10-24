@@ -272,6 +272,31 @@
     enabled: yes
     daemon_reload: yes
 
+# Unité héritée de deploy-mail-server-complete.yml (ancienne installation
+# inline) : un postfix.service maison sous /etc/systemd/system masque celui de
+# Debian, qui ne fait que porter l'instance `postfix@-` (rattachée par son
+# générateur). Les deux pilotent alors le même master : à chaque redémarrage,
+# `postfix@-` tente un second arrêt, échoue (« the Postfix mail system is not
+# running ») et reste en échec — SystemdUnitFailed postfix@-.service sur mail1
+# (web3c) depuis le 18/10/2026. L'unité du paquet suffit. L'arrêter AVANT de
+# la retirer : `postfix@-` refuserait sinon de démarrer un master déjà lancé.
+- name: Look for the legacy postfix.service override
+  ansible.builtin.stat:
+    path: /etc/systemd/system/postfix.service
+  register: mailserver_legacy_unit
+
+- name: Stop Postfix under the legacy unit
+  ansible.builtin.systemd:
+    name: postfix
+    state: stopped
+  when: mailserver_legacy_unit.stat.exists
+
+- name: Remove the legacy postfix.service override
+  ansible.builtin.file:
+    path: /etc/systemd/system/postfix.service
+    state: absent
+  when: mailserver_legacy_unit.stat.exists
+
 - name: Enable and start Postfix
   ansible.builtin.systemd:
     name: postfix

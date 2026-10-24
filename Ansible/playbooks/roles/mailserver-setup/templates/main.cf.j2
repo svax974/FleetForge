@@ -61,6 +61,14 @@ content_filter = mailfilter:
 maximal_queue_lifetime = 1d
 bounce_queue_lifetime  = 6h
 message_size_limit     = 52428800
+# Doit rester >= message_size_limit : sinon le livreur `local` refuse de
+# démarrer (« mailbox_size_limit is smaller than message_size_limit ») et
+# boucle en échec. Le défaut de Postfix (51200000) est PLUS PETIT que les
+# 50 Mio ci-dessus — constat du 24/10/2026 sur mail1 (web3c) : postfix@- en
+# échec depuis le 18/10, ~10 000 erreurs par heure. 1 Gio plutôt que 0
+# (illimité) : une mbox locale (root, cron) qui grossit sans fin finirait par
+# remplir le disque.
+mailbox_size_limit     = 1073741824
 
 # ── Misc ──────────────────────────────────────────────────────────────────────
 smtpd_banner        = $myhostname ESMTP
