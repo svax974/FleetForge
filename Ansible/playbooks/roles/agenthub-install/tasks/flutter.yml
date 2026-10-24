@@ -69,13 +69,42 @@
   become: true
   when: not agenthub_flutter_bin.stat.exists
 
-# Le service du runner a /usr/local/bin dans son PATH (agenthub-runner.service) : deux liens suffisent,
-# sans toucher à l'environnement du service ni le redémarrer (ses sessions tmux en cours restent intactes).
-- name: Expose flutter and dart on the PATH of the runner service
+# Un fichier du SDK partagé modifiable par tous le serait à travers chaque copie des runners des
+# utilisateurs (liens physiques, voir agenthub-user-flutter.j2) : retiré à chaque passage.
+- name: Remove the world-writable bits from the shared SDK
+  ansible.builtin.command: find {{ agenthub_flutter_dir | quote }} -perm -0002 ! -type l -print -exec chmod o-w {} +
+  become: true
+  register: agenthub_flutter_ow
+  changed_when: agenthub_flutter_ow.stdout | length > 0
+
+# Le service du runner a /usr/local/bin dans son PATH (agenthub-runner.service), celui des runners des
+# utilisateurs aussi : deux petits scripts plutôt que deux liens, pour qu'un compte `agr-*` prenne SA
+# copie (~/.agenthub-flutter) et tout autre compte le SDK partagé — sans toucher à l'environnement des
+# services ni les redémarrer (leurs sessions tmux en cours restent intactes). Les anciens liens sont
+# retirés d'abord : un gabarit écrit à travers un lien écraserait la cible, le vrai `bin/flutter`.
+- name: Look for the former flutter and dart links
+  ansible.builtin.stat:
+    path: "/usr/local/bin/{{ item }}"
+  loop: [flutter, dart]
+  become: true
+  register: agenthub_flutter_links
+
+- name: Remove the former flutter and dart links
   ansible.builtin.file:
-    src: "{{ agenthub_flutter_dir }}/bin/{{ item }}"
+    path: "{{ item.stat.path }}"
+    state: absent
+  loop: "{{ agenthub_flutter_links.results | selectattr('stat.exists') | selectattr('stat.islnk') | list }}"
+  loop_control:
+    label: "{{ item.stat.path }}"
+  become: true
+
+- name: Put flutter and dart on the PATH of every runner
+  ansible.builtin.template:
+    src: flutter-command.j2
     dest: "/usr/local/bin/{{ item }}"
-    state: link
+    owner: root
+    group: root
+    mode: "0755"
   loop: [flutter, dart]
   become: true
 
@@ -109,3 +138,31 @@
       Flutter ne répond pas pour l'utilisateur {{ agenthub_flutter_user }} sur {{ inventory_hostname }} :
       vérifier `runuser -l {{ agenthub_flutter_user }} -c 'flutter doctor -v'`.
     success_msg: "Flutter prêt pour {{ agenthub_flutter_user }} ({{ agenthub_flutter_dir }}, canal {{ agenthub_flutter_channel }})."
+
+# ── Runners des utilisateurs (comptes `agr-*`) : une copie légère chacun ────────────────────────
+# Le SDK partagé appartient à `agents` et Flutter écrit dans son propre dossier : un autre compte ne
+# peut pas s'en servir tel quel, et le rendre modifiable par un groupe laisserait un utilisateur y
+# glisser du code que le runner des admins exécuterait. agenthub-user-flutter fait donc à chaque
+# compte sa copie (liens physiques en lecture seule + copies privées de ce que Flutter réécrit, voir
+# le gabarit). L'outil des runners des utilisateurs d'AgentHub l'appelle à chaque nouveau runner ;
+# cette tâche couvre les comptes existants et refait les copies quand le SDK partagé a changé.
+- name: Install the per-account Flutter copier for the user runners
+  ansible.builtin.template:
+    src: agenthub-user-flutter.j2
+    dest: /usr/local/sbin/agenthub-user-flutter
+    owner: root
+    group: root
+    mode: "0755"
+  become: true
+
+- name: Give every user runner account its own Flutter copy
+  ansible.builtin.shell: |
+    set -euo pipefail
+    for user in $(getent passwd | awk -F: '$1 ~ /^agr-[a-z0-9]+$/ { print $1 }'); do
+      /usr/local/sbin/agenthub-user-flutter "$user"
+    done
+  args:
+    executable: /bin/bash
+  become: true
+  register: agenthub_flutter_user_copies
+  changed_when: "'made from' in agenthub_flutter_user_copies.stdout"

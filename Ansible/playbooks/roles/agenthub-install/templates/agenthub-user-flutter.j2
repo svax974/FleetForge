@@ -1,0 +1,64 @@
+#!/bin/bash
+# {{ ansible_managed }} — agenthub-install/tasks/flutter.yml
+#
+# agenthub-user-flutter agr-<name> — the own Flutter SDK of an AgentHub user runner account (one Linux account
+# `agr-*` per plain user, runner/README.md « Runners des utilisateurs »), made from the shared SDK
+# {{ agenthub_flutter_dir }} (owned by {{ agenthub_flutter_user }}, the hub's runner) without sharing anything the
+# account could write. A group-writable shared SDK is ruled out: one user could plant code there that the admins'
+# runner then runs.
+#   - the tree is hard-linked into ~/.agenthub-flutter (no disk cost): every linked file stays owned by
+#     {{ agenthub_flutter_user }}, read-only for the account;
+#   - the files Flutter rewrites while running — the top-level files of the SDK and of bin/cache (lockfile, stamps,
+#     version files, the flutter_tools snapshot) — are private copies, and every directory is the account's: it may
+#     replace anything in its copy, never a shared inode;
+#   - made again when the shared SDK changes (its revision, or a precache), else left as it is.
+# Called by the AgentHub user-runner helper once it has installed a runner, and by this role for the accounts that
+# already exist. /usr/local/bin/flutter and /usr/local/bin/dart pick ~/.agenthub-flutter when it is there.
+set -euo pipefail
+export LC_ALL=C PATH=/usr/sbin:/usr/bin:/sbin:/bin
+umask 022
+
+master={{ agenthub_flutter_dir | quote }}
+user="${1:-}"
+[[ "$user" =~ ^agr-[a-z0-9]{1,16}$ ]] || { echo "usage: agenthub-user-flutter agr-<name>" >&2; exit 2; }
+if [[ ! -x "$master/bin/flutter" || ! -d "$master/bin/cache/dart-sdk" ]]; then
+  echo "agenthub-user-flutter: no warmed Flutter SDK in $master, nothing to do"
+  exit 0
+fi
+# A world-writable shared file would be writable through every copy: refused.
+if [[ -n "$(find "$master" -perm -0002 ! -type l -print -quit)" ]]; then
+  echo "agenthub-user-flutter: $master has world-writable files (chmod -R o-w first)" >&2
+  exit 1
+fi
+home="$(getent passwd "$user" | cut -d: -f6)"
+[[ -n "$home" && "$home" == /home/* && -d "$home" && ! -L "$home" ]] || { echo "agenthub-user-flutter: no usable home for $user" >&2; exit 1; }
+[[ "$(stat -c %U "$home")" == "$user" ]] || { echo "agenthub-user-flutter: $home is not $user's" >&2; exit 1; }
+dest="$home/.agenthub-flutter"
+
+# What a copy was made from: the revision and the newest stamp of the shared cache.
+newest_stamp="$( { stat -c %Y "$master"/bin/cache/*.stamp 2>/dev/null || true; } | sort -n | tail -n 1)"
+fingerprint="$(git -c safe.directory="$master" -C "$master" rev-parse HEAD):${newest_stamp:-0}"
+if [[ -d "$dest" && ! -L "$dest" && "$(cat "$dest/.agenthub-flutter-source" 2>/dev/null || true)" == "$fingerprint" ]]; then
+  echo "agenthub-user-flutter: $user's Flutter is up to date"
+  exit 0
+fi
+
+# Built in a root-only directory of the home (the account cannot reach it until it is complete), then swapped in.
+tmp="$(mktemp -d "$home/.agenthub-flutter.new.XXXXXX")"
+trap 'rm -rf "$tmp"' EXIT
+cp -al "$master/." "$tmp/"
+for f in "$tmp"/* "$tmp"/.[!.]* "$tmp"/bin/cache/*; do
+  [[ -f "$f" && ! -L "$f" ]] || continue
+  cp -p "$f" "$f.agenthub-copy"
+  mv -f "$f.agenthub-copy" "$f"
+  chown -h "$user:$user" "$f"
+done
+printf '%s\n' "$fingerprint" >"$tmp/.agenthub-flutter-source"
+# Directories only — never a hard-linked file, that would hand the shared inode over —, deepest first.
+find "$tmp" -mindepth 1 -depth -type d -exec chown -h "$user:$user" {} +
+rm -rf "$dest"
+mv -T "$tmp" "$dest"
+trap - EXIT
+chown -h "$user:$user" "$dest"
+chmod 0755 "$dest"
+echo "agenthub-user-flutter: $user's Flutter made from $master ($fingerprint)"

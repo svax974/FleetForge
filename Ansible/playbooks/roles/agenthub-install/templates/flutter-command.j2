@@ -1,0 +1,8 @@
+#!/bin/sh
+# {{ ansible_managed }} — agenthub-install/tasks/flutter.yml
+# `{{ item }}` for every account: an AgentHub user runner account with its own Flutter copy (~/.agenthub-flutter, made
+# by /usr/local/sbin/agenthub-user-flutter) runs it; every other account the shared SDK {{ agenthub_flutter_dir }}.
+if [ -n "${HOME:-}" ] && [ -x "$HOME/.agenthub-flutter/bin/{{ item }}" ]; then
+  exec "$HOME/.agenthub-flutter/bin/{{ item }}" "$@"
+fi
+exec {{ agenthub_flutter_dir }}/bin/{{ item }} "$@"
