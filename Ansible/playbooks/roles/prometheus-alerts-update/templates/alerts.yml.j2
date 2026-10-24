@@ -669,12 +669,15 @@ groups:
       # ou plusieurs échecs passagers consécutifs : pas de `for` long à ajouter,
       # il retarderait seulement d'une heure le constat. La raison (`reason`)
       # vient de openclaw_model_probe_info.
+      # Pas de `keep_firing_for` : la sonde est horaire, la valeur ne peut pas
+      # battre plus vite que la rétention ne l'absorberait. Elle ne faisait que
+      # garder l'alerte 15 min après un changement de modèle — le 24/10/2026,
+      # fleet-watch a ainsi fait analyser une panne déjà corrigée.
       - alert: OpenClawModelUnavailable
         expr: >-
           (openclaw_model_up == 0)
           * on (instance, model) group_left (reason) openclaw_model_probe_info
         for: 5m
-        keep_firing_for: {{ prom_alert_flap_grace }}
         labels:
           severity: critical
         annotations:
