@@ -44,7 +44,7 @@ prom_alert_target_down_for: "5m"
 # Le prix est une résolution annoncée avec ce retard — sans conséquence, la
 # valeur d'un RESOLVED n'étant pas dans sa fraîcheur.
 prom_alert_flap_grace: "15m"
-prom_alert_disk_free_pct: 10
+prom_alert_disk_free_pct: 8
 # Plancher absolu, combiné au pourcentage ci-dessus (voir le commentaire dans
 # alerts.yml.j2). En dessous de 50 Go, aucun de nos hôtes n'a de marge réelle,
 # quelle que soit la taille de son disque.
