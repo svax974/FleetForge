@@ -1,0 +1,17 @@
+---
+# PURGE du serveur de messagerie complet : tout ce que fait remove-mailserver.yml,
+# plus les boîtes aux lettres, la base, les clés DKIM et la configuration.
+# IRRÉVERSIBLE.
+#
+#   ./play.sh <parc> purge-mailserver.yml --limit <hôte>
+- name: Purge du serveur de messagerie
+  hosts: all
+  remote_user: "{{ remote_username }}"
+  become: true
+  pre_tasks:
+    - name: Skip hosts that do not carry the mailserver family
+      ansible.builtin.meta: end_host
+      when: "'mailserver' not in ansible_roles | default([])"
+      tags: [always]
+  roles:
+    - mailserver-purge

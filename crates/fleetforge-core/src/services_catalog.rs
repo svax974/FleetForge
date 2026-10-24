@@ -176,6 +176,8 @@ fn get_service_label(service_name: &str) -> (String, String) {
         "pgpool" => "Connection pooling PostgreSQL.",
         "vpn" => "Infrastructure VPN Pritunl.",
         "mailrelay" => "Relai SMTP multi-domaines.",
+        "mailserver" => "Serveur de messagerie complet : boîtes IMAP, antispam rspamd.",
+        "webmail" => "Webmail Roundcube devant le serveur de messagerie.",
         "rpcbtc" => "Nœud Bitcoin Core (RPC).",
         "bitcoin-exporter" => "Exporteur de métriques du nœud Bitcoin (rpcbtc-monitoring).",
         "svcprobe" => "Sonde de disponibilité partagée des services de l'hôte.",

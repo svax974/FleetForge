@@ -1,0 +1,4 @@
+---
+# Mêmes valeurs que webmail-install.
+webmail_port: "{{ app_port | default(4810) }}"
+webmail_container: webmail

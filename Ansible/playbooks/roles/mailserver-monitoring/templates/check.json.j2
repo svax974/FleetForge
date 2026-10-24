@@ -1,0 +1,14 @@
+{
+  "service": "mailserver",
+  "up": {"kind": "systemd", "unit": "postfix"},
+  "extra_checks": [
+    {"name": "smtp", "kind": "tcp", "host": "127.0.0.1", "port": 25},
+    {"name": "submission", "kind": "tcp", "host": "127.0.0.1", "port": 587},
+    {"name": "smtps", "kind": "tcp", "host": "127.0.0.1", "port": 465},
+    {"name": "imaps", "kind": "tcp", "host": "127.0.0.1", "port": 993},
+    {"name": "dovecot", "kind": "systemd", "unit": "dovecot"},
+    {"name": "rspamd", "kind": "http", "url": "http://127.0.0.1:{{ mailserver_rspamd_controller_port }}/ping", "status": [200], "timeout": 5},
+    {"name": "redis", "kind": "systemd", "unit": "redis-server"},
+    {"name": "exporter", "kind": "systemd", "unit": "prometheus-postfix-exporter"}
+  ]
+}

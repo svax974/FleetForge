@@ -1,0 +1,17 @@
+-- État voulu de la base — généré par Ansible (mailserver-setup), NE PAS ÉDITER.
+-- L'inventaire fait foi : une boîte retirée de `mailserver_users` disparaît de
+-- la base (ses messages restent sous {{ mailserver_vmail_dir }}, purge seule).
+BEGIN;
+DELETE FROM aliases;
+DELETE FROM users;
+DELETE FROM domains;
+{% for d in mailserver_domains %}
+INSERT INTO domains (name) VALUES ('{{ d.name | lower }}');
+{% endfor %}
+{% for u in mailserver_users %}
+INSERT INTO users (address, domain, password, quota) VALUES ('{{ u.address | lower }}', '{{ u.address.split('@')[1] | lower }}', '{SHA512-CRYPT}{{ u.password | trim | password_hash('sha512', (u.address | lower | hash('sha256'))[:16], rounds=5000) }}', '{{ u.quota | default(mailserver_default_quota) }}');
+{% endfor %}
+{% for a in mailserver_aliases %}
+INSERT INTO aliases (source, destination) VALUES ('{{ a.source | lower }}', '{{ a.destination | lower }}');
+{% endfor %}
+COMMIT;

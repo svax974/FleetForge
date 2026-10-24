@@ -1,0 +1,23 @@
+---
+# Serveur de messagerie complet (famille `mailserver`) : Postfix (MX entrant et
+# soumission), Dovecot (IMAPS, LMTP), boîtes et domaines virtuels en SQLite,
+# rspamd (antispam, signature DKIM) avec Redis. À ne pas confondre avec le
+# relais SMTP sortant, famille `mailrelay`, qui n'héberge aucune boîte.
+
+# Compte propriétaire des boîtes (Maildir). UID/GID fixes : ils sont écrits
+# dans la base (Dovecot les lit dans `user_query`) et dans les sauvegardes.
+mailserver_vmail_user: vmail
+mailserver_vmail_uid: 5000
+mailserver_vmail_dir: /var/vmail
+
+# Base SQLite des domaines, boîtes et alias. Lue par Postfix (via proxymap,
+# hors chroot) et par Dovecot (auth-worker) : groupe dédié, lecture seule.
+mailserver_conf_dir: /etc/mailserver
+mailserver_db_group: maildb
+
+# Reprise d'un serveur de messagerie EXISTANT non posé par ce rôle (Dovecot
+# déjà configuré à la main, ex. mail1 d'easynode). `false` : le rôle refuse
+# d'écraser sa configuration — l'ancienne installation inline réécrivait
+# main.cf et dovecot.conf sans rien vérifier. Passer à `true` (host_vars)
+# seulement après sauvegarde des boîtes et de la configuration en place.
+mailserver_adopt_existing: false

@@ -1,0 +1,16 @@
+---
+# Retire le serveur de messagerie complet (services, paquets, comptes, pare-feu,
+# sonde, cibles). Boîtes, base, clés DKIM et configuration CONSERVÉES.
+#
+#   ./play.sh <parc> remove-mailserver.yml --limit <hôte>
+- name: Suppression du serveur de messagerie
+  hosts: all
+  remote_user: "{{ remote_username }}"
+  become: true
+  pre_tasks:
+    - name: Skip hosts that do not carry the mailserver family
+      ansible.builtin.meta: end_host
+      when: "'mailserver' not in ansible_roles | default([])"
+      tags: [always]
+  roles:
+    - mailserver-remove

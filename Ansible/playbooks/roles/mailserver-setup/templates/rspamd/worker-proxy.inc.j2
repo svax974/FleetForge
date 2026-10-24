@@ -1,0 +1,8 @@
+# rspamd — proxy en mode milter pour Postfix. Généré par Ansible (mailserver-setup).
+bind_socket = "127.0.0.1:{{ mailserver_rspamd_milter_port }}";
+milter = yes;
+timeout = 120s;
+upstream "local" {
+  default = yes;
+  self_scan = yes;
+}

@@ -1,0 +1,22 @@
+---
+# Pare-feu du serveur de messagerie complet.
+#
+# 25 (MX), 465/587 (soumission) et 993 (IMAPS) sont publics PAR NATURE : un
+# MX reçoit de tout Internet, et les clients de messagerie se connectent de
+# n'importe où. C'est l'exception assumée aux deux profils d'accès du parc
+# (CLAUDE.md § 1), au même titre que le P2P d'une blockchain. La protection
+# passe par l'authentification (TLS obligatoire), fail2ban, et rspamd.
+mailserver_public_ports: [25, 465, 587, 993]
+
+# Sources jamais bannies par fail2ban : un incident d'authentification
+# passager ne doit pas couper nos propres serveurs (même règle que le relais,
+# mailrelay-security).
+mailserver_docker_bridge_cidr: "172.17.0.0/16"
+mailserver_trusted_sources: >-
+  {{ ((whitelist | default([]))
+      + (groups['all'] | default([])
+         | map('extract', hostvars, 'ansible_host')
+         | select('string') | list)
+      + [mailserver_docker_bridge_cidr])
+     | select('match', '^[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]{1,2})?$')
+     | unique | list }}

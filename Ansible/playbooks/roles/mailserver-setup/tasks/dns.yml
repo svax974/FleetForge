@@ -1,0 +1,77 @@
+---
+# Enregistrements DNS des domaines hébergés, depuis la machine de contrôle.
+# L'enregistrement A de `mailserver_hostname` n'est PAS posé ici : c'est
+# l'identité machine, publiée depuis l'inventaire par update-cloudflare-dns.
+
+- name: Read the DKIM record of each domain
+  ansible.builtin.slurp:
+    src: "/var/lib/rspamd/dkim/{{ item.name }}.{{ mailserver_dkim_selector }}.txt"
+  register: mailserver_dkim_records
+  loop: "{{ mailserver_domains }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Publish MX, DKIM and DMARC records
+  delegate_to: localhost
+  become: false
+  block:
+    # Ce serveur est LE MX du domaine : `solo` retire les MX précédents.
+    - name: Publish the MX record of each domain
+      community.general.cloudflare_dns:
+        api_token: "{{ item.cloudflare_token | default(cloudflare_token) }}"
+        zone: "{{ item.zone | default(item.name.split('.')[-2:] | join('.')) }}"
+        record: "{{ item.name }}"
+        type: MX
+        value: "{{ mailserver_hostname }}"
+        priority: 10
+        solo: true
+        state: present
+      loop: "{{ mailserver_domains }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    # Sortie de `rspamadm dkim_keygen` au format BIND, découpée en chaînes
+    # entre guillemets : on les recolle.
+    - name: Publish the DKIM record of each domain
+      community.general.cloudflare_dns:
+        api_token: "{{ item.item.cloudflare_token | default(cloudflare_token) }}"
+        zone: "{{ item.item.zone | default(item.item.name.split('.')[-2:] | join('.')) }}"
+        record: "{{ mailserver_dkim_selector }}._domainkey.{{ item.item.name }}"
+        type: TXT
+        value: "{{ item.content | b64decode | regex_findall('\"([^\"]*)\"') | join('') }}"
+        solo: true
+        state: present
+      loop: "{{ mailserver_dkim_records.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+
+    # `solo` : la politique écrite ici est l'état voulu. `dmarc_rua` accepte
+    # une adresse ou une liste — garder un destinataire tiers déjà en place
+    # (ex. rapports Cloudflare) impose de le lister, sinon il est retiré.
+    - name: Publish the DMARC record of each domain
+      vars:
+        _rua: "{{ item.dmarc_rua | default(mailserver_dmarc_rua) | default('postmaster@' ~ item.name, true) }}"
+      community.general.cloudflare_dns:
+        api_token: "{{ item.cloudflare_token | default(cloudflare_token) }}"
+        zone: "{{ item.zone | default(item.name.split('.')[-2:] | join('.')) }}"
+        record: "_dmarc.{{ item.name }}"
+        type: TXT
+        value: >-
+          v=DMARC1;
+          p={{ item.dmarc_policy | default(mailserver_dmarc_policy) }};
+          rua={{ (_rua if _rua is not string else [_rua])
+                 | map('regex_replace', '^', 'mailto:') | join(',') }}
+        solo: true
+        state: present
+      loop: "{{ mailserver_domains }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+# SPF à la racine du domaine, où vivent aussi d'autres TXT (vérifications de
+# domaine…) : `solo` les effacerait tous. On ne remplace que le `v=spf1`.
+- name: Publish the SPF record of each domain
+  ansible.builtin.include_tasks: spf.yml
+  loop: "{{ mailserver_domains }}"
+  loop_control:
+    loop_var: mail_domain
+    label: "{{ mail_domain.name }}"

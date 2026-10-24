@@ -1,0 +1,81 @@
+---
+# Roundcube en conteneur, publié sur `webmail_port`, devant le serveur de
+# messagerie désigné par `webmail_mailserver_entry`.
+
+- name: Require the mail server entry
+  ansible.builtin.assert:
+    that:
+      - webmail_mailserver_entry | length > 0
+      - webmail_mailserver_entry in hostvars
+      - "'mailserver' in (hostvars[webmail_mailserver_entry].ansible_roles | default([]))"
+      - webmail_mail_host | length > 0
+    fail_msg: >-
+      `webmail_mailserver_entry` doit nommer l'entrée d'inventaire d'un serveur
+      de messagerie (famille `mailserver`, attribut `hostname` renseigné).
+
+- name: Create the webmail data directory
+  ansible.builtin.file:
+    path: "{{ webmail_data_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0750'
+  become: true
+
+# Clé de chiffrement des sessions, générée UNE fois sur l'hôte : la changer
+# déconnecterait tous les utilisateurs sans que rien ne l'explique.
+- name: Generate the session encryption key on first run
+  ansible.builtin.shell:
+    cmd: "umask 077 && openssl rand -base64 18 | tr -d '\\n' > {{ webmail_data_dir }}/des_key"
+    creates: "{{ webmail_data_dir }}/des_key"
+  become: true
+
+- name: Read the session encryption key
+  ansible.builtin.slurp:
+    src: "{{ webmail_data_dir }}/des_key"
+  register: webmail_des_key
+  become: true
+  no_log: true
+
+- name: Run the Roundcube container
+  community.docker.docker_container:
+    name: "{{ webmail_container }}"
+    image: "{{ webmail_image }}"
+    pull: true
+    restart_policy: unless-stopped
+    published_ports:
+      - "{{ webmail_port }}:{{ webmail_container_port }}"
+    volumes:
+      - "{{ webmail_data_dir }}/db:/var/roundcube/db"
+    env:
+      ROUNDCUBEMAIL_DEFAULT_HOST: "ssl://{{ webmail_mail_host }}"
+      ROUNDCUBEMAIL_DEFAULT_PORT: "993"
+      ROUNDCUBEMAIL_SMTP_SERVER: "tls://{{ webmail_mail_host }}"
+      ROUNDCUBEMAIL_SMTP_PORT: "587"
+      ROUNDCUBEMAIL_DB_TYPE: sqlite
+      ROUNDCUBEMAIL_DES_KEY: "{{ webmail_des_key.content | b64decode }}"
+      ROUNDCUBEMAIL_SKIN: elastic
+      ROUNDCUBEMAIL_UPLOAD_MAX_FILESIZE: "{{ webmail_upload_max_filesize }}"
+  become: true
+  no_log: true
+
+- name: Wait for Roundcube to answer
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ webmail_port }}/"
+    status_code: [200]
+  register: webmail_ready
+  until: webmail_ready.status | default(0) == 200
+  retries: 24
+  delay: 5
+
+# Nom public (`proxy_hostname` de l'entrée) : CNAME vers le front des proxies
+# dès le premier déploiement (modèle agenthub-install, CLAUDE.md « Obligation
+# DNS + vhost »). Le vhost, lui, se pose dans parcs/<parc>/nginx/ — modèle
+# dans files/webmail.conf.example de ce rôle — puis update-proxy.yml.
+- name: Ensure the webmail CNAME to the canonical proxy front
+  ansible.builtin.include_role:
+    name: cloudflare-dns-update
+    tasks_from: cnames
+  vars:
+    cfdns_cname_scope:
+      - "{{ inventory_hostname }}"

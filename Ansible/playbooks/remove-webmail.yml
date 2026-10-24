@@ -1,0 +1,9 @@
+---
+# Retire le conteneur Roundcube et sa sonde ; données et clé de session conservées.
+#
+#   ./play.sh <parc> remove-webmail.yml
+- name: Suppression du webmail
+  hosts: webmail
+  remote_user: "{{ remote_username }}"
+  roles:
+    - webmail-remove

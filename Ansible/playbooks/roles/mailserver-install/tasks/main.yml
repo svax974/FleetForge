@@ -1,0 +1,124 @@
+---
+# Paquets, compte des boîtes et répertoires du serveur de messagerie complet.
+# La configuration vient de `mailserver-setup`.
+
+# Mêmes ports (25, 465, 587) et même Postfix : les deux familles ne peuvent
+# pas cohabiter sur une machine.
+- name: Refuse a machine that also carries the mail relay
+  ansible.builtin.assert:
+    that:
+      - "'mailrelay' not in (ansible_roles | default([]))"
+    fail_msg: >-
+      {{ inventory_hostname }} porte aussi la famille `mailrelay` : relais et
+      serveur complet se disputeraient Postfix et les ports 25/465/587.
+      Retirer le relais (remove-mailrelay.yml) ou choisir une autre machine.
+
+- name: Look for an existing Dovecot configuration
+  ansible.builtin.stat:
+    path: /etc/dovecot/dovecot.conf
+  register: mailserver_existing_dovecot
+
+- name: Look for this role's marker
+  ansible.builtin.stat:
+    path: "{{ mailserver_conf_dir }}/.managed-by-fleetforge"
+  register: mailserver_marker
+
+# Un serveur de messagerie déjà en service porte des boîtes : réécrire sa
+# configuration à l'aveugle peut les rendre illisibles (autre mail_location,
+# autre schéma d'utilisateurs). Voir `mailserver_adopt_existing`.
+- name: Refuse to overwrite a mail server this role did not install
+  ansible.builtin.assert:
+    that:
+      - not mailserver_existing_dovecot.stat.exists or mailserver_marker.stat.exists or mailserver_adopt_existing | bool
+    fail_msg: >-
+      Dovecot est déjà configuré sur {{ inventory_hostname }} sans avoir été
+      posé par ce rôle. Sauvegarder les boîtes et /etc/dovecot, /etc/postfix,
+      puis relancer avec `mailserver_adopt_existing: true` (host_vars).
+
+- name: Stop the mail services before (re)installing
+  ansible.builtin.import_role:
+    name: mailserver-stop
+
+- name: Preconfigure postfix as "No configuration" to prevent interactive setup
+  ansible.builtin.debconf:
+    name: postfix
+    question: postfix/main_mailer_type
+    value: "No configuration"
+    vtype: select
+
+- name: Install the mail server packages
+  ansible.builtin.apt:
+    name:
+      - postfix
+      - postfix-sqlite
+      - dovecot-core
+      - dovecot-imapd
+      - dovecot-lmtpd
+      - dovecot-sqlite
+      - sqlite3
+      - rspamd
+      - redis-server
+      - fail2ban
+      - prometheus-postfix-exporter
+    state: present
+    update_cache: true
+
+- name: Create the mailbox group
+  ansible.builtin.group:
+    name: "{{ mailserver_vmail_user }}"
+    gid: "{{ mailserver_vmail_uid }}"
+    system: true
+
+- name: Create the mailbox owner
+  ansible.builtin.user:
+    name: "{{ mailserver_vmail_user }}"
+    uid: "{{ mailserver_vmail_uid }}"
+    group: "{{ mailserver_vmail_user }}"
+    home: "{{ mailserver_vmail_dir }}"
+    shell: /usr/sbin/nologin
+    system: true
+    create_home: false
+
+- name: Create the mailbox root
+  ansible.builtin.file:
+    path: "{{ mailserver_vmail_dir }}"
+    state: directory
+    owner: "{{ mailserver_vmail_user }}"
+    group: "{{ mailserver_vmail_user }}"
+    mode: '0770'
+
+# Postfix (proxymap) et Dovecot (auth-worker) lisent la base ; personne
+# d'autre. Le groupe porte cette lecture, la base reste à root.
+- name: Create the mail database group
+  ansible.builtin.group:
+    name: "{{ mailserver_db_group }}"
+    system: true
+
+- name: Let postfix and dovecot read the mail database
+  ansible.builtin.user:
+    name: "{{ item }}"
+    groups: "{{ mailserver_db_group }}"
+    append: true
+  loop: [postfix, dovecot]
+
+- name: Create the mail server configuration directory
+  ansible.builtin.file:
+    path: "{{ mailserver_conf_dir }}"
+    state: directory
+    owner: root
+    group: "{{ mailserver_db_group }}"
+    mode: '0750'
+
+- name: Mark the installation as managed by this role
+  ansible.builtin.copy:
+    dest: "{{ mailserver_conf_dir }}/.managed-by-fleetforge"
+    content: "Serveur de messagerie posé par le rôle mailserver-install (FleetForge).\n"
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Enable and start Redis (rspamd storage)
+  ansible.builtin.systemd:
+    name: redis-server
+    state: started
+    enabled: true

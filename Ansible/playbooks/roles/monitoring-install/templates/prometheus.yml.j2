@@ -405,6 +405,14 @@ scrape_configs:
     - files:
       - 'prometheus-configs/postfix/*.json'
 
+  # Serveur de messagerie complet : /metrics natif du contrôleur rspamd.
+  # Cibles posées par `mailserver-monitoring`. Même job que sur papanglabs.
+  - job_name: 'rspamd'
+    metrics_path: /metrics
+    file_sd_configs:
+    - files:
+      - 'prometheus-configs/rspamd/*.json'
+
   # FleetForge — l'application de gestion du parc, qui expose Prometheus
   # nativement sur son port applicatif. Cible déposée par
   # `fleetforge-monitoring` ; sans ce job le fichier resterait là sans

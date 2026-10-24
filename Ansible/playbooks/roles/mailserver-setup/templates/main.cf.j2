@@ -1,0 +1,60 @@
+# Postfix main.cf — serveur de messagerie complet (mailserver-setup)
+# Généré par Ansible — NE PAS ÉDITER À LA MAIN
+
+# ── Identité ──────────────────────────────────────────────────────────────────
+myhostname = {{ mailserver_hostname }}
+myorigin   = $myhostname
+mydestination = localhost
+mynetworks  = 127.0.0.0/8 [::ffff:127.0.0.0]/104 [::1]/128
+inet_interfaces = all
+inet_protocols  = ipv4
+smtpd_banner = $myhostname ESMTP
+biff = no
+append_dot_mydomain = no
+readme_directory = no
+compatibility_level = 3.6
+
+# ── TLS (wildcard de la zone, cert-install) ──────────────────────────────────
+smtpd_tls_cert_file = /etc/letsencrypt/live/{{ mailserver_cert_zone }}/fullchain.pem
+smtpd_tls_key_file  = /etc/letsencrypt/live/{{ mailserver_cert_zone }}/privkey.pem
+smtpd_tls_security_level = may
+smtpd_tls_auth_only = yes
+smtpd_tls_mandatory_protocols = !SSLv2, !SSLv3, !TLSv1, !TLSv1.1
+smtpd_tls_protocols = !SSLv2, !SSLv3, !TLSv1, !TLSv1.1
+smtp_tls_security_level = may
+smtp_tls_CApath = /etc/ssl/certs
+smtpd_tls_session_cache_database = btree:${data_directory}/smtpd_scache
+smtp_tls_session_cache_database  = btree:${data_directory}/smtp_scache
+
+# ── Domaines et boîtes virtuels (SQLite) ──────────────────────────────────────
+# `proxy:` : la base est lue par proxymap, hors du chroot de smtpd.
+virtual_mailbox_domains = proxy:sqlite:/etc/postfix/sqlite-domains.cf
+virtual_mailbox_maps    = proxy:sqlite:/etc/postfix/sqlite-users.cf
+virtual_alias_maps      = proxy:sqlite:/etc/postfix/sqlite-aliases.cf
+virtual_transport       = lmtp:unix:private/dovecot-lmtp
+
+# ── Authentification (Dovecot) ────────────────────────────────────────────────
+smtpd_sasl_type = dovecot
+smtpd_sasl_path = private/auth
+smtpd_sasl_auth_enable = no
+
+# ── Restrictions (port 25 : réception pour nos domaines seulement) ────────────
+smtpd_helo_required = yes
+smtpd_relay_restrictions = permit_mynetworks, permit_sasl_authenticated, reject_unauth_destination
+smtpd_recipient_restrictions = reject_non_fqdn_recipient, reject_unknown_recipient_domain, permit_mynetworks, permit_sasl_authenticated, reject_unauth_destination
+smtpd_sender_restrictions = reject_non_fqdn_sender, reject_unknown_sender_domain
+# Un client authentifié n'émet que pour les adresses qu'il possède.
+smtpd_sender_login_maps = proxy:sqlite:/etc/postfix/sqlite-login.cf
+
+# ── Antispam et DKIM (rspamd) ─────────────────────────────────────────────────
+smtpd_milters     = inet:127.0.0.1:{{ mailserver_rspamd_milter_port }}
+non_smtpd_milters = $smtpd_milters
+milter_default_action = accept
+milter_protocol = 6
+
+# ── Tailles ───────────────────────────────────────────────────────────────────
+message_size_limit = {{ mailserver_message_size_limit }}
+# Doit rester >= message_size_limit, sinon le livreur `local` refuse de démarrer
+# (constat du 24/10/2026 sur les relais, mailrelay-setup).
+mailbox_size_limit = 0
+virtual_mailbox_limit = 0

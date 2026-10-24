@@ -1,0 +1,106 @@
+---
+# Supervision du serveur de messagerie complet (voir defaults). Toutes les
+# tâches portent `monitoring` : réarmer la supervision ne rejoue pas Postfix.
+
+- name: Fail early when no Prometheus host is defined
+  ansible.builtin.assert:
+    that:
+      - prometheus_host is defined
+      - prometheus_host in hostvars
+    fail_msg: "`prometheus_host` non défini ou absent de l'inventaire."
+  tags: [monitoring]
+
+- name: Enable and start prometheus-postfix-exporter
+  ansible.builtin.systemd:
+    name: prometheus-postfix-exporter
+    state: started
+    enabled: true
+  become: true
+  tags: [monitoring]
+
+# ── Cibles Prometheus : exporter Postfix et contrôleur rspamd ─────────────────
+- name: Create the target directories on the Prometheus host
+  ansible.builtin.file:
+    path: "/home/{{ remote_username }}/prometheus/prometheus-configs/{{ item.job }}"
+    state: directory
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: '0755'
+  loop: &mailserver_targets
+    - { job: postfix, port: "{{ mailserver_exporter_port }}" }
+    - { job: rspamd, port: "{{ mailserver_rspamd_controller_port }}" }
+  loop_control:
+    label: "{{ item.job }}"
+  delegate_to: "{{ prometheus_host }}"
+  become: true
+  tags: [monitoring]
+
+- name: Deploy the Prometheus targets
+  ansible.builtin.template:
+    src: target.json.j2
+    dest: "/home/{{ remote_username }}/prometheus/prometheus-configs/{{ item.job }}/{{ inventory_hostname }}.json"
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: '0644'
+  loop: *mailserver_targets
+  loop_control:
+    label: "{{ item.job }}"
+  delegate_to: "{{ prometheus_host }}"
+  become: true
+  tags: [monitoring]
+
+# Prometheus co-localisé : sa source est une IP du bridge Docker (même règle
+# que mailrelay-monitoring).
+- name: Allow Prometheus to scrape the exporter and rspamd
+  community.general.ufw:
+    rule: allow
+    src: >-
+      {{ '172.17.0.0/16'
+         if hostvars[prometheus_host]['ansible_host'] == ansible_host
+         else hostvars[prometheus_host]['ansible_host'] }}
+    port: "{{ item.port }}"
+    proto: tcp
+    comment: "Prometheus scrape - {{ item.job }}"
+  loop: *mailserver_targets
+  loop_control:
+    label: "{{ item.job }}"
+  become: true
+  tags: [monitoring]
+
+# ── Sonde svcprobe ────────────────────────────────────────────────────────────
+- name: Ensure the shared probe is installed
+  ansible.builtin.include_role:
+    name: svcprobe-install
+    public: true
+  tags: [monitoring]
+
+- name: Deploy the mail server probe
+  ansible.builtin.template:
+    src: check.json.j2
+    dest: "{{ svcprobe_checks_dir }}/mailserver.json"
+    owner: root
+    group: root
+    mode: '0644'
+  become: true
+  tags: [monitoring]
+
+# Une sonde qui répond 0 alors que le service tourne est une sonde mal écrite,
+# et elle ferait sonner ServiceDown en permanence.
+- name: Verify the probe answers
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ svcprobe_listen_port }}/metrics"
+    return_content: true
+  register: mailserver_probe
+  retries: 6
+  delay: 5
+  until: mailserver_probe.status is defined and mailserver_probe.status == 200
+  changed_when: false
+  tags: [monitoring]
+
+- name: Report the probe result
+  ansible.builtin.debug:
+    msg: >-
+      {{ mailserver_probe.content.splitlines()
+         | select('search', 'service="mailserver"')
+         | list }}
+  tags: [monitoring]

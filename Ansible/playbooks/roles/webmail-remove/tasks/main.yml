@@ -1,0 +1,18 @@
+---
+# Arrête et supprime le conteneur Roundcube et sa sonde. Conserve les données
+# (préférences, carnets d'adresses) et la clé de session — voir webmail-purge.
+# La règle DOCKER-USER appartient à la machine (host_vars) : la retirer de
+# `docker_ports_rules` reste un geste explicite.
+
+- name: Remove the Roundcube container
+  community.docker.docker_container:
+    name: "{{ webmail_container }}"
+    state: absent
+  become: true
+
+- name: Remove the webmail probe
+  ansible.builtin.file:
+    path: /etc/svcprobe/checks.d/webmail.json
+    state: absent
+  become: true
+  tags: [monitoring]

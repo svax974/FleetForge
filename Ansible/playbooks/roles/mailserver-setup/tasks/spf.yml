@@ -1,0 +1,64 @@
+---
+# SPF d'un domaine (`mail_domain`) par l'API Cloudflare : seul l'enregistrement
+# `v=spf1` est créé ou remplacé, les autres TXT de la racine restent.
+# `no_log` : le jeton passe dans les en-têtes.
+
+- name: Find the Cloudflare zone of {{ mail_domain.name }}
+  ansible.builtin.uri:
+    url: "https://api.cloudflare.com/client/v4/zones?name={{ mail_domain.zone | default(mail_domain.name.split('.')[-2:] | join('.')) }}"
+    headers:
+      Authorization: "Bearer {{ mail_domain.cloudflare_token | default(cloudflare_token) }}"
+    return_content: true
+  register: mailserver_spf_zone
+  delegate_to: localhost
+  become: false
+  no_log: true
+
+- name: Read the TXT records of {{ mail_domain.name }}
+  ansible.builtin.uri:
+    url: "https://api.cloudflare.com/client/v4/zones/{{ mailserver_spf_zone.json.result[0].id }}/dns_records?type=TXT&name={{ mail_domain.name }}"
+    headers:
+      Authorization: "Bearer {{ mail_domain.cloudflare_token | default(cloudflare_token) }}"
+    return_content: true
+  register: mailserver_spf_txt
+  delegate_to: localhost
+  become: false
+  no_log: true
+
+- name: Compute the SPF change for {{ mail_domain.name }}
+  ansible.builtin.set_fact:
+    mailserver_spf_wanted: "v=spf1 mx {{ mailserver_spf_qualifier }}"
+    mailserver_spf_current: >-
+      {{ mailserver_spf_txt.json.result
+         | selectattr('content', 'search', '^"?v=spf1')
+         | list }}
+
+# Deux SPF sur un même nom invalident les deux (RFC 7208 § 3.2) : refuser
+# plutôt que de deviner lequel garder.
+- name: Refuse several SPF records on {{ mail_domain.name }}
+  ansible.builtin.assert:
+    that:
+      - mailserver_spf_current | length <= 1
+    fail_msg: "{{ mail_domain.name }} porte déjà plusieurs enregistrements SPF : les fusionner à la main."
+
+- name: Create or update the SPF record of {{ mail_domain.name }}
+  ansible.builtin.uri:
+    url: >-
+      https://api.cloudflare.com/client/v4/zones/{{ mailserver_spf_zone.json.result[0].id }}/dns_records{{
+      ('/' ~ mailserver_spf_current[0].id) if mailserver_spf_current | length == 1 else '' }}
+    method: "{{ 'PUT' if mailserver_spf_current | length == 1 else 'POST' }}"
+    headers:
+      Authorization: "Bearer {{ mail_domain.cloudflare_token | default(cloudflare_token) }}"
+    body_format: json
+    body:
+      type: TXT
+      name: "{{ mail_domain.name }}"
+      content: "{{ mailserver_spf_wanted }}"
+      ttl: 1
+  when: >-
+    mailserver_spf_current | length == 0
+    or (mailserver_spf_current[0].content | regex_replace('^"|"$', '')) != mailserver_spf_wanted
+  changed_when: true
+  delegate_to: localhost
+  become: false
+  no_log: true

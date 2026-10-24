@@ -1,0 +1,103 @@
+---
+# Retire le serveur de messagerie complet : services, paquets, comptes,
+# pare-feu, sonde et cibles Prometheus. CONSERVE les boîtes (/var/vmail), la
+# base, les clés DKIM et la configuration — voir mailserver-purge. Redis et
+# fail2ban, outils génériques, restent.
+
+# Ne retire que ce que mailserver-install a posé : mail1 d'easynode porte la
+# famille `mailserver` mais héberge un serveur HÉRITÉ, aux boîtes réelles.
+# Un remove — ou un purge, qui importe ce rôle — y détruirait sans retour ce
+# que ce rôle n'a jamais installé.
+- name: Look for the installation marker
+  ansible.builtin.stat:
+    path: "{{ mailserver_conf_dir }}/.managed-by-fleetforge"
+  register: mailserver_marker
+
+- name: Refuse to remove a mail server this role did not install
+  ansible.builtin.assert:
+    that:
+      - mailserver_marker.stat.exists or mailserver_adopt_existing | bool
+    fail_msg: >-
+      Le serveur de messagerie de {{ inventory_hostname }} n'a pas été posé par
+      mailserver-install (marqueur {{ mailserver_conf_dir }}/.managed-by-fleetforge
+      absent). Rien n'est retiré. `mailserver_adopt_existing: true` pour passer
+      outre, après sauvegarde.
+
+- name: Stop the mail services
+  ansible.builtin.import_role:
+    name: mailserver-stop
+
+- name: Remove the mail server packages
+  ansible.builtin.apt:
+    name:
+      - postfix
+      - postfix-sqlite
+      - dovecot-core
+      - dovecot-imapd
+      - dovecot-lmtpd
+      - dovecot-sqlite
+      - rspamd
+      - prometheus-postfix-exporter
+    state: absent
+    purge: false
+
+- name: Remove the mailbox owner (mailboxes preserved)
+  ansible.builtin.user:
+    name: "{{ mailserver_vmail_user }}"
+    state: absent
+    remove: false
+
+- name: Remove the mail groups
+  ansible.builtin.group:
+    name: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ mailserver_vmail_user }}"
+    - "{{ mailserver_db_group }}"
+
+- name: Close the mail ports
+  community.general.ufw:
+    rule: allow
+    port: "{{ item }}"
+    proto: tcp
+    delete: true
+  loop: "{{ mailserver_public_ports }}"
+  failed_when: false
+
+- name: Remove the fail2ban mail jails
+  ansible.builtin.file:
+    path: /etc/fail2ban/jail.d/mailserver.conf
+    state: absent
+
+# Laissées en place, la sonde et les cibles publieraient `up=0` indéfiniment
+# et feraient sonner des alertes sur un service volontairement désinstallé.
+- name: Remove the mail server probe
+  ansible.builtin.file:
+    path: /etc/svcprobe/checks.d/mailserver.json
+    state: absent
+  tags: [monitoring]
+
+- name: Remove the Prometheus targets
+  ansible.builtin.file:
+    path: "/home/{{ remote_username }}/prometheus/prometheus-configs/{{ item }}/{{ inventory_hostname }}.json"
+    state: absent
+  loop: [postfix, rspamd]
+  delegate_to: "{{ prometheus_host }}"
+  become: true
+  tags: [monitoring]
+
+- name: Close the scrape ports
+  community.general.ufw:
+    rule: allow
+    port: "{{ item }}"
+    proto: tcp
+    delete: true
+    src: >-
+      {{ '172.17.0.0/16'
+         if hostvars[prometheus_host]['ansible_host'] == ansible_host
+         else hostvars[prometheus_host]['ansible_host'] }}
+  loop:
+    - "{{ mailserver_exporter_port }}"
+    - "{{ mailserver_rspamd_controller_port }}"
+  failed_when: false
+  tags: [monitoring]

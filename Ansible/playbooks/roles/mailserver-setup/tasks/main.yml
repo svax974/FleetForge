@@ -1,0 +1,212 @@
+---
+# Configuration du serveur de messagerie complet : certificat, base des boîtes,
+# Postfix, Dovecot, rspamd, clés DKIM, DNS. `mailserver-install` a posé les
+# paquets et arrêté les services.
+
+# ── Garde-fous ────────────────────────────────────────────────────────────────
+# Les valeurs de l'inventaire finissent dans des requêtes SQL et des tables
+# Postfix : une apostrophe ou une adresse sans domaine casserait la base.
+- name: Check the mailbox declarations
+  vars:
+    addresses: >-
+      {{ (mailserver_users | map(attribute='address') | list)
+         + (mailserver_aliases | map(attribute='destination') | list) }}
+    domains: "{{ mailserver_domains | map(attribute='name') | map('lower') | list }}"
+  ansible.builtin.assert:
+    that:
+      - mailserver_domains | length > 0
+      - addresses | reject('match', '^[^@\s\x27]+@[^@\s\x27]+$') | list | length == 0
+      - mailserver_aliases | map(attribute='source') | reject('match', '^[^@\s\x27]*@[^@\s\x27]+$') | list | length == 0
+      - mailserver_users | map(attribute='address') | map('lower') | map('regex_replace', '^.*@', '') | reject('in', domains) | list | length == 0
+      - mailserver_users | selectattr('password', 'undefined') | list | length == 0
+    fail_msg: >-
+      Déclarations de boîtes invalides : `mailserver_domains` vide, adresse
+      mal formée (apostrophe, espace, sans @), boîte hors des domaines déclarés
+      ou sans `password`.
+    quiet: true
+
+# La configuration écrite ici suit la syntaxe de Dovecot 2.3 (Ubuntu 24.04,
+# Debian 12). Dovecot 2.4 l'a profondément changée : plutôt qu'un démon qui
+# refuse de démarrer, un refus explicite.
+- name: Read the Dovecot version
+  ansible.builtin.command:
+    cmd: dovecot --version
+  register: mailserver_dovecot_version
+  changed_when: false
+  check_mode: false
+
+- name: Require Dovecot 2.3
+  ansible.builtin.assert:
+    that:
+      - mailserver_dovecot_version.stdout is match('2\.3\.')
+    fail_msg: >-
+      Dovecot {{ mailserver_dovecot_version.stdout }} : cette configuration vise
+      la 2.3. Adapter dovecot.conf.j2 avant de déployer sur cette distribution.
+
+# ── Certificat ────────────────────────────────────────────────────────────────
+# Wildcard de la zone par le rôle générique : couvre `mailserver_hostname`
+# (MX, IMAP, soumission) sans enregistrement A préalable (DNS-01).
+- name: Obtain the zone wildcard certificate
+  ansible.builtin.include_role:
+    name: cert-install
+  vars:
+    domains: ["{{ mailserver_cert_zone }}"]
+
+- name: Reload Postfix and Dovecot when the certificate is renewed
+  ansible.builtin.copy:
+    dest: /etc/letsencrypt/renewal-hooks/deploy/mailserver-reload.sh
+    content: |
+      #!/bin/sh
+      # Géré par Ansible (mailserver-setup) : recharge les démons TLS après un renouvellement.
+      systemctl reload postfix
+      systemctl reload dovecot
+    owner: root
+    group: root
+    mode: '0755'
+
+# ── Base des domaines, boîtes et alias ────────────────────────────────────────
+- name: Deploy the database schema
+  ansible.builtin.copy:
+    src: schema.sql
+    dest: "{{ mailserver_conf_dir }}/schema.sql"
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Apply the database schema
+  ansible.builtin.shell:
+    cmd: "sqlite3 {{ mailserver_db }} < {{ mailserver_conf_dir }}/schema.sql"
+  changed_when: false
+
+# Fichier d'état complet (hachés seulement, jamais les mots de passe), 0600 :
+# rejoué quand il change, l'inventaire fait foi.
+- name: Render the wanted database state
+  ansible.builtin.template:
+    src: state.sql.j2
+    dest: "{{ mailserver_conf_dir }}/state.sql"
+    owner: root
+    group: root
+    mode: '0600'
+  register: mailserver_state
+  no_log: true
+
+- name: Apply the wanted database state
+  ansible.builtin.shell:
+    cmd: "sqlite3 {{ mailserver_db }} < {{ mailserver_conf_dir }}/state.sql"
+  when: mailserver_state.changed
+
+- name: Restrict the database to its readers
+  ansible.builtin.file:
+    path: "{{ mailserver_db }}"
+    owner: root
+    group: "{{ mailserver_db_group }}"
+    mode: '0640'
+
+# ── Postfix ───────────────────────────────────────────────────────────────────
+- name: Deploy the Postfix SQLite tables
+  ansible.builtin.template:
+    src: sqlite-map.cf.j2
+    dest: "/etc/postfix/sqlite-{{ item.name }}.cf"
+    owner: root
+    group: postfix
+    mode: '0640'
+  loop:
+    - { name: domains, query: "SELECT name FROM domains WHERE name = '%s'" }
+    - { name: users, query: "SELECT 1 FROM users WHERE address = '%s'" }
+    - { name: aliases, query: "SELECT destination FROM aliases WHERE source = '%s'" }
+    - { name: login, query: "SELECT address FROM users WHERE address = '%s' UNION SELECT destination FROM aliases WHERE source = '%s'" }
+  loop_control:
+    label: "{{ item.name }}"
+  notify: restart postfix
+
+- name: Deploy Postfix main.cf and master.cf
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "/etc/postfix/{{ item }}"
+    owner: root
+    group: root
+    mode: '0644'
+  loop: [main.cf, master.cf]
+  notify: restart postfix
+
+# ── Dovecot ───────────────────────────────────────────────────────────────────
+- name: Deploy the Dovecot configuration
+  ansible.builtin.template:
+    src: dovecot.conf.j2
+    dest: /etc/dovecot/dovecot.conf
+    owner: root
+    group: dovecot
+    mode: '0644'
+  notify: restart dovecot
+
+- name: Deploy the Dovecot SQL queries
+  ansible.builtin.template:
+    src: dovecot-sql.conf.ext.j2
+    dest: /etc/dovecot/dovecot-sql.conf.ext
+    owner: root
+    group: dovecot
+    mode: '0640'
+  notify: restart dovecot
+
+# ── rspamd ────────────────────────────────────────────────────────────────────
+- name: Deploy the rspamd local configuration
+  ansible.builtin.template:
+    src: "rspamd/{{ item }}.j2"
+    dest: "/etc/rspamd/local.d/{{ item }}"
+    owner: root
+    group: root
+    mode: '0644'
+  loop:
+    - worker-controller.inc
+    - worker-proxy.inc
+    - redis.conf
+    - dkim_signing.conf
+    - milter_headers.conf
+  notify: restart rspamd
+
+- name: Create the DKIM key directory
+  ansible.builtin.file:
+    path: /var/lib/rspamd/dkim
+    state: directory
+    owner: _rspamd
+    group: _rspamd
+    mode: '0750'
+
+# Clé privée et enregistrement TXT d'un même appel ; jamais régénérée : une
+# nouvelle clé invaliderait la signature tant que le DNS n'a pas suivi.
+- name: Generate a DKIM key for each domain
+  ansible.builtin.shell:
+    cmd: >-
+      rspamadm dkim_keygen -s {{ mailserver_dkim_selector }} -b 2048 -d {{ item.name }}
+      -k /var/lib/rspamd/dkim/{{ item.name }}.{{ mailserver_dkim_selector }}.key
+      > /var/lib/rspamd/dkim/{{ item.name }}.{{ mailserver_dkim_selector }}.txt
+    creates: "/var/lib/rspamd/dkim/{{ item.name }}.{{ mailserver_dkim_selector }}.key"
+  loop: "{{ mailserver_domains }}"
+  loop_control:
+    label: "{{ item.name }}"
+  notify: restart rspamd
+
+- name: Hand the DKIM keys to rspamd
+  ansible.builtin.file:
+    path: "/var/lib/rspamd/dkim/{{ item.name }}.{{ mailserver_dkim_selector }}.key"
+    owner: _rspamd
+    group: _rspamd
+    mode: '0600'
+  loop: "{{ mailserver_domains }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+# ── Démarrage ─────────────────────────────────────────────────────────────────
+- name: Enable and start the mail services
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: started
+    enabled: true
+    daemon_reload: true
+  loop: [rspamd, dovecot, postfix]
+
+# ── DNS ───────────────────────────────────────────────────────────────────────
+- name: Publish the DNS records on Cloudflare
+  ansible.builtin.include_tasks: dns.yml
+  when: mailserver_manage_dns | bool
+  tags: [dns]

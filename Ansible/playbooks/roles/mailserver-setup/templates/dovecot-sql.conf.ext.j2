@@ -1,0 +1,9 @@
+# Dovecot — requêtes SQL sur la base SQLite (mailserver-setup)
+# Généré par Ansible — NE PAS ÉDITER À LA MAIN
+driver = sqlite
+connect = {{ mailserver_db }}
+default_pass_scheme = SHA512-CRYPT
+
+password_query = SELECT address AS user, password FROM users WHERE address = '%u'
+user_query = SELECT '{{ mailserver_vmail_dir }}/%d/%n' AS home, {{ mailserver_vmail_uid }} AS uid, {{ mailserver_vmail_uid }} AS gid, '*:storage=' || quota AS quota_rule FROM users WHERE address = '%u'
+iterate_query = SELECT address AS user FROM users

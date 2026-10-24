@@ -1,0 +1,14 @@
+---
+# Supervision du serveur de messagerie complet.
+#
+# - exporter Postfix (trafic, files) : même job `postfix` que les relais,
+#   une instance par machine — les deux familles ne cohabitent jamais ;
+# - rspamd : /metrics natif du contrôleur (spam, actions, latence), job
+#   `rspamd` ;
+# - svcprobe : `service_up{service="mailserver"}` et une sonde par démon et
+#   par port, l'état que les compteurs ne disent pas (un exporter qui tourne
+#   pendant que Dovecot est arrêté publie des compteurs figés).
+#
+#   ./play.sh <parc> deploy-mailserver.yml --limit <hôte> --tags monitoring
+mailserver_exporter_port: 9154
+mailserver_rspamd_controller_port: 11334

@@ -1,0 +1,42 @@
+---
+# ufw et fail2ban du serveur de messagerie complet. Démons natifs sous
+# systemd : ufw filtre réellement ces ports (pas de publication Docker).
+# Le contrôleur rspamd (11334) n'est ouvert qu'à Prometheus, par
+# mailserver-monitoring.
+
+- name: Open the mail ports (public by nature, see defaults)
+  community.general.ufw:
+    rule: allow
+    port: "{{ item }}"
+    proto: tcp
+    comment: "mailserver - public by nature"
+  loop: "{{ mailserver_public_ports }}"
+
+- name: Deploy the fail2ban mail jails
+  ansible.builtin.copy:
+    dest: /etc/fail2ban/jail.d/mailserver.conf
+    content: |
+      # Géré par Ansible (mailserver-security) — NE PAS ÉDITER À LA MAIN.
+      [DEFAULT]
+      ignoreip = 127.0.0.1/8 ::1 {{ mailserver_trusted_sources | join(' ') }}
+
+      [postfix]
+      enabled = true
+      mode = aggressive
+      maxretry = 5
+      bantime = 1h
+
+      [dovecot]
+      enabled = true
+      maxretry = 5
+      bantime = 1h
+    owner: root
+    group: root
+    mode: '0644'
+  notify: restart fail2ban
+
+- name: Enable and start fail2ban
+  ansible.builtin.systemd:
+    name: fail2ban
+    state: started
+    enabled: true

@@ -1,0 +1,7 @@
+---
+# Mêmes valeurs que webmail-install.
+webmail_data_dir: /var/lib/webmail
+webmail_image: roundcube/roundcubemail:latest-apache
+# Nom public (attribut `proxy_hostname` de l'entrée `webmail`) : nécessaire au
+# retrait du CNAME.
+webmail_hostname: "{{ proxy_hostname | default('webmail.' ~ domain_name) }}"

@@ -1,0 +1,10 @@
+---
+# PURGE du webmail : conteneur, sonde, données Roundcube, clé de session, image
+# et CNAME public. Les boîtes aux lettres (serveur de messagerie) ne sont pas touchées.
+#
+#   ./play.sh <parc> purge-webmail.yml
+- name: Purge du webmail
+  hosts: webmail
+  remote_user: "{{ remote_username }}"
+  roles:
+    - webmail-purge

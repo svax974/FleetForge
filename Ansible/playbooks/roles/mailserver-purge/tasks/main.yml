@@ -1,0 +1,23 @@
+---
+# Tout ce que fait mailserver-remove, plus les DONNÉES : boîtes aux lettres,
+# base des utilisateurs, clés DKIM, configuration. Destructif et irréversible.
+#
+# Le certificat wildcard de la zone n'est PAS retiré : émis par le rôle
+# générique cert-install, il peut servir à d'autres services de la machine.
+
+- name: Remove the service, its accounts, probe and targets
+  ansible.builtin.import_role:
+    name: mailserver-remove
+
+- name: Delete the mailboxes, database, DKIM keys and configuration
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ mailserver_vmail_dir }}"
+    - "{{ mailserver_conf_dir }}"
+    - /etc/postfix
+    - /etc/dovecot
+    - /etc/rspamd/local.d
+    - /var/lib/rspamd/dkim
+    - /etc/letsencrypt/renewal-hooks/deploy/mailserver-reload.sh

@@ -1,0 +1,49 @@
+---
+# Serveur de messagerie COMPLET (famille `mailserver`) : Postfix (MX entrant,
+# soumission 587/465), Dovecot (IMAPS 993, LMTP), boîtes et domaines virtuels
+# en SQLite, rspamd (antispam, DKIM) + Redis, Let's Encrypt (wildcard de zone),
+# DNS Cloudflare (MX, SPF, DKIM, DMARC), ufw, fail2ban, supervision.
+# Le relais SMTP sortant, sans boîte, est une autre famille : deploy-mailrelay.yml.
+#
+#   ./play.sh <parc> deploy-mailserver.yml --limit <hôte>
+#   ./play.sh <parc> deploy-mailserver.yml --limit <hôte> --tags monitoring
+#   ./play.sh <parc> deploy-mailserver.yml --limit <hôte> --tags dns
+#
+# Prérequis :
+#   - inventaire : `ansible_roles: [mailserver]` sur l'hôte (sinon ignoré),
+#     `hostname` = nom du serveur (cible des MX, publié en A) ;
+#   - group_vars/host_vars : `mailserver_domains`, `mailserver_users`
+#     (mots de passe en vault), `cloudflare_token`, `email` ;
+#   - Dovecot 2.3 (Ubuntu 24.04, Debian 12) ;
+#   - un serveur de messagerie déjà en place mais non posé par ce rôle
+#     (mail1 d'easynode) est refusé tant que `mailserver_adopt_existing` n'est
+#     pas `true` — après sauvegarde des boîtes.
+#
+# `--limit` est OBLIGATOIRE : `hosts: all`, et seuls les hôtes portant la
+# famille sont traités.
+# Remplace deploy-mail-server-complete.yml (24/10/2026), qui n'était qu'un
+# second relais à authentification Dovecot, cassé, aux domaines écrits en dur.
+
+# ── Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ───────────────────────
+- name: Contrôle préalable
+  hosts: all
+  remote_user: "{{ remote_username }}"
+  roles:
+    - role: host-preflight
+      preflight_require_docker: false
+
+- name: Serveur de messagerie
+  hosts: all
+  remote_user: "{{ remote_username }}"
+  become: true
+  pre_tasks:
+    - name: Skip hosts that do not carry the mailserver family
+      ansible.builtin.meta: end_host
+      when: "'mailserver' not in ansible_roles | default([])"
+      tags: [always]
+  roles:
+    - mailserver-install
+    - mailserver-setup
+    - mailserver-security
+    # Supervision (OBLIGATOIRE, voir CLAUDE.md).
+    - mailserver-monitoring

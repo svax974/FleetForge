@@ -1,0 +1,22 @@
+---
+# Webmail Roundcube (famille `webmail`) devant un serveur de messagerie de la
+# famille `mailserver`. Service PUBLIÉ par les proxies : entrée d'inventaire
+# DÉDIÉE (CLAUDE.md § 2), qui porte `app_port`, `proxy_hostname`, `access_mode`
+# et `ansible_roles: [webmail]`, plus l'identité de la machine.
+
+# Port de service publié sur l'hôte (registre des ports, CLAUDE.local.md).
+# Le conteneur écoute sur 80 : la règle DOCKER-USER doit porter
+# `published_remap: true` (webmail-security le vérifie).
+webmail_port: "{{ app_port | default(4810) }}"
+webmail_container_port: 80
+
+webmail_image: roundcube/roundcubemail:latest-apache
+webmail_container: webmail
+webmail_data_dir: /var/lib/webmail
+
+# Entrée d'inventaire du serveur de messagerie (famille `mailserver`) : son
+# `hostname` sert d'hôte IMAPS (993) et de soumission (587, STARTTLS).
+webmail_mailserver_entry: ""
+webmail_mail_host: "{{ hostvars[webmail_mailserver_entry].hostname | default('') if webmail_mailserver_entry else '' }}"
+
+webmail_upload_max_filesize: 25M

@@ -1,0 +1,9 @@
+---
+# Mêmes valeurs que mailserver-install / mailserver-monitoring.
+mailserver_vmail_user: vmail
+mailserver_db_group: maildb
+mailserver_exporter_port: 9154
+mailserver_rspamd_controller_port: 11334
+mailserver_public_ports: [25, 465, 587, 993]
+mailserver_conf_dir: /etc/mailserver
+mailserver_adopt_existing: false

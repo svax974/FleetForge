@@ -38,8 +38,6 @@ pub const NOT_FAMILIES: &[&str] = &[
     // orchestrations de plusieurs playbooks
     "btc-pipeline",
     "dbs",
-    // ancienne installation inline, concurrente de deploy-mailrelay.yml
-    "mail-server-complete",
 ];
 
 fn is_family(playbooks_dir: &str, family: &str) -> bool {

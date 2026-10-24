@@ -1,0 +1,45 @@
+---
+# Le port du webmail est PUBLIÉ par Docker : ufw ne le voit jamais, seule la
+# chaîne DOCKER-USER le filtre (CLAUDE.md § 1). La règle appartient à la
+# MACHINE et vit dans `docker_ports_rules` de son entrée CANONIQUE
+# (host_vars/<entrée>.yml). Ce rôle la retrouve — même adresse et même port
+# SSH que l'entrée dédiée — vérifie que le port y figure, puis applique le jeu
+# de règles complet de la machine par docker-ports-security.
+
+- name: Find the canonical entry of this machine
+  ansible.builtin.set_fact:
+    webmail_canonical: >-
+      {{ groups['all']
+         | map('extract', hostvars)
+         | selectattr('ansible_host', 'defined')
+         | selectattr('ansible_host', 'equalto', ansible_host)
+         | selectattr('docker_ports_rules', 'defined')
+         | selectattr('docker_ports_rules', 'truthy')
+         | selectattr('ansible_port', 'equalto', ansible_port | default(22))
+         | map(attribute='inventory_hostname')
+         | list }}
+
+# Sans règle, le port serait ouvert à tout Internet (constat du 08/10/2026
+# sur ctdapi). Le conteneur écoute sur 80 : sans `published_remap`, le DROP
+# écrit pour le port publié ne matcherait jamais.
+- name: Require the webmail port in the machine's DOCKER-USER rules
+  vars:
+    rules: "{{ hostvars[webmail_canonical | first].docker_ports_rules | default([]) if webmail_canonical | length > 0 else [] }}"
+    rule: "{{ rules | selectattr('port', 'equalto', webmail_port | int) | list }}"
+  ansible.builtin.assert:
+    that:
+      - webmail_canonical | length == 1
+      - rule | length == 1
+      - rule[0].published_remap | default(false) | bool
+    fail_msg: >-
+      Déclarer le port {{ webmail_port }} dans `docker_ports_rules` de l'entrée
+      canonique de la machine (host_vars), avec `published_remap: true` et les
+      sources du profil « service exposé par les proxies » (proxies + vpns +
+      Prometheus + whitelist). Entrée(s) canonique(s) trouvée(s) :
+      {{ webmail_canonical }}.
+
+- name: Apply the machine's DOCKER-USER rules
+  ansible.builtin.include_role:
+    name: docker-ports-security
+  vars:
+    docker_ports_rules: "{{ hostvars[webmail_canonical | first].docker_ports_rules }}"

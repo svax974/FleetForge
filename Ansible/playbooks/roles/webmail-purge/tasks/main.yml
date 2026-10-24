@@ -1,0 +1,36 @@
+---
+# Tout ce que fait webmail-remove, plus les données Roundcube, la clé de
+# session, l'image et le CNAME public. Les boîtes aux lettres, elles, vivent sur
+# le serveur de messagerie et ne sont pas touchées.
+
+- name: Remove the container and its probe
+  ansible.builtin.import_role:
+    name: webmail-remove
+
+- name: Delete the webmail data and session key
+  ansible.builtin.file:
+    path: "{{ webmail_data_dir }}"
+    state: absent
+  become: true
+
+- name: Remove the Roundcube image
+  community.docker.docker_image:
+    name: "{{ webmail_image }}"
+    state: absent
+  become: true
+  failed_when: false
+
+# Symétrique de la publication (cloudflare-dns-update/tasks/cnames.yml).
+# L'entrée d'inventaire porteuse de `proxy_hostname` doit être retirée en même
+# temps, sinon la prochaine synchronisation republierait le record.
+- name: Remove the webmail CNAME
+  community.general.cloudflare_dns:
+    api_token: "{{ cloudflare_token }}"
+    zone: "{{ domain_name }}"
+    record: "{{ webmail_hostname }}"
+    type: CNAME
+    state: absent
+  delegate_to: localhost
+  become: false
+  run_once: true
+  when: cloudflare_token | default('') | length > 0

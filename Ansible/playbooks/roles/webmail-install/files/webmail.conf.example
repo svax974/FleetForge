@@ -1,0 +1,57 @@
+{# ── Webmail Roundcube (famille `webmail`) ────────────────────────────────────
+   MODÈLE à copier dans parcs/<parc>/nginx/sites-enabled/webmail.conf au premier
+   déploiement, puis `./play.sh <parc> update-proxy.yml`. Calqué sur
+   llamacpp.conf : entrée dédiée `webmail`, filtrage par `_access.inc` selon son
+   `access_mode`.
+
+   Roundcube authentifie chaque utilisateur (IMAP) : `access_mode: public` est
+   défendable pour un webmail ouvert à ses utilisateurs, `private` (défaut)
+   le réserve aux vpns + whitelist. Le choix se déclare sur l'entrée.
+
+   Un proxy qui ne trouve pas l'entrée `webmail` ne reçoit AUCUN vhost. #}
+{% if 'webmail' in hostvars %}
+{% set wm_upstream = 'http://' ~ hostvars['webmail'].ansible_host ~ ':' ~ (hostvars['webmail'].app_port | default(4810)) %}
+{% set wm_name = hostvars['webmail'].proxy_hostname | default('webmail.' ~ domain_name) %}
+# Backend Roundcube : {{ wm_upstream }}
+
+server {
+    listen      80;
+    listen      [::]:80;
+    server_name {{ wm_name }};
+    return 301 https://$host$request_uri;
+}
+
+server {
+{% if nginx_version is version('1.25.1', '>=') %}
+    listen      443 ssl;
+    listen      [::]:443 ssl;
+    http2       on;
+{% else %}
+    listen      443 ssl http2;
+    listen      [::]:443 ssl http2;
+{% endif %}
+    server_name {{ wm_name }};
+
+    ssl_certificate     /etc/letsencrypt/live/{{ domain_name }}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/{{ domain_name }}/privkey.pem;
+
+    add_header X-Robots-Tag "noindex, nofollow" always;
+
+    # Pièces jointes : aligné sur webmail_upload_max_filesize (25M) avec marge.
+    client_max_body_size 30m;
+
+    location / {
+        {% set access_entry = 'webmail' %}
+        {% include '_access.inc' %}
+
+        proxy_pass         {{ wm_upstream }};
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Real-IP         $remote_addr;
+        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+        proxy_http_version 1.1;
+    }
+}
+{% else %}
+# Webmail non déployé sur ce parc (pas d'entrée `webmail`) : aucun vhost.
+{% endif %}

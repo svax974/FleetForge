@@ -1,0 +1,6 @@
+# rspamd — contrôleur (interface web, /metrics). Généré par Ansible (mailserver-setup).
+# Écoute sur toutes les interfaces pour que Prometheus scrape /metrics ; ufw
+# n'ouvre le port qu'à lui (mailserver-monitoring). Les sources ci-dessous
+# sont dispensées de mot de passe, les autres n'ont accès à rien.
+bind_socket = "*:{{ mailserver_rspamd_controller_port }}";
+secure_ip = [{% for ip in mailserver_rspamd_secure_ips %}"{{ ip }}"{{ ", " if not loop.last else "" }}{% endfor %}];

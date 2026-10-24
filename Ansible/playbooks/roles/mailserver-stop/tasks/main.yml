@@ -1,0 +1,15 @@
+---
+# Arrête les démons du serveur de messagerie. Sans effet sur une machine où ils
+# ne sont pas installés (unités absentes ignorées). Redis n'est pas arrêté :
+# rspamd s'en sert, mais il peut servir à d'autres.
+
+- name: Stop the mail server services
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: stopped
+  loop:
+    - postfix
+    - dovecot
+    - rspamd
+    - prometheus-postfix-exporter
+  failed_when: false

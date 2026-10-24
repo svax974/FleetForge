@@ -1,0 +1,66 @@
+---
+# Configuration du serveur de messagerie complet (famille `mailserver`).
+
+# Nom du serveur (`myhostname`, HELO, certificat, cible des MX) : l'attribut
+# `hostname` de l'entrée d'inventaire, publié en A par update-cloudflare-dns —
+# même règle que `mailrelay_hostname`, pour la même raison.
+mailserver_hostname: "{{ hostname | default(inventory_hostname ~ '.' ~ domain_name) }}"
+
+# Domaines hébergés : le serveur est leur MX.
+#   mailserver_domains:
+#     - name: example.com
+#       zone: example.com              # facultatif — défaut : deux derniers labels
+#       cloudflare_token: "…"          # facultatif — défaut : cloudflare_token
+#       dmarc_policy: quarantine       # facultatif — défaut : mailserver_dmarc_policy
+#       dmarc_rua: dmarc@example.com   # facultatif — adresse ou liste
+mailserver_domains: []
+
+# Boîtes. Mot de passe en vault (`ansible-vault encrypt_string`), haché ici en
+# SHA512-CRYPT avec un sel dérivé de l'adresse : stable d'un rejeu à l'autre,
+# donc pas de réécriture de la base à chaque déploiement. Il n'apparaît
+# jamais en argument de commande ni dans la sortie.
+#   mailserver_users:
+#     - address: alice@example.com
+#       password: !vault |
+#         …
+#       quota: 5G                      # facultatif — défaut : mailserver_default_quota
+mailserver_users: []
+
+# Alias : `source` peut être une adresse ou `@domaine` (attrape-tout).
+#   mailserver_aliases:
+#     - { source: postmaster@example.com, destination: alice@example.com }
+mailserver_aliases: []
+
+mailserver_default_quota: 2G
+mailserver_message_size_limit: 52428800
+
+# Mêmes valeurs que mailserver-install.
+mailserver_vmail_uid: 5000
+mailserver_vmail_dir: /var/vmail
+mailserver_conf_dir: /etc/mailserver
+mailserver_db_group: maildb
+mailserver_db: "{{ mailserver_conf_dir }}/mailserver.db"
+
+# Certificat : wildcard par zone, émis par le rôle générique cert-install
+# (Cloudflare DNS-01) — il couvre `mailserver_hostname` sans dépendre d'un
+# enregistrement A au moment de l'émission.
+mailserver_cert_zone: "{{ mailserver_hostname.split('.')[-2:] | join('.') }}"
+
+# rspamd : contrôleur (interface web, /metrics) et milter.
+mailserver_rspamd_controller_port: 11334
+mailserver_rspamd_milter_port: 11332
+# Sources dispensées de mot de passe sur le contrôleur. Prometheus en fait
+# partie : /metrics en a besoin. ufw ne laisse de toute façon passer que lui
+# (mailserver-monitoring).
+mailserver_rspamd_secure_ips: >-
+  {{ ['127.0.0.1', '::1']
+     + ([hostvars[prometheus_host].ansible_host] if prometheus_host is defined and prometheus_host in hostvars else []) }}
+
+# DKIM signé par rspamd, une clé RSA-2048 par domaine.
+mailserver_dkim_selector: mail
+
+# ── DNS (Cloudflare) ──────────────────────────────────────────────────────────
+mailserver_manage_dns: true
+mailserver_spf_qualifier: "-all"
+mailserver_dmarc_policy: none
+mailserver_dmarc_rua: ""

@@ -1,0 +1,45 @@
+---
+# Webmail Roundcube (famille `webmail`) en conteneur, devant un serveur de
+# messagerie de la famille `mailserver` (deploy-mailserver.yml).
+#
+#   ./play.sh <parc> deploy-webmail.yml
+#   ./play.sh <parc> deploy-webmail.yml --tags monitoring
+#
+# Prérequis :
+#   - entrée d'inventaire DÉDIÉE `webmail` (service publié, CLAUDE.md § 2) :
+#     identité de la machine (ansible_host, ansible_port, provider, ports de
+#     scrape), `hostname: webmail-priv.<domaine>`, `proxy_hostname`,
+#     `app_port: 4810`, `access_mode`, `ansible_roles: [webmail]`,
+#     `webmail_mailserver_entry: <entrée du serveur de messagerie>` ;
+#   - règle `docker_ports_rules` du port (published_remap: true) dans le
+#     host_vars de l'entrée canonique de la machine (webmail-security l'exige) ;
+#   - port 4810 au registre (CLAUDE.local.md) ;
+#   - vhost : copier roles/webmail-install/files/webmail.conf.example dans
+#     parcs/<parc>/nginx/sites-enabled/webmail.conf, puis update-proxy.yml.
+
+# ── Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ───────────────────────
+- name: Contrôle préalable
+  hosts: webmail
+  remote_user: "{{ remote_username }}"
+  roles:
+    - host-preflight
+
+- name: Deploy Roundcube
+  hosts: webmail
+  remote_user: "{{ remote_username }}"
+  roles:
+    - webmail-install
+
+- name: Filter the webmail port in DOCKER-USER
+  hosts: webmail
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - webmail-security
+
+# ── Supervision (OBLIGATOIRE, voir CLAUDE.md) ──────────────────────────────
+- name: Supervision du service
+  hosts: webmail
+  remote_user: "{{ remote_username }}"
+  roles:
+    - webmail-monitoring

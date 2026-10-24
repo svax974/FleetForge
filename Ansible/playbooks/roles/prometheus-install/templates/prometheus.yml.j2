@@ -50,6 +50,14 @@ scrape_configs:
       - files:
           - 'prometheus-configs/postfix/*.json'
 
+  # Serveur de messagerie complet : /metrics natif du contrôleur rspamd
+  # (spam, actions, latence). Cibles posées par `mailserver-monitoring`.
+  - job_name: 'rspamd'
+    metrics_path: /metrics
+    file_sd_configs:
+      - files:
+          - 'prometheus-configs/rspamd/*.json'
+
   # API indicateurs. Cible déposée par papangmetrics-api-install : HTTPS par le
   # frontal TLS de la machine (`__scheme__` dans le file_sd) quand il est actif.
   # /metrics exige le bearer METRICS_AUTH_TOKEN.

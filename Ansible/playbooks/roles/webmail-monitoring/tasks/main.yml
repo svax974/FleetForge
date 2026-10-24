@@ -1,0 +1,44 @@
+---
+# Supervision du webmail : sonde svcprobe (`service_up{service="webmail"}`),
+# conteneur et page de connexion. Roundcube n'expose aucune métrique.
+
+- name: Ensure the shared probe is installed
+  ansible.builtin.include_role:
+    name: svcprobe-install
+    public: true
+  tags: [monitoring]
+
+- name: Deploy the webmail probe
+  ansible.builtin.copy:
+    dest: "{{ svcprobe_checks_dir }}/webmail.json"
+    content: |
+      {
+        "service": "webmail",
+        "up": {"kind": "http", "url": "http://127.0.0.1:{{ webmail_port }}/", "status": [200], "timeout": 10},
+        "extra_checks": [
+          {"name": "container", "kind": "docker", "container": "{{ webmail_container }}"}
+        ]
+      }
+    owner: root
+    group: root
+    mode: '0644'
+  become: true
+  tags: [monitoring]
+
+# Une sonde qui répond 0 alors que le service tourne ferait sonner ServiceDown
+# en permanence : mieux vaut le voir au déploiement.
+- name: Verify the probe answers
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ svcprobe_listen_port }}/metrics"
+    return_content: true
+  register: webmail_probe
+  retries: 6
+  delay: 5
+  until: webmail_probe.status is defined and webmail_probe.status == 200
+  changed_when: false
+  tags: [monitoring]
+
+- name: Report the probe result
+  ansible.builtin.debug:
+    msg: "{{ webmail_probe.content.splitlines() | select('search', 'service=\"webmail\"') | list }}"
+  tags: [monitoring]

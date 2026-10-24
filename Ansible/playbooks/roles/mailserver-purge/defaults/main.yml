@@ -1,0 +1,4 @@
+---
+# Mêmes valeurs que mailserver-install / mailserver-setup.
+mailserver_vmail_dir: /var/vmail
+mailserver_conf_dir: /etc/mailserver

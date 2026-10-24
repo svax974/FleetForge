@@ -1,0 +1,93 @@
+# Dovecot — serveur de messagerie complet (mailserver-setup)
+# Généré par Ansible — NE PAS ÉDITER À LA MAIN. Fichier unique : la
+# configuration par défaut du paquet (conf.d/) n'est pas incluse.
+
+protocols = imap lmtp
+listen = *
+
+# ── TLS (wildcard de la zone, cert-install) ──────────────────────────────────
+ssl = required
+ssl_cert = </etc/letsencrypt/live/{{ mailserver_cert_zone }}/fullchain.pem
+ssl_key = </etc/letsencrypt/live/{{ mailserver_cert_zone }}/privkey.pem
+ssl_min_protocol = TLSv1.2
+ssl_prefer_server_ciphers = yes
+
+# ── Authentification ──────────────────────────────────────────────────────────
+disable_plaintext_auth = yes
+auth_mechanisms = plain login
+passdb {
+  driver = sql
+  args = /etc/dovecot/dovecot-sql.conf.ext
+}
+userdb {
+  driver = sql
+  args = /etc/dovecot/dovecot-sql.conf.ext
+}
+
+# ── Boîtes ────────────────────────────────────────────────────────────────────
+mail_location = maildir:{{ mailserver_vmail_dir }}/%d/%n
+mail_uid = {{ mailserver_vmail_uid }}
+mail_gid = {{ mailserver_vmail_uid }}
+first_valid_uid = {{ mailserver_vmail_uid }}
+last_valid_uid = {{ mailserver_vmail_uid }}
+mail_plugins = $mail_plugins quota
+
+namespace inbox {
+  inbox = yes
+  mailbox Drafts {
+    special_use = \Drafts
+    auto = subscribe
+  }
+  mailbox Sent {
+    special_use = \Sent
+    auto = subscribe
+  }
+  mailbox Junk {
+    special_use = \Junk
+    auto = subscribe
+  }
+  mailbox Trash {
+    special_use = \Trash
+    auto = subscribe
+  }
+}
+
+plugin {
+  quota = maildir:User quota
+}
+
+# ── Services ──────────────────────────────────────────────────────────────────
+service imap-login {
+  inet_listener imap {
+    port = 0
+  }
+  inet_listener imaps {
+    port = 993
+    ssl = yes
+  }
+}
+
+# Livraison par Postfix (virtual_transport = lmtp:unix:private/dovecot-lmtp).
+service lmtp {
+  unix_listener /var/spool/postfix/private/dovecot-lmtp {
+    mode = 0600
+    user = postfix
+    group = postfix
+  }
+}
+
+# Authentification SMTP de Postfix (smtpd_sasl_path = private/auth).
+service auth {
+  unix_listener /var/spool/postfix/private/auth {
+    mode = 0660
+    user = postfix
+    group = postfix
+  }
+}
+
+protocol lmtp {
+  mail_plugins = $mail_plugins quota
+  postmaster_address = postmaster@{{ mailserver_domains | map(attribute='name') | first | default(mailserver_hostname) }}
+}
+
+log_path = syslog
