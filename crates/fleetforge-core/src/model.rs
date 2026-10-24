@@ -288,6 +288,7 @@ mod tests {
             server_type: None,
             provider: Some("contabo".to_string()),
             ansible_roles: vec![],
+            alert_exclude: vec![],
             svcprobe_port: svcprobe,
             monitor_port: None,
             groups: vec![],

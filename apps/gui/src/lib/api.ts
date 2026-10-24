@@ -20,7 +20,7 @@ import {
   Model, AnsibleInventoryInfo, AnsibleGroup, AnsiblePlaybook, AnsibleRole, AnsibleRun,
   GroupVarEntry, ServerService, ServerServiceState, PrometheusMetric, CatalogService,
   Fleet, Finding, Probe, ProbeScopeName, RunHandle,
-  ProviderStatus, ServerProvider, Instance, InstanceRef, Reconciliation, MachineControl,
+  ProviderStatus, ServerProvider, Instance, InstanceRef, Reconciliation, MachineControl, AlertRule,
 } from '../types'
 
 // === Modèles ===
@@ -80,6 +80,14 @@ export const readGroupVarsFile = async (filename: string): Promise<GroupVarEntry
   call('read_group_vars_file', { filename })
 export const writeGroupVarsFile = async (filename: string, entries: GroupVarEntry[]): Promise<void> =>
   call('write_group_vars_file', { filename, entries })
+
+// === Exemptions d'alertes ===
+export const listAlertRules = async (inventoryPath: string): Promise<AlertRule[]> =>
+  call('list_alert_rules', { inventoryPath })
+
+/** Remplace les exemptions de l'entrée ; effet au prochain update-prometheus-alerts.yml. */
+export const setHostAlertExclusions = async (inventoryPath: string, host: string, alerts: string[]): Promise<void> =>
+  call('set_host_alert_exclusions', { inventoryPath, host, alerts })
 
 // === Services suivis ===
 export const getServerServices = async (

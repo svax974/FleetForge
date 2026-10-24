@@ -76,6 +76,34 @@ groups:
           summary: "Disque bas : {{ '{{' }} $labels.mountpoint {{ '}}' }} sur {{ '{{' }} $labels.instance {{ '}}' }}"
           description: "Moins de {{ prom_alert_disk_free_pct }} % ET moins de {{ prom_alert_disk_free_gb }} Go d'espace libre."
 
+      # Préavis de DiskSpaceLow : ses seuils (`prom_alert_disk_free_pct` ET
+      # `prom_alert_disk_free_gb`) prévus à `prom_alert_disk_predict_days` jours,
+      # d'après la tendance des
+      # `prom_alert_disk_predict_window`. Pas « plein dans N jours » : à 0,5 Go/j
+      # un disque de 1,4 To à 86 Go libres ne le serait que dans ~170 jours, soit
+      # bien APRÈS le plancher — l'alerte aurait sonné après DiskSpaceLow.
+      # Même conjonction pourcentage ET volume que DiskSpaceLow, appliquée à la
+      # valeur PRÉVUE : le volume seul sonnerait en permanence sur un disque de
+      # 100 Go (50 % du disque) ou sur /boot/efi, qui n'a jamais 50 Go libres.
+      - alert: DiskWillFillSoon
+        expr: |
+          predict_linear(node_filesystem_free_bytes{ {{- fs -}} }[{{ prom_alert_disk_predict_window }}],
+                         {{ prom_alert_disk_predict_days }} * 86400)
+          / node_filesystem_size_bytes{ {{- fs -}} } * 100
+          < {{ prom_alert_disk_free_pct }}
+          and
+          predict_linear(node_filesystem_free_bytes{ {{- fs -}} }[{{ prom_alert_disk_predict_window }}],
+                         {{ prom_alert_disk_predict_days }} * 86400)
+          < {{ prom_alert_disk_free_gb }} * 1024 * 1024 * 1024
+          and
+          node_filesystem_readonly{ {{- fs -}} } == 0
+        for: 6h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Disque en voie de saturation : {{ '{{' }} $labels.mountpoint {{ '}}' }} sur {{ '{{' }} $labels.instance {{ '}}' }}"
+          description: "À la tendance des {{ prom_alert_disk_predict_window }}, moins de {{ prom_alert_disk_free_pct }} % ET moins de {{ prom_alert_disk_free_gb }} Go libres d'ici {{ prom_alert_disk_predict_days }} jours."
+
       # `avg by (instance)` : la moyenne des cœurs, pas un cœur en particulier —
       # un seul cœur saturé (process mono-thread) est normal et ne doit pas
       # sonner comme une machine chargée. `for: 15m` filtre le pic ponctuel

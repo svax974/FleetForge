@@ -415,6 +415,8 @@ pub enum ConfirmedAction {
         role: String,
         hosts: Vec<String>,
     },
+    /// Lance un playbook sur le parc courant, sans `--limit`.
+    RunPlaybook { label: String, path: String },
     /// Efface les identifiants d'un compte — pas seulement sa session.
     ForgetAccount { account: AccountId },
     /// Porte la désignation complète et l'action typée, pas leur description.

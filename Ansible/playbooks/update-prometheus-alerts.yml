@@ -1,0 +1,20 @@
+---
+# Met à jour les RÈGLES D'ALERTE seules sur l'hôte Prometheus du parc : rendu
+# de alerts.yml.j2, exemptions par hôte (`alert_exclude`), validation promtool,
+# rechargement. Sans recréer le conteneur Prometheus, contrairement à
+# deploy-monitoring.yml / deploy-prometheus.yml qui rejouent toute la stack.
+#
+# C'est le playbook que lancent les applications (bouton « Appliquer » des
+# exemptions d'alertes) après une modification de `alert_exclude`.
+#
+#   ./play.sh web3c update-prometheus-alerts.yml
+#   ./play.sh papanglabs update-prometheus-alerts.yml
+#
+# Motif d'hôtes écrit en dur, couvrant les deux parcs : `hosts:` est résolu
+# avant les group_vars, `{{ prometheus_host }}` y vaudrait son défaut (CLAUDE.md).
+- name: Mise à jour des règles d'alerte
+  hosts: prometheus1:monitor
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - prometheus-alerts-update

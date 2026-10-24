@@ -210,6 +210,7 @@ fn parse_host(name: &str, value: &serde_yaml::Value) -> AnsibleHost {
     let mut server_type: Option<String> = None;
     let mut provider: Option<String> = None;
     let mut ansible_roles: Vec<String> = Vec::new();
+    let mut alert_exclude: Vec<String> = Vec::new();
     let mut svcprobe_port: Option<u16> = None;
     let mut monitor_port: Option<u16> = None;
     let mut vars: HashMap<String, serde_json::Value> = HashMap::new();
@@ -239,6 +240,9 @@ fn parse_host(name: &str, value: &serde_yaml::Value) -> AnsibleHost {
                 "ansible_roles" => {
                     ansible_roles = parse_role_families(v);
                 }
+                "alert_exclude" => {
+                    alert_exclude = parse_role_families(v);
+                }
                 "svcprobe_port" => {
                     svcprobe_port = v.as_u64().map(|n| n as u16);
                 }
@@ -262,6 +266,7 @@ fn parse_host(name: &str, value: &serde_yaml::Value) -> AnsibleHost {
         server_type,
         provider,
         ansible_roles,
+        alert_exclude,
         svcprobe_port,
         monitor_port,
         groups: Vec::new(),
@@ -269,6 +274,8 @@ fn parse_host(name: &str, value: &serde_yaml::Value) -> AnsibleHost {
     }
 }
 
+/// Sert aussi à `alert_exclude`, de même forme.
+///
 /// `ansible_roles` est toujours une liste par convention, mais un inventaire
 /// tiers ou une saisie à la main peut y mettre une chaîne. On accepte les deux
 /// en lecture — le consommateur écrit `'brk' in ansible_roles` sans tester le

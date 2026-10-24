@@ -58,6 +58,11 @@ pub struct AnsibleHost {
     /// ici ». Toujours une liste : `[]` quand l'hôte ne reçoit que le socle.
     #[serde(default)]
     pub ansible_roles: Vec<String>,
+    /// Alertes Prometheus dont l'entrée est exemptée, par nom de règle
+    /// (`alert_exclude: [DiskWillFillSoon]`), appliquées au rendu des règles
+    /// par `prometheus-alerts-update`. Voir `alert_rules`.
+    #[serde(default)]
+    pub alert_exclude: Vec<String>,
     /// Port de la sonde `svcprobe`. Composante de l'identité machine : deux
     /// entrées qui partagent une adresse mais pas ce port sont deux machines
     /// distinctes derrière un même NAT (cf. `hub`/`nuc` sur web3c).

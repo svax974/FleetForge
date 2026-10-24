@@ -216,24 +216,27 @@ fn host_from_vars(name: &str, vars: &Value, groups: &[String]) -> AnsibleHost {
         })
     };
 
-    let ansible_roles = map
-        .get("ansible_roles")
-        .map(|v| match v {
-            Value::Array(a) => a
-                .iter()
-                .filter_map(|x| x.as_str().map(|s| s.trim().to_string()))
-                .filter(|s| !s.is_empty())
-                .collect(),
-            Value::String(s) => s
-                .split(',')
-                .map(|p| p.trim().to_string())
-                .filter(|p| !p.is_empty())
-                .collect(),
-            _ => Vec::new(),
-        })
-        .unwrap_or_default();
+    // `ansible_roles`, `alert_exclude` : liste par convention, chaîne
+    // « a, b » tolérée en lecture.
+    let list_of = |k: &str| -> Vec<String> {
+        map.get(k)
+            .map(|v| match v {
+                Value::Array(a) => a
+                    .iter()
+                    .filter_map(|x| x.as_str().map(|s| s.trim().to_string()))
+                    .filter(|s| !s.is_empty())
+                    .collect(),
+                Value::String(s) => s
+                    .split(',')
+                    .map(|p| p.trim().to_string())
+                    .filter(|p| !p.is_empty())
+                    .collect(),
+                _ => Vec::new(),
+            })
+            .unwrap_or_default()
+    };
 
-    const PROMOTED: [&str; 9] = [
+    const PROMOTED: [&str; 10] = [
         "ansible_host",
         "ansible_port",
         "ansible_user",
@@ -241,6 +244,7 @@ fn host_from_vars(name: &str, vars: &Value, groups: &[String]) -> AnsibleHost {
         "server_type",
         "provider",
         "ansible_roles",
+        "alert_exclude",
         "svcprobe_port",
         "monitor_port",
     ];
@@ -263,7 +267,8 @@ fn host_from_vars(name: &str, vars: &Value, groups: &[String]) -> AnsibleHost {
         hostname: string_of("hostname"),
         server_type: string_of("server_type"),
         provider: string_of("provider"),
-        ansible_roles,
+        ansible_roles: list_of("ansible_roles"),
+        alert_exclude: list_of("alert_exclude"),
         svcprobe_port: port_of("svcprobe_port"),
         monitor_port: port_of("monitor_port"),
         groups: groups.to_vec(),

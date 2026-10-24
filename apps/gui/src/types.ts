@@ -44,6 +44,8 @@ export interface AnsibleHost {
   provider?: ServerProvider
   /** Familles de rôles applicables, sans suffixe d'action. Toujours une liste. */
   ansible_roles: string[]
+  /** Alertes Prometheus dont l'entrée est exemptée (`alert_exclude`). */
+  alert_exclude: string[]
   /** Composante de l'identité machine — cf. `MachineKey` côté cœur. */
   svcprobe_port?: number
   monitor_port?: number
@@ -321,6 +323,13 @@ export interface DeployLaunchConfig {
   roles: string[]
   hosts: string[]
   extraVars?: Record<string, string>
+}
+
+/** Règle d'alerte du gabarit partagé ; `loaded` : le parc charge son groupe. */
+export interface AlertRule {
+  name: string
+  group: string
+  loaded: boolean
 }
 
 export interface PlaybookLaunchConfig {

@@ -213,6 +213,14 @@ pub async fn dispatch(
             &p.get::<Vec<GroupVarEntry>>("entries")?,
         )?),
 
+        // === Exemptions d'alertes ===
+        "list_alert_rules" => ok(core.list_alert_rules(&p.get::<String>("inventoryPath")?)?),
+        "set_host_alert_exclusions" => ok(core.set_alert_exclusions(
+            &p.get::<String>("inventoryPath")?,
+            &p.get::<String>("host")?,
+            &p.get::<Vec<String>>("alerts")?,
+        )?),
+
         // === Supervision ===
         "query_prometheus" => ok(core.query_prometheus(&p.get::<String>("query")?).await?),
         "get_probes" => {
@@ -456,6 +464,8 @@ pub const COMMANDS: &[&str] = &[
     "list_group_vars_files",
     "read_group_vars_file",
     "write_group_vars_file",
+    "list_alert_rules",
+    "set_host_alert_exclusions",
     "query_prometheus",
     "get_probes",
     "check_ansible_available",

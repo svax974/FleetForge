@@ -13,6 +13,7 @@
 //!
 //! Point d'entrée : [`Core`].
 
+pub mod alert_rules;
 pub mod ansible_group_vars;
 pub mod ansible_inventory;
 pub mod ansible_playbooks;
@@ -305,6 +306,21 @@ impl Core {
             return Err(anyhow!("Playbooks path not configured"));
         }
         ansible_group_vars::write_group_vars_file(&path, filename, entries)
+    }
+
+    // === Exemptions d'alertes ===
+
+    /// Règles d'alerte connues, celles que le parc charge en premier.
+    pub fn list_alert_rules(&self, inventory_path: &str) -> Result<Vec<alert_rules::AlertRule>> {
+        let parc = self.resolve_inventory(inventory_path)?;
+        alert_rules::list_alert_rules(&self.playbooks_path()?, &parc.name)
+    }
+
+    /// Remplace les exemptions d'une entrée (`alert_exclude`). Effet au
+    /// prochain `update-prometheus-alerts.yml`.
+    pub fn set_alert_exclusions(&self, inventory_path: &str, host: &str, alerts: &[String]) -> Result<()> {
+        let parc = self.resolve_inventory(inventory_path)?;
+        alert_rules::set_alert_exclusions(&self.playbooks_path()?, &parc, host, alerts)
     }
 
     // === Prometheus ===

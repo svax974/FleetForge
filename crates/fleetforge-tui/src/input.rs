@@ -16,7 +16,7 @@ use crate::app::{
     Screen, SessionMenu,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use fleetforge_core::deploy::DeployRequest;
+use fleetforge_core::deploy::{DeployRequest, PlaybookRequest};
 use fleetforge_providers::PowerAction;
 use fleetforge_core::SettingKey;
 use std::collections::HashMap;
@@ -477,6 +477,31 @@ fn perform(app: &mut App, action: ConfirmedAction, tx: &UnboundedSender<Msg>) {
                 }
             });
         }
+        ConfirmedAction::RunPlaybook { label, path } => {
+            let core = app.core.clone();
+            let inventory = app.inventory_path.clone();
+            let tx = tx.clone();
+            app.status = format!("{label}…");
+            app.go(Screen::Runs);
+            tokio::task::spawn_blocking(move || {
+                let request = PlaybookRequest {
+                    id: format!("tui-{}", now_millis()),
+                    label,
+                    playbook_path: path,
+                    inventory_path: inventory,
+                    limit_hosts: None,
+                    extra_vars: HashMap::new(),
+                };
+                match core.run_playbook(request, |_| {}) {
+                    Ok(run) => {
+                        let _ = tx.send(Msg::Status(format!("run terminé : {}", run.status)));
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Msg::Error(e.to_string()));
+                    }
+                }
+            });
+        }
         ConfirmedAction::ForgetAccount { account } => {
             let hub = app.hub.clone();
             let tx = tx.clone();
@@ -922,11 +947,69 @@ fn run_command(app: &mut App, input: &str, tx: &UnboundedSender<Msg>) {
         }
         "clear-marks" => app.clear_marks(),
         "inventory" => switch_inventory(app, parts.next(), tx),
+        "exempt" => edit_exemption(app, parts.next(), true, tx),
+        "unexempt" => edit_exemption(app, parts.next(), false, tx),
+        "apply-alerts" => request_apply_alerts(app),
         "connect" => connect_provider(app, tx),
         "disconnect" => disconnect_provider(app, tx),
         "quit" | "q" => app.should_quit = true,
         other => app.status = format!("⚠ commande inconnue : {other}"),
     }
+}
+
+/// `:exempt <alerte>` / `:unexempt <alerte>` sur l'hôte courant
+/// (`alert_exclude` dans l'inventaire). Effet au prochain `:apply-alerts`.
+fn edit_exemption(app: &mut App, alert: Option<&str>, add: bool, tx: &UnboundedSender<Msg>) {
+    if app.screen != Screen::Hosts {
+        app.status = "sélectionner un hôte (écran 2) pour gérer ses exemptions".into();
+        return;
+    }
+    let Some(host) = app.visible_hosts().get(app.cursor()).map(|h| (*h).clone()) else { return };
+    let Some(alert) = alert else {
+        app.status = format!(
+            ":{} <alerte> — exemptions de {} : {}",
+            if add { "exempt" } else { "unexempt" },
+            host.name,
+            if host.alert_exclude.is_empty() { "aucune".to_string() } else { host.alert_exclude.join(", ") }
+        );
+        return;
+    };
+    let mut next = host.alert_exclude.clone();
+    if add {
+        if next.iter().any(|a| a == alert) {
+            app.status = format!("{} est déjà exempté de {alert}", host.name);
+            return;
+        }
+        next.push(alert.to_string());
+    } else {
+        let before = next.len();
+        next.retain(|a| a != alert);
+        if next.len() == before {
+            app.status = format!("{} n'est pas exempté de {alert}", host.name);
+            return;
+        }
+    }
+    match app.core.set_alert_exclusions(&app.inventory_path, &host.name, &next) {
+        Ok(()) => {
+            app.status = format!("{} : exemptions enregistrées — :apply-alerts pour les appliquer", host.name);
+            app.loading = true;
+            crate::reload_all(app, tx.clone());
+        }
+        Err(e) => app.status = format!("\u{26a0} {e}"),
+    }
+}
+
+const APPLY_ALERTS_PLAYBOOK: &str = "update-prometheus-alerts";
+
+fn request_apply_alerts(app: &mut App) {
+    let Some(playbook) = app.playbooks.iter().find(|p| p.name == APPLY_ALERTS_PLAYBOOK) else {
+        app.status = format!("\u{26a0} playbook {APPLY_ALERTS_PLAYBOOK}.yml introuvable");
+        return;
+    };
+    app.overlay = Some(Overlay::Confirm(Confirm {
+        prompt: format!("Rendre les règles d'alerte du parc ({APPLY_ALERTS_PLAYBOOK}.yml) ? (o/n)"),
+        action: ConfirmedAction::RunPlaybook { label: playbook.label.clone(), path: playbook.path.clone() },
+    }));
 }
 
 fn now_millis() -> u128 {

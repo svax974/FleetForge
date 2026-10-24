@@ -497,6 +497,7 @@ mod tests {
             server_type: None,
             provider: provider.map(|s| s.to_string()),
             ansible_roles: families.iter().map(|s| s.to_string()).collect(),
+            alert_exclude: vec![],
             svcprobe_port: None,
             monitor_port: None,
             groups: vec![],

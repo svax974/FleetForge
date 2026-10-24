@@ -27,6 +27,9 @@
 #   monitor_port     port de scrape node_exporter public (NAT domestique)
 #   svcprobe_port    port de scrape svcprobe public (NAT domestique)
 #   monitor: "off"   machine non supervisée
+#   alert_exclude    alertes Prometheus dont l'entrée est exemptée, par nom de
+#                    règle : [DiskWillFillSoon] (prometheus-alerts-update,
+#                    `./play.sh <parc> update-prometheus-alerts.yml`)
 #   initial_ssh_pass 🔒 mot de passe root d'une machine vierge (vault)
 # ═════════════════════════════════════════════════════════════════════════════
 all:

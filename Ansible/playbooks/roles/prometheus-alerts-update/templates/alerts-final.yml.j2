@@ -1,0 +1,21 @@
+# Règles d'alerte — généré par Ansible (prometheus-alerts-update), NE PAS ÉDITER.
+# Source commentée : alerts.yml.j2. Exemptions par hôte appliquées :
+{% for alert, hosts in prom_alert_exemptions | dictsort %}
+#   {{ alert }} : {{ hosts | join(', ') }}
+{% else %}
+#   aucune
+{% endfor %}
+{% set groups_out = [] %}
+{% for group in prom_alert_rules.groups | default([], true) %}
+{% set rules_out = [] %}
+{% for rule in group.rules %}
+{% if rule.alert is defined and rule.alert in prom_alert_exemptions %}
+{% set selector = 'up{instance=~"(' ~ prom_alert_exemptions[rule.alert] | join('|') ~ ')(-[0-9]+)?"}' %}
+{% set _ = rules_out.append(rule | combine({'expr': '(' ~ (rule.expr | trim) ~ ')\nunless on (instance) ' ~ selector})) %}
+{% else %}
+{% set _ = rules_out.append(rule) %}
+{% endif %}
+{% endfor %}
+{% set _ = groups_out.append(group | combine({'rules': rules_out})) %}
+{% endfor %}
+{{ {'groups': groups_out} | to_nice_yaml(indent=2, width=1000) }}

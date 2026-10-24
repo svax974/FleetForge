@@ -16,13 +16,15 @@
 import { useState, useEffect, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Server as ServerIcon, RefreshCw, AlertCircle, Search } from 'lucide-react'
-import { getFleet, getDiagnostics, machineControls } from '../lib/api'
-import { Fleet, Server, Health, Finding, AnsibleHost, MachineControl } from '../types'
+import { getFleet, getDiagnostics, machineControls, listAlertRules } from '../lib/api'
+import { Fleet, Server, Health, Finding, AnsibleHost, MachineControl, AlertRule, PlaybookLaunchConfig } from '../types'
 import { MachinePower } from './MachinePower'
+import { AlertExclusions } from './AlertExclusions'
 
 interface ServersViewProps {
   selectedInventory: string
   configMissing: boolean
+  onLaunchPlaybook: (config: PlaybookLaunchConfig) => void
 }
 
 /** Jetons de statut. Mêmes états, mêmes couleurs que le TUI — c'est ce qui
@@ -124,7 +126,7 @@ function ServerCard({
   )
 }
 
-function ServerDetail({ server, fleet, findings, control, onPowered, t }: {
+function ServerDetail({ server, fleet, findings, control, onPowered, inventoryPath, rules, onLaunchPlaybook, t }: {
   server: Server
   fleet: Fleet
   findings: Finding[]
@@ -133,9 +135,15 @@ function ServerDetail({ server, fleet, findings, control, onPowered, t }: {
    *  comptes — piloter au hasard serait pire que ne rien proposer. */
   control?: MachineControl
   onPowered: () => void
+  inventoryPath: string
+  rules: AlertRule[]
+  onLaunchPlaybook: (config: PlaybookLaunchConfig) => void
   t: (k: string) => string
 }) {
   const label = machineLabel(server)
+  const hosted = server.hosts
+    .map((name: string) => fleet.hosts.find((h: AnsibleHost) => h.name === name))
+    .filter((h: AnsibleHost | undefined): h is AnsibleHost => h !== undefined)
   const style = HEALTH_STYLE[server.health]
 
   const related = findings.filter((f) =>
@@ -196,6 +204,14 @@ function ServerDetail({ server, fleet, findings, control, onPowered, t }: {
         </div>
       </div>
 
+      <AlertExclusions
+        inventoryPath={inventoryPath}
+        hosts={hosted}
+        rules={rules}
+        onSaved={onPowered}
+        onLaunchPlaybook={onLaunchPlaybook}
+      />
+
       {related.length > 0 && (
         <div>
           <h4 className="text-xs uppercase tracking-wide text-gray-500 mb-2">
@@ -222,11 +238,12 @@ function ServerDetail({ server, fleet, findings, control, onPowered, t }: {
   )
 }
 
-export default function ServersView({ selectedInventory, configMissing }: ServersViewProps) {
+export default function ServersView({ selectedInventory, configMissing, onLaunchPlaybook }: ServersViewProps) {
   const { t } = useTranslation()
   const [fleet, setFleet] = useState<Fleet | null>(null)
   const [findings, setFindings] = useState<Finding[]>([])
   const [controls, setControls] = useState<MachineControl[]>([])
+  const [rules, setRules] = useState<AlertRule[]>([])
   const [selected, setSelected] = useState<string | null>(null)
   const [query, setQuery] = useState('')
   const [loading, setLoading] = useState(false)
@@ -248,6 +265,7 @@ export default function ServersView({ selectedInventory, configMissing }: Server
       // alors rien à quoi rapprocher. L'échec ne doit pas emporter le parc,
       // qui s'affiche très bien sans.
       setControls(await machineControls(selectedInventory).catch(() => []))
+      setRules(await listAlertRules(selectedInventory).catch(() => []))
     } catch (err: unknown) {
       setError(String(err))
     } finally {
@@ -359,6 +377,9 @@ export default function ServersView({ selectedInventory, configMissing }: Server
                 findings={findings}
                 control={currentControl}
                 onPowered={load}
+                inventoryPath={selectedInventory}
+                rules={rules}
+                onLaunchPlaybook={onLaunchPlaybook}
                 t={t}
               />
             : <p className="text-sm text-gray-600">{t('servers.select_one')}</p>}

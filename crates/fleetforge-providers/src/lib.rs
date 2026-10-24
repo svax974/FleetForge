@@ -755,6 +755,7 @@ mod tests {
             server_type: None,
             provider: Some(provider.into()),
             ansible_roles: vec![],
+            alert_exclude: vec![],
             svcprobe_port: None,
             monitor_port: None,
             groups: vec![],

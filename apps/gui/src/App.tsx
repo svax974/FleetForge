@@ -157,7 +157,7 @@ function App() {
         activeDeployments={activeDeployments}
       />
       <main className="flex-1 overflow-auto">
-        {currentView === 'servers' && <ServersView selectedInventory={selectedInventory} configMissing={configMissing} />}
+        {currentView === 'servers' && <ServersView selectedInventory={selectedInventory} configMissing={configMissing} onLaunchPlaybook={launchPlaybook} />}
         {currentView === 'diagnostics' && <DiagnosticsView selectedInventory={selectedInventory} configMissing={configMissing} />}
         {currentView === 'providers' && <ProvidersView selectedInventory={selectedInventory} />}
         {currentView === 'dashboard' && <DashboardView onNavigate={setCurrentView} />}

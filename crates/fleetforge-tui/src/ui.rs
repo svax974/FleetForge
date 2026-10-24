@@ -990,6 +990,14 @@ fn host_detail(app: &App) -> Vec<Line<'static>> {
         }
     }
 
+    if !host.alert_exclude.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(heading("Exemptions d'alertes".into()));
+        for alert in &host.alert_exclude {
+            lines.push(Line::from(Span::styled(format!("  {alert}"), tone_style(Tone::Warn))));
+        }
+    }
+
     // Services suivis sur cet hôte.
     let tracked: Vec<&fleetforge_core::ServerServiceState> = app
         .services
@@ -1571,6 +1579,9 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("inventory", "changer de parc (sans argument : la liste)"),
     ("reload", "tout recharger"),
     ("clear-marks", "effacer la sélection d'hôtes"),
+    ("exempt", "exempter l'hôte courant d'une alerte (:exempt <alerte>)"),
+    ("unexempt", "retirer une exemption de l'hôte courant"),
+    ("apply-alerts", "rendre les règles d'alerte du parc (update-prometheus-alerts.yml)"),
     ("connect", "connecter le provider courant"),
     ("disconnect", "déconnecter le provider courant"),
     ("quit", "quitter"),

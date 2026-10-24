@@ -345,7 +345,19 @@
     "health_down": "aucune sonde ne répond",
     "health_unknown": "aucune sonde enregistrée",
     "power": "Alimentation",
-    "power_confirm": "{action} sur « {name} » ? La machine sera interrompue."
+    "power_confirm": "{action} sur « {name} » ? La machine sera interrompue.",
+    "alert_exclusions": {
+      "title": "Exemptions d'alertes",
+      "none": "aucune",
+      "pick": "Choisir une alerte…",
+      "add": "Ajouter",
+      "remove": "Retirer",
+      "save": "Enregistrer",
+      "apply": "Appliquer",
+      "apply_hint": "Rendre les règles d'alerte du parc (update-prometheus-alerts.yml)",
+      "saved": "Inventaire mis à jour. « Appliquer » pour que Prometheus en tienne compte.",
+      "no_playbook": "Playbook {{name}} introuvable dans le dossier des playbooks."
+    }
   },
   "diagnostics": {
     "title": "Diagnostics",

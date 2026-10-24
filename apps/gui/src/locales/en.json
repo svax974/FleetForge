@@ -343,7 +343,19 @@
     "health_down": "no probe responding",
     "health_unknown": "no probe registered",
     "power": "Power",
-    "power_confirm": "{action} on “{name}”? The machine will be interrupted."
+    "power_confirm": "{action} on “{name}”? The machine will be interrupted.",
+    "alert_exclusions": {
+      "title": "Alert exemptions",
+      "none": "none",
+      "pick": "Pick an alert…",
+      "add": "Add",
+      "remove": "Remove",
+      "save": "Save",
+      "apply": "Apply",
+      "apply_hint": "Render the fleet's alert rules (update-prometheus-alerts.yml)",
+      "saved": "Inventory updated. Click “Apply” for Prometheus to take it into account.",
+      "no_playbook": "Playbook {{name}} not found in the playbooks folder."
+    }
   },
   "diagnostics": {
     "title": "Diagnostics",

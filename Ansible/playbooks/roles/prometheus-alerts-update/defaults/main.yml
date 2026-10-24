@@ -49,6 +49,13 @@ prom_alert_disk_free_pct: 10
 # alerts.yml.j2). En dessous de 50 Go, aucun de nos hôtes n'a de marge réelle,
 # quelle que soit la taille de son disque.
 prom_alert_disk_free_gb: 50
+# DiskWillFillSoon : horizon de la prévision (jours) = préavis avant que
+# DiskSpaceLow ne sonne, et fenêtre de tendance. Une fenêtre courte suit mal un
+# disque qui grossit par à-coups (réindex), une longue réagit tard à une
+# accélération. Une instance neuve n'a pas la fenêtre complète : la tendance
+# est calculée sur ce qui existe, `for: 6h` évite le faux positif du départ.
+prom_alert_disk_predict_days: 30
+prom_alert_disk_predict_window: "14d"
 
 # Types de systèmes de fichiers écartés de DiskSpaceLow. Doublon volontaire de
 # `node_exporter_fs_types_exclude` (rôle exporter-sys-install) : les séries

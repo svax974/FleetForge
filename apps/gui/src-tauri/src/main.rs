@@ -203,6 +203,26 @@ async fn write_group_vars_file(
     core.write_group_vars(&filename, &entries).map_err(err)
 }
 
+// === Exemptions d'alertes ===
+
+#[tauri::command]
+async fn list_alert_rules(
+    core: State<'_, Core>,
+    inventory_path: String,
+) -> Result<Vec<fleetforge_core::alert_rules::AlertRule>, String> {
+    core.list_alert_rules(&inventory_path).map_err(err)
+}
+
+#[tauri::command]
+async fn set_host_alert_exclusions(
+    core: State<'_, Core>,
+    inventory_path: String,
+    host: String,
+    alerts: Vec<String>,
+) -> Result<(), String> {
+    core.set_alert_exclusions(&inventory_path, &host, &alerts).map_err(err)
+}
+
 // === Prometheus ===
 
 #[tauri::command]
@@ -642,6 +662,9 @@ fn main() {
             list_group_vars_files,
             read_group_vars_file,
             write_group_vars_file,
+            // exemptions d'alertes
+            list_alert_rules,
+            set_host_alert_exclusions,
             // prometheus
             query_prometheus,
             get_probes,

@@ -24,9 +24,55 @@
 #
 # Le suffixe n'est pas `.yml` : le fichier est déposé dans le répertoire déjà
 # monté dans le conteneur, dont le motif de chargement est `rules/*.yml`.
+# ── Exemptions par hôte (`alert_exclude`) ─────────────────────────────────────
+# Une entrée d'inventaire peut se soustraire à des alertes nommées :
+#   nuc:
+#     alert_exclude: [DiskWillFillSoon]
+# La règle reste unique et commentée dans alerts.yml.j2 ; seule l'expression
+# DÉPLOYÉE est enveloppée en `(<expr>) unless on (instance) up{instance=~"…"}`.
+# `up` existe pour toute cible scrapée, en panne comprise : l'exclusion vaut
+# quel que soit l'état de l'hôte. Le suffixe `-N` couvre les instances
+# numérotées d'une entrée (`lamacpp-1`). Une règle dont le résultat n'a pas de
+# label `instance` (absent(), agrégat) n'est pas concernée.
+- name: Collect the per-host alert exemptions
+  ansible.builtin.set_fact:
+    prom_alert_exemptions: >-
+      {%- set ns = namespace(m={}) -%}
+      {%- for h in groups[parc_name] | default([]) | sort -%}
+      {%- for a in hostvars[h].alert_exclude | default([]) -%}
+      {%- set _ = ns.m.update({a: ns.m.get(a, []) + [h]}) -%}
+      {%- endfor -%}
+      {%- endfor -%}
+      {{ ns.m }}
+
+- name: Render the alert rules
+  ansible.builtin.set_fact:
+    prom_alert_rules: "{{ lookup('ansible.builtin.template', 'alerts.yml.j2') | from_yaml }}"
+
+# Une exemption qui ne correspond à aucune règle chargée sur ce parc est
+# décorative : faute de frappe, ou règle d'un groupe absent de
+# `prom_alert_groups`. Un nom d'entrée hors [A-Za-z0-9_-] casserait la regex
+# PromQL (`\-` n'y est pas un échappement valide, cf. defaults).
+- name: Check the alert exemptions
+  vars:
+    loaded: >-
+      {{ (prom_alert_rules.groups | default([], true))
+         | map(attribute='rules') | flatten | map(attribute='alert') | list }}
+    unknown: "{{ prom_alert_exemptions.keys() | difference(loaded) }}"
+    bad_hosts: "{{ prom_alert_exemptions.values() | flatten | reject('match', '^[A-Za-z0-9_-]+$') | list }}"
+  ansible.builtin.assert:
+    that:
+      - unknown | length == 0
+      - bad_hosts | length == 0
+    fail_msg: >-
+      Exemptions invalides (`alert_exclude` dans l'inventaire). Alertes
+      absentes des règles chargées sur ce parc : {{ unknown }}. Noms d'entrée
+      inutilisables dans une regex PromQL : {{ bad_hosts }}.
+    quiet: true
+
 - name: Stage alert rules for validation
   ansible.builtin.template:
-    src: alerts.yml.j2
+    src: alerts-final.yml.j2
     dest: "{{ prometheus_home }}/rules/.alerts.staged"
     owner: "{{ remote_username }}"
     group: "{{ remote_username }}"
