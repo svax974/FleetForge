@@ -160,7 +160,7 @@ fn get_role_metadata(name: &str) -> (String, String) {
         "vpn-monitoring" => ("Supervision VPN".into(), "Sonde OpenVPN (unité + port) et métriques du fichier de statut : clients connectés, octets, fraîcheur du fichier.".into()),
         "wordpress-monitoring" => ("Supervision WordPress".into(), "Sonde HTTP de la page d'accueil (exclut les 5xx) plus les unités Apache et MySQL.".into()),
         "docker-repo-monitoring" => ("Supervision registre Docker".into(), "Sonde HTTP de l'API /v2/ du registre (200 ou 401) et état du conteneur.".into()),
-        "mailserver-monitoring" => ("Supervision relai SMTP".into(), "Exporter Postfix (cible + scrape) et sonde svcprobe sur Postfix, Dovecot, OpenDKIM et les ports 25/587/993. Extrait de mailserver-setup pour être rejouable seul.".into()),
+        "mailrelay-monitoring" => ("Supervision relai SMTP".into(), "Exporter Postfix (cible + scrape) et sonde svcprobe (service `postfix`) sur Postfix, OpenDKIM et les ports 25/587 — Dovecot et 993 seulement avec mailmon_check_dovecot. Extrait de mailrelay-setup pour être rejouable seul.".into()),
         "ollama-monitoring" => ("Supervision Ollama".into(), "Sonde HTTP sur /api/tags — le démon accepte les connexions bien avant de pouvoir servir un modèle — plus son unité systemd.".into()),
         "llamacpp-monitoring" => ("Supervision llama.cpp".into(), "Sonde HTTP sur /health — 503 tant que le modèle charge, alors que le port est déjà ouvert — plus l'unité de l'instance publiée, et cible /metrics native (job node-llamacpp : requêtes en attente de slot).".into()),
         "grafana-monitoring" => ("Supervision Grafana".into(), "Cible native /metrics plus sonde /api/health, qui distingue « Grafana répond » de « Grafana répond ET sa base interne est joignable ».".into()),
@@ -219,20 +219,20 @@ fn get_role_metadata(name: &str) -> (String, String) {
         "vpn-routes-remove" => ("Suppression routes VPN".into(), "Supprime les règles iptables et désactive l'IP forwarding.".into()),
 
         // Mail (anciens rôles non fonctionnels — conservés pour référence)
-        "mail-install" => ("Installation serveur mail (déprécié)".into(), "Rôle non fonctionnel — utiliser mailserver-install.".into()),
-        "mail-remove" => ("Suppression serveur mail (déprécié)".into(), "Rôle non fonctionnel — utiliser mailserver-remove.".into()),
-        "mail-purge" => ("Purge serveur mail (déprécié)".into(), "Rôle non fonctionnel — utiliser mailserver-purge.".into()),
-        "mail-setup" => ("Configuration serveur mail (déprécié)".into(), "Rôle non fonctionnel — utiliser mailserver-setup.".into()),
-        "mail-setup-multi" => ("Configuration multi-domaines (déprécié)".into(), "Rôle non fonctionnel — utiliser mailserver-setup.".into()),
-        "mail-security" => ("Sécurité serveur mail (déprécié)".into(), "Rôle non fonctionnel — utiliser mailserver-security.".into()),
+        "mail-install" => ("Installation serveur mail (déprécié)".into(), "Rôle non fonctionnel — utiliser mailrelay-install.".into()),
+        "mail-remove" => ("Suppression serveur mail (déprécié)".into(), "Rôle non fonctionnel — utiliser mailrelay-remove.".into()),
+        "mail-purge" => ("Purge serveur mail (déprécié)".into(), "Rôle non fonctionnel — utiliser mailrelay-purge.".into()),
+        "mail-setup" => ("Configuration serveur mail (déprécié)".into(), "Rôle non fonctionnel — utiliser mailrelay-setup.".into()),
+        "mail-setup-multi" => ("Configuration multi-domaines (déprécié)".into(), "Rôle non fonctionnel — utiliser mailrelay-setup.".into()),
+        "mail-security" => ("Sécurité serveur mail (déprécié)".into(), "Rôle non fonctionnel — utiliser mailrelay-security.".into()),
 
         // Mailserver (relai SMTP multi-domaines — rôles fonctionnels)
-        "mailserver-stop" => ("Arrêt relai SMTP".into(), "Arrête proprement Postfix, OpenDKIM et l'exporter Prometheus. Force le kill des processus résiduels et supprime les lock files.".into()),
-        "mailserver-install" => ("Installation relai SMTP".into(), "Installe Postfix, OpenDKIM, certbot (Cloudflare DNS), SASL et prometheus-postfix-exporter.".into()),
-        "mailserver-setup" => ("Configuration relai SMTP".into(), "Configure Postfix multi-domaines avec TLS (Let's Encrypt SNI), DKIM par domaine, SASL, filtre de headers (Reply-To + préfixe sujet) et exporter Prometheus. Publie sur Cloudflare les enregistrements A, SPF, DKIM et DMARC de chaque domaine de relais, plus le DMARC des domaines racines (mailserver_dmarc_org_domains). Retire le postfix.service maison hérité de deploy-mail-server-complete.yml, qui faisait échouer postfix@- à chaque redémarrage, et garde mailbox_size_limit au-dessus de message_size_limit.".into()),
-        "mailserver-security" => ("Sécurité relai SMTP".into(), "Configure UFW (ports 465/587, bloque 25 entrant) et Fail2ban pour Postfix.".into()),
-        "mailserver-remove" => ("Suppression relai SMTP".into(), "Arrête et supprime Postfix, OpenDKIM et l'exporter. Préserve les certificats et clés DKIM.".into()),
-        "mailserver-purge" => ("Purge relai SMTP".into(), "Supprime tous les services, certificats Let's Encrypt, clés DKIM, config SASL et scripts de filtre.".into()),
+        "mailrelay-stop" => ("Arrêt relai SMTP".into(), "Arrête proprement Postfix, OpenDKIM et l'exporter Prometheus. Force le kill des processus résiduels et supprime les lock files.".into()),
+        "mailrelay-install" => ("Installation relai SMTP".into(), "Installe Postfix, OpenDKIM, certbot (Cloudflare DNS), SASL et prometheus-postfix-exporter.".into()),
+        "mailrelay-setup" => ("Configuration relai SMTP".into(), "Configure Postfix multi-domaines avec TLS (Let's Encrypt SNI), DKIM par domaine, SASL, filtre de headers (Reply-To + préfixe sujet) et exporter Prometheus. Publie sur Cloudflare les enregistrements A, SPF, DKIM et DMARC de chaque domaine de relais, plus le DMARC des domaines racines (mailrelay_dmarc_org_domains). Retire le postfix.service maison hérité de deploy-mail-server-complete.yml, qui faisait échouer postfix@- à chaque redémarrage, et garde mailbox_size_limit au-dessus de message_size_limit.".into()),
+        "mailrelay-security" => ("Sécurité relai SMTP".into(), "Configure UFW (ports 465/587, bloque 25 entrant) et Fail2ban pour Postfix.".into()),
+        "mailrelay-remove" => ("Suppression relai SMTP".into(), "Arrête et supprime Postfix, OpenDKIM et l'exporter. Préserve les certificats et clés DKIM.".into()),
+        "mailrelay-purge" => ("Purge relai SMTP".into(), "Supprime tous les services, certificats Let's Encrypt, clés DKIM, config SASL et scripts de filtre.".into()),
         "dmarc-exporter-install" => ("Installation exporteur DMARC".into(), "Relève une boîte IMAP, agrège les rapports DMARC et les expose sur le port 7489 (dmarc_up, messages alignés/non alignés, fraîcheur des rapports). Enregistre la cible auprès de Prometheus.".into()),
         "dmarc-exporter-remove" => ("Suppression exporteur DMARC".into(), "Arrête et supprime le service, le script et l'utilisateur système. Conserve l'état agrégé et la cible Prometheus.".into()),
         "dmarc-exporter-purge" => ("Purge exporteur DMARC".into(), "Supprime le service, l'état agrégé, la configuration (identifiants IMAP) et la cible Prometheus. Destructif.".into()),
@@ -479,7 +479,7 @@ fn categorize(name: &str) -> String {
         "Proxy".to_string()
     } else if name.starts_with("vpn-") {
         "VPN".to_string()
-    } else if name.starts_with("mail-") {
+    } else if name.starts_with("mail") {
         "Mail".to_string()
     } else if name.starts_with("monitoring-")
         || name.starts_with("prometheus-")

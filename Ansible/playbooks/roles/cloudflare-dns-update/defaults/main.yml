@@ -10,7 +10,7 @@
 #
 # Sens de la synchronisation : inventaire → Cloudflare, jamais l'inverse. Ce qui
 # existe chez Cloudflare sans correspondre à un hôte d'inventaire n'est ni lu ni
-# touché — enregistrements MX, DKIM/DMARC posés par `mailserver-setup`, vhosts,
+# touché — enregistrements MX, DKIM/DMARC posés par `mailrelay-setup`, vhosts,
 # vérifications de domaine, tout cela vit très bien à côté.
 
 # Zone Cloudflare. Une par parc, celle du domaine de l'inventaire.
@@ -19,7 +19,7 @@ cfdns_zone: "{{ domain_name }}"
 # Groupe dont les hôtes sont publiés. `all` = tout l'inventaire du parc.
 cfdns_group: all
 
-# Jeton d'API. Le même que le reste du parc (certbot DNS-01, mailserver-setup) :
+# Jeton d'API. Le même que le reste du parc (certbot DNS-01, mailrelay-setup) :
 # les deux usages exigent la même permission Zone:DNS:Edit, et deux variables
 # pour un même droit n'ont jamais servi qu'à diverger.
 cfdns_token: "{{ cloudflare_token | default('') }}"

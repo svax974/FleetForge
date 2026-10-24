@@ -219,7 +219,7 @@ pub fn candidate_roles(service_name: &str, action: &str) -> Vec<String> {
 
     // Certaines actions sont TRADUITES à l'analyse : `-setup` et `-deploy` ne
     // survivent pas au passage. L'inverse doit donc réessayer les suffixes
-    // d'origine, faute de quoi `mailserver-setup` ou `papangmetrics-deploy` ne
+    // d'origine, faute de quoi `mailrelay-setup` ou `papangmetrics-deploy` ne
     // se retrouvent jamais eux-mêmes.
     let suffixes: Vec<&str> = match action {
         "update" => vec!["update", "setup"],

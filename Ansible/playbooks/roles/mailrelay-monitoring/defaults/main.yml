@@ -1,0 +1,32 @@
+---
+# Supervision du relais SMTP.
+#
+# Ces tâches vivaient au milieu de `mailrelay-setup`, entre la configuration
+# d'OpenDKIM et l'affichage des clés DNS. Conséquence : réarmer la supervision
+# du relais imposait de rejouer toute la configuration Postfix/Dovecot/DKIM —
+# exactement ce que la convention `-monitoring` (CLAUDE.md) existe pour éviter.
+#
+#   ./play.sh papanglabs deploy-mailrelay.yml --tags monitoring
+mailmon_exporter_port: 9154
+mailmon_job: postfix
+
+# Sondes svcprobe en complément de l'exporter Postfix : celui-ci compte les
+# messages, il ne dit pas si Dovecot répond ni si le port 25 est ouvert. Un
+# relais dont l'exporter tourne pendant que Postfix est arrêté publierait des
+# compteurs figés — indiscernables d'une période sans courrier.
+mailmon_smtp_port: 25
+mailmon_submission_port: 587
+mailmon_imap_port: 993
+
+# Sondes IMAP/Dovecot, DÉSACTIVÉES par défaut : `mailrelay-install` n'installe
+# pas dovecot (postfix, opendkim, sasl2, certbot, l'exporter — rien d'autre).
+# Ce parc n'exploite que des relais SMTP sortants, sans boîtes aux lettres.
+#
+# Les sonder quand même donnait deux zéros permanents sur les deux parcs, donc
+# `ServiceCheckFailing` en `firing` continu pour un service qu'aucun rôle ne
+# déploie. Une alerte qui sonne toujours n'apprend qu'une chose : à l'ignorer —
+# et elle aurait masqué la vraie, `opendkim`, mort depuis quatre mois sur la
+# même sonde.
+#
+# Passer à `true` (host_vars) sur une machine qui sert réellement de l'IMAP.
+mailmon_check_dovecot: false

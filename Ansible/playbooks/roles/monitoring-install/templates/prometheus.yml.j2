@@ -397,7 +397,7 @@ scrape_configs:
     - files:
       - 'prometheus-configs/mtbridge/*.json'
 
-  # Relais SMTP. `mailserver-setup` dépose sa cible dans prometheus-configs/postfix.
+  # Relais SMTP. `mailrelay-monitoring` dépose sa cible dans prometheus-configs/postfix.
   # Même job que sur papanglabs.
   - job_name: 'postfix'
     metrics_path: /metrics

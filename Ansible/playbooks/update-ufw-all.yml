@@ -209,7 +209,7 @@
   remote_user: "{{ remote_username }}"
   become: true
   roles:
-    - mailserver-security
+    - mailrelay-security
 
 # ── Note : retrait d'une autorisation ──────────────────────────────────────
 # Ce playbook AJOUTE les règles correspondant à la configuration courante.

@@ -1,0 +1,51 @@
+---
+# Stop all mail relay services gracefully, then force-kill lingering processes.
+# Safe to run even if services are not installed (ignore_errors throughout).
+
+- name: Stop postfix via systemd
+  ansible.builtin.systemd:
+    name: postfix
+    state: stopped
+    enabled: no
+  ignore_errors: yes
+
+- name: Stop opendkim via systemd
+  ansible.builtin.systemd:
+    name: opendkim
+    state: stopped
+    enabled: no
+  ignore_errors: yes
+
+- name: Stop prometheus-postfix-exporter via systemd
+  ansible.builtin.systemd:
+    name: prometheus-postfix-exporter
+    state: stopped
+    enabled: no
+  ignore_errors: yes
+
+- name: Ensure postfix master daemon is not running
+  ansible.builtin.shell: |
+    postfix stop 2>/dev/null || true
+    sleep 1
+    pkill -9 -x master 2>/dev/null || true
+    pkill -9 -x smtpd  2>/dev/null || true
+    pkill -9 -x pickup 2>/dev/null || true
+    pkill -9 -x qmgr   2>/dev/null || true
+    exit 0
+  changed_when: false
+
+- name: Remove Postfix lock and PID files
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /var/lib/postfix/master.lock
+    - /var/spool/postfix/pid/master.pid
+  ignore_errors: yes
+
+- name: Verify postfix master is stopped
+  ansible.builtin.shell: pgrep -x master
+  register: _pcheck
+  failed_when: _pcheck.rc == 0
+  changed_when: false
+  ignore_errors: yes

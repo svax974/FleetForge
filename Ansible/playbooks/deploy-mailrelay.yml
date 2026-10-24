@@ -1,0 +1,101 @@
+---
+# Relai SMTP multi-domaines (famille `mailrelay`) : Postfix + OpenDKIM +
+# Let's Encrypt, authentification SASL du compte relais, aucune boîte aux
+# lettres. Ex-`deploy-mail-relay.yml` (→ `deploy-mailserver.yml` le 11/10/2026),
+# renommé `deploy-mailrelay.yml` le 24/10/2026 : `mailserver` désigne désormais
+# le serveur de messagerie complet (boîtes IMAP), une autre famille.
+#
+#   ./play.sh papanglabs deploy-mailrelay.yml
+#   ./play.sh web3c deploy-mailrelay.yml --tags monitoring
+#
+# Motif couvrant les deux parcs : le relais s'appelle `mail` sur papanglabs et
+# `mail1` sur web3c. Avec `hosts: mail` seul, ce playbook n'a jamais rien fait
+# sur web3c — il matchait zéro hôte et se terminait sans erreur, ce qui explique
+# que les enregistrements DNS y aient été posés à la main.
+# ── Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ───────────────────────
+# Échoue immédiatement si le parc n'a pas d'hôte de supervision utilisable,
+# puis vérifie — et répare — le socle de la machine, node_exporter et sa cible
+# Prometheus. Un service déployé sans supervision est un service dont personne
+# ne saura qu'il est tombé.
+# Les contrôles bloquants portent le tag `always` : ils s'appliquent même à un
+# rejeu ciblé par `--tags`.
+- name: Contrôle préalable
+  hosts: mail:mail1
+  remote_user: "{{ remote_username }}"
+  roles:
+    - role: host-preflight
+      preflight_require_docker: false
+
+- name: Deploy multi-domain SMTP relay (Postfix + OpenDKIM + Let's Encrypt)
+  hosts: mail:mail1
+  remote_user: "{{ remote_username }}"
+  become: yes
+  gather_facts: yes
+
+  pre_tasks:
+    - name: Validate required variables
+      ansible.builtin.fail:
+        msg: "Variable '{{ item }}' must be defined"
+      when: vars[item] is not defined
+      loop:
+        - mail_domains
+        - relay_user
+        - relay_user_password
+        - cloudflare_token
+        - email
+
+    - name: Display deployment plan
+      ansible.builtin.debug:
+        msg: |
+          ════════════════════════════════════════════════════════════
+          MAILSERVER DEPLOYMENT
+          ════════════════════════════════════════════════════════════
+          Target : {{ inventory_hostname }} ({{ ansible_host }})
+          Domains:
+          {% for d in mail_domains %}
+            - {{ d.name }}
+              Reply-To       : {{ d.reply_address }}
+              Subject prefix : {{ d.subject_prefix }}
+          {% endfor %}
+          Relay user : {{ relay_user }}
+          Ports      : 465 (SMTPS) / 587 (Submission)
+          TLS        : Let's Encrypt (Cloudflare DNS)
+          DKIM       : RSA-2048, selector=mail
+          ════════════════════════════════════════════════════════════
+
+  roles:
+    - mailrelay-install
+    - mailrelay-setup
+    - mailrelay-security
+    - mailrelay-monitoring
+
+  post_tasks:
+    - name: Deployment summary
+      ansible.builtin.debug:
+        msg: |
+          ════════════════════════════════════════════════════════════
+          MAILSERVER DEPLOYED SUCCESSFULLY
+          ════════════════════════════════════════════════════════════
+
+          SERVICES RUNNING:
+            Postfix    — ports 465 (SMTPS) and 587 (Submission)
+            OpenDKIM   — unix socket /run/opendkim/opendkim.sock
+            Mailfilter — pipe transport (header rewrite)
+            Exporter   — port 9154 (Prometheus postfix metrics)
+
+          AUTHENTICATION:
+            User     : {{ relay_user }}
+            Password : (see relay_user_password in group_vars)
+
+          TEST CONNECTIONS:
+            openssl s_client -connect {{ mail_domains[0].name }}:465
+            openssl s_client -starttls smtp -connect {{ mail_domains[0].name }}:587
+
+          DKIM DNS RECORDS:
+            Check task output above for TXT values to verify/update in DNS.
+            Each record: mail._domainkey.<subdomain>.<domain>  TXT  <value>
+
+          PTR RECORD (required for deliverability — set with your VPS provider):
+            {{ ansible_host }} -> {{ mailrelay_hostname }}
+
+          ════════════════════════════════════════════════════════════

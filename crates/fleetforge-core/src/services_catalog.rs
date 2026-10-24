@@ -175,7 +175,7 @@ fn get_service_label(service_name: &str) -> (String, String) {
         "dbfront" => "Base de données frontend.",
         "pgpool" => "Connection pooling PostgreSQL.",
         "vpn" => "Infrastructure VPN Pritunl.",
-        "mailserver" => "Relai SMTP multi-domaines.",
+        "mailrelay" => "Relai SMTP multi-domaines.",
         "rpcbtc" => "Nœud Bitcoin Core (RPC).",
         "bitcoin-exporter" => "Exporteur de métriques du nœud Bitcoin (rpcbtc-monitoring).",
         "svcprobe" => "Sonde de disponibilité partagée des services de l'hôte.",

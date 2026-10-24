@@ -1,0 +1,62 @@
+---
+# Full purge: runs remove + deletes certs, DKIM keys, configs, mailfilter, SASL db
+
+- name: Import mailrelay-remove tasks
+  ansible.builtin.import_role:
+    name: mailrelay-remove
+
+- name: Remove Postfix configuration directory
+  ansible.builtin.file:
+    path: /etc/postfix
+    state: absent
+
+- name: Remove OpenDKIM configuration and keys
+  ansible.builtin.file:
+    path: /etc/opendkim
+    state: absent
+
+- name: Remove opendkim.conf
+  ansible.builtin.file:
+    path: /etc/opendkim.conf
+    state: absent
+
+- name: Revoke and delete Let's Encrypt certificates for each domain
+  ansible.builtin.command:
+    cmd: "certbot delete --non-interactive --cert-name {{ item.name }}"
+  loop: "{{ mail_domains }}"
+  ignore_errors: yes
+
+- name: Remove Cloudflare credentials
+  ansible.builtin.file:
+    path: /etc/letsencrypt/cloudflare_mailserver.ini
+    state: absent
+
+- name: Remove certbot deploy hook
+  ansible.builtin.file:
+    path: /etc/letsencrypt/renewal-hooks/deploy/postfix-reload.sh
+    state: absent
+
+- name: Remove mailfilter lib directory
+  ansible.builtin.file:
+    path: /usr/local/lib/mailserver
+    state: absent
+
+- name: Remove fail2ban Postfix jail config
+  ansible.builtin.file:
+    path: /etc/fail2ban/jail.d/postfix.conf
+    state: absent
+
+- name: Restart fail2ban after jail removal
+  ansible.builtin.systemd:
+    name: fail2ban
+    state: restarted
+  ignore_errors: yes
+
+- name: Remove SASL packages
+  ansible.builtin.apt:
+    name:
+      - sasl2-bin
+      - libsasl2-modules
+    state: absent
+    purge: yes
+  ignore_errors: yes

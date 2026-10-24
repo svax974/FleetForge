@@ -14,7 +14,7 @@
 # Sens unique, inventaire → Cloudflare. Créé s'il manque, mis à jour s'il
 # diffère, JAMAIS supprimé : ce qui existe chez Cloudflare sans correspondre à
 # un hôte d'inventaire n'est ni lu ni touché (MX, DKIM/DMARC de
-# `mailserver-setup`, vhosts, vérifications de domaine…).
+# `mailrelay-setup`, vhosts, vérifications de domaine…).
 #
 # Aucune machine n'est jointe : tout se fait par l'API depuis le poste de
 # contrôle. Pas de `host-preflight` donc — il n'y a pas d'hôte à contrôler, et

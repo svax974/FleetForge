@@ -226,10 +226,10 @@ fn get_playbook_metadata(name: &str) -> (String, String) {
         "deploy-pgpool" => ("Déploiement PgPool".into(), "Déploie PgPool-II pour le pooling de connexions PostgreSQL.".into()),
         "deploy-vpn" => ("Déploiement VPN".into(), "Installe et configure l'infrastructure VPN Pritunl.".into()),
         "install-vpn-routes" => ("Installation routes VPN".into(), "Configure les règles de routage réseau pour le trafic VPN.".into()),
-        // Ex-`deploy-mail-relay.yml`, renommé le 11/10/2026 : famille `mailserver`.
-        "deploy-mailserver" => ("Déploiement relai SMTP".into(), "Installe Postfix + OpenDKIM multi-domaines, TLS Let's Encrypt (SNI), SASL, filtre Reply-To/préfixe sujet, Fail2ban et exporter Prometheus. Publie les enregistrements DNS Cloudflare (A, SPF, DKIM, DMARC). Variables : mail_domains, relay_user, relay_user_password, mailserver_dmarc_org_domains.".into()),
-        "remove-mailserver" => ("Suppression relai SMTP".into(), "Arrête Postfix, OpenDKIM et l'exporter (certs et clés DKIM préservés).".into()),
-        "purge-mailserver" => ("Purge relai SMTP".into(), "Supprime complètement le relai SMTP : services, certificats Let's Encrypt, clés DKIM, SASL et config.".into()),
+        // Ex-`deploy-mail-relay.yml` puis `deploy-mailserver.yml` : famille `mailrelay` depuis le 24/10/2026.
+        "deploy-mailrelay" => ("Déploiement relai SMTP".into(), "Installe Postfix + OpenDKIM multi-domaines, TLS Let's Encrypt (SNI), SASL, filtre Reply-To/préfixe sujet, Fail2ban et exporter Prometheus. Publie les enregistrements DNS Cloudflare (A, SPF, DKIM, DMARC). Variables : mail_domains, relay_user, relay_user_password, mailrelay_dmarc_org_domains.".into()),
+        "remove-mailrelay" => ("Suppression relai SMTP".into(), "Arrête Postfix, OpenDKIM et l'exporter (certs et clés DKIM préservés).".into()),
+        "purge-mailrelay" => ("Purge relai SMTP".into(), "Supprime complètement le relai SMTP : services, certificats Let's Encrypt, clés DKIM, SASL et config.".into()),
         "deploy-dmarc-exporter" => ("Déploiement exporteur DMARC".into(), "Installe l'exporteur des rapports agrégés DMARC sur le relais (port 7489) et l'enregistre auprès de Prometheus. Les rapports quotidiens deviennent des métriques : plus de mail sauf anomalie. Variables : dmarc_exporter_imap_user, dmarc_exporter_imap_password, dmarc_exporter_rua_addresses.".into()),
         "remove-dmarc-exporter" => ("Suppression exporteur DMARC".into(), "Arrête et retire l'exporteur DMARC (état agrégé et cible Prometheus conservés).".into()),
         "purge-dmarc-exporter" => ("Purge exporteur DMARC".into(), "Supprime l'exporteur DMARC, son état agrégé, ses identifiants IMAP et sa cible Prometheus. Destructif.".into()),

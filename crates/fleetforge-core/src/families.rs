@@ -38,7 +38,7 @@ pub const NOT_FAMILIES: &[&str] = &[
     // orchestrations de plusieurs playbooks
     "btc-pipeline",
     "dbs",
-    // ancienne installation inline, concurrente de deploy-mailserver.yml
+    // ancienne installation inline, concurrente de deploy-mailrelay.yml
     "mail-server-complete",
 ];
 

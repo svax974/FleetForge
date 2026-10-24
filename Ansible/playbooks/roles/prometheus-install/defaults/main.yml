@@ -16,7 +16,7 @@ prometheus_evaluation_interval: "60s"
 prometheus_sd_jobs:
   - exporter            # node_exporter système
   - node-btc            # bitcoin exporter
-  - postfix             # prometheus-postfix-exporter (déposé par mailserver-setup)
+  - postfix             # prometheus-postfix-exporter (cible posée par mailrelay-monitoring)
   - papangmetrics-api   # /metrics de l'API indicateurs
   - papangmetrics-etl   # /metrics de l'ETL (porte brk_up et brk_height)
   - dmarc               # exporter des rapports agrégés DMARC

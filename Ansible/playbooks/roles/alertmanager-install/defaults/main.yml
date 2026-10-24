@@ -6,7 +6,7 @@ alertmanager_image: "prom/alertmanager:latest"
 alertmanager_home: "/home/{{ remote_username }}/alertmanager"
 
 # ── Envoi e-mail ───────────────────────────────────────────────────────────
-# Smarthost = le serveur mail interne (rôle `mailserver-install`, hôte `mail`).
+# Smarthost = le serveur mail interne (rôle `mailrelay-install`, hôte `mail`).
 # Attention : `mail_domains` ne contient aujourd'hui que the.web3c.cc et
 # the.tradekong.app — aucun domaine PapangLabs. Tant qu'un domaine PapangLabs
 # n'y est pas ajouté (avec ses enregistrements DNS, non automatisés à ce jour),

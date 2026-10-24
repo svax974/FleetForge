@@ -1,0 +1,23 @@
+---
+# Sources autorisées à soumettre du courrier sur 465/587.
+#
+# Le relais n'a aucune raison d'être joignable depuis Internet : ses seuls
+# clients légitimes sont nos propres serveurs et les postes de la whitelist.
+# L'ouvrir au monde exposerait l'authentification SASL au bruit de fond
+# permanent des scanners (fail2ban ne fait que limiter la casse).
+#
+# Composition :
+#   - whitelist (VPN, postes de travail)
+#   - toutes les IP des hôtes de l'inventaire courant
+#   - le bridge Docker, car des conteneurs co-localisés (Alertmanager) émettent
+#     via l'hôte et arrivent avec une IP du réseau bridge
+mailrelay_docker_bridge_cidr: "172.17.0.0/16"
+
+mailrelay_allowed_sources: >-
+  {{ ((whitelist | default([]))
+      + (groups['all'] | default([])
+         | map('extract', hostvars, 'ansible_host')
+         | select('string') | list)
+      + [mailrelay_docker_bridge_cidr])
+     | select('match', '^[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]{1,2})?$')
+     | unique | list }}

@@ -52,7 +52,7 @@ pub struct AnsibleHost {
     /// de repli qui le masquerait.
     pub provider: Option<String>,
     /// Familles de rôles applicables, sans le suffixe d'action
-    /// (`mailserver` → `mailserver-install`, `-setup`, `-security`, …).
+    /// (`mailrelay` → `mailrelay-install`, `-setup`, `-security`, …).
     /// MANDATORY côté Ansible (CLAUDE.md § 2) et jusqu'ici noyée dans `vars`,
     /// donc l'application ne savait pas répondre « quels rôles s'appliquent
     /// ici ». Toujours une liste : `[]` quand l'hôte ne reçoit que le socle.

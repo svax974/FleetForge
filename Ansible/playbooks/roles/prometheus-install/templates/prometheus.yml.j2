@@ -42,7 +42,7 @@ scrape_configs:
       - files:
           - 'prometheus-configs/node-theta-edge/*.json'
 
-  # Relais SMTP. `mailserver-setup` dépose sa cible dans prometheus-configs/postfix ;
+  # Relais SMTP. `mailrelay-monitoring` dépose sa cible dans prometheus-configs/postfix ;
   # sans ce job le fichier resterait là sans jamais être lu.
   - job_name: 'postfix'
     metrics_path: /metrics

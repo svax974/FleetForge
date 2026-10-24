@@ -227,7 +227,7 @@ openclaw_repo_dir: "{{ openclaw_watch_workspace }}/FleetForge"
 # pour lister un répertoire (`group:fs` = read, write, edit, apply_patch) et
 # l'`exec` de l'agent watch n'accepte que fleet-ssh : sans index, il ne peut
 # ouvrir que les chemins qu'il devine. Constat du 24/10/2026 : analyse d'un
-# échec Postfix sans pouvoir nommer `deploy-mailserver.yml`. Hors du clone :
+# échec Postfix sans pouvoir nommer le playbook du relais mail. Hors du clone :
 # `force` le réinitialise à chaque déploiement.
 openclaw_repo_index: "{{ openclaw_watch_workspace }}/FleetForge-INDEX.md"
 

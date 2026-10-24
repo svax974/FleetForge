@@ -1,0 +1,17 @@
+---
+- name: Remove mail relay services (certs and DKIM keys preserved)
+  hosts: mail:mail1
+  remote_user: "{{ remote_username }}"
+  become: yes
+  gather_facts: yes
+
+  pre_tasks:
+    - name: Confirm removal
+      ansible.builtin.debug:
+        msg: |
+          Stopping and removing Postfix, OpenDKIM and postfix-exporter.
+          Certs (/etc/letsencrypt) and DKIM keys (/etc/opendkim/keys) are preserved.
+          Use purge-mailrelay.yml to delete everything.
+
+  roles:
+    - mailrelay-remove

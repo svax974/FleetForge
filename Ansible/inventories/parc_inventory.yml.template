@@ -93,7 +93,7 @@ all:
               ansible_host: 203.0.113.10
               provider: contabo
               server_type: misc
-              ansible_roles: [mailserver, dmarc-exporter]
+              ansible_roles: [mailrelay, dmarc-exporter]
 
             # Machine derrière un NAT domestique : identifiée par adresse + port
             # SSH, ports de scrape redirigés par le routeur.

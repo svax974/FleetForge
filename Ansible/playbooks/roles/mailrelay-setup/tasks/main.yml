@@ -1,0 +1,455 @@
+---
+# Configure multi-domain SMTP relay: certs, DKIM, SASL, Postfix, milter, exporter
+# Note: mailrelay-install (toujours exécuté avant) s'occupe de stopper les services.
+
+# ── Directories ───────────────────────────────────────────────────────────────
+
+- name: Create Postfix SASL directory
+  ansible.builtin.file:
+    path: /etc/postfix/sasl
+    state: directory
+    owner: root
+    group: postfix
+    mode: '0750'
+
+- name: Create OpenDKIM base directory
+  ansible.builtin.file:
+    path: /etc/opendkim/keys
+    state: directory
+    owner: opendkim
+    group: opendkim
+    mode: '0700'
+
+# /run is tmpfs — ensure directory exists with correct ownership before start.
+# postfix is added to opendkim group below, so 0750 gives it socket access.
+#
+# Cette tâche ne joue qu'au DÉPLOIEMENT : elle ne survit ni à un redémarrage de
+# la machine ni, surtout, à un arrêt du service quand l'unité porte
+# `RuntimeDirectory=`. C'est le drop-in ci-dessous qui tient la garantie à
+# chaque démarrage ; la tâche reste utile pour un opendkim démarré à la main
+# juste après le déploiement.
+- name: Ensure /run/opendkim exists with correct ownership
+  ansible.builtin.file:
+    path: /run/opendkim
+    state: directory
+    owner: opendkim
+    group: opendkim
+    mode: '0750'
+
+- name: Ensure the opendkim drop-in directory exists
+  ansible.builtin.file:
+    path: /etc/systemd/system/opendkim.service.d
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Deploy the opendkim runtime directory drop-in
+  ansible.builtin.template:
+    src: opendkim-runtime-dir.conf.j2
+    dest: /etc/systemd/system/opendkim.service.d/zz-runtime-dir.conf
+    owner: root
+    group: root
+    mode: '0644'
+  notify: restart opendkim
+
+# Drop-in posé à la main sur web3c, superseded par le précédent : son
+# `ExecStartPost=chgrp postfix` arrive APRÈS le démarrage du démon, donc trop
+# tard pour la création de la socket, et il entre en conflit avec le `chown`
+# ci-dessus. Le laisser ferait cohabiter deux sources pour la même chose.
+- name: Remove the superseded hand-written socket-group drop-in
+  ansible.builtin.file:
+    path: /etc/systemd/system/opendkim.service.d/socket-group.conf
+    state: absent
+  notify: restart opendkim
+
+- name: Remove stale opendkim socket if present
+  ansible.builtin.file:
+    path: /run/opendkim/opendkim.sock
+    state: absent
+
+# ── Let's Encrypt certificates (Cloudflare DNS challenge) ─────────────────────
+
+- name: Deploy Cloudflare credentials for certbot
+  ansible.builtin.template:
+    src: ../../cert-install/templates/cloudflare.ini.j2
+    dest: /etc/letsencrypt/cloudflare_mailserver.ini
+    owner: root
+    group: root
+    mode: '0600'
+
+- name: Obtain Let's Encrypt certificate for each relay domain
+  ansible.builtin.command:
+    cmd: >-
+      certbot certonly --non-interactive --agree-tos
+      -m {{ email }}
+      --dns-cloudflare
+      --dns-cloudflare-credentials /etc/letsencrypt/cloudflare_mailserver.ini
+      --dns-cloudflare-propagation-seconds 60
+      --cert-name {{ item.name }}
+      -d {{ item.name }}
+    creates: "/etc/letsencrypt/live/{{ item.name }}/fullchain.pem"
+  loop: "{{ mail_domains }}"
+
+- name: Deploy certbot renewal deploy hook
+  ansible.builtin.template:
+    src: cert-deploy-hook.sh.j2
+    dest: /etc/letsencrypt/renewal-hooks/deploy/postfix-reload.sh
+    owner: root
+    group: root
+    mode: '0755'
+
+# ── OpenDKIM keys (one RSA-2048 key per domain) ───────────────────────────────
+
+- name: Create DKIM key directory for each domain
+  ansible.builtin.file:
+    path: "/etc/opendkim/keys/{{ item.name }}"
+    state: directory
+    owner: opendkim
+    group: opendkim
+    mode: '0700'
+  loop: "{{ mail_domains }}"
+
+- name: Generate DKIM key for each domain (skipped if key already exists)
+  ansible.builtin.command:
+    cmd: "opendkim-genkey -b 2048 -s mail -d {{ item.name }} -D /etc/opendkim/keys/{{ item.name }}"
+    creates: "/etc/opendkim/keys/{{ item.name }}/mail.private"
+  loop: "{{ mail_domains }}"
+  notify: restart opendkim
+
+- name: Set DKIM key ownership
+  ansible.builtin.file:
+    path: "/etc/opendkim/keys/{{ item.name }}/mail.private"
+    owner: opendkim
+    group: opendkim
+    mode: '0600'
+  loop: "{{ mail_domains }}"
+
+# ── OpenDKIM configuration ────────────────────────────────────────────────────
+
+- name: Deploy opendkim.conf
+  ansible.builtin.template:
+    src: opendkim.conf.j2
+    dest: /etc/opendkim.conf
+    owner: root
+    group: root
+    mode: '0644'
+  notify: restart opendkim
+
+- name: Deploy OpenDKIM KeyTable
+  ansible.builtin.template:
+    src: opendkim-keytable.j2
+    dest: /etc/opendkim/KeyTable
+    owner: opendkim
+    group: opendkim
+    mode: '0640'
+  notify: restart opendkim
+
+- name: Deploy OpenDKIM SigningTable
+  ansible.builtin.template:
+    src: opendkim-signingtable.j2
+    dest: /etc/opendkim/SigningTable
+    owner: opendkim
+    group: opendkim
+    mode: '0640'
+  notify: restart opendkim
+
+- name: Deploy OpenDKIM TrustedHosts
+  ansible.builtin.template:
+    src: opendkim-trustedhosts.j2
+    dest: /etc/opendkim/TrustedHosts
+    owner: opendkim
+    group: opendkim
+    mode: '0640'
+  notify: restart opendkim
+
+- name: Add postfix to opendkim group (access to UNIX socket)
+  ansible.builtin.user:
+    name: postfix
+    groups: opendkim
+    append: yes
+
+# ── SASL authentication ───────────────────────────────────────────────────────
+
+- name: Ensure /etc/sasl2 exists
+  ansible.builtin.file:
+    path: /etc/sasl2
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Deploy SASL smtpd.conf (Cyrus SASL reads from /etc/sasl2, not /etc/postfix/sasl)
+  ansible.builtin.template:
+    src: sasl-smtpd.conf.j2
+    dest: /etc/sasl2/smtpd.conf
+    owner: root
+    group: root
+    mode: '0644'
+  notify: restart postfix
+
+- name: Create SASL relay user with realm matching myhostname
+  ansible.builtin.shell: |
+    saslpasswd2 -d -u "{{ mailrelay_hostname }}" {{ relay_user }} 2>/dev/null || true
+    echo "{{ relay_user_password }}" | saslpasswd2 -c -p -u "{{ mailrelay_hostname }}" {{ relay_user }}
+  no_log: true
+  changed_when: false
+
+# postfix doit pouvoir lire /etc/sasldb2, livré en root:sasl 0660. Sans cette
+# appartenance au groupe, l'authentification échoue en « Permission denied »
+# quel que soit le mot de passe fourni.
+- name: Add postfix to the sasl group (read access to /etc/sasldb2)
+  ansible.builtin.user:
+    name: postfix
+    groups: sasl
+    append: true
+  notify: restart postfix
+
+- name: Set sasldb2 permissions
+  ansible.builtin.file:
+    path: /etc/sasldb2
+    owner: root
+    group: sasl
+    mode: '0640'
+
+# ── Mailfilter script (header rewrite) ────────────────────────────────────────
+
+- name: Deploy mailfilter domain config
+  ansible.builtin.template:
+    src: mailfilter-config.json.j2
+    dest: /etc/postfix/mailserver-domains.json
+    owner: root
+    group: postfix
+    mode: '0640'
+  notify: restart postfix
+
+- name: Deploy mailfilter.py
+  ansible.builtin.template:
+    src: mailfilter.py.j2
+    dest: /usr/local/lib/mailserver/mailfilter.py
+    owner: mailfilter
+    group: mailfilter
+    mode: '0750'
+  notify: restart postfix
+
+# ── Postfix configuration ─────────────────────────────────────────────────────
+
+- name: Deploy Postfix main.cf
+  ansible.builtin.template:
+    src: main.cf.j2
+    dest: /etc/postfix/main.cf
+    owner: root
+    group: root
+    mode: '0644'
+  notify: restart postfix
+
+- name: Deploy Postfix master.cf
+  ansible.builtin.template:
+    src: master.cf.j2
+    dest: /etc/postfix/master.cf
+    owner: root
+    group: root
+    mode: '0644'
+  notify: restart postfix
+
+- name: Deploy TLS SNI map source file
+  ansible.builtin.template:
+    src: tls-sni-map.j2
+    dest: /etc/postfix/tls_sni_map
+    owner: root
+    group: root
+    mode: '0644'
+  notify:
+    - reload postfix
+
+
+# ── Enable and start services ─────────────────────────────────────────────────
+
+- name: Enable and start OpenDKIM
+  ansible.builtin.systemd:
+    name: opendkim
+    state: started
+    enabled: yes
+    daemon_reload: yes
+
+# Unité héritée de deploy-mail-server-complete.yml (ancienne installation
+# inline) : un postfix.service maison sous /etc/systemd/system masque celui de
+# Debian, qui ne fait que porter l'instance `postfix@-` (rattachée par son
+# générateur). Les deux pilotent alors le même master : à chaque redémarrage,
+# `postfix@-` tente un second arrêt, échoue (« the Postfix mail system is not
+# running ») et reste en échec — SystemdUnitFailed postfix@-.service sur mail1
+# (web3c) depuis le 18/10/2026. L'unité du paquet suffit. L'arrêter AVANT de
+# la retirer : `postfix@-` refuserait sinon de démarrer un master déjà lancé.
+- name: Look for the legacy postfix.service override
+  ansible.builtin.stat:
+    path: /etc/systemd/system/postfix.service
+  register: mailrelay_legacy_unit
+
+- name: Stop Postfix under the legacy unit
+  ansible.builtin.systemd:
+    name: postfix
+    state: stopped
+  when: mailrelay_legacy_unit.stat.exists
+
+- name: Remove the legacy postfix.service override
+  ansible.builtin.file:
+    path: /etc/systemd/system/postfix.service
+    state: absent
+  when: mailrelay_legacy_unit.stat.exists
+
+- name: Enable and start Postfix
+  ansible.builtin.systemd:
+    name: postfix
+    state: started
+    enabled: yes
+    daemon_reload: yes
+
+# ── Prometheus ─────────────────────────────────────────────────────────────
+# La supervision est passée dans `mailrelay-monitoring` (convention `-monitoring`,
+# CLAUDE.md). Elle vivait ici, entre OpenDKIM et l'affichage des clés DNS :
+# réarmer le scrape du relais imposait donc de rejouer toute la configuration
+# Postfix/Dovecot/DKIM. Désormais :  ./play.sh papanglabs deploy-mailrelay.yml --tags monitoring
+
+# ── Display DKIM public keys for DNS verification ─────────────────────────────
+
+- name: Read DKIM public key for each domain
+  ansible.builtin.slurp:
+    src: "/etc/opendkim/keys/{{ item.name }}/mail.txt"
+  register: dkim_keys
+  loop: "{{ mail_domains }}"
+  tags: [dns]
+
+- name: Display DKIM DNS records
+  ansible.builtin.debug:
+    msg: |
+      ════════════════════════════════════════════════════════════
+      DKIM DNS RECORD — {{ item.item.name }}
+      ════════════════════════════════════════════════════════════
+      Name:  mail._domainkey.the (under the parent zone)
+      Type:  TXT
+      Value: {{ item.content | b64decode }}
+      ════════════════════════════════════════════════════════════
+  loop: "{{ dkim_keys.results }}"
+
+# ── Publication des enregistrements DNS sur Cloudflare ────────────────────────
+# Les appels partent de la machine de contrôle (delegate_to: localhost) : le
+# relais n'a pas besoin d'un accès sortant vers l'API Cloudflare.
+#
+# La zone est déduite des deux derniers labels du domaine (papanglabs.com pour
+# mail.papanglabs.com, tradekong.app pour the.tradekong.app). Les suffixes à
+# deux niveaux (.co.uk…) doivent être déclarés explicitement via une clé `zone`
+# dans l'entrée de `mail_domains`.
+
+- name: Publish DNS records on Cloudflare
+  when: mailrelay_manage_dns | bool
+  delegate_to: localhost
+  become: false
+  tags: [dns]
+  block:
+
+    # Un CNAME et un A ne peuvent pas coexister sur le même nom (Cloudflare
+    # renvoie 81054). Un CNAME laissé là par un nommage antérieur bloquerait donc
+    # définitivement la publication.
+    - name: Remove any CNAME conflicting with the mail domain A record
+      community.general.cloudflare_dns:
+        api_token: "{{ item.cloudflare_token | default(cloudflare_token) }}"
+        zone: "{{ item.zone | default(item.name.split('.')[-2:] | join('.')) }}"
+        record: "{{ item.name }}"
+        type: CNAME
+        state: absent
+      loop: "{{ mail_domains }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when: mailrelay_dns_replace_conflicting | bool
+
+    - name: Publish A record for each mail domain
+      community.general.cloudflare_dns:
+        api_token: "{{ item.cloudflare_token | default(cloudflare_token) }}"
+        zone: "{{ item.zone | default(item.name.split('.')[-2:] | join('.')) }}"
+        record: "{{ item.name }}"
+        type: A
+        value: "{{ mailrelay_public_ip }}"
+        proxied: false
+        solo: true
+        state: present
+      loop: "{{ mail_domains }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Publish SPF record for each mail domain
+      community.general.cloudflare_dns:
+        api_token: "{{ item.cloudflare_token | default(cloudflare_token) }}"
+        zone: "{{ item.zone | default(item.name.split('.')[-2:] | join('.')) }}"
+        record: "{{ item.name }}"
+        type: TXT
+        value: "v=spf1 ip4:{{ mailrelay_public_ip }} {{ mailrelay_spf_qualifier }}"
+        solo: true
+        state: present
+      loop: "{{ mail_domains }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    # La clé publique est au format BIND, découpée en plusieurs chaînes entre
+    # guillemets. On les recolle pour obtenir la valeur TXT réelle.
+    - name: Publish DKIM record for each mail domain
+      community.general.cloudflare_dns:
+        api_token: "{{ item.item.cloudflare_token | default(cloudflare_token) }}"
+        zone: "{{ item.item.zone | default(item.item.name.split('.')[-2:] | join('.')) }}"
+        record: "{{ mailrelay_dkim_selector }}._domainkey.{{ item.item.name }}"
+        type: TXT
+        value: "{{ item.content | b64decode | regex_findall('\"([^\"]*)\"') | join('') }}"
+        solo: true
+        state: present
+      loop: "{{ dkim_keys.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+
+    # `solo: true` écrase l'enregistrement existant : la politique et le `rua`
+    # produits ici doivent refléter l'état voulu du DNS, sinon rejouer le rôle
+    # dégrade silencieusement une politique durcie à la main.
+    # `dmarc_rua` accepte une adresse ou une LISTE d'adresses. DMARC permet
+    # plusieurs destinataires (`rua=mailto:a,mailto:b`), et c'est indispensable
+    # ici : plusieurs domaines délèguent déjà leurs rapports à un tiers
+    # (Brevo). Avec `solo: true`, écraser l'enregistrement par une adresse
+    # unique couperait cette remontée sans que rien ne le signale.
+    - name: Publish DMARC record for each mail domain
+      vars:
+        _rua: "{{ item.dmarc_rua | default(mailrelay_dmarc_rua) | default(item.reply_address, true) }}"
+      community.general.cloudflare_dns:
+        api_token: "{{ item.cloudflare_token | default(cloudflare_token) }}"
+        zone: "{{ item.zone | default(item.name.split('.')[-2:] | join('.')) }}"
+        record: "_dmarc.{{ item.name }}"
+        type: TXT
+        value: >-
+          v=DMARC1;
+          p={{ item.dmarc_policy | default(mailrelay_dmarc_policy) }};
+          rua={{ (_rua if _rua is not string else [_rua])
+                 | map('regex_replace', '^', 'mailto:') | join(',') }}
+        solo: true
+        state: present
+      loop: "{{ mail_domains }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    # Le domaine racine est celui qui est réellement usurpable, et il n'apparaît
+    # jamais dans `mail_domains` (qui ne liste que les sous-domaines de relais).
+    # `sp` n'est pas posé : les sous-domaines munis de leur propre `_dmarc`
+    # gardent leur politique, les autres héritent de `p`.
+    - name: Publish DMARC record for each organisational domain
+      vars:
+        _rua: "{{ item.rua }}"
+      community.general.cloudflare_dns:
+        api_token: "{{ item.cloudflare_token | default(cloudflare_token) }}"
+        zone: "{{ item.zone | default(item.name.split('.')[-2:] | join('.')) }}"
+        record: "_dmarc.{{ item.name }}"
+        type: TXT
+        value: >-
+          v=DMARC1;
+          p={{ item.policy | default('none') }};
+          rua={{ (_rua if _rua is not string else [_rua])
+                 | map('regex_replace', '^', 'mailto:') | join(',') }}
+        solo: true
+        state: present
+      loop: "{{ mailrelay_dmarc_org_domains }}"
+      loop_control:
+        label: "{{ item.name }}"
