@@ -116,6 +116,22 @@ openclaw_custom_provider_api_key: ""
 # pour ansible-vault --stdin-name. Pas de canal de discussion connecté
 # (--skip-channels — aucun n'a été demandé).
 
+# ── Modèle par défaut des agents ────────────────────────────────────────────
+# `provider/model`, posé dans `agents.defaults.model` ; vide = réglage laissé à
+# OpenClaw (UI). C'est aussi le modèle du heartbeat, de fleet-watch et de
+# l'agent `watch` quand ils n'en fixent pas. Constat du 24/10/2026 : réglé
+# seulement dans l'UI, `poe/mimo-v2.6-flash` est resté en place après son
+# retrait par Poe — 404 à chaque appel. Dans l'inventaire, un changement de
+# modèle se lit dans un diff et se rejoue. La sonde des modèles
+# (openclaw-monitoring) alerte quand il cesse de répondre. Le modèle doit
+# figurer dans la liste du fournisseur (`models.providers.<fournisseur>`).
+# Valeur scalaire : des replis posés dans l'UI (`{primary, fallbacks}`) sont
+# remplacés.
+openclaw_default_model: ""
+# Modèle des tâches annexes d'OpenClaw (titres, résumés, rêverie de la
+# mémoire). Vide = rien n'est posé.
+openclaw_utility_model: "{{ openclaw_default_model }}"
+
 # ── Heartbeat : surveillance du parc ────────────────────────────────────────
 # Le heartbeat interroge Alertmanager et Prometheus et signale sur Telegram.
 # Tout ce qui décrit le parc (adresse d'Alertmanager, hôtes et services
@@ -159,7 +175,7 @@ openclaw_fleetwatch_renotify_hours: 6
 # routeur `auto:*` (voir ci-dessus).
 openclaw_fleetwatch_model: "{{ openclaw_heartbeat_model }}"
 # `low` exige un modèle qui le supporte (ex. opencode-go) ; poe/mimo-v2.6-flash,
-# le défaut de l'agent depuis le 17/10/2026, n'accepte que `off` ou `ultra` et
+# le défaut de l'agent du 17 au 24/10/2026, n'accepte que `off` ou `ultra` et
 # fait échouer `openclaw agent` sinon (constaté le 18/10/2026 : fleet-watch
 # tombait en secours « modèle indisponible » alors que le modèle répondait).
 openclaw_fleetwatch_thinking: "off"

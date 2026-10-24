@@ -208,6 +208,25 @@
     HOME: "{{ openclaw_home }}"
   changed_when: true
 
+# Modèle par défaut et modèle utilitaire (voir defaults). Rien de secret :
+# `--batch-json` convient. Chaque chemin n'est posé que si sa valeur est
+# renseignée : vide, le réglage de l'UI reste en place.
+- name: Configure the default and utility models
+  ansible.builtin.command:
+    cmd: >-
+      {{ openclaw_binary }} config set --batch-json
+      '{{ (([{"path": "agents.defaults.model", "value": openclaw_default_model}]
+             if openclaw_default_model | length > 0 else [])
+           + ([{"path": "agents.defaults.utilityModel", "value": openclaw_utility_model}]
+              if openclaw_utility_model | length > 0 else [])) | to_json }}'
+    chdir: "{{ openclaw_home }}"
+  become: true
+  become_user: "{{ openclaw_user }}"
+  environment:
+    HOME: "{{ openclaw_home }}"
+  changed_when: true
+  when: openclaw_default_model | length > 0 or openclaw_utility_model | length > 0
+
 # Optionnel (openclaw_custom_provider_name vide = sauté). Écrit dans un
 # FICHIER plutôt qu'en argv (`--batch-file`, pas `--batch-json`) : la clé API
 # ne doit jamais apparaître dans la ligne de commande, lisible par tout compte
