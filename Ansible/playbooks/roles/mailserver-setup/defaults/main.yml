@@ -8,6 +8,15 @@
 # être créés à la main — donc en pratique jamais créés.
 mailserver_manage_dns: true
 
+# Nom du serveur (`myhostname`, nom annoncé en HELO, royaume SASL du compte
+# relais) : l'attribut `hostname` de l'entrée d'inventaire, c'est-à-dire
+# l'identité machine publiée en A. Constat du 24/10/2026 : le rôle composait
+# `inventory_hostname`.`domain_name`, juste sur papanglabs (entrée `mail`) par
+# coïncidence, mais `mail1.web3c.cc` sur web3c, où l'entrée déclare
+# `hostname: mail.web3c.cc`. Un déploiement aurait changé le nom annoncé et le
+# royaume SASL, donc invalidé le compte relais en service.
+mailserver_hostname: "{{ hostname | default(inventory_hostname ~ '.' ~ domain_name) }}"
+
 # Le jeton d'API est pris sur l'entrée du domaine (`cloudflare_token`) si elle
 # en porte un, sinon sur la variable globale `cloudflare_token`.
 #

@@ -190,8 +190,8 @@
 
 - name: Create SASL relay user with realm matching myhostname
   ansible.builtin.shell: |
-    saslpasswd2 -d -u "{{ inventory_hostname }}.{{ domain_name }}" {{ relay_user }} 2>/dev/null || true
-    echo "{{ relay_user_password }}" | saslpasswd2 -c -p -u "{{ inventory_hostname }}.{{ domain_name }}" {{ relay_user }}
+    saslpasswd2 -d -u "{{ mailserver_hostname }}" {{ relay_user }} 2>/dev/null || true
+    echo "{{ relay_user_password }}" | saslpasswd2 -c -p -u "{{ mailserver_hostname }}" {{ relay_user }}
   no_log: true
   changed_when: false
 

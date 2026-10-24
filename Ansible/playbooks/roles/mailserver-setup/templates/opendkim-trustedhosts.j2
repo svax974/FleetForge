@@ -3,7 +3,7 @@
 127.0.0.1
 localhost
 ::1
-{{ inventory_hostname }}.{{ domain_name }}
+{{ mailserver_hostname }}
 {% for domain in mail_domains %}
 {{ domain.name }}
 {% endfor %}

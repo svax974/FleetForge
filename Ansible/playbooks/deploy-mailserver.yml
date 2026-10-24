@@ -94,6 +94,6 @@
             Each record: mail._domainkey.<subdomain>.<domain>  TXT  <value>
 
           PTR RECORD (required for deliverability — set with your VPS provider):
-            {{ ansible_host }} -> {{ inventory_hostname }}.{{ domain_name }}
+            {{ ansible_host }} -> {{ mailserver_hostname }}
 
           ════════════════════════════════════════════════════════════
