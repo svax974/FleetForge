@@ -25,5 +25,6 @@
   'model': openclaw_fleetwatch_model,
   'thinking': openclaw_fleetwatch_thinking,
   'timeout': openclaw_fleetwatch_timeout,
+  'quiet_reply': openclaw_fleetwatch_quiet_reply,
   'prompt': lookup('ansible.builtin.template', 'fleet-watch-prompt.j2') | trim
 } | to_nice_json }}

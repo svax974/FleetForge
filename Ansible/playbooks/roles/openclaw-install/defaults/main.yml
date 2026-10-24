@@ -184,6 +184,11 @@ openclaw_fleetwatch_timeout: 300
 # Prometheus qui ne sont pas des noms d'inventaire (le job `mtbridge` expose
 # `mtbridge1`).
 openclaw_fleetwatch_ignore_extra: [mtbridge1]
+# Réponse convenue du modèle quand aucune alerte ouverte n'est un problème EN
+# COURS (toutes dans la rétention `prom_alert_flap_grace` après rétablissement).
+# fleet-watch.py ne l'envoie pas : seuls les problèmes sont notifiés, jamais les
+# rétablissements (demande opérateur du 24/10/2026).
+openclaw_fleetwatch_quiet_reply: "RAS"
 
 # ── Travail de fond facturé au modèle ───────────────────────────────────────
 # Constat du 20/10/2026 : 9 234 points Poe dans la journée, dont 4 % pour la

@@ -132,6 +132,15 @@ def main() -> int:
         send(f"⚠️ Alertes ouvertes, {reason} :\n" + "\n".join(
             f"- {a['labels'].get('alertname')} : {a['labels'].get('service') or a['labels'].get('job')}"
             f" sur {a['labels'].get('instance')}" for a in open_alerts))
+    elif reply.strip(" .«»\"").upper() == CONF["quiet_reply"].upper():
+        # Tout est rétabli, rien n'est envoyé. L'empreinte n'est pas marquée
+        # notifiée au premier « rien à signaler » : une alerte encore dans sa
+        # rétention (`keep_firing_for`) qui retombe garde la même empreinte, et
+        # serait sinon tue pendant `renotify_hours`. Le tick suivant réanalyse
+        # donc une fois ; un second « rien à signaler » vaut notification.
+        if state.get("quiet") != fingerprint:
+            save_state({**state, "quiet": fingerprint})
+            return 0
     else:
         send(reply)
     save_state({"fingerprint": fingerprint, "notified_at": now})

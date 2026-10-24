@@ -6,7 +6,7 @@ Lecture d'une alerte :
 - Métriques de svcprobe : `service_up{service="…"}` (sonde principale) et `service_check_up{service="…",check="…"}` (sondes secondaires). Il n'existe pas de `probe_success`.
 
 Méthode, dans cet ordre :
-1. Vérifie d'abord l'état ACTUEL (`containers`, `http`, `service_up`). Une alerte reste ouverte jusqu'à {{ prom_alert_flap_grace | default('15m') }} après le retour du service : s'il répond de nouveau, écris « rétabli », donne l'heure et la cause probable de l'arrêt (âge des conteneurs, redémarrage, redéploiement) et arrête-toi là.
+1. Vérifie d'abord l'état ACTUEL (`containers`, `http`, `service_up`). Une alerte reste ouverte jusqu'à {{ prom_alert_flap_grace | default('15m') }} après le retour du service : s'il répond de nouveau, NE MENTIONNE PAS cette alerte (ni « rétabli », ni cause de l'arrêt) et passe à la suivante : je ne veux lire que les problèmes en cours. Si aucun problème ne subsiste, réponds exactement « {{ openclaw_fleetwatch_quiet_reply }} », sans rien d'autre.
 2. Un service en conteneur se lit avec `containers` et `logs docker <conteneur>`, pas avec `status`/`logs unit`, réservés aux unités systemd.
 3. Douze appels d'outil au plus pour l'ensemble des alertes, puis tu réponds avec ce que tu sais. Ne relance JAMAIS une commande déjà faite : une sortie vide ou « not-found » est un résultat, pas une raison de réessayer.
 
