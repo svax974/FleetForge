@@ -12,3 +12,6 @@ agenthub_back_port: "{{ hostvars['agenthub'].back_port | default(4701) }}"
 # appartiennent à cette application et sont purgés avec elle.
 agenthub_legacy_project_names:
   - agentcenter
+# Compte de provisionnement des runners des utilisateurs (`--account` de setup-user-runners.sh,
+# `agenthub_userRunnersAccount` côté hub) : supprimé seulement s'il porte le marqueur du script.
+agenthub_user_runners_account: agenthub-provision

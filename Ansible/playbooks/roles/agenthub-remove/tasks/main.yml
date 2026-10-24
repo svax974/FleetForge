@@ -84,6 +84,29 @@
   become: true
   ignore_errors: true
 
+# Runners des utilisateurs (un compte Linux `agr-*` par utilisateur simple, installés par le
+# déploiement — runner/README.md « Runners des utilisateurs ») : arrêtés et désactivés comme le
+# runner du hub, PAS désinstallés (comptes, dossiers, connexions aux CLI conservés). Un
+# redéploiement les redémarre (provision-user-runners.sh). Seules les unités dont `User=` est un
+# compte `agr-*` : jamais le runner du hub ni un runner personnel installé à la main.
+- name: Stop and disable the user runners (keep them installed)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    shopt -s nullglob
+    for unit in /etc/systemd/system/agenthub-runner-*.service; do
+      grep -qE '^User=agr-[a-z0-9]{1,16}$' "$unit" || continue
+      name="$(basename "$unit")"
+      if systemctl is-enabled --quiet "$name" || systemctl is-active --quiet "$name"; then
+        systemctl disable --now --quiet "$name"
+        echo "stopped ${name%.service}"
+      fi
+    done
+  args:
+    executable: /bin/bash
+  become: true
+  register: agenthub_user_runners_stop
+  changed_when: "'stopped' in agenthub_user_runners_stop.stdout"
+
 # One-time legacy of the AgentCenter → AgentHub rename (2026-10-08): the pre-rename unit
 # (`agentcenter-runner.service`, `/etc/agentcenter-runner.env`, `/opt/agentcenter-runner`) is
 # unknown to the new install paths and would linger (enabled, dialing a dead API path).
@@ -139,8 +162,8 @@
 - name: Remind the operator about docker_ports_rules and the CNAME
   ansible.builtin.debug:
     msg: >-
-      AgentHub arrêté (conteneurs retirés, runner désactivé — pas
-      désinstallé). Les ports {{ agenthub_front_port }}/{{ agenthub_back_port }}
+      AgentHub arrêté (conteneurs retirés, runner du hub et runners des
+      utilisateurs désactivés — pas désinstallés). Les ports {{ agenthub_front_port }}/{{ agenthub_back_port }}
       restent dans docker_ports_rules (host_vars/ctdapi.yml) et le CNAME
       {{ agenthub_hostname }} reste publié tant qu'ils ne sont pas retirés à
       la main (voir agenthub-purge). Si {{ agenthub_front_port }}/

@@ -24,6 +24,8 @@ agenthub_flutter_enabled: true
 # Utilisateur du runner (créé par runner/scripts/install.sh, `--user` par défaut) : propriétaire du
 # SDK, car Flutter écrit dans son propre répertoire (cache des artefacts moteur).
 agenthub_flutter_user: agents
+# Limite connue : les runners des utilisateurs (comptes `agr-*`, voir agenthub-deploy/defaults) ne
+# peuvent pas se servir de ce SDK tel quel (propriété de `agents`, Flutter écrit dans son dossier).
 agenthub_flutter_dir: /opt/flutter
 agenthub_flutter_channel: stable
 # Le SDK n'est cloné qu'une fois ; une montée de version est un choix explicite

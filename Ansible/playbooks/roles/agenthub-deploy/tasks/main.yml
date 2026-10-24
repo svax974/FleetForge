@@ -50,6 +50,31 @@
     label: "{{ item.item }}"
   when: not item.stat.exists
 
+# Sans ces deux clés du back/.env de prod, deploy-full.sh saute le hook d'auto-provisionnement
+# sans bruit : un hub neuf n'aurait ni runner ni runners d'utilisateurs (l'étape « Choisis l'IA
+# de ton équipe » réduite au LLM direct). grep -q : aucune valeur n'est affichée.
+- name: Check the auto-provisioning switches of the prod back/.env
+  ansible.builtin.shell: >-
+    grep -Eq '^RUNNER_PROVISION=["]?1' {{ (agenthub_src ~ agenthub_back_env_file) | quote }}
+    && grep -Eq '^BOOTSTRAP_API_KEY=["]?[^"[:space:]]' {{ (agenthub_src ~ agenthub_back_env_file) | quote }}
+  delegate_to: localhost
+  become: false
+  register: agenthub_env_switches
+  changed_when: false
+  failed_when: false
+  when: agenthub_runner_autoprovision | default(true)
+
+- name: Fail when the auto-provisioning switches are missing
+  ansible.builtin.fail:
+    msg: >-
+      {{ agenthub_src }}{{ agenthub_back_env_file }} doit poser RUNNER_PROVISION=1 et une
+      BOOTSTRAP_API_KEY (clé d'API admin d'amorçage, voir back/.env.example) : le déploiement
+      apparie alors le runner du hub et installe les runners des utilisateurs tout seul. Sans
+      auto-provisionnement : `agenthub_runner_autoprovision: false` (chemin manuel, --tags runner).
+  when:
+    - agenthub_runner_autoprovision | default(true)
+    - agenthub_env_switches.rc != 0
+
 # `run.sh prod` == `deploy-full.sh` (build local + push via un contexte Docker
 # SSH + démarrage distant), avec la gestion des migrations en amont (voir
 # defaults). Exécuté depuis le poste de contrôle : Ansible n'a pas de contexte
@@ -64,6 +89,9 @@
   environment:
     BACK_ENV_FILE: "{{ agenthub_back_env_file }}"
     FRONT_ENV_FILE: "{{ agenthub_front_env_file }}"
+    # Lus par runner/scripts/provision-user-runners.sh (voir defaults).
+    USER_RUNNERS_PROVISION: "{{ '1' if agenthub_user_runners | bool else '0' }}"
+    USER_RUNNERS_AUTO_ENABLE: "{{ '1' if agenthub_user_runners_auto_enable | bool else '0' }}"
   register: agenthub_deploy_run
   changed_when: true
 
@@ -100,9 +128,12 @@
       joignable via https://{{ agenthub_hostname | default('agenthub.' ~ domain_name) }}
       (vhost proxies) une fois `--tags proxy-conf` joué, et filtré dans
       DOCKER-USER (proxies + whitelist + VPN uniquement) une fois
-      agenthub-security joué. Prochaine étape : activer le runner
-      (tasks/runner.yml, --tags runner) une fois un jeton obtenu depuis la
-      page « Nouveau runner » du hub.
+      agenthub-security joué. Runner du hub et runners des utilisateurs mis en
+      place par le déploiement lui-même (auto-provisionnement, voir la sortie
+      `[RUNNER:…]` / `[USER-RUNNERS:…]` du script ; un avertissement n'arrête
+      pas le déploiement). Sans auto-provisionnement : activer le runner
+      (tasks/runner.yml, --tags runner) avec un jeton de la page « Nouveau
+      runner » du hub.
 
 - name: Activate the AgentHub runner
   ansible.builtin.import_tasks: runner.yml

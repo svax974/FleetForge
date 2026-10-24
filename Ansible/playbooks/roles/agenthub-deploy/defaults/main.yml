@@ -97,6 +97,21 @@ agenthub_runner_ssh_port: "{{ ssh_custom_port }}"
 # (défaut) saute alors l'assert et la tâche ci-dessous ; le chemin manuel
 # (token vaulté + --tags runner) reste disponible avec `false`.
 agenthub_runner_autoprovision: true
+
+# ── Runners des utilisateurs (un compte Linux par utilisateur simple, sur CET hôte) ─────────────
+# Mis en place par le déploiement lui-même (run.sh prod → deploy-full.sh → hook
+# provision-hub-runner.sh → runner/scripts/provision-user-runners.sh ; runner/README.md « Mise en
+# place : par le déploiement du hub ») : clé SSH du hub, setup-user-runners.sh (compte restreint
+# agenthub-provision, outil root limité, sudo limité au seul outil, bloc sshd + règle hosts.allow
+# pour le seul réseau Docker du hub — cet hôte refuse sshd à tout le reste, ssh-security-update),
+# adresse SSH vérifiée par le hub, activation, (re)démarrage des runners. Rien d'autre à installer
+# ici : ce rôle ne fait que passer ces deux interrupteurs au script. Prérequis : ceux de
+# l'auto-provisionnement (RUNNER_PROVISION=1 + BOOTSTRAP_API_KEY dans back/.env, vérifiés par
+# tasks/main.yml ; SSH root depuis le poste de contrôle, déjà requis par deploy-runner.sh).
+# Revue de sécurité humaine due (outil root, comptes par utilisateur).
+agenthub_user_runners: true                # false → USER_RUNNERS_PROVISION=0 : étape sautée
+agenthub_user_runners_auto_enable: true    # false → installé et vérifié, laissé désactivé dans le hub
+
 # Identifiant de l'application dans le dépôt privé du parc (.private/apps/apps.yml) :
 # ses .env de prod y sont chiffrés (apps/agenthub/{back,front}.env.vault) et restaurés
 # dans le dépôt applicatif avant le déploiement — le vault fait foi. Sans copie

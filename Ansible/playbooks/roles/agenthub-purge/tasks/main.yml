@@ -85,6 +85,93 @@
   become: true
   ignore_errors: true
 
+# ── Runners des utilisateurs : comptes, dossiers, unités, puis l'accès du hub ──────────────
+# Chaque compte `agr-*` part avec son dossier (connexions aux CLI, copies de projets : des données
+# d'AgentHub, comme la base) par l'outil que setup-user-runners.sh a installé (`remove` : unités du
+# compte, fichier d'env, commande, processus, `userdel -r`, avec sa propre validation des noms) ;
+# sans l'outil (installation incomplète), les mêmes étapes à la main. Puis ce que
+# setup-user-runners.sh a posé : le compte de provisionnement (seulement s'il porte son marqueur),
+# l'outil, la commande forcée, la règle sudo, le bloc sshd (rechargé) et la règle hosts.allow
+# repérée par son commentaire. Le runner du hub (`agents`, /opt/agenthub-runner) reste installé,
+# comme avant.
+- name: Remove the user runners and their accounts (homes included)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    helper=/usr/local/sbin/agenthub-user-runner
+    for user in $(getent passwd | awk -F: '$1 ~ /^agr-[a-z0-9]+$/ { print $1 }'); do
+      if [ -x "$helper" ]; then
+        "$helper" remove "$user" "${user#agr-}"
+      else
+        for unit in /etc/systemd/system/agenthub-runner-*.service; do
+          [ -e "$unit" ] && grep -qx "User=$user" "$unit" || continue
+          name="$(basename "$unit" .service)"
+          systemctl disable --now --quiet "$name.service" || true
+          rm -f "$unit" "/etc/$name.env" "/usr/local/bin/$name"
+        done
+        pkill -KILL -u "$user" || true
+        userdel -r "$user"
+      fi
+      echo "removed $user"
+    done
+    systemctl daemon-reload
+  args:
+    executable: /bin/bash
+  become: true
+  register: agenthub_user_runners_purge
+  changed_when: "'removed' in agenthub_user_runners_purge.stdout"
+
+- name: Remove the hub's provisioning account (only the one setup-user-runners.sh created)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    account={{ agenthub_user_runners_account | quote }}
+    getent passwd "$account" >/dev/null || exit 0
+    [ "$(getent passwd "$account" | cut -d: -f5)" = 'AgentHub user runners (provisioning, SSH forced command)' ] || exit 0
+    pkill -KILL -u "$account" || true
+    userdel -r "$account"
+    echo removed
+  args:
+    executable: /bin/bash
+  become: true
+  register: agenthub_provision_account_purge
+  changed_when: "'removed' in agenthub_provision_account_purge.stdout"
+
+- name: Remove the user-runner helper, forced command, sudo rule and sshd block
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /usr/local/sbin/agenthub-user-runner
+    - /usr/local/bin/agenthub-user-runner-ssh
+    - /etc/sudoers.d/agenthub-user-runner
+    - /etc/ssh/sshd_config.d/90-agenthub-user-runners.conf
+  become: true
+  register: agenthub_user_runner_files
+
+- name: Reload sshd without the hub network's block
+  ansible.builtin.systemd:
+    name: ssh
+    state: reloaded
+  become: true
+  when: >-
+    agenthub_user_runner_files.results
+    | selectattr('changed') | map(attribute='item') | select('search', 'sshd_config') | list | length > 0
+
+- name: Look for /etc/hosts.allow
+  ansible.builtin.stat:
+    path: /etc/hosts.allow
+  become: true
+  register: agenthub_hosts_allow
+
+# Le commentaire repère + la ligne qui le suit, exactement ce que setup-user-runners.sh ajoute ;
+# le reste du fichier (bloc « ANSIBLE sshd whitelist », lignes d'autres rôles) n'est pas touché.
+- name: Remove the hub network's hosts.allow rule (setup-user-runners.sh)
+  ansible.builtin.replace:
+    path: /etc/hosts.allow
+    regexp: '^# AgentHub user runners \(setup-user-runners\.sh\):[^\n]*\nsshd: [^\n]*\n'
+    replace: ''
+  become: true
+  when: agenthub_hosts_allow.stat.exists
+
 # ── DNS : retirer le CNAME public ───────────────────────────────────────────
 - name: Remove the AgentHub CNAME
   community.general.cloudflare_dns:
@@ -101,7 +188,8 @@
 - name: Remind the operator about the vhost and the firewall rules
   ansible.builtin.debug:
     msg: >-
-      AgentHub purgé (conteneurs, volumes, images, CNAME DNS). Restent à
+      AgentHub purgé (conteneurs, volumes, images, CNAME DNS, runners des
+      utilisateurs et leurs comptes `agr-*`, accès du hub à ce serveur). Restent à
       retirer à la main si le port doit être réattribué : le gabarit
       sites-enabled/agenthub.conf (proxy-update) et les entrées
       {{ agenthub_front_port }}/{{ agenthub_back_port }} de

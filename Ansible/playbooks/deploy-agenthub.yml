@@ -20,8 +20,10 @@
 #   5. silence Alertmanager sur service="agenthub" (alertmanager-update)
 #   6. agenthub-deploy   : build+push+démarrage de l'app (scripts du dépôt
 #      app, PAS un docker_container/docker_compose Ansible — voir
-#      agenthub-deploy/defaults) puis activation du runner (déjà installé,
-#      voir --tags runner)
+#      agenthub-deploy/defaults) ; le même script apparie le runner du hub et
+#      installe les runners des utilisateurs (un compte Linux par
+#      utilisateur, sshd ouvert au seul réseau Docker du hub pour un compte
+#      restreint) — voir agenthub-deploy/defaults
 #   7. agenthub-monitoring : sonde svcprobe (service_up{service="agenthub"})
 #   8. silence raccourci à 20 min (retombée des alertes de la coupure)
 #

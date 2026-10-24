@@ -1,6 +1,6 @@
 ---
 # Retire AgentHub : conteneurs (front/back/postgres) et sonde. Désactive le
-# runner sans le désinstaller. Conserve les volumes de données (voir
+# runner du hub et les runners des utilisateurs sans les désinstaller. Conserve les volumes de données (voir
 # purge-agenthub.yml). Le filtrage DOCKER-USER et le CNAME DNS ne sont pas
 # retirés automatiquement — voir le message d'agenthub-remove.
 #
