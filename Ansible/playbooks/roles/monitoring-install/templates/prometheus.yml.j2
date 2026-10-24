@@ -24,13 +24,17 @@ scrape_configs:
       username: '{{ prometheus_user }}'
       password: '{{ prometheus_pass }}'
 
+  # Aucun filtre de métriques, comme sur papanglabs (prometheus-install). Le
+  # tri se fait à la source : exporter-sys-install lance node_exporter avec
+  # `--collector.disable-defaults` et ne réactive que les collecteurs dont une
+  # règle se sert (~1 500 séries par machine). Constat du 24/10/2026 : un
+  # `keep` limité à cinq métriques (CPU, mémoire, système de fichiers) jetait
+  # tout le reste à l'ingestion — collecteur textfile (sauvegardes), systemd,
+  # diskstats, netdev. Les groupes `backups` et la moitié de `resources`
+  # évaluaient des séries inexistantes, inactives avec `health=ok`, depuis la
+  # mise en place de ces règles.
   - job_name: 'exporter'
     metrics_path: /metrics
-    metric_relabel_configs:
-      - source_labels: [__name__]
-        target_label: __name__
-        regex: (node_cpu_seconds_total|node_memory_MemAvailable_bytes|node_memory_MemTotal_bytes|node_filesystem_free_bytes|node_filesystem_size_bytes)
-        action: keep
     file_sd_configs:
     - files:
       - 'prometheus-configs/exporter/*.json'
