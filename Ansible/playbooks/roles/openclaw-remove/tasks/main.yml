@@ -58,6 +58,36 @@
   become: true
   failed_when: false
 
+# Le fichier de métriques part avec : laissé en place, il serait republié
+# par svcprobe tant qu'une sonde le lit, et OpenClawModelProbeStale sonnerait
+# sur un service volontairement désinstallé. Le compte d'échecs reste (purge).
+- name: Stop and disable the model probe timer
+  ansible.builtin.systemd:
+    name: openclaw-model-probe.timer
+    state: stopped
+    enabled: false
+  become: true
+  failed_when: false
+  tags: [monitoring]
+
+- name: Remove the model probe, its units and its metrics
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/systemd/system/openclaw-model-probe.timer
+    - /etc/systemd/system/openclaw-model-probe.service
+    - "{{ openclaw_modelprobe_bin }}"
+    - "{{ openclaw_modelprobe_metric_file }}"
+  become: true
+  tags: [monitoring]
+
+- name: Reload systemd after removing the model probe units
+  ansible.builtin.systemd:
+    daemon_reload: true
+  become: true
+  tags: [monitoring]
+
 # La sonde svcprobe elle-même (port 9110) reste : elle est PARTAGÉE avec les
 # autres alias de cette machine NAT domestique.
 - name: Remove the OpenClaw probe

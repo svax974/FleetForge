@@ -1,0 +1,10 @@
+[Unit]
+Description=Sonde périodique des modèles utilisés par OpenClaw
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec={{ openclaw_modelprobe_interval }}
+RandomizedDelaySec=2min
+
+[Install]
+WantedBy=timers.target

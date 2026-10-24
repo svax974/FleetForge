@@ -1,0 +1,25 @@
+[Unit]
+Description=Sonde des modèles utilisés par OpenClaw
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# srvc : seul compte qui lit openclaw.json (0600) et ses clés.
+User={{ openclaw_user }}
+Group={{ openclaw_user }}
+Environment=PROBE_MAX_TOKENS={{ openclaw_modelprobe_max_tokens }}
+Environment=PROBE_TIMEOUT={{ openclaw_modelprobe_timeout }}
+Environment=PROBE_TRANSIENT_TOLERANCE={{ openclaw_modelprobe_transient_tolerance }}
+ExecStart=/usr/bin/python3 -I {{ openclaw_modelprobe_bin }} {{ openclaw_prefix }}/openclaw.json {{ openclaw_prefix }}/bin/fleet-watch.json {{ openclaw_modelprobe_metric_file }} {{ openclaw_modelprobe_state_dir }}/state.json
+# Répertoire d'état : fichier de métriques (lu par svcprobe, root, à qui
+# ProtectHome interdit /home) et compte des échecs consécutifs.
+StateDirectory={{ openclaw_modelprobe_state_dir | basename }}
+TimeoutStartSec={{ openclaw_modelprobe_timeout | int * 10 }}
+
+# Ne fait que lire la configuration d'OpenClaw et écrire dans son répertoire
+# d'état, seul chemin inscriptible sous ProtectSystem=strict.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only

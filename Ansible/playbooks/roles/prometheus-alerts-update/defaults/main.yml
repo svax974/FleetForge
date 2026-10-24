@@ -194,6 +194,12 @@ prom_alert_astar_rss_bytes: 8589934592
 # font une dizaine de minutes, au-delà le nœud ne suit plus.
 prom_alert_theta_lag_blocks: 100
 
+# ── OpenClaw (groupe `openclaw`) ──────────────────────────────────────────────
+# Âge maximal de la dernière exécution de la sonde des modèles. Trois fois
+# `openclaw_modelprobe_interval` (1 h, rôle openclaw-monitoring) : une
+# exécution manquée ne sonne pas, deux non plus, la troisième oui.
+prom_alert_openclaw_probe_stale_seconds: 10800
+
 # ── Sauvegardes (groupe `backups`) ────────────────────────────────────────────
 # Fraîcheur maximale tolérée, en heures. Chaque valeur laisse passer une
 # exécution ratée sans sonner — au-delà, c'est une panne installée.

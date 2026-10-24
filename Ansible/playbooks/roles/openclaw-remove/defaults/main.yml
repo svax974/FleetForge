@@ -5,3 +5,7 @@ openclaw_prefix: "{{ openclaw_home }}/.openclaw"
 openclaw_port: "{{ app_port | default(18789) }}"
 openclaw_lan_cidr: "192.168.1.0/24"
 openclaw_extra_allowed_cidrs: []
+# Mêmes valeurs que openclaw-monitoring.
+openclaw_modelprobe_bin: /usr/local/bin/openclaw-model-probe
+openclaw_modelprobe_state_dir: /var/lib/openclaw-model-probe
+openclaw_modelprobe_metric_file: "{{ openclaw_modelprobe_state_dir }}/metrics.prom"

@@ -1,7 +1,9 @@
 ---
 # Supervision d'OpenClaw. Convention `<service>-monitoring` (CLAUDE.md) : le
 # rôle dépose une SONDE déclarative pour `svcprobe`, qui expose
-# `service_up{service="openclaw"}`.
+# `service_up{service="openclaw"}`. État dégradé : la sonde des modèles vérifie
+# que les modèles qu'OpenClaw appelle répondent encore, svcprobe relaie son
+# résultat.
 
 # `public: true` est OBLIGATOIRE : sans lui, les defaults du rôle inclus
 # (svcprobe_checks_dir, svcprobe_lib_dir, svcprobe_listen_port) restent confinés à
@@ -14,6 +16,54 @@
     public: true
   tags: [monitoring]
 
+# ── Sonde des modèles ───────────────────────────────────────────────────────
+# Voir defaults et l'en-tête du script. AVANT la sonde svcprobe qui relaie son
+# fichier : un `cat` sur un fichier absent lèverait ProbeConfigError.
+- name: Deploy the model probe
+  ansible.builtin.copy:
+    src: openclaw-model-probe.py
+    dest: "{{ openclaw_modelprobe_bin }}"
+    owner: root
+    group: root
+    mode: '0755'
+  become: true
+  tags: [monitoring]
+
+- name: Deploy the model probe units
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "/etc/systemd/system/{{ item }}"
+    owner: root
+    group: root
+    mode: '0644'
+  loop:
+    - openclaw-model-probe.service
+    - openclaw-model-probe.timer
+  become: true
+  tags: [monitoring]
+
+- name: Enable the model probe timer
+  ansible.builtin.systemd:
+    name: openclaw-model-probe.timer
+    state: started
+    enabled: true
+    daemon_reload: true
+  become: true
+  tags: [monitoring]
+
+# Une exécution immédiate, sans attendre le timer : un script qui plante
+# échoue ici (oneshot, `systemctl start` attend sa fin) plutôt que de laisser
+# un fichier absent que seule OpenClawModelProbeMissing révélerait, deux
+# heures plus tard. Un modèle inutilisable, lui, ne fait PAS échouer le
+# déploiement : c'est précisément ce que la sonde doit publier.
+- name: Run the model probe once
+  ansible.builtin.command:
+    cmd: systemctl start openclaw-model-probe.service
+  become: true
+  changed_when: false
+  tags: [monitoring]
+
+# ── Sonde svcprobe ──────────────────────────────────────────────────────────
 - name: Deploy the OpenClaw probe
   ansible.builtin.template:
     src: check.json.j2
@@ -26,7 +76,9 @@
 
 # Contrôle immédiat : une sonde déposée mais qui répond `service_up 0` alors
 # que le service tourne est une sonde MAL ÉCRITE, et elle ferait sonner une
-# alerte en permanence.
+# alerte en permanence. Attendre aussi les séries de la sonde des modèles :
+# c'est la preuve que svcprobe les relaie (son cache de 10 s peut servir une
+# exposition antérieure à la sonde).
 - name: Verify the probe answers
   ansible.builtin.uri:
     url: "http://127.0.0.1:{{ svcprobe_listen_port }}/metrics"
@@ -34,14 +86,16 @@
   register: openclaw_probe
   retries: 6
   delay: 5
-  until: openclaw_probe.status is defined and openclaw_probe.status == 200
+  until: >-
+    openclaw_probe.status is defined and openclaw_probe.status == 200
+    and 'openclaw_model_probe_last_run_timestamp_seconds' in openclaw_probe.content
   changed_when: false
   tags: [monitoring]
 
 - name: Report the probe result
   ansible.builtin.debug:
     msg: >-
-      {{ openclaw_probe.content.split('\n')
-         | select('search', 'openclaw')
+      {{ openclaw_probe.content.splitlines()
+         | select('match', '(service_up|service_check_up)\{service="openclaw"|openclaw_model_(up|unchecked|probe_info)\{')
          | list }}
   tags: [monitoring]

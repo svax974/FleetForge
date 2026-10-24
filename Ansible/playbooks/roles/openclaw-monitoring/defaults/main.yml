@@ -6,3 +6,28 @@
 
 openclaw_port: "{{ app_port | default(18789) }}"
 openclaw_url: "http://127.0.0.1:{{ openclaw_port }}"
+
+# ── Sonde des modèles (`openclaw-model-probe`) ──────────────────────────────
+# `service_up` reste à 1 quand le modèle ne répond plus (constat du 24/10/2026 :
+# `poe/mimo-v2.6-flash` retiré par Poe, 404 à chaque appel, rien de visible).
+# Timer systemd sous srvc, complétion RÉELLE de quelques tokens par modèle
+# utilisé, résultat relayé par svcprobe avec `service_up` (déjà scrapé : ni
+# cible ni port de plus). Alertes : groupe `openclaw` de
+# prometheus-alerts-update.
+openclaw_user: "{{ remote_username }}"
+openclaw_home: "/home/{{ openclaw_user }}"
+openclaw_prefix: "{{ openclaw_home }}/.openclaw"
+# Root et non srvc, comme fleet-ssh : le compte qui exécute la sonde n'a pas à
+# pouvoir la réécrire.
+openclaw_modelprobe_bin: /usr/local/bin/openclaw-model-probe
+# 1 h : ~24 appels par jour et par modèle. Une sonde par scrape coûterait
+# ~5 800 complétions facturées par jour et par modèle.
+openclaw_modelprobe_interval: 1h
+openclaw_modelprobe_max_tokens: 8
+openclaw_modelprobe_timeout: 60
+# Échecs PASSAGERS consécutifs (429, 5xx, injoignable) avant `up = 0`. Les
+# échecs définitifs (404, 401/403, 402, 400) comptent dès le premier.
+openclaw_modelprobe_transient_tolerance: 2
+# Sous /var/lib : svcprobe (root, ProtectHome) ne lit rien sous /home.
+openclaw_modelprobe_state_dir: /var/lib/openclaw-model-probe
+openclaw_modelprobe_metric_file: "{{ openclaw_modelprobe_state_dir }}/metrics.prom"

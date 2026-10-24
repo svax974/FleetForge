@@ -652,6 +652,83 @@ groups:
             qui tire aussi la dernière image.
 
 {% endif %}
+{% if 'openclaw' in prom_alert_groups %}
+
+  # ── OpenClaw : modèles utilisés ────────────────────────────────────────────
+  # Séries du timer `openclaw-model-probe` (rôle `openclaw-monitoring`),
+  # relayées par svcprobe (job `svcprobe`) : une complétion réelle par modèle
+  # qu'OpenClaw appelle, toutes les heures. `service_up` ne voit pas
+  # cette panne — le 23/10/2026, Poe a retiré le modèle par défaut, chaque appel
+  # revenait en 404 et la gateway restait saine.
+  # Contrôle après déploiement : `count(openclaw_model_probe_last_run_timestamp_seconds)`
+  # doit valoir 1 et `count(openclaw_model_up or openclaw_model_unchecked)` être
+  # non nul, sinon ces règles sont décoratives.
+  - name: openclaw
+    rules:
+      # La sonde n'écrit 0 qu'après un échec définitif (404, 401/403, 402, 400)
+      # ou plusieurs échecs passagers consécutifs : pas de `for` long à ajouter,
+      # il retarderait seulement d'une heure le constat. La raison (`reason`)
+      # vient de openclaw_model_probe_info.
+      - alert: OpenClawModelUnavailable
+        expr: >-
+          (openclaw_model_up == 0)
+          * on (instance, model) group_left (reason) openclaw_model_probe_info
+        for: 5m
+        keep_firing_for: {{ prom_alert_flap_grace }}
+        labels:
+          severity: critical
+        annotations:
+          summary: "Modèle OpenClaw inutilisable : {{ '{{' }} $labels.model {{ '}}' }} ({{ '{{' }} $labels.reason {{ '}}' }})"
+          description: >-
+            Usages touchés : {{ '{{' }} $labels.used_by {{ '}}' }}. not_found = retiré du
+            catalogue du fournisseur, auth = clé refusée, no_credit = crédit
+            épuisé. Tant que le modèle par défaut ou celui de fleet-watch est en
+            cause, les alertes du parc ne sont plus analysées. Détail :
+            `journalctl -u openclaw-model-probe` sur {{ '{{' }} $labels.instance {{ '}}' }} ;
+            changer de modèle par l'UI de contrôle ou
+            `openclaw config set agents.defaults.model <fournisseur/modèle>`.
+
+      # Un timer arrêté laisse le dernier résultat publié indéfiniment : un « 1 »
+      # qui ne veille plus.
+      - alert: OpenClawModelProbeStale
+        expr: time() - openclaw_model_probe_last_run_timestamp_seconds > {{ prom_alert_openclaw_probe_stale_seconds | default(10800) }}
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Sonde des modèles OpenClaw arrêtée sur {{ '{{' }} $labels.instance {{ '}}' }}"
+          description: >-
+            Dernière exécution il y a {{ '{{' }} $value | humanizeDuration {{ '}}' }}. Vérifier
+            `systemctl status openclaw-model-probe.timer` et le journal de
+            l'unité openclaw-model-probe.
+
+      - alert: OpenClawModelProbeMissing
+        expr: absent(openclaw_model_probe_last_run_timestamp_seconds)
+        for: 2h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Aucune mesure de la sonde des modèles OpenClaw"
+          description: >-
+            Le groupe `openclaw` est chargé mais la sonde n'a jamais publié.
+            Rejouer `./play.sh {{ parc_name | default('<parc>') }} deploy-openclaw.yml --tags monitoring`.
+
+      # Modèle appelé mais que la sonde ne sait pas tester (fournisseur sans
+      # `baseUrl`, OAuth, API non OpenAI-compatible, secret non résolu) : sa
+      # panne passerait inaperçue, autant le savoir.
+      - alert: OpenClawModelUnchecked
+        expr: openclaw_model_unchecked == 1
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Modèle OpenClaw non supervisé : {{ '{{' }} $labels.model {{ '}}' }}"
+          description: >-
+            Usages : {{ '{{' }} $labels.used_by {{ '}}' }}. Cause : {{ '{{' }} $labels.cause {{ '}}' }}. La
+            sonde ne peut pas vérifier ce modèle ; sa disparition ne serait pas
+            signalée.
+
+{% endif %}
 {% if 'sync' in prom_alert_groups %}
 
   # ── Serveurs de synchronisation web3c-sync ─────────────────────────────────
