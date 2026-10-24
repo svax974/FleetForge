@@ -37,10 +37,13 @@
   # `agenthub_runner_autoprovision: false` + le token vaulté.
   when: not (agenthub_runner_autoprovision | default(true))
 
-# `no_log` sur TOUTE la tâche : `argv` contiendrait le jeton en clair dans les
-# logs Ansible (et dans un historique de runs persisté par FleetForge,
-# CLAUDE.md) sans cette protection — même précaution que freellm-install pour
-# la clé API unifiée.
+# Le jeton passe par l'entrée standard (`--token-stdin` : deploy-runner.sh le
+# transmet à install.sh par le canal SSH), jamais dans une ligne de commande —
+# ni ici, ni sur l'hôte, où les comptes des runners des utilisateurs (`agr-*`)
+# verraient une ligne de commande avec `ps`. `no_log` sur TOUTE la tâche quand
+# même : le module garde `stdin` dans son résultat, qui finirait dans les logs
+# Ansible (et dans un historique de runs persisté par FleetForge, CLAUDE.md) —
+# même précaution que freellm-install pour la clé API unifiée.
 - name: Deploy/activate the AgentHub runner with the real hub URL and token
   ansible.builtin.command:
     argv:
@@ -52,12 +55,12 @@
       - "{{ agenthub_runner_name }}"
       - --hub-url
       - "{{ agenthub_runner_hub_url }}"
-      - --token
-      - "{{ agenthub_runner_token }}"
+      - --token-stdin
       - --roots
       - "{{ agenthub_runner_roots }}"
       - --workspace-root
       - "{{ agenthub_workspace_root }}"
+    stdin: "{{ agenthub_runner_token }}"
   args:
     chdir: "{{ agenthub_src }}"
   delegate_to: localhost
