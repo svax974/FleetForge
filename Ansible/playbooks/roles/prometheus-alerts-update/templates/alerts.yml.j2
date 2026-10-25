@@ -195,10 +195,11 @@ groups:
 
       - alert: PostgresReplicationLagHigh
         expr: |
-          timescaledb_replication_lag_seconds
-          or postgres_replication_lag_seconds
-          or postgres_front_replication_lag_seconds
-          > {{ prom_alert_db_replication_lag_seconds }}
+          (
+            timescaledb_replication_lag_seconds
+            or postgres_replication_lag_seconds
+            or postgres_front_replication_lag_seconds
+          ) > {{ prom_alert_db_replication_lag_seconds }}
         for: 10m
         labels:
           severity: warning
@@ -209,12 +210,15 @@ groups:
       # Un slot de réplication inactif retient les WAL indéfiniment et finit
       # par remplir le disque du MAÎTRE — panne lente, sans lien direct avec le
       # réplica qui l'a laissé inactif.
+      # `A or B > 0` se lit `A or (B > 0)` : `>` lie plus fort que `or`. Sans parenthèses, ces règles
+      # sonnaient pour toute série `timescaledb_*` existante, quelle que soit sa valeur (timescale1, 25/10/2026).
       - alert: PostgresInactiveReplicationSlot
         expr: |
-          timescaledb_inactive_replication_slots
-          or postgres_inactive_replication_slots
-          or postgres_front_inactive_replication_slots
-          > 0
+          (
+            timescaledb_inactive_replication_slots
+            or postgres_inactive_replication_slots
+            or postgres_front_inactive_replication_slots
+          ) > 0
         for: 30m
         labels:
           severity: warning
@@ -224,10 +228,11 @@ groups:
 
       - alert: PostgresLongRunningTransaction
         expr: |
-          timescaledb_longest_transaction_seconds
-          or postgres_longest_transaction_seconds
-          or postgres_front_longest_transaction_seconds
-          > {{ prom_alert_db_long_transaction_seconds }}
+          (
+            timescaledb_longest_transaction_seconds
+            or postgres_longest_transaction_seconds
+            or postgres_front_longest_transaction_seconds
+          ) > {{ prom_alert_db_long_transaction_seconds }}
         for: 10m
         labels:
           severity: warning
