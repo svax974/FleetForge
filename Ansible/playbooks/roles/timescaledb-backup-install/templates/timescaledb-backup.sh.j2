@@ -23,7 +23,9 @@ DB="{{ tsdb_db }}"
 DB_USER="{{ tsdb_user }}"
 CONTAINER="{{ tsdb_container }}"
 DEST_DIR="{{ tsdb_backup_dest_dir }}"
-INTERVAL_DAYS="{{ tsdb_backup_interval_days }}"
+# TSDB_BACKUP_INTERVAL_DAYS=0 force un dump immédiat (duplicate-timescale.yml) ; le cron, lui,
+# garde l'intervalle déployé.
+INTERVAL_DAYS="${TSDB_BACKUP_INTERVAL_DAYS:-{{ tsdb_backup_interval_days }}}"
 KEEP="{{ tsdb_backup_keep }}"
 MIN_FREE_GB="{{ tsdb_backup_min_free_gb }}"
 METRIC_FILE="{{ node_exporter_textfile_dir }}/backup_timescale.prom"

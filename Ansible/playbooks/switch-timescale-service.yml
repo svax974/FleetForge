@@ -1,0 +1,85 @@
+---
+# Déplace le NOM DE SERVICE de la base d'indicateurs (timescale.<domaine>, celui que vise
+# METRICS_DB_HOST de PapangMetrics) d'un serveur TimescaleDB à un autre : le A de l'ancien
+# serveur est supprimé et remplacé par un CNAME vers le `hostname` de la cible.
+#
+#   ./play.sh papanglabs switch-timescale-service.yml -e target=timescale1 -e old=timescale --check
+#   ./play.sh papanglabs switch-timescale-service.yml -e target=timescale1 -e old=timescale
+#
+# Une seule manipulation DNS, volontairement un playbook et non un geste manuel : le A et le
+# CNAME ne coexistent pas (Cloudflare 81054), l'ordre compte, et un retour arrière se rejoue à
+# l'identique (-e target=timescale). N'effectue PAS la copie des données : voir
+# duplicate-timescale.yml (-e freeze=yes), à jouer AVANT, sans quoi la cible n'est pas à jour.
+#
+# Prérequis côté inventaire : l'entrée de l'ANCIEN serveur ne doit plus avoir le nom de service
+# pour `hostname` (timescale-old.<domaine>), sans quoi la synchronisation DNS recréerait le A.
+- name: Déplacer le nom de service TimescaleDB
+  # Joué sur la CIBLE (-e target=…) pour hériter des variables du parc (domain_name,
+  # cloudflare_token) ; les appels Cloudflare sont délégués au poste de contrôle.
+  hosts: "{{ target }}"
+  gather_facts: false
+  vars:
+    tsdb_service_label: "{{ (tsdb_service_hostname | default('timescale.' ~ domain_name)).split('.')[0] }}"
+    tsdb_service_fqdn: "{{ tsdb_service_hostname | default('timescale.' ~ domain_name) }}"
+  tasks:
+    - name: Vérifier la cible et le jeton Cloudflare
+      ansible.builtin.assert:
+        that:
+          - target is defined
+          - target in hostvars
+          - hostvars[target].hostname is defined
+          - hostvars[target].hostname != tsdb_service_fqdn
+          - (cloudflare_token | default('')) | length > 0
+        fail_msg: >-
+          -e target=<entrée d'inventaire> requis ; son `hostname` doit être distinct du nom de
+          service ({{ tsdb_service_fqdn }}) ; `cloudflare_token` doit être au vault.
+        quiet: true
+      delegate_to: localhost
+      become: false
+
+    # Avant de libérer le nom de service : l'ancien serveur reste joignable sous son identité
+    # machine (sauvegardes, SSH, supervision), qui ne doit plus être le nom de service.
+    - name: Publier le A de l'ancien serveur sous son nom machine
+      community.general.cloudflare_dns:
+        api_token: "{{ cloudflare_token }}"
+        zone: "{{ domain_name }}"
+        record: "{{ hostvars[old].hostname.split('.')[0] }}"
+        type: A
+        value: "{{ hostvars[old].ansible_host }}"
+        ttl: 1
+        proxied: false
+        state: present
+      when: old is defined
+      delegate_to: localhost
+      become: false
+
+    - name: Supprimer le A du nom de service (un A et un CNAME ne coexistent pas)
+      community.general.cloudflare_dns:
+        api_token: "{{ cloudflare_token }}"
+        zone: "{{ domain_name }}"
+        record: "{{ tsdb_service_label }}"
+        type: A
+        state: absent
+      delegate_to: localhost
+      become: false
+
+    # TTL court : le jour de la bascule, un retour arrière doit se propager vite.
+    - name: Publier le CNAME vers la cible
+      community.general.cloudflare_dns:
+        api_token: "{{ cloudflare_token }}"
+        zone: "{{ domain_name }}"
+        record: "{{ tsdb_service_label }}"
+        type: CNAME
+        value: "{{ hostvars[target].hostname }}"
+        ttl: 120
+        proxied: false
+        state: present
+      delegate_to: localhost
+      become: false
+
+    - name: Résolution attendue
+      ansible.builtin.debug:
+        msg: >-
+          {{ tsdb_service_fqdn }} → {{ hostvars[target].hostname }} ({{ hostvars[target].ansible_host }}).
+          Vérifier `getent hosts {{ tsdb_service_fqdn }}` sur papangmetrics1 (cache du résolveur, TTL 120 s),
+          puis redémarrer papangmetrics-etl et papangmetrics-api : le processus garde sa résolution.

@@ -54,3 +54,11 @@ node_exporter_textfile_dir: /var/lib/node_exporter/textfile_collector
 # prochain cron, soit jusqu'à deux jours.
 tsdb_backup_migrate_legacy: true
 tsdb_backup_legacy_dir: "{{ tsdb_dir }}/backups"
+
+# false = les scripts de dump/restore sont posés (le restore est nécessaire pour
+# charger la base) mais AUCUN cron : indispensable sur un serveur qui n'est qu'une
+# copie. Les dumps de tous les serveurs portent le même nom (`<base>-<horodatage>`)
+# dans le même dossier de destination, avec une rotation sur les `tsdb_backup_keep`
+# plus récents : une copie qui planifierait son dump y ferait tourner les bons dumps
+# de la source. Repasser à true sur le serveur devenu source, et false sur l'ancien.
+tsdb_backup_enabled: true

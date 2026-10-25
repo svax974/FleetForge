@@ -1,0 +1,218 @@
+---
+# Duplique la base d'indicateurs d'un serveur TimescaleDB SOURCE vers un serveur CIBLE
+# déjà déployé (deploy-timescaledb[-standalone].yml -e tsdb_target=<cible>) : un dump
+# FRAIS de la source, puis restauration sur la cible, depuis `backup-timescale`.
+#
+#   ./play.sh papanglabs duplicate-timescale.yml                              # état seul (lecture)
+#   ./play.sh papanglabs duplicate-timescale.yml -e confirm=yes               # copie, SOURCE ET ETL INTACTS
+#   ./play.sh papanglabs duplicate-timescale.yml -e confirm=yes -e freeze=yes # copie de BASCULE
+#   ./play.sh papanglabs duplicate-timescale.yml -e confirm=yes -e fresh_dump=no   # dernier dump existant
+#   ./play.sh papanglabs duplicate-timescale.yml -e src_host=timescale -e dst_host=timescale1 …
+#
+# ── Deux usages ──────────────────────────────────────────────────────────────
+#   • Répétition (sans `freeze`) : la source reste la référence, l'ETL et l'API continuent
+#     d'écrire dedans. La cible n'est qu'un instantané, vite périmé. À rejouer autant que
+#     nécessaire pour mesurer la durée du dump + restauration et valider la cible.
+#   • Bascule (`freeze=yes`) : l'ETL et l'API de papangmetrics1 sont ARRÊTÉS avant le dump
+#     et RESTENT arrêtés. Aucune écriture n'est perdue entre le dump et la bascule du nom
+#     de service. L'arrêt dure tout le dump + la restauration : à jouer en fenêtre calme.
+#     La reprise est manuelle, APRÈS avoir déplacé le CNAME (voir le runbook ci-dessous).
+#
+# ── Ce que ce playbook NE fait PAS ───────────────────────────────────────────
+#   • il ne touche pas au DNS : timescale.<domaine> se déplace À LA MAIN ;
+#   • il ne planifie aucune sauvegarde sur la cible (`tsdb_backup_enabled: false`, host_vars) ;
+#   • il n'efface jamais la source. La cible, elle, est ÉCRASÉE (DROP DATABASE) : refusée si
+#     elle est la source.
+#
+# ── Runbook de bascule ───────────────────────────────────────────────────────
+#   0. Cible déployée et saine (deploy-timescaledb[-standalone].yml -e tsdb_target=…),
+#      certificat dont le SAN contient timescale.<domaine> (timescale-tls-pki.sh --name …).
+#   1. Répétition : duplicate-timescale.yml -e confirm=yes  (note la durée, valide la cible).
+#   2. Fenêtre de bascule : duplicate-timescale.yml -e confirm=yes -e freeze=yes
+#   3. Cloudflare : timescale.<domaine> devient un CNAME vers <cible>.<domaine>
+#      (TTL bas, A supprimé d'abord : un A et un CNAME ne coexistent pas). Renommer au
+#      préalable le `hostname` de l'ancienne entrée (`timescale-old.<domaine>`) pour que la
+#      synchronisation DNS ne recrée pas l'A.
+#   4. papangmetrics1 : `getent hosts timescale.<domaine>` doit rendre l'IP de la cible, puis
+#      redémarrer l'ETL et l'API :
+#      ./play.sh papanglabs restore-timescale.yml  (sans confirm, relance seulement ETL/API)
+#   5. Sauvegardes : tsdb_backup_enabled true sur la cible, false sur l'ancienne, puis
+#      deploy-timescaledb.yml -e tsdb_target=<hôte> --tags backup (ou le rôle complet).
+
+# ── 0. Garde-fous ────────────────────────────────────────────────────────────
+- name: Contrôle des paramètres
+  hosts: "{{ src_host | default('timescale') }}:{{ dst_host | default('timescale1') }}"
+  remote_user: "{{ remote_username }}"
+  gather_facts: false
+  tags: [always]
+  tasks:
+    - name: Refuser source = cible
+      ansible.builtin.assert:
+        that: (src_host | default('timescale')) != (dst_host | default('timescale1'))
+        fail_msg: "La source et la cible sont le même hôte : la restauration détruirait la base."
+        quiet: true
+      run_once: true
+
+    - name: Refuser une cible qui planifie ses propres dumps
+      ansible.builtin.assert:
+        that: >-
+          hostvars[dst_host | default('timescale1')].tsdb_backup_enabled | default(true) | bool == false
+          or (confirm | default('')) != 'yes'
+        fail_msg: >-
+          {{ dst_host | default('timescale1') }} planifie ses dumps (tsdb_backup_enabled). Ils porteraient le
+          même nom que ceux de la source dans le même dossier : la rotation ferait tourner les bons dumps.
+          Mettre tsdb_backup_enabled: false dans ses host_vars, puis rejouer deploy-timescaledb.yml.
+        quiet: true
+      run_once: true
+
+# ── 1. ETL et API à l'arrêt (bascule seulement) ──────────────────────────────
+- name: Arrêt de l'ETL et de l'API (freeze=yes)
+  hosts: papangmetrics1
+  remote_user: "{{ remote_username }}"
+  gather_facts: false
+  tags: [freeze]
+  tasks:
+    - name: Arrêter papangmetrics-etl et papangmetrics-api
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: stopped
+      loop:
+        - papangmetrics-etl
+        - papangmetrics-api
+      become: true
+      when:
+        - (confirm | default('')) == 'yes'
+        - (freeze | default('no')) == 'yes'
+
+# ── 2. Dump frais de la source ───────────────────────────────────────────────
+# Le script de sauvegarde se limite à un dump tous les `tsdb_backup_interval_days` jours ;
+# TSDB_BACKUP_INTERVAL_DAYS=0 lève cette limite pour CET appel seulement. pg_dump lit un
+# instantané cohérent : la source peut rester en service (répétition).
+- name: Dump de la source
+  hosts: "{{ src_host | default('timescale') }}"
+  remote_user: "{{ remote_username }}"
+  gather_facts: false
+  tags: [dump]
+  tasks:
+    - name: Dumps disponibles avant l'opération
+      ansible.builtin.command: "/home/{{ remote_username }}/papangmetrics-db/timescaledb-restore.sh --check"
+      changed_when: false
+      register: tsdb_dumps_before
+
+    - name: Afficher les dumps
+      ansible.builtin.debug:
+        var: tsdb_dumps_before.stdout_lines
+
+    - name: Rappel — confirmation requise
+      ansible.builtin.debug:
+        msg: "Lecture seule. Pour copier : ./play.sh papanglabs duplicate-timescale.yml -e confirm=yes"
+      when: (confirm | default('')) != 'yes'
+
+    # Plusieurs heures possibles : asynchrone, avec un sondage espacé, pour ne pas dépendre
+    # d'une connexion SSH tenue ouverte tout le long.
+    - name: Dump frais (timescaledb-backup.sh)
+      ansible.builtin.shell:
+        cmd: >-
+          TSDB_BACKUP_INTERVAL_DAYS=0
+          /home/{{ remote_username }}/papangmetrics-db/timescaledb-backup.sh
+          >> /home/{{ remote_username }}/papangmetrics-db/backup.log 2>&1
+        executable: /bin/bash
+      async: 21600
+      poll: 60
+      changed_when: true
+      when:
+        - (confirm | default('')) == 'yes'
+        - (fresh_dump | default('yes')) == 'yes'
+
+    - name: Dernières lignes du journal de dump
+      ansible.builtin.command: "tail -n 5 /home/{{ remote_username }}/papangmetrics-db/backup.log"
+      changed_when: false
+      register: tsdb_dump_log
+      when: (confirm | default('')) == 'yes' and (fresh_dump | default('yes')) == 'yes'
+
+    - name: Afficher le journal
+      ansible.builtin.debug:
+        var: tsdb_dump_log.stdout_lines
+      when: tsdb_dump_log is not skipped
+
+# ── 3. Restauration sur la cible ─────────────────────────────────────────────
+# La cible TIRE le dump depuis `backup-timescale` (clé + ouverture ufw posées par
+# timescaledb-backup-install à son déploiement). Le plus récent est pris.
+- name: Restauration sur la cible
+  hosts: "{{ dst_host | default('timescale1') }}"
+  remote_user: "{{ remote_username }}"
+  gather_facts: false
+  tags: [restore]
+  tasks:
+    - name: Dumps visibles depuis la cible
+      ansible.builtin.command: "/home/{{ remote_username }}/papangmetrics-db/timescaledb-restore.sh --check"
+      changed_when: false
+      register: tsdb_dumps_dst
+
+    - name: Afficher les dumps
+      ansible.builtin.debug:
+        var: tsdb_dumps_dst.stdout_lines
+
+    - name: Restaurer le dump le plus récent
+      ansible.builtin.shell:
+        cmd: >-
+          /home/{{ remote_username }}/papangmetrics-db/timescaledb-restore.sh --yes
+          > /home/{{ remote_username }}/papangmetrics-db/restore.log 2>&1
+        executable: /bin/bash
+      async: 21600
+      poll: 60
+      changed_when: true
+      when: (confirm | default('')) == 'yes'
+
+    - name: Journal de restauration
+      ansible.builtin.command: "tail -n 25 /home/{{ remote_username }}/papangmetrics-db/restore.log"
+      changed_when: false
+      register: tsdb_restore_log
+      when: (confirm | default('')) == 'yes'
+
+    - name: Afficher le journal
+      ansible.builtin.debug:
+        var: tsdb_restore_log.stdout_lines
+      when: tsdb_restore_log is not skipped
+
+# ── 4. Comparaison source / cible ────────────────────────────────────────────
+- name: Comparaison des deux bases
+  hosts: "{{ src_host | default('timescale') }}:{{ dst_host | default('timescale1') }}"
+  remote_user: "{{ remote_username }}"
+  gather_facts: false
+  tags: [verify]
+  tasks:
+    - name: Taille, hypertables et chunks
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - papangmetrics-timescaledb
+          - psql
+          - -U
+          - "{{ papangmetrics_user | default('papangmetrics') }}"
+          - -d
+          - "{{ papangmetrics_db | default('papangmetrics') }}"
+          - -tAc
+          - >-
+            select pg_size_pretty(pg_database_size(current_database())) || ' | hypertables='
+            || (select count(*) from timescaledb_information.hypertables) || ' | chunks='
+            || (select count(*) from timescaledb_information.chunks)
+      register: tsdb_cmp
+      changed_when: false
+      when: (confirm | default('')) == 'yes'
+
+    - name: Afficher
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} : {{ tsdb_cmp.stdout }}"
+      when: tsdb_cmp is not skipped
+
+    - name: Rappel de la suite (freeze=yes)
+      ansible.builtin.debug:
+        msg: >-
+          ETL et API de papangmetrics1 sont ARRÊTÉS. Déplacer le CNAME timescale.{{ domain_name }},
+          vérifier `getent hosts timescale.{{ domain_name }}` sur papangmetrics1, puis les relancer.
+      run_once: true
+      when:
+        - (confirm | default('')) == 'yes'
+        - (freeze | default('no')) == 'yes'

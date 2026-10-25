@@ -6,9 +6,14 @@ pm_dir: "/home/{{ remote_username }}/papangmetrics"
 # Source on the Ansible control machine (rsynced to the box).
 pm_src: "/Users/steph/Dev/Projects/PapangLabs/PapangMetrics/"
 
-# Runtime config. Indicators DB is standalone (see the 'timescale' host) — override
-# pm_db_host to "127.0.0.1" per-deployment if the DB is ever co-located instead.
-pm_db_host: "{{ hostvars['timescale']['ansible_host'] | default('127.0.0.1') }}"
+# Runtime config. Indicators DB is standalone — override pm_db_host to "127.0.0.1"
+# per-deployment if the DB is ever co-located instead.
+# Le client vise un NOM DE SERVICE (timescale.<domaine>) et non l'IP d'un serveur : c'est un
+# enregistrement DNS que l'opérateur déplace d'une base à l'autre (timescale → timescale1), sans
+# redéployer PapangMetrics. Le nom doit figurer dans le SAN du certificat du serveur ciblé
+# (timescaledb-install : tsdb_service_hostname) — le client vérifie la chaîne ET le nom.
+# Le DNS est mis en cache par le processus : redémarrer l'ETL et l'API après avoir déplacé le CNAME.
+pm_db_host: "{{ timescale_service_hostname | default('timescale.' ~ domain_name) }}"
 pm_db_port: "{{ papangmetrics_db_port | default(5432) }}"
 pm_db_name: "{{ papangmetrics_db | default('papangmetrics') }}"
 pm_db_user: "{{ papangmetrics_user | default('papangmetrics') }}"

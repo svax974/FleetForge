@@ -4,6 +4,11 @@
 #
 #   ./play.sh papanglabs deploy-timescaledb.yml
 #   ./play.sh papanglabs deploy-timescaledb.yml --tags monitoring   # supervision seule
+#   ./play.sh papanglabs deploy-timescaledb.yml -e tsdb_target=timescale1
+#                                                       # un AUTRE serveur (copie, voir duplicate-timescale.yml)
+#
+# `tsdb_target` est passé par `-e` : seul cas où une variable est admise dans `hosts:`
+# (les `-e` existent avant le chargement des group_vars, contrairement à eux).
 #
 # Suppose la machine DÉJÀ BOOTSTRAPÉE. Pour un VPS neuf, passer par
 # `deploy-timescaledb-standalone.yml` : il enchaîne le bootstrap (root, port 22)
@@ -23,14 +28,14 @@
 # Prometheus. Les contrôles bloquants portent le tag `always` : ils
 # s'appliquent même à un rejeu ciblé par `--tags`.
 - name: Contrôle préalable
-  hosts: timescale
+  hosts: "{{ tsdb_target | default('timescale') }}"
   remote_user: "{{ remote_username }}"
   roles:
     - role: host-preflight
       preflight_require_docker: true
 
 - name: Base d'indicateurs TimescaleDB
-  hosts: timescale
+  hosts: "{{ tsdb_target | default('timescale') }}"
   remote_user: "{{ remote_username }}"
   roles:
     - timescaledb-install

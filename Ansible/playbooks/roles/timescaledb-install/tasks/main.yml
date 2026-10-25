@@ -1,6 +1,25 @@
 ---
 # Deploy self-hosted TimescaleDB (Docker) for PapangMetrics indicators.
 
+# A « DNS seul » vers l'ansible_host de cette machine (`hostname` de l'entrée,
+# ex. timescale1.<zone>), publié dès le premier déploiement sans attendre
+# update-cloudflare-dns.yml — jamais proxifié par Cloudflare : le 5432 n'y passerait
+# pas. Le NOM DE SERVICE (timescale.<zone>, celui que visent les clients) n'est
+# volontairement PAS géré ici : c'est un CNAME que l'opérateur déplace d'un serveur
+# à l'autre.
+- name: Publish the A record of this machine (DNS only)
+  ansible.builtin.include_role:
+    name: cloudflare-dns-update
+    tasks_from: records
+  vars:
+    cfdns_a_scope:
+      - "{{ inventory_hostname }}"
+  # Une machine dont le `hostname` EST le nom de service (l'historique `timescale`)
+  # le laisse à l'opérateur : après la bascule du CNAME, ce A serait recréé et
+  # Cloudflare refuserait (81054, un A et un CNAME ne coexistent pas).
+  when: (hostname | default('')) != tsdb_service_hostname
+  tags: [dns]
+
 - name: Create TimescaleDB directory
   ansible.builtin.file:
     path: "{{ tsdb_dir }}"

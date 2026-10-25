@@ -28,6 +28,7 @@
     comment: "{{ inventory_hostname }}-tsdb-backup-to-{{ tsdb_backup_dest_host }}"
   register: tsdb_backup_key
   when: not (tsdb_backup_is_local | bool)
+  tags: [retarget]
 
 - name: Authorize the key on the destination host
   ansible.posix.authorized_key:
@@ -47,6 +48,27 @@
     from_ip: "{{ ansible_host }}"
     port: "{{ ssh_custom_port }}"
     comment: "backup source {{ inventory_hostname }} - ssh push"
+  delegate_to: "{{ tsdb_backup_dest_host }}"
+  become: true
+  when: not (tsdb_backup_is_local | bool)
+  tags: [retarget]
+
+# La destination filtre SSH sur DEUX couches : ufw (ci-dessus) et tcpwrappers — `sshd` est lié
+# à libwrap, `/etc/hosts.deny` porte `sshd: ALL` et `/etc/hosts.allow` ne liste que les IP
+# opérateur. Ufw ouvert sans hosts.allow : la connexion TCP aboutit puis sshd la coupe avant
+# l'authentification (`refused connect from …`, vu comme `Connection reset` côté source) — une
+# sauvegarde ou une restauration qui ne part jamais alors que tout paraît configuré (timescale1,
+# 25/10/2026). Ligne `sshd:` DISTINCTE de celle de ssh-security-update, pour qu'un rejeu de ce
+# rôle de sécurité ne l'efface pas. Même motif que brk-backup-install.
+- name: Allow the source through tcpwrappers on the destination (sshd)
+  ansible.builtin.lineinfile:
+    path: /etc/hosts.allow
+    line: "sshd: {{ ansible_host }}"
+    regexp: "^sshd: {{ ansible_host | regex_escape }}$"
+    create: true
+    owner: root
+    group: root
+    mode: '0644'
   delegate_to: "{{ tsdb_backup_dest_host }}"
   become: true
   when: not (tsdb_backup_is_local | bool)
@@ -131,6 +153,8 @@
     hour: "{{ tsdb_backup_cron_hour }}"
     minute: "0"
     job: "{{ tsdb_dir }}/timescaledb-backup.sh >> {{ tsdb_dir }}/backup.log 2>&1"
+    state: "{{ 'present' if tsdb_backup_enabled | bool else 'absent' }}"
+  tags: [retarget]
 
 # Les deux anciens scripts sont retirés — pas laissés « au cas où ». Un
 # backup.sh périmé qui écrit encore dans {{ tsdb_backup_legacy_dir }} donnerait

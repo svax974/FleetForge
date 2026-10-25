@@ -206,6 +206,7 @@
   notify:
     - restart papangmetrics-api
     - restart papangmetrics-etl
+  tags: [code, env]
 
 - name: Build the list of accepted service JWT public keys
   ansible.builtin.set_fact:
@@ -213,7 +214,11 @@
       {{ pm_service_jwt_envs | map('regex_replace', '^', pm_dir ~ '/certs/service-jwt.d/')
          | map('regex_replace', '$', '.pub') | list
          + ([pm_dir ~ '/certs/service-jwt.pub'] if (pm_service_jwt_legacy_key | bool) else []) }}
+  tags: [code, env]
 
+# Tag `env` : réécrit le .env (et le certificat de l'AC dont il dépend) SANS livrer le code ni
+# rejouer les migrations — pour changer METRICS_DB_HOST (bascule du nom de service TimescaleDB)
+# sans publier ce que contient le dépôt local de PapangMetrics.
 - name: Write .env
   ansible.builtin.template:
     src: env.j2
@@ -225,6 +230,7 @@
   notify:
     - restart papangmetrics-api
     - restart papangmetrics-etl
+  tags: [code, env]
 
 - name: Run SQL migrations
   ansible.builtin.command:

@@ -2,6 +2,7 @@
 # Déploiement d'un VPS NEUF portant la base d'indicateurs.
 #
 #   ./play.sh papanglabs deploy-timescaledb-standalone.yml
+#   ./play.sh papanglabs deploy-timescaledb-standalone.yml -e tsdb_target=timescale1
 #
 # Différence avec `deploy-timescaledb.yml`, et c'est la SEULE : ce playbook
 # ajoute la phase de bootstrap — connexion en root sur le port 22, migration
@@ -20,7 +21,7 @@
 
 # ── Phase 1 : socle de la machine (root, port 22 → port du parc) ─────────────
 - name: Phase 1 — Base server setup
-  hosts: timescale
+  hosts: "{{ tsdb_target | default('timescale') }}"
   remote_user: root
   gather_facts: false
   # Même liste, même ordre et même répartition de `become` que

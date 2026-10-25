@@ -70,6 +70,16 @@ tsdb_tls_enabled: "{{ timescaledb_tls_enabled | default(true) }}"
 # refusé (`hostnossl … reject`) et seuls les clients de `tsdb_tls_clients` admis.
 tsdb_tls_required: "{{ timescaledb_tls_required | default(false) }}"
 tsdb_tls_pki_dir: "{{ lookup('ansible.builtin.env', 'HOME') }}/.secrets/papang/timescale-ca"
+# Répertoire du couple server.crt/server.key de CETTE machine. Par défaut la racine de
+# l'AC (premier serveur, historique) ; un second serveur le surcharge dans ses host_vars
+# (`<pki_dir>/servers/<hôte>`, voir timescale-tls-pki.sh --name) pour que les deux
+# certificats cohabitent, signés par la même AC.
+tsdb_tls_server_dir: "{{ tsdb_tls_pki_dir }}"
+# Nom de SERVICE que visent les clients (PapangMetrics : METRICS_DB_HOST). Un CNAME
+# que l'opérateur déplace d'un serveur à l'autre : il doit figurer dans le SAN de
+# TOUS les serveurs susceptibles de le porter, sans quoi la bascule du CNAME casse la
+# vérification de nom (rejectUnauthorized) et PapangMetrics perd sa base.
+tsdb_service_hostname: "timescale.{{ domain_name }}"
 # Clients réseau admis en `hostssl` : la même liste que le filtre DOCKER-USER
 # (timescaledb-security, `tsdb_allowed_ips`), une seule source.
 tsdb_tls_clients: "{{ tsdb_allowed_ips | default([]) }}"
