@@ -19,10 +19,12 @@ pub mod ansible_inventory;
 pub mod ansible_playbooks;
 pub mod ansible_roles;
 pub mod ansible_runner;
+pub mod automation;
 pub mod database;
 pub mod deploy;
 pub mod diagnostics;
 pub mod families;
+pub mod fault;
 pub mod inventory_dynamic;
 pub mod inventory_writer;
 pub mod logging;
@@ -31,6 +33,8 @@ pub mod model;
 pub mod models;
 pub mod parc;
 pub mod paths;
+pub mod redact;
+pub mod ro_gate;
 pub mod service_tracker;
 pub mod services_catalog;
 pub mod settings;
@@ -41,7 +45,8 @@ use std::sync::{Arc, Mutex};
 
 pub use ansible_group_vars::GroupVarEntry;
 pub use database::Database;
-pub use deploy::{DeployRequest, PlaybookRequest, RunHandle, RunRegistry};
+pub use deploy::{DeployRequest, PlaybookRequest, RunGuard, RunHandle, RunOptions, RunRegistry};
+pub use fault::{Fault, FaultKind};
 pub use metrics::{Probe, ProbeScope, PrometheusClient, PrometheusConfig};
 pub use model::{Fleet, Health, MachineKey, ProviderKind, Server};
 pub use models::*;
@@ -65,6 +70,36 @@ fn resolve_role(roles: &[AnsibleRole], service_name: &str, action: &str) -> Opti
 pub struct Core {
     db: Mutex<Database>,
     runs: RunRegistry,
+    /// Un run à la fois par parc (`deploy::RunLock`).
+    locks: deploy::RunLocks,
+}
+
+/// Que faire quand un run occupe déjà le parc.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LockPolicy {
+    /// Attendre, en le disant dans la sortie du run — les interfaces humaines.
+    Wait,
+    /// Refuser tout de suite (`FaultKind::RunBusy`) — l'API d'automatisation,
+    /// dont l'appelant décide lui-même de réessayer.
+    Try,
+}
+
+/// Run de playbook validé et inscrit au registre, prêt à s'exécuter.
+///
+/// Séparé de l'exécution pour que l'API puisse répondre « lancé » (ou
+/// « occupé ») avant de confier le run à un fil d'exécution : le run est déjà
+/// visible dans le registre quand la réponse part.
+pub struct PreparedRun {
+    req: PlaybookRequest,
+    parc: parc::Parc,
+    options: RunOptions,
+    guard: Option<RunGuard>,
+}
+
+impl PreparedRun {
+    pub fn id(&self) -> &str {
+        &self.req.id
+    }
 }
 
 impl Core {
@@ -73,6 +108,7 @@ impl Core {
         Ok(Self {
             db: Mutex::new(db),
             runs: RunRegistry::new(),
+            locks: deploy::RunLocks::default(),
         })
     }
 
@@ -507,6 +543,11 @@ impl Core {
         // run « en cours » à jamais dans le registre.
         let parc = self.resolve_inventory(&req.inventory_path)?;
 
+        if self.runs.is_running(&req.id) {
+            return fault::fail(FaultKind::RunIdInUse, format!("un run en cours porte déjà l'identifiant {}", req.id));
+        }
+        automation::validate_extra_vars(&req.extra_vars, false)?;
+
         self.runs.start(
             &req.id,
             &req.label,
@@ -514,22 +555,38 @@ impl Core {
             &req.roles,
             &req.hosts,
         );
+        let sink = Arc::new(deploy::line_sink(&self.runs, &req.id, on_line));
+        let _guard = self.wait_for_lock(&parc.name, &*sink);
+        let result = self.deploy_locked(&req, &parc, &playbooks_path, sink);
+        self.settle_run(&req.id, &result);
+        result
+    }
 
+    /// Corps de [`Core::run_deploy`], verrou du parc tenu.
+    fn deploy_locked<S>(
+        &self,
+        req: &DeployRequest,
+        parc: &parc::Parc,
+        playbooks_path: &str,
+        sink: Arc<S>,
+    ) -> Result<AnsibleRun>
+    where
+        S: Fn(String) + Send + Sync + 'static,
+    {
         let env = self.ansible_env()?;
         let extra = (!req.extra_vars.is_empty()).then(|| req.extra_vars.clone());
-        let sink = Arc::new(deploy::line_sink(&self.runs, &req.id, on_line));
 
         let mut families: Vec<String> = req
             .roles
             .iter()
-            .filter_map(|r| families::family_of_role(&playbooks_path, r))
+            .filter_map(|r| families::family_of_role(playbooks_path, r))
             .collect();
         families.dedup();
-        let inscribed = self.inscribe_families(&parc, &families, &req.hosts, &*sink);
+        let inscribed = self.inscribe_families(parc, &families, &req.hosts, &*sink);
 
         let run = ansible_runner::run_playbook_streaming(
-            &playbooks_path,
-            &parc,
+            playbooks_path,
+            parc,
             &req.roles,
             &req.hosts,
             extra,
@@ -540,15 +597,38 @@ impl Core {
             families::revert(&inscribed).into_iter().for_each(|n| sink(format!("[fleetforge] {n}")));
         }
 
-        self.runs
-            .finish(&req.id, deploy::RunStatus::from_str(&run.status));
-
         let saved = self.with_db(|db| {
             let saved = db.add_ansible_run(run)?;
             deploy::record_deploy(db, &saved, &req.roles, &req.hosts);
             Ok(saved)
         })?;
         Ok(saved)
+    }
+
+    /// Prend le verrou du parc ; s'il est tenu, le dit dans la sortie du run
+    /// avant d'attendre — sans quoi un run en attente ressemblerait à un run
+    /// figé.
+    fn wait_for_lock(&self, parc: &str, say: &dyn Fn(String)) -> RunGuard {
+        let lock = self.locks.of(parc);
+        lock.try_acquire().unwrap_or_else(|| {
+            say(format!(
+                "[fleetforge] un autre run est en cours sur le parc {parc} : attente de sa fin…"
+            ));
+            lock.acquire()
+        })
+    }
+
+    /// Clôt l'entrée du registre, quelle que soit l'issue : une erreur levée
+    /// après `runs.start` laissait sinon un run « en cours » à jamais.
+    fn settle_run(&self, id: &str, result: &Result<AnsibleRun>) {
+        match result {
+            Ok(run) => self.runs.finish_with(
+                id,
+                deploy::RunStatus::from_str(&run.status),
+                run.exit_code,
+            ),
+            Err(_) => self.runs.finish(id, deploy::RunStatus::Failed),
+        }
     }
 
     /// Inscrit chaque famille sur les hôtes qui ne la portent pas encore
@@ -580,56 +660,188 @@ impl Core {
         done
     }
 
-    /// Exécute un playbook existant.
+    /// Exécute un playbook existant (interfaces humaines : attend le verrou).
     pub fn run_playbook<F>(&self, req: PlaybookRequest, on_line: F) -> Result<AnsibleRun>
     where
         F: Fn(String) + Send + Sync + 'static,
     {
+        let prepared = self.prepare_playbook(req, RunOptions::default(), LockPolicy::Wait)?;
+        self.execute_playbook(prepared, on_line)
+    }
+
+    /// Valide un run de playbook et l'inscrit au registre.
+    ///
+    /// Refusé AVANT l'inscription : identifiant mal formé ou déjà en cours,
+    /// playbook hors du dossier des playbooks, `--limit` hors inventaire,
+    /// variable mal nommée, parc occupé (`LockPolicy::Try`).
+    pub fn prepare_playbook(
+        &self,
+        mut req: PlaybookRequest,
+        options: RunOptions,
+        lock: LockPolicy,
+    ) -> Result<PreparedRun> {
+        automation::validate_run_id(&req.id)?;
+        if self.runs.is_running(&req.id) {
+            return fault::fail(FaultKind::RunIdInUse, format!("un run en cours porte déjà l'identifiant {}", req.id));
+        }
+        automation::validate_extra_vars(&req.extra_vars, false)?;
         let parc = self.resolve_inventory(&req.inventory_path)?;
+        let resolved = automation::resolve_playbook(&self.playbooks_path()?, &req.playbook_path)?;
+        req.playbook_path = resolved.to_string_lossy().to_string();
+        if let Some(limit) = req.limit_hosts.as_ref().filter(|l| !l.is_empty()) {
+            automation::validate_limit(&self.fleet(&parc.name)?, limit)?;
+        }
+
+        let guard = match lock {
+            LockPolicy::Wait => None,
+            LockPolicy::Try => Some(self.locks.of(&parc.name).try_acquire().ok_or_else(|| {
+                Fault::new(
+                    FaultKind::RunBusy,
+                    format!("un run est déjà en cours sur le parc {}", parc.name),
+                )
+            })?),
+        };
+
+        let label = if options.check { format!("[check] {}", req.label) } else { req.label.clone() };
         let display_hosts = req.limit_hosts.clone().unwrap_or_default();
-        self.runs.start(
+        self.runs.start_with(
             &req.id,
-            &req.label,
+            &label,
             deploy::RunKind::Playbook,
             &[],
             &display_hosts,
+            options,
         );
+        Ok(PreparedRun { req, parc, options, guard })
+    }
 
+    /// Exécute un run préparé. Bloque le temps du playbook.
+    pub fn execute_playbook<F>(&self, prepared: PreparedRun, on_line: F) -> Result<AnsibleRun>
+    where
+        F: Fn(String) + Send + Sync + 'static,
+    {
+        let PreparedRun { req, parc, options, guard } = prepared;
+        let sink = Arc::new(deploy::line_sink(&self.runs, &req.id, on_line));
+        let _guard = guard.unwrap_or_else(|| self.wait_for_lock(&parc.name, &*sink));
+        let result = self.playbook_locked(&req, &parc, options, sink);
+        self.settle_run(&req.id, &result);
+        result
+    }
+
+    /// Corps d'un run de playbook, verrou du parc tenu.
+    fn playbook_locked<S>(
+        &self,
+        req: &PlaybookRequest,
+        parc: &parc::Parc,
+        options: RunOptions,
+        sink: Arc<S>,
+    ) -> Result<AnsibleRun>
+    where
+        S: Fn(String) + Send + Sync + 'static,
+    {
         let env = self.ansible_env()?;
         let extra = (!req.extra_vars.is_empty()).then(|| req.extra_vars.clone());
-        let sink = Arc::new(deploy::line_sink(&self.runs, &req.id, on_line));
 
         // Seuls les hôtes NOMMÉS par `--limit` sont inscrits : sans limite, le
         // playbook vise ses propres entrées, qui déclarent déjà leur famille —
         // et certains plays agissent sur l'entrée canonique de la machine
         // (`deploy-rotki.yml` → `ctdapi`), qui ne doit pas la recevoir.
-        let family = families::family_of_playbook(&self.playbooks_path()?, &req.playbook_path);
+        // En `--check`, rien n'est installé : l'inventaire ne doit pas le
+        // prétendre.
+        let family = (!options.check)
+            .then(|| families::family_of_playbook(&self.playbooks_path().unwrap_or_default(), &req.playbook_path))
+            .flatten();
         let inscribed = match (&family, &req.limit_hosts) {
-            (Some(f), Some(hosts)) => self.inscribe_families(&parc, std::slice::from_ref(f), hosts, &*sink),
+            (Some(f), Some(hosts)) => self.inscribe_families(parc, std::slice::from_ref(f), hosts, &*sink),
             _ => vec![],
         };
+        if options.check {
+            sink("[fleetforge] mode vérification (--check) : aucune modification des hôtes ni de l'inventaire".to_string());
+        }
 
-        let run = ansible_runner::run_existing_playbook_streaming(
+        let mut run = ansible_runner::run_existing_playbook_streaming(
             &req.playbook_path,
-            &parc,
+            parc,
             req.limit_hosts.clone(),
             extra,
+            options,
             &env,
             { let s = sink.clone(); move |l: String| s(l) },
         )?;
         if run.status != "success" {
             families::revert(&inscribed).into_iter().for_each(|n| sink(format!("[fleetforge] {n}")));
         }
-
-        self.runs
-            .finish(&req.id, deploy::RunStatus::from_str(&run.status));
+        if options.check {
+            run.roles = run.roles.iter().map(|r| format!("{r} --check")).collect();
+        }
 
         let saved = self.with_db(|db| {
             let saved = db.add_ansible_run(run)?;
-            let hosts = req.limit_hosts.clone().unwrap_or_else(|| saved.hosts.clone());
-            deploy::record_playbook(db, &saved, &req.playbook_path, &hosts);
+            // Un `--check` n'a rien installé : rien à consigner au suivi.
+            if !options.check {
+                let hosts = req.limit_hosts.clone().unwrap_or_else(|| saved.hosts.clone());
+                deploy::record_playbook(db, &saved, &req.playbook_path, &hosts);
+            }
             Ok(saved)
         })?;
         Ok(saved)
+    }
+
+    // === API d'automatisation ===
+
+    /// Un parc désigné par son NOM (jamais un chemin de fichier).
+    pub fn parc_by_name(&self, name: &str) -> Result<parc::Parc> {
+        automation::validate_parc_name(name)?;
+        self.list_parcs()?
+            .into_iter()
+            .find(|p| p.name == name)
+            .ok_or_else(|| Fault::new(FaultKind::UnknownParc, format!("parc inconnu : {name}")).into())
+    }
+
+    pub fn list_hosts(&self, parc: &str) -> Result<Vec<automation::HostSummary>> {
+        let parc = self.parc_by_name(parc)?;
+        Ok(automation::host_summaries(&self.fleet(&parc.name)?))
+    }
+
+    pub fn list_playbook_summaries(&self) -> Result<Vec<automation::PlaybookSummary>> {
+        Ok(automation::playbook_summaries(&self.list_playbooks()?))
+    }
+
+    /// Alertes actives de l'Alertmanager du parc (JSON de l'API v2, tel quel).
+    pub async fn alertmanager_alerts(&self, parc: &str) -> Result<serde_json::Value> {
+        let parc = self.parc_by_name(parc)?;
+        let fleet = self.fleet(&parc.name)?;
+        let url = automation::alertmanager_url(&self.playbooks_path()?, &fleet)?;
+        automation::fetch_alerts(&url).await
+    }
+
+    /// Entrée d'inventaire visée par un diagnostic.
+    ///
+    /// Sans `parc`, l'entrée est cherchée dans tous les parcs ; un nom présent
+    /// dans plusieurs (`proxy1`, `mail`) est refusé plutôt que deviné.
+    pub fn find_host(&self, parc: Option<&str>, host: &str) -> Result<(String, AnsibleHost)> {
+        let parcs = match parc {
+            Some(name) => vec![self.parc_by_name(name)?],
+            None => self.list_parcs()?,
+        };
+        let mut found: Vec<(String, AnsibleHost)> = Vec::new();
+        for p in parcs {
+            if let Ok(fleet) = self.fleet(&p.name) {
+                if let Some(h) = fleet.host(host) {
+                    found.push((p.name.clone(), h.clone()));
+                }
+            }
+        }
+        match found.len() {
+            0 => fault::fail(FaultKind::UnknownHost, format!("hôte inconnu : {host}")),
+            1 => Ok(found.remove(0)),
+            _ => fault::fail(
+                FaultKind::AmbiguousHost,
+                format!(
+                    "{host} existe dans plusieurs parcs ({}) : préciser `parc`",
+                    found.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>().join(", ")
+                ),
+            ),
+        }
     }
 }

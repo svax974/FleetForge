@@ -17,82 +17,139 @@
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
-use fleetforge_core::{DeployRequest, GroupVarEntry, Model, PlaybookRequest, ProbeScope, SettingKey};
+use axum::{Extension, Json};
+use fleetforge_core::{DeployRequest, Fault, FaultKind, GroupVarEntry, Model, ProbeScope, SettingKey};
 use fleetforge_providers::{AccountId, Credentials, InstanceRef, PowerAction};
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
+use crate::automation;
+use crate::config::Role;
 use crate::state::AppState;
 
-/// Erreur rendue au frontal. Le frontal n'affiche que le message : c'est déjà
-/// ce que fait la façade Tauri, qui aplatit tout en `String`.
+/// Erreur rendue au client : `{ "error": <message>, "code": <code stable> }`.
+///
+/// Le frontal n'affiche que le message — c'est déjà ce que fait la façade
+/// Tauri, qui aplatit tout en `String`. Un appelant programmatique lit le
+/// code (`fleetforge_core::FaultKind::code`, `failed` pour une erreur non
+/// qualifiée) et le statut HTTP.
 #[derive(Debug)]
-pub struct ApiError(String);
+pub struct ApiError {
+    status: StatusCode,
+    code: &'static str,
+    message: String,
+}
+
+impl ApiError {
+    /// Refus métier non qualifié. 400 et non 500 : la quasi-totalité de ces
+    /// erreurs sont des refus (rôle sans hôte, inventaire absent, hébergeur
+    /// inconnu), pas des pannes du serveur.
+    fn failed(message: String) -> Self {
+        Self { status: StatusCode::BAD_REQUEST, code: "failed", message }
+    }
+
+    fn invalid(message: String) -> Self {
+        Self::from_fault(&Fault::invalid(message))
+    }
+
+    fn from_fault(fault: &Fault) -> Self {
+        let status = match fault.kind {
+            FaultKind::InvalidArgument | FaultKind::AmbiguousHost => StatusCode::BAD_REQUEST,
+            FaultKind::UnknownParc
+            | FaultKind::UnknownHost
+            | FaultKind::UnknownPlaybook
+            | FaultKind::UnknownRun => StatusCode::NOT_FOUND,
+            FaultKind::RunBusy | FaultKind::RunIdInUse | FaultKind::CheckRequired => StatusCode::CONFLICT,
+            FaultKind::NotConfigured => StatusCode::SERVICE_UNAVAILABLE,
+            FaultKind::Upstream => StatusCode::BAD_GATEWAY,
+            FaultKind::Timeout => StatusCode::GATEWAY_TIMEOUT,
+        };
+        Self { status, code: fault.kind.code(), message: fault.message.clone() }
+    }
+}
+
+impl From<anyhow::Error> for ApiError {
+    fn from(e: anyhow::Error) -> Self {
+        match e.downcast_ref::<Fault>() {
+            Some(fault) => Self::from_fault(fault),
+            None => Self::failed(e.to_string()),
+        }
+    }
+}
+
+impl From<serde_json::Error> for ApiError {
+    fn from(e: serde_json::Error) -> Self {
+        Self::invalid(format!("corps JSON invalide : {e}"))
+    }
+}
 
 // Une conversion générique `impl<E: Display> From<E>` serait refusée par la
-// cohérence des traits (elle chevaucherait `From<T> for T`). Les trois sources
+// cohérence des traits (elle chevaucherait `From<T> for T`). Les sources
 // d'erreur qui traversent réellement cette couche sont donc écrites une à une.
 macro_rules! from_error {
     ($($ty:ty),* $(,)?) => {
         $(impl From<$ty> for ApiError {
             fn from(e: $ty) -> Self {
-                ApiError(e.to_string())
+                ApiError::failed(e.to_string())
             }
         })*
     };
 }
 
-from_error!(
-    anyhow::Error,
-    serde_json::Error,
-    tokio::task::JoinError,
-    fleetforge_providers::ProviderError,
-);
+from_error!(tokio::task::JoinError, fleetforge_providers::ProviderError);
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        // 400 et non 500 : la quasi-totalité de ces erreurs sont des refus
-        // métier (rôle sans hôte, inventaire absent, hébergeur inconnu), pas
-        // des pannes du serveur. Le frontal, lui, ne lit que le message.
-        (StatusCode::BAD_REQUEST, Json(json!({ "error": self.0 }))).into_response()
+        (self.status, Json(json!({ "error": self.message, "code": self.code }))).into_response()
     }
 }
 
-type ApiResult = Result<Json<Value>, ApiError>;
+pub type ApiResult = Result<Json<Value>, ApiError>;
 
 /// Arguments d'un appel, tels que le frontal les envoie.
-struct Params(Value);
+pub struct Params(Value);
 
 impl Params {
-    fn get<T: DeserializeOwned>(&self, key: &str) -> Result<T, ApiError> {
-        let raw = self
-            .0
-            .get(key)
-            .ok_or_else(|| ApiError(format!("argument manquant : {key}")))?;
-        serde_json::from_value(raw.clone())
-            .map_err(|e| ApiError(format!("argument {key} invalide : {e}")))
+    pub fn get<T: DeserializeOwned>(&self, key: &str) -> Result<T, ApiError> {
+        self.opt(key)?
+            .ok_or_else(|| ApiError::invalid(format!("argument manquant : {key}")))
     }
 
     /// Argument facultatif. Absent et `null` sont traités pareil : le frontal
     /// envoie l'un ou l'autre selon les appels (`serviceName: name ?? null`).
-    fn opt<T: DeserializeOwned>(&self, key: &str) -> Result<Option<T>, ApiError> {
+    pub fn opt<T: DeserializeOwned>(&self, key: &str) -> Result<Option<T>, ApiError> {
         match self.0.get(key) {
             None | Some(Value::Null) => Ok(None),
             Some(raw) => serde_json::from_value(raw.clone())
                 .map(Some)
-                .map_err(|e| ApiError(format!("argument {key} invalide : {e}"))),
+                .map_err(|e| ApiError::invalid(format!("argument {key} invalide : {e}"))),
         }
     }
 
     fn opt_or_default<T: DeserializeOwned + Default>(&self, key: &str) -> Result<T, ApiError> {
         Ok(self.opt(key)?.unwrap_or_default())
     }
+
+    /// Premier des noms présents — le frontal et l'API d'automatisation
+    /// nomment certains arguments différemment (`inventoryPath` / `parc`).
+    pub fn first_opt<T: DeserializeOwned>(&self, keys: &[&str]) -> Result<Option<T>, ApiError> {
+        for key in keys {
+            if let Some(value) = self.opt(key)? {
+                return Ok(Some(value));
+            }
+        }
+        Ok(None)
+    }
+
+    pub fn first<T: DeserializeOwned>(&self, keys: &[&str]) -> Result<T, ApiError> {
+        self.first_opt(keys)?
+            .ok_or_else(|| ApiError::invalid(format!("argument manquant : {}", keys.join(" ou "))))
+    }
 }
 
-fn ok<T: serde::Serialize>(value: T) -> ApiResult {
-    Ok(Json(serde_json::to_value(value)?))
+pub fn ok<T: serde::Serialize>(value: T) -> ApiResult {
+    Ok(Json(serde_json::to_value(value).map_err(|e| ApiError::failed(e.to_string()))?))
 }
 
 /// Compte visé par un appel : `provider` obligatoire, `account` facultatif.
@@ -112,14 +169,18 @@ fn account_id(p: &Params) -> Result<AccountId, ApiError> {
 
 fn provider_kind(name: &str) -> Result<fleetforge_core::model::ProviderKind, ApiError> {
     fleetforge_core::model::ProviderKind::parse(name)
-        .ok_or_else(|| ApiError(format!("provider inconnu : {name}")))
+        .ok_or_else(|| ApiError::invalid(format!("provider inconnu : {name}")))
 }
 
 pub async fn dispatch(
     State(state): State<AppState>,
+    role: Option<Extension<Role>>,
     Path(command): Path<String>,
     body: String,
 ) -> ApiResult {
+    // Rôle absent = requête qui n'est pas passée par l'authentification :
+    // traitée comme la moins privilégiée.
+    let role = role.map_or(Role::Automation, |Extension(r)| r);
     // Corps lu en texte plutôt que par l'extracteur `Json` : une commande sans
     // argument est appelée avec un corps vide, que `Json` rejetterait avant
     // même d'arriver ici — l'erreur parlerait alors de désérialisation là où le
@@ -252,21 +313,9 @@ pub async fn dispatch(
             let run = tokio::task::spawn_blocking(move || core.run_deploy(req, sink)).await?;
             ok(settle(&state, &id, run)?)
         }
-        "run_ansible_playbook" => {
-            let id: String = p.get("deployId")?;
-            let playbook_path: String = p.get("playbookPath")?;
-            let req = PlaybookRequest {
-                label: p.opt("label")?.unwrap_or_else(|| playbook_path.clone()),
-                id: id.clone(),
-                playbook_path,
-                inventory_path: p.get("inventoryPath")?,
-                limit_hosts: p.opt("limitHosts")?,
-                extra_vars: p.opt_or_default("extraVars")?,
-            };
-            let sink = state.events.sink(&id);
-            let run = tokio::task::spawn_blocking(move || core.run_playbook(req, sink)).await?;
-            ok(settle(&state, &id, run)?)
-        }
+        // `check`, `diff`, `detach` ; validation stricte et `--check` exigé
+        // pour le compte d'automatisation (voir `automation.rs`).
+        "run_ansible_playbook" => automation::run_playbook(&state, role, &p).await,
         "get_active_runs" => ok(core.runs().active()),
         "get_run_handle" => ok(core.runs().get(&p.get::<String>("runId")?)),
         "clear_finished_runs" => ok(core.runs().clear_finished()),
@@ -324,7 +373,7 @@ pub async fn dispatch(
                     // autres, mais se taire le ferait passer pour vide.
                     if instances.is_empty() {
                         if let Some((account, error)) = failures.into_iter().next() {
-                            return Err(ApiError(format!("{account} : {error}")));
+                            return Err(ApiError::failed(format!("{account} : {error}")));
                         }
                     }
                     ok(instances)
@@ -353,7 +402,7 @@ pub async fn dispatch(
                 "start" => PowerAction::Start,
                 "stop" => PowerAction::Stop { graceful },
                 "reboot" => PowerAction::Reboot { graceful },
-                other => return Err(ApiError(format!("action inconnue : {other}"))),
+                other => return Err(ApiError::invalid(format!("action inconnue : {other}"))),
             };
             ok(hub.power(&reference, action).await?)
         }
@@ -388,7 +437,14 @@ pub async fn dispatch(
             ok(core.with_db(|db| db.delete_model(id))?)
         }
 
-        other => Err(ApiError(format!("commande inconnue : {other}"))),
+        // === API d'automatisation (AgentHub) — web seulement ===
+        "list_hosts" => automation::list_hosts(&state, &p).await,
+        "list_playbooks" => automation::list_playbooks(&state),
+        "alertmanager_alerts" => automation::alertmanager_alerts(&state, &p).await,
+        "ssh_diagnose" => automation::ssh_diagnose(&state, role, &p).await,
+        "run_status" => automation::run_status(&state, role, &p),
+
+        other => Err(ApiError::invalid(format!("commande inconnue : {other}"))),
     }
 }
 
@@ -397,7 +453,7 @@ pub async fn dispatch(
 /// Les deux commandes d'exécution partagent ces trois gestes ; les recopier
 /// laisserait un jour un flux SSE ouvert sur un run terminé, que le navigateur
 /// rouvrirait indéfiniment.
-fn settle(
+pub fn settle(
     state: &AppState,
     run_id: &str,
     outcome: anyhow::Result<fleetforge_core::AnsibleRun>,
@@ -494,11 +550,42 @@ pub const COMMANDS: &[&str] = &[
     "add_model",
     "update_model",
     "delete_model",
+    // API d'automatisation — web seulement, sans équivalent Tauri.
+    "list_hosts",
+    "list_playbooks",
+    "alertmanager_alerts",
+    "ssh_diagnose",
+    "run_status",
 ];
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_qualified_fault_keeps_its_code_and_status() {
+        let err: ApiError = anyhow::Error::from(Fault::new(FaultKind::RunBusy, "occupé")).into();
+        assert_eq!((err.status, err.code), (StatusCode::CONFLICT, "run_busy"));
+        let err: ApiError = anyhow::anyhow!("autre chose").into();
+        assert_eq!((err.status, err.code), (StatusCode::BAD_REQUEST, "failed"));
+        let err = Params(json!({})).get::<String>("parc").unwrap_err();
+        assert_eq!((err.status, err.code), (StatusCode::BAD_REQUEST, "invalid_argument"));
+    }
+
+    #[test]
+    fn aliases_are_read_in_order() {
+        let p = Params(json!({ "parc": "web3c", "inventoryPath": null }));
+        assert_eq!(p.first::<String>(&["inventoryPath", "parc"]).unwrap(), "web3c");
+        let err = Params(json!({})).first::<String>(&["playbookPath", "playbook"]).unwrap_err();
+        assert!(err.message.contains("playbookPath ou playbook"), "{}", err.message);
+    }
+
+    #[test]
+    fn every_automation_command_is_served() {
+        for command in crate::auth::AUTOMATION_COMMANDS {
+            assert!(COMMANDS.contains(command), "{command} absente de COMMANDS");
+        }
+    }
 
     #[test]
     fn optional_arguments_accept_absent_and_null_alike() {
@@ -520,7 +607,7 @@ mod tests {
     #[test]
     fn a_missing_required_argument_names_itself() {
         let err = Params(json!({})).get::<String>("inventoryPath").unwrap_err();
-        assert!(err.0.contains("inventoryPath"), "message : {}", err.0);
+        assert!(err.message.contains("inventoryPath"), "message : {}", err.message);
     }
 
     #[test]

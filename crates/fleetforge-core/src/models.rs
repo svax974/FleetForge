@@ -98,6 +98,10 @@ pub struct AnsibleRun {
     pub output: String,
     pub started_at: String,
     pub finished_at: Option<String>,
+    /// Code de sortie d'`ansible-playbook` du run qui vient de s'achever. Non
+    /// persisté : `None` pour un run relu en base.
+    #[serde(default)]
+    pub exit_code: Option<i32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

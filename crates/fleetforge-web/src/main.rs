@@ -14,6 +14,7 @@
 
 mod api;
 mod auth;
+mod automation;
 mod config;
 mod events;
 mod metrics;
@@ -26,8 +27,38 @@ use axum::Router;
 use config::Config;
 use fleetforge_core::{Core, SettingKey};
 use state::AppState;
+use std::path::Path;
 use std::sync::Arc;
 use tower_http::services::{ServeDir, ServeFile};
+
+fn env_path(variable: &str) -> Option<String> {
+    std::env::var(variable)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+/// Chemins imposés par l'environnement : chacun par sa variable, à défaut
+/// dérivé de `FLEETFORGE_ANSIBLE_DIR` (`<dossier>/inventories`,
+/// `<dossier>/playbooks`) — l'arbre Ansible peut vivre ailleurs que dans le
+/// code livré.
+fn deployed_paths() -> Vec<(SettingKey, &'static str, String)> {
+    let root = env_path("FLEETFORGE_ANSIBLE_DIR");
+    [
+        (SettingKey::InventoriesPath, "FLEETFORGE_INVENTORIES_PATH", "inventories"),
+        (SettingKey::PlaybooksPath, "FLEETFORGE_PLAYBOOKS_PATH", "playbooks"),
+    ]
+    .into_iter()
+    .filter_map(|(key, variable, sub)| {
+        env_path(variable)
+            .or_else(|| {
+                root.as_ref()
+                    .map(|r| Path::new(r).join(sub).to_string_lossy().to_string())
+            })
+            .map(|value| (key, variable, value))
+    })
+    .collect()
+}
 
 /// Impose les chemins livrés par le déploiement, quand il en fournit.
 ///
@@ -38,16 +69,9 @@ use tower_http::services::{ServeDir, ServeFile};
 /// L'application démarrerait alors sur un inventaire vide, ce qui ressemble
 /// beaucoup à un parc vide.
 fn adopt_deployed_paths(core: &Core) -> Result<()> {
-    for (key, variable) in [
-        (SettingKey::InventoriesPath, "FLEETFORGE_INVENTORIES_PATH"),
-        (SettingKey::PlaybooksPath, "FLEETFORGE_PLAYBOOKS_PATH"),
-    ] {
-        if let Ok(value) = std::env::var(variable) {
-            if !value.trim().is_empty() {
-                core.set_setting(key, value.trim())
-                    .with_context(|| format!("réglage {variable}"))?;
-            }
-        }
+    for (key, variable, value) in deployed_paths() {
+        core.set_setting(key, &value)
+            .with_context(|| format!("réglage {variable}"))?;
     }
     Ok(())
 }
@@ -79,7 +103,7 @@ async fn main() -> Result<()> {
         .context("catalogue de modèles")?;
     adopt_deployed_paths(&core)?;
 
-    let state = AppState::new(core);
+    let state = AppState::new(core, config.ro_gate.clone());
 
     // Le frontal est une application à page unique : toute route inconnue doit
     // rendre `index.html`, faute de quoi un rechargement (F5) sur une vue
@@ -101,7 +125,7 @@ async fn main() -> Result<()> {
         .route("/healthz", get(|| async { "ok" }))
         .fallback_service(statics)
         .layer(axum::middleware::from_fn_with_state(
-            Arc::new(config.auth),
+            Arc::new(config.accounts),
             auth::middleware,
         ))
         .with_state(state);

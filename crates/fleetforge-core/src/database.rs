@@ -381,6 +381,7 @@ impl Database {
                 output: row.get(5)?,
                 started_at: row.get(6)?,
                 finished_at: row.get(7)?,
+                exit_code: None,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -404,6 +405,7 @@ impl Database {
                 output: row.get(5)?,
                 started_at: row.get(6)?,
                 finished_at: row.get(7)?,
+                exit_code: None,
             })
         })?;
         Ok(run)

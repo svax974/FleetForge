@@ -27,3 +27,9 @@ subtle = "2.6"
 # Empreinte du mot de passe d'accès. Le serveur ne stocke jamais le clair : il
 # vit dans le vault Ansible, l'empreinte seule est déposée sur la machine.
 argon2 = { version = "0.5", features = ["std"] }
+
+# Test de bout en bout de l'API d'automatisation (`tests/automation_api.rs`) :
+# client HTTP du binaire lancé contre un parc factice. Déjà compilé pour le
+# cœur, aucune dépendance nouvelle à l'arbre.
+[dev-dependencies]
+reqwest.workspace = true

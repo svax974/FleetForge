@@ -13,6 +13,7 @@
 //! les workers forkés d'Ansible cassent sur macOS. [`AnsibleEnv`] réunit ce que
 //! les wrappers apportent, en un seul endroit.
 
+use crate::deploy::RunOptions;
 use crate::models::*;
 use crate::parc::Parc;
 use anyhow::Result;
@@ -67,8 +68,10 @@ pub fn check_ansible_installed() -> bool {
         .unwrap_or(false)
 }
 
-/// Stream stdout+stderr line by line via `on_line`, return (combined_output, success).
-fn execute_with_streaming<F>(mut cmd: Command, on_line: F) -> Result<(String, bool)>
+/// Stream stdout+stderr line by line via `on_line`, return (combined_output, exit code).
+///
+/// Le code est `None` quand le processus a été tué par un signal.
+fn execute_with_streaming<F>(mut cmd: Command, on_line: F) -> Result<(String, Option<i32>)>
 where
     F: Fn(String) + Send + Sync + 'static,
 {
@@ -119,7 +122,37 @@ where
         format!("{}\n--- STDERR ---\n{}", stdout, stderr)
     };
 
-    Ok((combined, status.success()))
+    Ok((combined, status.code()))
+}
+
+/// Variables supplémentaires en UN objet JSON (`-e '{"k": "v"}'`).
+///
+/// La forme `-e k=v` est découpée par Ansible sur les espaces : une valeur
+/// `x ansible_ssh_common_args=…` y injectait une seconde variable. En JSON,
+/// une valeur reste une chaîne, entière.
+fn add_extra_vars(cmd: &mut Command, extra_vars: Option<HashMap<String, String>>) {
+    if let Some(vars) = extra_vars.filter(|v| !v.is_empty()) {
+        let sorted: std::collections::BTreeMap<String, String> = vars.into_iter().collect();
+        cmd.arg("-e")
+            .arg(serde_json::to_string(&sorted).expect("variables sérialisables"));
+    }
+}
+
+fn add_options(cmd: &mut Command, options: RunOptions) {
+    if options.check {
+        cmd.arg("--check");
+    }
+    if options.diff {
+        cmd.arg("--diff");
+    }
+}
+
+fn status_of(code: Option<i32>) -> &'static str {
+    if code == Some(0) {
+        "success"
+    } else {
+        "failed"
+    }
 }
 
 /// Un `-i` par fichier du parc — JAMAIS `-i a,b`, qu'Ansible lirait comme une
@@ -146,6 +179,7 @@ fn failed_run(
         output: message,
         started_at,
         finished_at: Some(chrono::Utc::now().to_rfc3339()),
+        exit_code: None,
     }
 }
 
@@ -155,6 +189,7 @@ pub fn run_existing_playbook_streaming<F>(
     parc: &Parc,
     limit_hosts: Option<Vec<String>>,
     extra_vars: Option<HashMap<String, String>>,
+    options: RunOptions,
     env: &AnsibleEnv,
     on_line: F,
 ) -> Result<AnsibleRun>
@@ -181,13 +216,10 @@ where
             cmd.arg("--limit").arg(hosts.join(","));
         }
     }
-    if let Some(vars) = extra_vars {
-        for (k, v) in vars {
-            cmd.arg("-e").arg(format!("{}={}", k, v));
-        }
-    }
+    add_extra_vars(&mut cmd, extra_vars);
+    add_options(&mut cmd, options);
 
-    let (combined, success) = match execute_with_streaming(cmd, on_line) {
+    let (combined, code) = match execute_with_streaming(cmd, on_line) {
         Ok(r) => r,
         Err(e) => {
             return Ok(failed_run(
@@ -205,10 +237,11 @@ where
         inventory: parc.name.clone(),
         roles: vec![playbook_name],
         hosts: hosts_recorded,
-        status: if success { "success" } else { "failed" }.to_string(),
+        status: status_of(code).to_string(),
         output: combined,
         started_at,
         finished_at: Some(chrono::Utc::now().to_rfc3339()),
+        exit_code: code,
     })
 }
 
@@ -250,16 +283,12 @@ where
         .apply(&mut cmd);
     add_inventories(&mut cmd, parc);
     cmd.arg(&temp_path);
-    if let Some(vars) = extra_vars {
-        for (k, v) in vars {
-            cmd.arg("-e").arg(format!("{}={}", k, v));
-        }
-    }
+    add_extra_vars(&mut cmd, extra_vars);
 
     let result = execute_with_streaming(cmd, on_line);
     let _ = std::fs::remove_file(&temp_path);
 
-    let (combined, success) = match result {
+    let (combined, code) = match result {
         Ok(r) => r,
         Err(e) => {
             return Ok(failed_run(
@@ -277,10 +306,11 @@ where
         inventory: parc.name.clone(),
         roles: roles.to_vec(),
         hosts: hosts.to_vec(),
-        status: if success { "success" } else { "failed" }.to_string(),
+        status: status_of(code).to_string(),
         output: combined,
         started_at,
         finished_at: Some(chrono::Utc::now().to_rfc3339()),
+        exit_code: code,
     })
 }
 
@@ -300,5 +330,45 @@ mod tests {
         let args: Vec<_> = cmd.get_args().map(|a| a.to_string_lossy().to_string()).collect();
         assert_eq!(args, vec!["-i", "a/web3c_inventory.yml", "-i", "a/web3c_oracle.yml"]);
         assert!(!args.iter().any(|a| a.contains(',')), "jamais de liste séparée par des virgules");
+    }
+
+    fn args_of(cmd: &Command) -> Vec<String> {
+        cmd.get_args().map(|a| a.to_string_lossy().to_string()).collect()
+    }
+
+    #[test]
+    fn extra_vars_travel_as_one_json_object() {
+        let mut cmd = Command::new("ansible-playbook");
+        let vars = HashMap::from([
+            ("b".to_string(), "x ansible_ssh_common_args=-oProxyCommand=id".to_string()),
+            ("a".to_string(), "1".to_string()),
+        ]);
+        add_extra_vars(&mut cmd, Some(vars));
+        let args = args_of(&cmd);
+        assert_eq!(args[0], "-e");
+        let parsed: serde_json::Value = serde_json::from_str(&args[1]).unwrap();
+        assert_eq!(parsed["b"], "x ansible_ssh_common_args=-oProxyCommand=id");
+        assert_eq!(args.len(), 2, "une seule option -e");
+
+        let mut empty = Command::new("ansible-playbook");
+        add_extra_vars(&mut empty, Some(HashMap::new()));
+        assert!(args_of(&empty).is_empty());
+    }
+
+    #[test]
+    fn check_and_diff_map_to_their_flags() {
+        let mut cmd = Command::new("ansible-playbook");
+        add_options(&mut cmd, RunOptions { check: true, diff: true });
+        assert_eq!(args_of(&cmd), vec!["--check", "--diff"]);
+        let mut none = Command::new("ansible-playbook");
+        add_options(&mut none, RunOptions::default());
+        assert!(args_of(&none).is_empty());
+    }
+
+    #[test]
+    fn only_a_zero_exit_code_is_a_success() {
+        assert_eq!(status_of(Some(0)), "success");
+        assert_eq!(status_of(Some(2)), "failed");
+        assert_eq!(status_of(None), "failed");
     }
 }

@@ -77,10 +77,20 @@ Sans `dist/`, le serveur refuse de démarrer et le dit.
 | `FLEETFORGE_WEB_USER` | — | identifiant Basic Auth |
 | `FLEETFORGE_WEB_PASSWORD_HASH` | — | empreinte argon2id (production) |
 | `FLEETFORGE_WEB_PASSWORD` | — | mot de passe en clair (**développement seul**) |
-| `FLEETFORGE_INVENTORIES_PATH` | réglage stocké | impose les inventaires |
-| `FLEETFORGE_PLAYBOOKS_PATH` | réglage stocké | impose les playbooks |
+| `FLEETFORGE_API_USER` | — | compte d'automatisation (AgentHub), voir « API d'automatisation » |
+| `FLEETFORGE_API_PASSWORD_HASH` | — | son empreinte argon2id (production) |
+| `FLEETFORGE_API_PASSWORD` | — | son mot de passe en clair (**développement seul**) |
+| `FLEETFORGE_ANSIBLE_DIR` | — | arbre Ansible : impose `<dossier>/inventories` et `<dossier>/playbooks` |
+| `FLEETFORGE_INVENTORIES_PATH` | réglage stocké | impose les inventaires (prime sur `FLEETFORGE_ANSIBLE_DIR`) |
+| `FLEETFORGE_PLAYBOOKS_PATH` | réglage stocké | impose les playbooks (prime sur `FLEETFORGE_ANSIBLE_DIR`) |
+| `FLEETFORGE_RO_SSH_KEY` | `~/.ssh/id_fleetforge_ro` | clé de diagnostic lecture seule (`ssh_diagnose`) |
+| `FLEETFORGE_RO_SSH_USER` | `openclaw-ro` | compte lecture seule des machines |
+| `FLEETFORGE_RO_KNOWN_HOSTS` | `~/.ssh/known_hosts_fleetforge_ro` | `known_hosts` propre au diagnostic |
+| `FLEETFORGE_RO_TIMEOUT_SECS` | `60` | délai d'un diagnostic (5 à 600) |
 
-L'empreinte prime sur le clair quand les deux sont posés.
+L'empreinte prime sur le clair quand les deux sont posés. Un compte
+d'automatisation à moitié renseigné (utilisateur sans secret, ou l'inverse)
+empêche le démarrage ; il doit porter un autre nom que le compte opérateur.
 
 **Le serveur REFUSE de démarrer** sur autre chose que la boucle locale sans
 `FLEETFORGE_WEB_USER` + secret : cette application lance de vrais playbooks avec les
@@ -129,6 +139,93 @@ systemctl status fleetforge
 journalctl -u fleetforge -f
 curl -s localhost:9750/healthz          # -> ok
 ```
+
+### API d'automatisation (AgentHub)
+
+Le poste « Infrastructure Manager » d'AgentHub pilote le parc par le même
+`POST /api/<commande>` que le frontal, avec un **compte à lui**, cantonné à six
+commandes et au flux d'un run (`auth::AUTOMATION_COMMANDS`) ; tout le reste
+répond `403 forbidden`. Commandes servies par le web seulement : elles n'ont
+pas d'équivalent dans l'application de bureau (CLAUDE.md § 3).
+
+**Identifiants** — jamais dans un dépôt. Par le déploiement : `ff_api_user:
+agenthub` dans `playbooks/group_vars/<parc>.yml`, puis
+`./play.sh web3c deploy-fleetforge.yml` ; le mot de passe est tiré au premier
+passage, chiffré dans ce même fichier (à committer), et la machine n'en
+reçoit que l'empreinte (`FLEETFORGE_API_USER` / `FLEETFORGE_API_PASSWORD_HASH`).
+Le relire pour le saisir dans AgentHub :
+
+```sh
+ansible -i inventories/web3c_inventory.yml -m debug -a 'var=ff_api_password' infra1
+```
+
+À la main (autre machine) : tirer un mot de passe, en produire l'empreinte par
+l'entrée standard, ne poser que l'empreinte dans l'environnement du service :
+
+```sh
+printf '%s' "$MOT_DE_PASSE" | fleetforge-web hash-password   # -> $argon2id$…
+```
+
+**Réseau** — le vhost `infra.<domaine>` n'admet que la `whitelist` : l'adresse
+de sortie d'AgentHub doit y être ajoutée (gabarit `fleetforge.conf` du dépôt de
+parc), en HTTPS. Jamais le port 9750 en direct depuis une autre machine :
+l'authentification basique y circulerait en clair.
+
+**Ce que ce compte ne peut pas faire, par construction :**
+- désigner un parc autrement que par son NOM (pas de chemin de fichier
+  d'inventaire), un playbook hors du dossier des playbooks, un `--limit` hors
+  des hôtes et groupes du parc (ni motif, ni `!`, ni `,`) ;
+- passer une variable `ansible_*` ou une valeur contenant un gabarit Jinja ;
+- lancer un run réel sans le `--check` du MÊME lancement (parc, playbook,
+  limit, variables) achevé depuis moins d'une heure → `409 check_required` ;
+- attendre un parc occupé : `409 run_busy` (un run à la fois par parc, verrou
+  partagé avec l'opérateur, qui lui attend) ;
+- lire une sortie non caviardée : `output_tail`, le flux SSE, la sortie de
+  `ssh_diagnose` passent par `fleetforge_core::redact` (motifs de ro-gate —
+  défense en profondeur, pas une garantie).
+
+**Erreurs** — toujours `{ "error": "<message>", "code": "<code>" }` :
+`invalid_argument`/`ambiguous_host` (400), `unauthorized` (401), `forbidden`
+(403), `unknown_parc`/`unknown_host`/`unknown_playbook`/`unknown_run` (404),
+`run_busy`/`run_id_in_use`/`check_required` (409), `upstream_error` (502),
+`not_configured` (503), `timeout` (504), `failed` (400, erreur non qualifiée).
+
+| Commande | Corps | Réponse |
+|---|---|---|
+| `list_hosts` | `{ "parc": "web3c" }` | `[{ "name", "ip", "port" (null = 22), "groups", "roles", "provider" (null si absent) }]` |
+| `list_playbooks` | — | `[{ "path": "deploy-x.yml", "family", "service", "label", "description" }]` — `family` : `deploy`, `update`, `remove`, `purge`, `security`, `monitoring`, `backup`, `setup`, `migrate`, `other` |
+| `alertmanager_alerts` | `{ "parc" }` | JSON de `GET /api/v2/alerts?active=true&silenced=false&inhibited=false`, tel quel |
+| `ssh_diagnose` | `{ "host", "verb", "args"?: [..], "parc"? }` | `{ "parc", "host", "verb", "args", "exit_code", "output", "truncated" }` |
+| `run_ansible_playbook` | `{ "parc", "playbook", "limit"?, "extra_vars"?, "check"?, "diff"?, "detach"?, "run_id"?, "label"? }` | `detach: true` → `{ "run_id", "state": "running", "check", "diff" }` ; sinon le run terminé + `run_id` |
+| `run_status` | `{ "run_id", "tail_lines"? (50, ≤ 500) }` | `{ "run_id", "state": "running"\|"success"\|"failed", "exit_code", "started_at", "ended_at", "output_tail", "label", "check", "diff" }` |
+
+Détails :
+- `run_ansible_playbook` accepte aussi la forme du frontal (`inventoryPath`,
+  `playbookPath`, `limitHosts`, `extraVars`, `deployId`). Sans `run_id`, le
+  serveur en fabrique un (`api-<ms>-<n>`). Le run se termine et se clôt même
+  si le client se déconnecte ; sa sortie en direct reste
+  `GET /api/events/<run_id>` (SSE, événement `end` à la fin).
+- `run_status` lit le registre en mémoire : un run oublié (redémarrage du
+  service, « vider les runs terminés » côté opérateur) répond `unknown_run`.
+- `ssh_diagnose` : verbes de `ro-gate` seulement — `logs journal|unit
+  NOM|docker NOM [DURÉE] [all]`, `status UNITÉ`, `containers`, `stats`,
+  `firewall`, `system`, `ports`, `http PORT [CHEMIN]` ; `verb` peut porter la
+  demande entière (`"logs docker searxng 1h"`). Sans `parc`, l'hôte est cherché
+  dans tous les parcs (refusé s'il existe dans plusieurs). Exige
+  `ff_ro_diagnostics: true` au déploiement puis
+  `./play.sh <parc> deploy-readonly-user.yml --limit <entrées canoniques>` :
+  sans clé, `503 not_configured`.
+- `alertmanager_alerts` : URL lue dans `group_vars/<parc>.yml` —
+  `alertmanager_url` en clair s'il existe, sinon `alertmanager_host` (entrée
+  d'inventaire) et `alertmanager_port` (9093), sinon l'entrée qui porte la
+  famille `alertmanager`. La machine de FleetForge doit pouvoir joindre ce port
+  (filtrage `DOCKER-USER` de la machine de supervision).
+
+**Webhook d'Alertmanager vers le poste** — `alertmanager_agenthub_webhook_url`
+(vault du parc, forme `https://<hub>/api/v1/agenthub/hooks/<postId>/<secret>`)
+puis `./play.sh <parc> deploy-alertmanager.yml` : chaque alerte part par
+e-mail ET vers le webhook, résolutions comprises. Absente : configuration
+inchangée.
 
 ## 3. TUI (`fleetforge`)
 
@@ -286,3 +383,11 @@ cargo test -p fleetforge-web --test command_parity
 Aucun fichier du frontal autre que `transport.ts` ne doit importer
 `@tauri-apps/*` : un tel import casse la version web à l'exécution, sur un
 écran précis, sans que rien ne le signale à la construction.
+
+Seule exception : les commandes de l'API d'automatisation (`list_hosts`,
+`list_playbooks`, `alertmanager_alerts`, `ssh_diagnose`, `run_status`),
+servies par le web uniquement — leur appelant est distant, le frontal ne les
+appelle pas. Leur logique vit dans le cœur (`automation`, `ro_gate`), une
+commande Tauri n'en serait qu'un adaptateur de quelques lignes. Elles figurent
+dans `COMMANDS` comme les autres, et `tests/automation_api.rs` les essaie de
+bout en bout contre un parc factice (`ansible-playbook` et `ssh` simulés).

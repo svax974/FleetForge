@@ -11,8 +11,10 @@
 //! sur une machine neuve, avant toute configuration applicative.
 
 use anyhow::{bail, Result};
+use fleetforge_core::ro_gate::RoGateConfig;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
+use std::time::Duration;
 
 /// Port applicatif par défaut. Inscrit au registre des ports de CLAUDE.md :
 /// 9750, `/metrics` sur le même port (exposition Prometheus native).
@@ -22,12 +24,27 @@ pub struct Config {
     pub addr: SocketAddr,
     /// Racine des fichiers statiques (le `dist/` produit par `vite build`).
     pub static_dir: PathBuf,
-    pub auth: Option<BasicAuth>,
+    /// Comptes admis. Vide : aucune authentification — boucle locale seule.
+    pub accounts: Vec<Account>,
+    /// Diagnostic en lecture seule (`ssh_diagnose`).
+    pub ro_gate: RoGateConfig,
 }
 
-pub struct BasicAuth {
+/// Ce qu'un compte a le droit de faire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    /// L'opérateur : toute l'application.
+    Operator,
+    /// Un appelant programmatique (AgentHub) : la seule API d'automatisation
+    /// (`auth::AUTOMATION_COMMANDS`), entrées validées strictement, sorties
+    /// caviardées, et un run réel seulement après son `--check`.
+    Automation,
+}
+
+pub struct Account {
     pub user: String,
     pub secret: Secret,
+    pub role: Role,
 }
 
 /// Ce que le serveur détient pour vérifier un mot de passe.
@@ -44,8 +61,9 @@ pub enum Secret {
 }
 
 impl Config {
-    /// Lit `FLEETFORGE_WEB_*`. Échoue plutôt que de démarrer dans un état qui
-    /// exposerait le pilotage du parc sans authentification.
+    /// Lit `FLEETFORGE_WEB_*`, `FLEETFORGE_API_*` et `FLEETFORGE_RO_*`.
+    /// Échoue plutôt que de démarrer dans un état qui exposerait le pilotage
+    /// du parc sans authentification.
     pub fn from_env() -> Result<Self> {
         let bind: IpAddr = env("FLEETFORGE_WEB_BIND")
             .unwrap_or_else(|| "127.0.0.1".to_string())
@@ -59,16 +77,27 @@ impl Config {
             .map(PathBuf::from)
             .unwrap_or_else(default_static_dir);
 
-        // L'empreinte prime : quand les deux sont posées, c'est la variable
-        // héritée d'un déploiement plus ancien qu'on ignore, pas la neuve.
-        let secret = env("FLEETFORGE_WEB_PASSWORD_HASH")
-            .map(Secret::Hash)
-            .or_else(|| env("FLEETFORGE_WEB_PASSWORD").map(Secret::Plain));
+        let mut accounts = Vec::new();
+        if let (Some(user), Some(secret)) = (env("FLEETFORGE_WEB_USER"), secret_of("FLEETFORGE_WEB")) {
+            accounts.push(Account { user, secret, role: Role::Operator });
+        }
 
-        let auth = match (env("FLEETFORGE_WEB_USER"), secret) {
-            (Some(user), Some(secret)) => Some(BasicAuth { user, secret }),
-            _ => None,
-        };
+        // Compte d'automatisation (AgentHub). À moitié renseigné, c'est une
+        // erreur de déploiement : la taire laisserait AgentHub en 401 sans que
+        // rien n'en désigne la cause.
+        match (env("FLEETFORGE_API_USER"), secret_of("FLEETFORGE_API")) {
+            (Some(user), Some(secret)) => {
+                if accounts.iter().any(|a| a.user == user) {
+                    bail!("FLEETFORGE_API_USER doit différer de FLEETFORGE_WEB_USER ({user})");
+                }
+                accounts.push(Account { user, secret, role: Role::Automation });
+            }
+            (None, None) => {}
+            _ => bail!(
+                "compte d'automatisation incomplet : FLEETFORGE_API_USER et \
+                 FLEETFORGE_API_PASSWORD_HASH vont ensemble"
+            ),
+        }
 
         // Cette application lance des playbooks Ansible sur tout le parc, avec
         // les clés SSH de la machine. Sur une interface autre que la boucle
@@ -76,7 +105,7 @@ impl Config {
         // c'est un accès administrateur ouvert. Le refus est donc au démarrage,
         // pas au premier appel — un serveur qui démarre est un serveur qu'on
         // croit configuré.
-        if auth.is_none() && !bind.is_loopback() {
+        if accounts.is_empty() && !bind.is_loopback() {
             bail!(
                 "FLEETFORGE_WEB_USER et FLEETFORGE_WEB_PASSWORD_HASH sont obligatoires pour \
                  écouter sur {bind} : sans eux, n'importe qui joignant ce port pilote \
@@ -88,9 +117,41 @@ impl Config {
         Ok(Self {
             addr: SocketAddr::new(bind, port),
             static_dir,
-            auth,
+            accounts,
+            ro_gate: ro_gate_from_env()?,
         })
     }
+}
+
+/// Secret d'un compte : `<PRÉFIXE>_PASSWORD_HASH`, à défaut `<PRÉFIXE>_PASSWORD`.
+///
+/// L'empreinte prime : quand les deux sont posées, c'est la variable héritée
+/// d'un déploiement plus ancien qu'on ignore, pas la neuve.
+fn secret_of(prefix: &str) -> Option<Secret> {
+    env(&format!("{prefix}_PASSWORD_HASH"))
+        .map(Secret::Hash)
+        .or_else(|| env(&format!("{prefix}_PASSWORD")).map(Secret::Plain))
+}
+
+/// Réglages du diagnostic lecture seule. La clé n'est pas exigée au
+/// démarrage : sans elle, `ssh_diagnose` répond `not_configured` et le reste
+/// de l'application fonctionne.
+fn ro_gate_from_env() -> Result<RoGateConfig> {
+    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+    let timeout = match env("FLEETFORGE_RO_TIMEOUT_SECS") {
+        Some(t) => t.parse::<u64>()?.clamp(5, 600),
+        None => 60,
+    };
+    Ok(RoGateConfig {
+        key: env("FLEETFORGE_RO_SSH_KEY")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".ssh/id_fleetforge_ro")),
+        user: env("FLEETFORGE_RO_SSH_USER").unwrap_or_else(|| "openclaw-ro".to_string()),
+        known_hosts: env("FLEETFORGE_RO_KNOWN_HOSTS")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".ssh/known_hosts_fleetforge_ro")),
+        timeout: Duration::from_secs(timeout),
+    })
 }
 
 fn env(key: &str) -> Option<String> {
