@@ -4,6 +4,10 @@
 # une cible sans ouverture apparaît dans Prometheus et reste `down`, ce qui
 # ressemble à une machine en panne alors que c'est un pare-feu.
 
+# `remote_user` sur chaque tâche déléguée : sans lui, la délégation hérite du
+# compte du play. Au bootstrap d'une image OVH/Oracle c'est `ubuntu`
+# (setup-server.yml, `bootstrap_users`), qui n'existe pas sur l'hôte de
+# supervision — lequel se pilote toujours en `remote_username`.
 - name: Set prometheus home on monitor host
   ansible.builtin.set_fact:
     prometheus_home: "/home/{{ remote_username }}/prometheus"
@@ -16,6 +20,7 @@
     group: "{{ remote_username }}"
     mode: "0755"
   delegate_to: "{{ prometheus_host }}"
+  remote_user: "{{ remote_username }}"
 
 # UNE cible par MACHINE, pas par entrée d'inventaire : plusieurs entrées
 # partagent la même adresse (ctdapi, dev, docker-repo, xbot…).
@@ -39,6 +44,7 @@
   args:
     executable: /bin/bash
   delegate_to: "{{ prometheus_host }}"
+  remote_user: "{{ remote_username }}"
   register: exporter_existing_target
   changed_when: false
   check_mode: false
@@ -54,6 +60,7 @@
     group: "{{ remote_username }}"
     mode: "0644"
   delegate_to: "{{ prometheus_host }}"
+  remote_user: "{{ remote_username }}"
   notify: reload prometheus
   when: >-
     exporter_existing_target.stdout_lines | length == 0

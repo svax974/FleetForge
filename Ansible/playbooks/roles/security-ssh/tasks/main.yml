@@ -248,7 +248,7 @@
     host: "{{ ansible_host }}"
     port: "{{ ssh_custom_port }}"
     delay: 3
-    timeout: 30
+    timeout: 120
     state: started
   delegate_to: localhost
   become: false

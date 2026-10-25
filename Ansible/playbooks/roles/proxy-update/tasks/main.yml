@@ -110,6 +110,18 @@
   # les déployer ferait inclure leur contenu deux fois.
   when: not (item | basename).startswith('_')
 
+# Vhost de santé du front (sonde du Load Balancer Cloudflare), posé APRÈS les
+# vhosts du parc : le répertoire sites-enabled vient d'être vidé, il faut donc le
+# reposer à chaque passage — d'où le rôle plutôt que le répertoire du parc.
+- name: Deploy the front health vhost
+  ansible.builtin.template:
+    src: healthz.conf.j2
+    dest: /etc/nginx/sites-enabled/healthz.conf
+    owner: root
+    group: root
+    mode: '0644'
+  tags: [healthz]
+
 - name: Copy nginx streams enabled confs
   ansible.builtin.template:
     src: "{{ item }}"

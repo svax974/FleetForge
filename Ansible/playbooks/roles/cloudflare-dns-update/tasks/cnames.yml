@@ -58,6 +58,10 @@
   when:
     - hostvars[item].proxy_hostname is defined
     - hostvars[item].proxy_hostname is search('\.' ~ cfdns_zone ~ '$')
+    # Le global du parc (group_vars) vaut le front lui-même : un hôte sans attribut
+    # d'inventaire le HÉRITE. Ce n'est pas un nom public — le publier ferait
+    # revendiquer `proxy.<zone>` par tous les hôtes (CNAME bouclé).
+    - hostvars[item].proxy_hostname != 'proxy.' ~ cfdns_zone
   delegate_to: localhost
   become: false
   run_once: true
@@ -79,15 +83,26 @@
   become: false
   run_once: true
 
-- name: Fail on duplicate CNAME names
+# Plusieurs hôtes peuvent porter le MÊME nom public (vpn1/vpn2 → vpn.<zone>,
+# back1-prod/back2-prod → back-prod.<zone>) : tous pointent sur le même front,
+# le CNAME est donc identique et se publie une seule fois. Seul un désaccord
+# sur `proxy_hostname_proxied` entre deux hôtes du même nom est un vrai conflit
+# (le dernier écrirait par-dessus l'autre à chaque exécution).
+- name: Fail on CNAME names claimed with different proxied states
   ansible.builtin.assert:
     that:
       - (cfdns_cnames | default([]) | map(attribute='record') | list | unique | length)
-        == (cfdns_cnames | default([]) | length)
+        == (cfdns_cnames | default([]) | map('community.general.json_query', '[record, proxied]') | map('join', '|') | list | unique | length)
     fail_msg: >-
-      Deux hôtes d'inventaire revendiquent le même nom CNAME :
-      {{ cfdns_cnames | default([]) | map(attribute='record') | list
-         | difference(cfdns_cnames | default([]) | map(attribute='record') | list | unique) | unique | join(', ') }}.
+      Un même nom CNAME est déclaré avec des valeurs `proxy_hostname_proxied`
+      différentes selon l'hôte : {{ cfdns_cnames | default([]) | map(attribute='record') | list | join(', ') }}.
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Publish each CNAME name once
+  ansible.builtin.set_fact:
+    cfdns_cnames: "{{ cfdns_cnames | default([]) | unique(attribute='record') }}"
   delegate_to: localhost
   become: false
   run_once: true

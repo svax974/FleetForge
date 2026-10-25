@@ -74,4 +74,5 @@
 # répertoires file_sd sont repartis vides et plus rien n'était scrapé.
 - name: Register the Prometheus target and scrape rules
   ansible.builtin.include_tasks: target.yml
+  when: exporter_register_target | bool
   tags: [monitoring]

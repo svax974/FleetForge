@@ -53,4 +53,8 @@
       -d "*.preview.{{ item }}"
     creates: "/etc/letsencrypt/live/preview.{{ item }}/fullchain.pem"
   # Seul le domaine du hub (pas tradekong.app…) : `agenthub_preview_domains` pour le changer.
-  loop: "{{ agenthub_preview_domains | default(['web3c.cc']) }}"
+  # Borné aux domaines du parc (`domains`) : le fichier d'identifiants
+  # `cloudflare_<domaine>.ini` n'est posé que pour eux. Sans ce filtre, un parc
+  # qui ne gère pas `web3c.cc` (papanglabs) échouait ici sur « File not found:
+  # cloudflare_web3c.cc.ini » et tout `deploy-proxy` s'arrêtait.
+  loop: "{{ agenthub_preview_domains | default(['web3c.cc']) | intersect(domains) }}"

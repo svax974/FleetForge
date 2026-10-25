@@ -56,3 +56,22 @@
   remote_user: "{{ remote_username }}"
   roles:
     - proxy-monitoring
+
+# ── DNS Cloudflare ─────────────────────────────────────────────────────────
+# Publie (ou met à jour) les A de l'inventaire, dont le front round-robin
+# `proxy.<zone>` — un proxy ajouté au groupe y entre ici — puis les CNAME des
+# services. Même rôle que `update-cloudflare-dns.yml`, joué depuis le poste de
+# contrôle par l'API (aucune connexion aux proxies). Placé APRÈS le déploiement :
+# un nom ne doit pas être publié avant que le proxy ne serve. Ne supprime rien :
+# un proxy retiré du groupe reste à nettoyer à la main.
+# `hosts: proxies` (et non `all`) : l'appartenance au parc donne les group_vars
+# (`cloudflare_token`, `domain_name`). Rejouable seul :
+#   ./play.sh web3c deploy-proxy.yml --tags dns
+- name: Synchronisation DNS Cloudflare
+  hosts: proxies
+  gather_facts: false
+  roles:
+    - role: cloudflare-dns-update
+      delegate_to: localhost
+      run_once: true
+      tags: [dns]

@@ -1,5 +1,12 @@
 ---
 node_exporter_version: "1.8.2"
+
+# Enregistrer la cible auprès de `prometheus_host` et ouvrir le scrape dans ufw.
+# `setup-server.yml` le met à false : un bootstrap ne doit dépendre ni de la
+# supervision ni d'un autre hôte (elle peut être absente, en cours
+# d'installation, ou être la machine bootstrapée elle-même). Tout `deploy-*`
+# la pose ensuite via `host-preflight`, qui vérifie et répare la cible.
+exporter_register_target: true
 # Port d'ÉCOUTE : 9100 sur toutes les machines, sans exception. C'est aussi ce
 # que voit ufw (le NAT a déjà traduit le port à son arrivée).
 node_exporter_port: 9100

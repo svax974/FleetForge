@@ -1,0 +1,34 @@
+{#
+  Vhost de santé du front, posé par le RÔLE (et non par le répertoire du parc) :
+  il doit exister sur chaque proxy à chaque déploiement, quel que soit le parc.
+
+  Sonde du Load Balancer Cloudflare. Elle ne peut pas viser un vhost de service :
+  ceux-ci filtrent par adresse (whitelist, parc) et refusent les IP de Cloudflare
+  — 403 constaté le 24/10/2026 sur store.<domaine>, les deux proxies sortaient du
+  pool alors qu'ils servaient normalement.
+
+  Réponse fixe, rendue par nginx seul : aucun amont, donc la sonde ne dépend
+  d'aucun back et ne le charge pas. Elle prouve ce que le client emprunte :
+  écoute 443, TLS et certificat, configuration nginx chargée. Rien n'est exposé.
+  Journal coupé : une requête par minute et par point de présence Cloudflare.
+-#}
+server {
+  listen 443 ssl;
+  listen [::]:443 ssl;
+
+  server_name {{ proxy_healthz_hostname }};
+
+  access_log off;
+
+  location = {{ proxy_healthz_path }} {
+    default_type text/plain;
+    return 200 "ok\n";
+  }
+
+  location / {
+    return 404;
+  }
+
+  ssl_certificate /etc/letsencrypt/live/{{ domain_name }}/fullchain.pem;
+  ssl_certificate_key /etc/letsencrypt/live/{{ domain_name }}/privkey.pem;
+}

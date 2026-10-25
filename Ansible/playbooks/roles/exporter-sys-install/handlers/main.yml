@@ -5,9 +5,18 @@
     state: restarted
     daemon_reload: true
 
+# Le conteneur peut ne pas exister (Prometheus pas encore installé, ou c'est la
+# machine qu'on est en train de bootstrapper) : `docker_container` tentait alors
+# de le CRÉER et échouait (« Cannot create container when image is not
+# specified »). Un redémarrage n'a de sens que pour un conteneur existant.
 - name: reload prometheus
-  community.docker.docker_container:
-    name: prometheus
-    state: started
-    restart: yes
+  ansible.builtin.shell: |
+    docker inspect prometheus >/dev/null 2>&1 || { echo absent; exit 0; }
+    docker restart prometheus >/dev/null && echo restarted
+  args:
+    executable: /bin/bash
+  register: prometheus_reload
+  changed_when: "'restarted' in prometheus_reload.stdout"
   delegate_to: "{{ prometheus_host }}"
+  remote_user: "{{ remote_username }}"
+  ignore_unreachable: true

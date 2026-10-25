@@ -197,7 +197,7 @@ fn get_role_metadata(name: &str) -> (String, String) {
         "proxy-install" => ("Installation Nginx proxy".into(), "Installe et configure Nginx comme reverse proxy avec support SSL.".into()),
         "proxy-remove" => ("Suppression proxy Nginx".into(), "Arrête et désinstalle Nginx (configs préservées).".into()),
         "proxy-purge" => ("Purge proxy Nginx".into(), "Supprime Nginx, tous ses fichiers de configuration et les certificats SSL.".into()),
-        "proxy-update" => ("MAJ vhosts proxy".into(), "Resynchronise nginx.conf, vhosts, streams, certificats et htpasswd des proxies depuis Ansible/parcs/<parc_name>/nginx/ (gitignoré), valide avec nginx -t puis redémarre. Le répertoire du parc fait foi : un vhost qui en sort est retiré des proxies.".into()),
+        "proxy-update" => ("MAJ vhosts proxy".into(), "Resynchronise nginx.conf, vhosts, streams, certificats et htpasswd des proxies depuis Ansible/parcs/<parc_name>/nginx/ (gitignoré), valide avec nginx -t puis redémarre. Le répertoire du parc fait foi : un vhost qui en sort est retiré des proxies. Pose aussi le vhost /healthz (sonde du Load Balancer Cloudflare), commun à tous les parcs.".into()),
         "proxy-certs-bind9" => ("Certificats SSL (BIND9)".into(), "Gère les certificats Let's Encrypt via le challenge DNS avec BIND9 (RFC2136).".into()),
 
         // Nginx
@@ -332,7 +332,7 @@ fn get_role_metadata(name: &str) -> (String, String) {
         "exporter-llamacpp-remove" => ("Suppression exporteur llama.cpp".into(), "Retire l'instance llama.cpp des targets Prometheus et ferme le port firewall. Variable : llamacpp_instance_id (défaut : 1).".into()),
 
         // DNS / Cloudflare
-        "cloudflare-dns-update" => ("Synchronisation DNS Cloudflare".into(), "Publie un enregistrement A par hôte d'inventaire portant un `hostname` dans la zone du parc, pointant sur son `ansible_host`. Créé s'il manque, mis à jour s'il diffère (`solo`, sinon un second A ferait répondre la zone en tourniquet), jamais supprimé : ce qui existe sans correspondre à un hôte n'est pas touché. Les hôtes écartés sont listés avec leur motif.".into()),
+        "cloudflare-dns-update" => ("Synchronisation DNS Cloudflare".into(), "Publie un enregistrement A par hôte d'inventaire portant un `hostname` dans la zone du parc, pointant sur son `ansible_host`. Créé s'il manque, mis à jour s'il diffère (`solo`, sinon un second A ferait répondre la zone en tourniquet), jamais supprimé : ce qui existe sans correspondre à un hôte n'est pas touché. Les hôtes écartés sont listés avec leur motif. Les A records en tourniquet de proxy.<zone> se coupent par `cfdns_publish_proxy_front: false` quand ce nom est un Load Balancer.".into()),
 
         // Application PapangLabs
         "papanglabs-back-install" => ("Installation back PapangLabs".into(), "Synchronise le contexte de build (rsync -L : back/src/modules_shared est un ensemble de liens vers .libs, exclu de la copie), dépose les deux .env — runtime et interpolation compose — et construit l'image. Ne démarre rien. Variables : pgb_src, pgb_env_file, pgb_compose_file.".into()),

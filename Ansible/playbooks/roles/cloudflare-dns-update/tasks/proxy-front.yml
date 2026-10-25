@@ -22,6 +22,13 @@
 #     pour garantir ces enregistrements AVANT de publier un CNAME, sans quoi
 #     le CNAME pointerait vers un nom sans aucun A record, donc injoignable.
 #
+# Désactivable : `cfdns_publish_proxy_front: false` quand le front est servi
+# par un Load Balancer Cloudflare. Ce nom appartient alors au load balancer et
+# un A record à côté serait refusé (erreur 81054 — un nom de load balancer ne
+# coexiste pas avec un enregistrement DNS), sans que le reste du déploiement
+# n'y gagne rien. Les CNAME de service vers `proxy.<zone>` restent publiés :
+# le load balancer répond à ce nom.
+#
 # Ne PURGE PAS un proxy retiré du groupe : un record laissé par un proxy
 # démantelé resterait dans le tourniquet. À nettoyer à la main le jour où le
 # groupe `proxies` change (aucun parc de ce dépôt n'en a fait l'expérience).
@@ -39,7 +46,9 @@
   loop: "{{ groups['proxies'] | default([]) }}"
   loop_control:
     label: "proxy.{{ cfdns_zone }} → {{ hostvars[item].ansible_host }} ({{ item }})"
-  when: groups['proxies'] | default([]) | length > 0
+  when:
+    - cfdns_publish_proxy_front | bool
+    - groups['proxies'] | default([]) | length > 0
   delegate_to: localhost
   become: false
   run_once: true
@@ -50,7 +59,9 @@
     msg: >-
       proxy.{{ cfdns_zone }} : {{ groups['proxies'] | default([]) | length }} proxy(ies) en
       round-robin ({{ groups['proxies'] | default([]) | map('extract', hostvars, 'ansible_host') | join(', ') }}).
-  when: groups['proxies'] | default([]) | length > 0
+  when:
+    - cfdns_publish_proxy_front | bool
+    - groups['proxies'] | default([]) | length > 0
   delegate_to: localhost
   become: false
   run_once: true

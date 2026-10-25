@@ -57,7 +57,7 @@ starnet_config_dir: "{{ starnet_home }}/.config/starnet"
 # monde. Version dans le chemin : une montée de version pose un NOUVEAU
 # répertoire, l'ancien reste utilisable jusqu'au redémarrage.
 # Node 22 = celui de la CI amont (README, « Node.js 22 matches CI »).
-starnet_node_version: "22.23.3"
+starnet_node_version: "24.22.1"
 starnet_node_arch: "{{ {'x86_64': 'x64', 'aarch64': 'arm64'}[ansible_architecture] }}"
 starnet_node_root: "{{ starnet_home }}/.local/lib/starnet-node"
 starnet_node_dir: "{{ starnet_node_root }}/node-v{{ starnet_node_version }}"

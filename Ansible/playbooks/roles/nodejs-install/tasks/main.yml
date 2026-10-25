@@ -23,7 +23,6 @@
 - name: Install Node.js
   ansible.builtin.apt:
     name: nodejs
-    state: present
+    state: latest
     update_cache: true
   become: true
-  when: node_check.rc != 0 or ('v' + nodejs_major) not in (node_check.stdout | default(''))

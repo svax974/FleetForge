@@ -12,6 +12,11 @@
 #
 #   ./play.sh web3c setup-server.yml --limit small3 -e ansible_user=ubuntu
 #
+# Le compte d'image est DÉDUIT du `provider` (`bootstrap_users` ci-dessous) :
+# ovh et oracle interdisent root, ils se connectent en `ubuntu` sans `-e`. Le
+# `-e ansible_user=…` reste prioritaire (image atypique, compte `debian`). Ne
+# vaut que pour ce playbook : les `deploy-*` se connectent en `srvc`.
+#
 # Ne pas figer ce compte dans l'inventaire : il ne vaut QUE pour le tout premier
 # passage. Une fois `security-create-user` joué, la machine se pilote comme les
 # autres, avec `remote_username` hérité des group_vars.
@@ -23,17 +28,26 @@
 # Ne jamais jouer sans `--limit` : le motif `all` rejouerait le bootstrap sur
 # tout l'inventaire, dont `install-tools` qui fait un `apt upgrade dist`.
 #
-# Le premier passage avec `-e ansible_user=ubuntu` (image sans login root) ÉCHOUE
-# sur l'enregistrement de la cible : une variable `-e` s'applique à tous les
-# hôtes, y compris celui vers lequel `exporter-sys-install` délègue, et il n'y a
-# pas de compte `ubuntu` sur l'hôte Prometheus. Tout le socle est posé à ce
-# stade ; terminer par un passage ordinaire, qui enregistre la cible :
-#   ./play.sh web3c deploy-exporter-sys.yml --limit <hôte>
+# INDÉPENDANT de la supervision et des services : le socle (SSH, utilisateur,
+# outils, Docker, node_exporter) se pose sans toucher à aucun autre hôte, y
+# compris sur la machine de supervision elle-même. L'enregistrement de la cible
+# Prometheus est une étape finale « au mieux » (post_tasks) : si elle échoue —
+# supervision absente ou pas encore installée, ou `-e ansible_user=ubuntu`, qui
+# s'applique aussi à l'hôte vers lequel on délègue —, un AVERTISSEMENT le dit
+# et le play réussit quand même. La cible est alors posée par `host-preflight`
+# au premier `deploy-*`, ou tout de suite par :
+#   ./play.sh <parc> deploy-exporter-sys.yml --limit <hôte>
 
 - name: Common server setup
   hosts: all
-  remote_user: root
+  remote_user: "{{ bootstrap_users[provider | default('')] | default('root') }}"
   gather_facts: false
+
+  vars:
+    # Fournisseurs dont l'image interdit le login root : compte sudoer d'origine.
+    bootstrap_users:
+      ovh: ubuntu
+      oracle: ubuntu
 
   # `become` est porté par les RÔLES, pas par le play : `remote_user: root` ne
   # décide de rien (une variable de connexion l'emporte sur un mot-clé de play,
@@ -79,7 +93,10 @@
     # laissant SystemdUnitFailed et les alertes de sauvegarde sans séries.
     # Une machine bootstrapée gagnait ainsi un exporter que personne ne scrapait,
     # cas de small3.
-    - { role: exporter-sys-install, become: true }
+    # Installe node_exporter SEUL : pas d'enregistrement de cible, pas de règle
+    # de scrape (`exporter_register_target: false`). Le bootstrap ne dépend ni
+    # de la supervision ni d'aucun autre hôte — voir post_tasks.
+    - { role: exporter-sys-install, become: true, exporter_register_target: false }
     # At the end of root stuff, disable root ssh and ssh from everywhere
     #- security-restrict
 
@@ -99,3 +116,29 @@
           security-ssh, set-hostname, install-scripts, install-tools,
           install-python, install-docker, security-create-user,
           readonly-user-install, journald-setup, exporter-sys-install
+
+    # Au mieux, et APRÈS le témoin : le bootstrap est réussi quoi qu'il arrive
+    # ici. `rescue` rend l'échec visible sans le propager (jamais silencieux :
+    # une cible absente = une machine que personne ne supervise).
+    # `ignore_unreachable` : un `rescue` n'attrape PAS un hôte injoignable, et ici
+    # la délégation vers `prometheus_host` l'est si un `-e ansible_user=…`
+    # (compte de l'image, précédence maximale) s'applique aussi à cet hôte — l'hôte bootstrapé serait alors
+    # marqué injoignable (rc=4) alors que son socle est entièrement posé.
+    - name: Register the node_exporter target (best effort)
+      tags: [monitoring]
+      become: true
+      ignore_unreachable: true
+      block:
+        - name: Register the Prometheus target and open the scrape
+          ansible.builtin.include_role:
+            name: exporter-sys-install
+            tasks_from: target
+      rescue:
+        - name: Warn that the target is not registered
+          ansible.builtin.debug:
+            msg: >-
+              ATTENTION : la cible node_exporter de {{ inventory_hostname }} n'est
+              PAS enregistrée sur {{ prometheus_host | default('prometheus_host') }}
+              — cette machine n'est pas supervisée. Le socle est posé. Pour
+              l'enregistrer : ./play.sh {{ parc_name | default('<parc>') }}
+              deploy-exporter-sys.yml --limit {{ inventory_hostname }}

@@ -29,3 +29,10 @@ proxy_update_subdirs:
 # Jeton d'écriture Prometheus (remote-write relayé par les proxies). Seul
 # papanglabs en a l'usage : `true` dans group_vars/papanglabs.yml.
 proxy_write_token_enabled: false
+
+# Vhost de santé du front, sonde du Load Balancer Cloudflare (templates/healthz.conf.j2).
+# Moniteur Cloudflare : HTTPS 443, GET, chemin ci-dessous, en-tête
+# `Host: <proxy_healthz_hostname>`, code attendu 200. Le nom est celui du front
+# (proxy.<domaine>) : il est couvert par le wildcard et ne porte aucun service.
+proxy_healthz_hostname: "proxy.{{ domain_name }}"
+proxy_healthz_path: /healthz

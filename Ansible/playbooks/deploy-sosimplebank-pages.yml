@@ -1,6 +1,6 @@
 ---
 # Pages légales de SoSimpleBank sur https://www.web3c.cc/sosimplebank/legal/
-# (privacy, terms, et variantes .en / .es). Même schéma que deploy-vxiptv-pages.yml.
+# (privacy, terms, support, et variantes .en / .es). Même schéma que deploy-vxiptv-pages.yml.
 # Les liens absolus `/legal/…` des pages sont réécrits en `/sosimplebank/legal/…` ;
 # les URL sans extension (`/legal/privacy`) sont servies par réécriture Apache,
 # comme sur Firebase Hosting (`firebase.json`).
@@ -36,6 +36,9 @@
         - { src: "{{ ssb_src }}/terms.html", dest: terms.html }
         - { src: "{{ ssb_src }}/terms.en.html", dest: terms.en.html }
         - { src: "{{ ssb_src }}/terms.es.html", dest: terms.es.html }
+        - { src: "{{ ssb_src }}/support.html", dest: support.html }
+        - { src: "{{ ssb_src }}/support.en.html", dest: support.en.html }
+        - { src: "{{ ssb_src }}/support.es.html", dest: support.es.html }
       site_pages_replace:
         - { regexp: 'href="/legal/', replace: 'href="/sosimplebank/legal/' }
       site_pages_htaccess: |
@@ -44,4 +47,4 @@
         AddDefaultCharset utf-8
         RewriteEngine On
         RewriteBase /sosimplebank/legal/
-        RewriteRule ^(privacy|terms)(\.en|\.es)?$ $1$2.html [L]
+        RewriteRule ^(privacy|terms|support)(\.en|\.es)?$ $1$2.html [L]

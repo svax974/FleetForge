@@ -39,3 +39,7 @@ cfdns_proxied: false
 
 # TTL. 1 = automatique côté Cloudflare.
 cfdns_ttl: 1
+
+# Publier les A records en tourniquet sous `proxy.<zone>` (tasks/proxy-front.yml).
+# `false` quand ce nom est tenu par un Load Balancer Cloudflare.
+cfdns_publish_proxy_front: true
