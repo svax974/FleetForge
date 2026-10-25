@@ -45,6 +45,27 @@
     state: absent
   become: true
 
+# Clé de diagnostic lecture seule : la privée part avec le service ; la
+# publique quitte keys/<parc>/readonly/, dossier qui fait foi — le prochain
+# readonly-user-install la révoque sur le parc (`exclusive: true`).
+- name: Remove the read-only diagnostics key
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ ff_ro_key }}"
+    - "{{ ff_ro_key }}.pub"
+    - "{{ ff_ro_known_hosts }}"
+  become: true
+
+- name: Withdraw the read-only diagnostics public key from the parc keys
+  ansible.builtin.file:
+    path: "{{ playbook_dir }}/../keys/{{ parc_name }}/readonly/{{ ff_ro_key_name }}"
+    state: absent
+  delegate_to: localhost
+  become: false
+  when: parc_name is defined
+
 - name: Reload systemd
   ansible.builtin.systemd:
     daemon_reload: true

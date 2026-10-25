@@ -28,6 +28,22 @@ alertmanager_smtp_require_tls: true
 # Destinataires des alertes — à renseigner en group_vars.
 alertmanager_email_to: []
 
+# ── Webhook AgentHub (FACULTATIF) ──────────────────────────────────────────
+# Poste « Infrastructure Manager » d'AgentHub : chaque alerte part AUSSI vers
+# ce webhook, l'e-mail restant inchangé (deux routes `continue`). Résolutions
+# comprises (`send_resolved: true`) : c'est ce qui clôt l'incident côté poste.
+#
+# Forme : https://<hub>/api/v1/agenthub/hooks/<postId>/<secret>
+# Le SECRET est dans l'URL : la variable se chiffre au vault du parc, jamais en
+# clair dans group_vars :
+#   ansible-vault encrypt_string --stdin-name alertmanager_agenthub_webhook_url
+# (la valeur sur l'entrée standard, pas en argument : `ps` est lisible par tous).
+#
+# Vide (défaut) : configuration rendue strictement identique à avant, e-mail
+# seul. Réseau : Alertmanager doit joindre le vhost d'AgentHub (mode d'accès de
+# son entrée, CLAUDE.md « Accès réseau »).
+alertmanager_agenthub_webhook_url: ""
+
 # ── Routage ────────────────────────────────────────────────────────────────
 alertmanager_group_wait: "30s"
 alertmanager_group_interval: "5m"

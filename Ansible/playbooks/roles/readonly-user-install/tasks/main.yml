@@ -1,14 +1,13 @@
 ---
-# Voir defaults/main.yml. Options de chaque clé : `restrict` (ni pty, ni
-# redirection de port, d'agent ou X11) et `command=` — quoi que demande le
-# client, seule la passerelle s'exécute.
+# Voir defaults/main.yml, et tasks/keys.yml pour les options de chaque clé
+# (`restrict`, `command=` vers la passerelle, `from=` selon
+# `readonly_key_from`).
 
-- name: List the read-only keys of the parc
-  ansible.builtin.set_fact:
-    ro_key_files: "{{ query('ansible.builtin.fileglob', playbook_dir ~ '/../keys/' ~ parc_name ~ '/readonly/*.pub') | sort }}"
+- name: Build the authorized lines of the read-only keys
+  ansible.builtin.import_tasks: keys.yml
 
 - name: Install the read-only account
-  when: ro_key_files | length > 0
+  when: ro_key_lines | length > 0
   block:
     - name: Install the read-only gate
       ansible.builtin.copy:
@@ -39,13 +38,13 @@
         user: "{{ readonly_user_name }}"
         state: present
         exclusive: true
-        key_options: 'restrict,command="/usr/bin/sudo -n {{ readonly_user_gate }}"'
-        key: "{{ query('ansible.builtin.file', *ro_key_files) | map('trim') | join('\n') }}"
+        key: "{{ ro_key_lines | join('\n') }}"
 
 # Le dossier fait foi jusqu'au bout : vidé, il révoque la dernière clé. Le
 # compte reste (readonly-user-remove le retire), mais plus rien n'y entre.
+# Même chose quand toutes les clés ont été écartées faute d'origine valide.
 - name: Revoke every read-only key when the parc declares none
   ansible.builtin.file:
     path: "/home/{{ readonly_user_name }}/.ssh/authorized_keys"
     state: absent
-  when: ro_key_files | length == 0
+  when: ro_key_lines | length == 0

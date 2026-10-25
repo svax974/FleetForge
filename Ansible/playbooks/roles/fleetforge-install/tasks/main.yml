@@ -134,6 +134,9 @@
 # `delete: false` volontairement, à l'inverse du code : les rôles déposent des
 # fichiers d'état sur le nœud de contrôle (`backups/`, artefacts de run), et
 # une synchronisation destructrice les emporterait à chaque livraison.
+#
+# `ff_ansible_sync: false` : l'arbre est tenu ailleurs (voir defaults), le
+# déploiement n'y écrit rien.
 - name: Sync the Ansible tree
   ansible.posix.synchronize:
     src: "{{ ff_src }}/Ansible/"
@@ -142,7 +145,23 @@
     rsync_opts: "{{ ff_rsync_excludes }}"
   become: true
   become_user: "{{ ff_user }}"
+  when: ff_ansible_sync | bool
   tags: [code, ansible]
+
+- name: Check the Ansible tree the application will read
+  ansible.builtin.stat:
+    path: "{{ ff_ansible_dir }}/inventories"
+  register: ff_ansible_tree
+  tags: [code, ansible, config]
+
+- name: Fail when the Ansible tree is missing on the machine
+  ansible.builtin.fail:
+    msg: >-
+      {{ ff_ansible_dir }}/inventories introuvable sur la machine. Avec
+      `ff_ansible_sync: false`, l'arbre doit déjà y être (clone du dépôt de
+      parc) ; sinon l'application démarrerait sur un parc vide.
+  when: not ff_ansible_tree.stat.exists
+  tags: [code, ansible, config]
 
 # ── Construction du serveur ────────────────────────────────────────────────
 - name: "Build fleetforge-web ({{ ff_cargo_profile }}, long ~10-20 min the first time)"
@@ -203,6 +222,26 @@
   changed_when: false
   no_log: true
   tags: [config]
+
+# Compte d'automatisation (AgentHub) : même traitement, empreinte seule.
+- name: Hash the automation password on the machine
+  ansible.builtin.command:
+    cmd: "{{ ff_dir }}/target/{{ ff_cargo_profile }}/fleetforge-web hash-password"
+    stdin: "{{ ff_api_password }}"
+    stdin_add_newline: false
+  become: true
+  become_user: "{{ ff_user }}"
+  register: ff_api_password_hash
+  changed_when: false
+  no_log: true
+  when: ff_api_user | length > 0
+  tags: [config]
+
+# ── Diagnostic lecture seule ───────────────────────────────────────────────
+- name: Set up the read-only diagnostics key
+  ansible.builtin.include_tasks: ro-diagnostics.yml
+  when: ff_ro_diagnostics | bool
+  tags: [secrets, config]
 
 # ── Secrets de pilotage ────────────────────────────────────────────────────
 - name: Set up the dedicated key and its agent
@@ -324,4 +363,16 @@
       `ansible -i inventories/<parc>.yml -m debug -a 'var=ff_web_password' {{ inventory_hostname }}`.
       Il n'existe nulle part sur la machine, qui n'en détient que l'empreinte.
       Accès par le proxy : https://infra.{{ domain_name }} (whitelist).
+  tags: [config]
+
+- name: Report the automation account
+  ansible.builtin.debug:
+    msg: >-
+      Compte d'automatisation « {{ ff_api_user }} » (AgentHub) : API
+      d'automatisation seule. Mot de passe dans le vault du parc :
+      `ansible -i inventories/<parc>_inventory.yml -m debug -a 'var=ff_api_password' {{ inventory_hostname }}`,
+      à saisir dans le connecteur FleetForge d'AgentHub. L'adresse d'AgentHub
+      doit être admise par le vhost infra.{{ domain_name }} (whitelist seule
+      par défaut).
+  when: ff_api_user | length > 0
   tags: [config]

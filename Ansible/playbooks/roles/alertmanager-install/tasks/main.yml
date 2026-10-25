@@ -16,6 +16,19 @@
       inventaire ?). Renseigner explicitement le smarthost SMTP.
   when: alertmanager_smtp_host | length == 0
 
+# Une URL mal copiée (apostrophe, espace, chemin d'un autre service) casserait
+# le YAML rendu, ou enverrait les alertes ailleurs sans que rien ne le dise.
+# Le message ne cite pas la valeur : elle porte le secret du webhook.
+- name: Fail early when the AgentHub webhook URL is malformed
+  ansible.builtin.fail:
+    msg: >-
+      `alertmanager_agenthub_webhook_url` doit avoir la forme
+      https://<hub>/api/v1/agenthub/hooks/<postId>/<secret> (sans espace ni
+      apostrophe). Valeur non affichée : elle contient le secret du webhook.
+  when:
+    - alertmanager_agenthub_webhook_url | default('') | length > 0
+    - alertmanager_agenthub_webhook_url is not match("^https?://[^\s'/]+/api/v1/agenthub/hooks/[^\s'/]+/[^\s'/]+$")
+
 - name: Create Alertmanager directories
   ansible.builtin.file:
     path: "{{ item }}"
@@ -39,10 +52,14 @@
     dest: "{{ alertmanager_home }}/.alertmanager.staged"
     owner: "{{ remote_username }}"
     group: "{{ remote_username }}"
-    # Contient les identifiants SMTP.
+    # Contient les identifiants SMTP (et le secret du webhook AgentHub).
     mode: "0640"
   become: true
   changed_when: false
+  # Le fichier d'étape est supprimé à chaque passage : `--diff` n'en montrait
+  # pas une différence mais le contenu ENTIER, identifiants compris — y
+  # compris dans la sortie qu'un run lancé par AgentHub lit.
+  diff: false
 
 - name: Validate the staged Alertmanager configuration with amtool
   ansible.builtin.command:

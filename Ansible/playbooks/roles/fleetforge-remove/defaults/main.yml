@@ -8,3 +8,7 @@ ff_port: "{{ app_port | default(9750) }}"
 ff_job: fleetforge
 ff_remote_key_name: "{{ ssh_key | default('id_fleetforge') }}"
 ff_passphrase_file: "/home/{{ remote_username }}/fleetforge/.key-passphrase"
+# Clé de diagnostic lecture seule (mêmes valeurs que fleetforge-install).
+ff_ro_key: "/home/{{ remote_username }}/.ssh/id_fleetforge_ro"
+ff_ro_key_name: id_fleetforge_ro.pub
+ff_ro_known_hosts: "/home/{{ remote_username }}/.ssh/known_hosts_fleetforge_ro"

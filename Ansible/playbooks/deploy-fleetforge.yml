@@ -35,6 +35,16 @@
 #
 # Le vhost (infra.<domaine>, restreint à la whitelist) appartient au proxy :
 #   ./play.sh web3c update-proxy.yml   /   ./play.sh papanglabs update-proxy.yml
+#
+# Facultatif, pour AgentHub (poste « Infrastructure Manager », RUNNING.md,
+# « API d'automatisation ») :
+#   • `ff_api_user: agenthub` dans le group_vars du parc — compte
+#     d'automatisation, cantonné à l'API ; mot de passe tiré au premier
+#     passage et chiffré dans le même fichier (à committer) ;
+#   • `ff_ro_diagnostics: true` — clé de diagnostic lecture seule, déposée dans
+#     keys/<parc>/readonly/ puis posée sur le parc avec `from=` :
+#       ./play.sh web3c deploy-readonly-user.yml --limit <entrées canoniques>
+#   • `ff_ansible_dir` / `ff_ansible_sync: false` — arbre Ansible tenu ailleurs.
 
 # ── Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ───────────────────────
 - name: Contrôle préalable

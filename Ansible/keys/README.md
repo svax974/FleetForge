@@ -17,6 +17,13 @@ SEULE `openclaw-ro` (`readonly-user-install`, joué par `setup-server.yml` et
 `deploy-readonly-user.yml`), jamais posées sur root ni srvc — `security-ssh`
 ne lit pas les sous-dossiers. Chaque clé n'y lance que la passerelle `ro-gate`
 (commande forcée, sorties caviardées). Même règle : le dossier fait foi, vidé il
-révoque. `id_openclaw.pub` y est déposée par `openclaw-install`.
+révoque. `id_openclaw.pub` y est déposée par `openclaw-install`,
+`id_fleetforge_ro.pub` par `fleetforge-install` (`ff_ro_diagnostics`, pour
+`ssh_diagnose`) et retirée par `fleetforge-remove`.
+
+Origine restreinte : une clé nommée dans `readonly_key_from`
+(`readonly-user-install/defaults`) reçoit `from="<adresses>"` — celle de
+FleetForge, les adresses des machines `infras`. Sans adresse IP résolue, elle
+n'est pas posée du tout.
 
 Le contenu de ce dossier est gitignoré : il décrit qui accède au parc.

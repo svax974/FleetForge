@@ -24,6 +24,15 @@ route:
   group_wait: {{ alertmanager_group_wait }}
   group_interval: {{ alertmanager_group_interval }}
   repeat_interval: {{ alertmanager_repeat_interval }}
+{% if alertmanager_agenthub_webhook_url | default('') | length > 0 %}
+  # Chaque alerte part vers AgentHub ET par e-mail : une route sans
+  # correspondance prend tout, `continue` la fait passer à la suivante au lieu
+  # de s'arrêter à la première qui l'accepte. Regroupement et rappels hérités.
+  routes:
+    - receiver: 'agenthub'
+      continue: true
+    - receiver: 'email'
+{% endif %}
 
 inhibit_rules:
   # Une cible injoignable rend ses alertes applicatives redondantes : inutile de
@@ -63,4 +72,11 @@ receivers:
 {% endfor %}
 {% else %}
     # Aucun destinataire configuré : renseigner `alertmanager_email_to`.
+{% endif %}
+{% if alertmanager_agenthub_webhook_url | default('') | length > 0 %}
+  # Poste « Infrastructure Manager » d'AgentHub. L'URL porte un secret (vault).
+  - name: 'agenthub'
+    webhook_configs:
+      - url: '{{ alertmanager_agenthub_webhook_url }}'
+        send_resolved: true
 {% endif %}

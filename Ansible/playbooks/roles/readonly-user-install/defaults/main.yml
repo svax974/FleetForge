@@ -21,3 +21,18 @@
 # vide : il révoque alors toutes les clés. Sans clé, aucun compte n'est créé.
 readonly_user_name: openclaw-ro
 readonly_user_gate: /usr/local/bin/ro-gate
+
+# Restriction d'ORIGINE par clé (`from="…"` d'authorized_keys) : nom du
+# fichier .pub → liste d'adresses IP littérales (ou CIDR) autorisées. Une clé
+# listée ici dont aucune adresse n'est une IP n'est PAS posée — l'oubli ferme,
+# il n'ouvre pas. Clé absente du dictionnaire : sans restriction d'origine
+# (comportement historique, `id_openclaw.pub`).
+#
+# `id_fleetforge_ro.pub` : clé de diagnostic de FleetForge (fleetforge-install,
+# `ff_ro_diagnostics`), utilisable depuis les seules machines du groupe
+# `infras`, comme la clé de pilotage dédiée.
+readonly_key_from:
+  id_fleetforge_ro.pub: "{{ groups['infras'] | default([]) | map('extract', hostvars, 'ansible_host') | list }}"
+# Forme admise d'une adresse d'origine : IPv4/IPv6 littérale, CIDR facultatif.
+# Un nom DNS n'est pas admis : `from=` le comparerait au DNS inverse.
+readonly_origin_pattern: '^[0-9A-Fa-f.:]+(/[0-9]{1,3})?$'

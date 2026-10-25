@@ -46,6 +46,40 @@ ff_bind: "0.0.0.0"
 # group_vars, l'étape de tirage est sautée.
 ff_web_user: "{{ remote_username }}"
 
+# ── Compte d'automatisation (AgentHub) — FACULTATIF ───────────────────────
+# Second compte d'authentification basique, cantonné à l'API d'automatisation
+# (list_hosts, list_playbooks, alertmanager_alerts, ssh_diagnose,
+# run_ansible_playbook, run_status et le flux d'un run) : pas de réglages, pas
+# de group_vars, pas d'hébergeurs. Ses runs réels exigent leur `--check`
+# préalable et ses sorties sont caviardées (RUNNING.md, « API
+# d'automatisation »).
+#
+# Vide (défaut) : pas de compte. Renseigné (`agenthub` dans le group_vars du
+# parc), le mot de passe `ff_api_password` est tiré au PREMIER déploiement et
+# chiffré dans playbooks/group_vars/<parc>.yml, comme `ff_web_password` ; la
+# machine n'en reçoit que l'empreinte argon2. À relire pour le saisir dans
+# AgentHub (connecteur FleetForge) :
+#   ansible -i inventories/<parc>_inventory.yml -m debug -a 'var=ff_api_password' infra1
+ff_api_user: ""
+
+# ── Diagnostic lecture seule (`ssh_diagnose`) — FACULTATIF ────────────────
+# Clé SSH SANS passphrase, créée sur la machine au premier déploiement, qui
+# n'ouvre que le compte `openclaw-ro` et sa passerelle `ro-gate` (verbes en
+# lecture fermés, sorties caviardées). Sa clé publique est déposée dans
+# keys/<parc>/readonly/id_fleetforge_ro.pub ; `readonly-user-install` la pose
+# ensuite sur le parc avec `from="<adresse de cette machine>"`
+# (`readonly_key_from`) : volée, elle ne sert que depuis ici.
+# Ce n'est JAMAIS la clé de pilotage — celle-là vaut srvc, donc root.
+#
+# Après le premier déploiement, poser la clé sur le parc :
+#   ./play.sh <parc> deploy-readonly-user.yml --limit <entrées canoniques>
+ff_ro_diagnostics: false
+ff_ro_key: "/home/{{ ff_user }}/.ssh/id_fleetforge_ro"
+ff_ro_key_name: id_fleetforge_ro.pub
+ff_ro_known_hosts: "/home/{{ ff_user }}/.ssh/known_hosts_fleetforge_ro"
+# Doit valoir `readonly_user_name` de readonly-user-install.
+ff_ro_user: openclaw-ro
+
 # ── Secrets de pilotage (OPT-IN) ───────────────────────────────────────────
 # À `false`, l'application est déployée et fonctionne en LECTURE — inventaires,
 # supervision, diagnostics — mais ne peut lancer aucun playbook : ni clé SSH du
@@ -103,6 +137,12 @@ ff_rsync_excludes:
   - "--exclude=.DS_Store"
 
 # ── Arbre Ansible livré ────────────────────────────────────────────────────
-# L'application lit les inventaires et lance les playbooks depuis cette copie.
+# L'application lit les inventaires et lance les playbooks depuis cette copie
+# (`FLEETFORGE_ANSIBLE_DIR` : inventories/ et playbooks/ en dessous).
+#
+# Il peut vivre AILLEURS que dans le code livré — un clone du dépôt de parc
+# tenu à jour par un autre moyen : régler `ff_ansible_dir` sur son chemin et
+# `ff_ansible_sync: false`, pour que le déploiement ne le réécrive pas.
 ff_ansible_dir: "{{ ff_dir }}/Ansible"
+ff_ansible_sync: true
 ff_install_ansible: true

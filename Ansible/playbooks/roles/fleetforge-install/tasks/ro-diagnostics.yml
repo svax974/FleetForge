@@ -1,0 +1,59 @@
+---
+# Clé de diagnostic LECTURE SEULE (`ssh_diagnose`), voir defaults.
+#
+# Créée SUR la machine, jamais ailleurs : la clé privée n'a pas à quitter
+# l'endroit d'où elle sert. Sans passphrase — un démon doit pouvoir s'en servir
+# seul —, ce qui est acceptable parce qu'elle n'ouvre que la passerelle
+# `ro-gate` (commande forcée) et seulement depuis l'adresse de cette machine
+# (`from=`, posé par readonly-user-install via `readonly_key_from`).
+#
+# La clé publique rejoint keys/<parc>/readonly/ sur le poste de contrôle : ce
+# dossier fait foi pour readonly-user-install, qui la pose ensuite sur le parc.
+
+- name: Ensure the .ssh directory of {{ ff_user }} exists
+  ansible.builtin.file:
+    path: "{{ ff_ro_key | dirname }}"
+    state: directory
+    owner: "{{ ff_user }}"
+    group: "{{ ff_user }}"
+    mode: "0700"
+  become: true
+
+# `openssh_keypair` ne régénère pas une clé existante : la clé posée sur le
+# parc reste valable d'un déploiement à l'autre.
+- name: Generate the read-only diagnostics key (no passphrase)
+  community.crypto.openssh_keypair:
+    path: "{{ ff_ro_key }}"
+    type: ed25519
+    comment: "fleetforge-ro@{{ inventory_hostname }}"
+  become: true
+  become_user: "{{ ff_user }}"
+  register: ff_ro_keypair
+
+- name: Ensure the parc read-only keys folder exists
+  ansible.builtin.file:
+    path: "{{ playbook_dir }}/../keys/{{ parc_name }}/readonly"
+    state: directory
+    mode: "0755"
+  delegate_to: localhost
+  become: false
+
+- name: Copy the public key to the parc read-only keys
+  ansible.builtin.copy:
+    content: "{{ ff_ro_keypair.public_key }} {{ ff_ro_keypair.comment }}\n"
+    dest: "{{ playbook_dir }}/../keys/{{ parc_name }}/readonly/{{ ff_ro_key_name }}"
+    mode: "0644"
+  delegate_to: localhost
+  become: false
+  register: ff_ro_pub
+
+- name: Remind to authorize the key on the parc
+  ansible.builtin.debug:
+    msg: >-
+      Clé de diagnostic {{ 'NOUVELLE — ' if ff_ro_pub.changed else '' }}déposée
+      dans keys/{{ parc_name }}/readonly/{{ ff_ro_key_name }}. Elle n'ouvre rien
+      tant que readonly-user-install ne l'a pas posée (avec
+      from="{{ ansible_host }}") :
+      `./play.sh {{ parc_name }} deploy-readonly-user.yml --limit <entrées canoniques>`.
+      Le dossier keys/ est versionné dans le dépôt PRIVÉ du parc : y committer
+      le fichier.

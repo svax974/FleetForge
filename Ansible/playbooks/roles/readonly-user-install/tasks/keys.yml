@@ -1,0 +1,50 @@
+---
+# Lignes authorized_keys des clés lecture seule du parc (`ro_key_lines`, une
+# LISTE : le saut de ligne se met à l'usage, dans une chaîne YAML entre
+# guillemets doubles — un `'\n'` écrit dans un bloc `>-` resterait littéral et
+# collerait toutes les clés sur une seule ligne).
+#
+# Une ligne par clé, options écrites DANS la ligne (le module les lit là quand
+# `key_options` est absent) : c'est ce qui permet une origine propre à chaque
+# clé. `restrict` (ni pty, ni redirection de port, d'agent ou X11),
+# `command=` — quoi que demande le client, seule la passerelle s'exécute — et,
+# pour les clés de `readonly_key_from`, `from=` : la clé ne sert que depuis
+# ces adresses. Une clé à restreindre sans adresse valide est ÉCARTÉE.
+#
+# Fichier à part pour être exécutable seul (`tasks_from: keys`), sans compte
+# ni sudo : c'est ce qui permet d'en vérifier le résultat sur le poste.
+
+- name: List the read-only keys of the parc
+  ansible.builtin.set_fact:
+    ro_key_files: "{{ query('ansible.builtin.fileglob', playbook_dir ~ '/../keys/' ~ parc_name ~ '/readonly/*.pub') | sort }}"
+
+- name: Build the authorized lines of the read-only keys
+  ansible.builtin.set_fact:
+    ro_key_lines: >-
+      {%- set ns = namespace(lines=[]) -%}
+      {%- set base = 'restrict,command="/usr/bin/sudo -n ' ~ readonly_user_gate ~ '"' -%}
+      {%- for f in ro_key_files -%}
+      {%- set name = f | basename -%}
+      {%- set key = lookup('ansible.builtin.file', f) | trim -%}
+      {%- if name in readonly_key_from -%}
+      {%- set wanted = readonly_key_from[name] -%}
+      {%- set wanted = [wanted] if wanted is string else wanted -%}
+      {%- set origin = wanted | select('match', readonly_origin_pattern) | list -%}
+      {%- if origin | length > 0 -%}
+      {%- set ns.lines = ns.lines + [base ~ ',from="' ~ (origin | join(',')) ~ '" ' ~ key] -%}
+      {%- endif -%}
+      {%- else -%}
+      {%- set ns.lines = ns.lines + [base ~ ' ' ~ key] -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {{ ns.lines }}
+
+- name: Report the keys left out for lack of a valid origin
+  ansible.builtin.debug:
+    msg: >-
+      {{ item }} NON posée : `readonly_key_from` exige une origine, et aucune
+      adresse IP n'a été résolue (groupe vide, ou `ansible_host` en nom DNS).
+  loop: "{{ ro_key_files | map('basename') | select('in', readonly_key_from) | list }}"
+  when: >-
+    ([readonly_key_from[item]] if readonly_key_from[item] is string else readonly_key_from[item])
+    | select('match', readonly_origin_pattern) | list | length == 0
