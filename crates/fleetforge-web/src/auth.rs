@@ -37,11 +37,13 @@ use crate::config::{Account, Role, Secret};
 
 /// Commandes ouvertes au compte d'automatisation. Tout le reste — réglages,
 /// group_vars, hébergeurs, alimentation des machines, sorties brutes des runs
-/// (`get_run_handle`) — reste à l'opérateur.
+/// (`get_run_handle`) — reste à l'opérateur. `query_prometheus` n'y est admis
+/// que sous sa forme `{ parc, query }` (lecture seule, voir `automation.rs`).
 pub const AUTOMATION_COMMANDS: &[&str] = &[
     "list_hosts",
     "list_playbooks",
     "alertmanager_alerts",
+    "query_prometheus",
     "ssh_diagnose",
     "run_ansible_playbook",
     "run_status",
@@ -260,6 +262,7 @@ mod tests {
         assert!(automation_may(&Method::POST, "/api/list_hosts"));
         assert!(automation_may(&Method::POST, "/api/run_ansible_playbook"));
         assert!(automation_may(&Method::POST, "/api/run_status"));
+        assert!(automation_may(&Method::POST, "/api/query_prometheus"));
         assert!(automation_may(&Method::GET, "/api/events/run-1"));
 
         for (method, path) in [

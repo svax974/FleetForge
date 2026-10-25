@@ -798,6 +798,28 @@ impl Core {
             .ok_or_else(|| Fault::new(FaultKind::UnknownParc, format!("parc inconnu : {name}")).into())
     }
 
+    /// Requête instantanée sur LA supervision du parc nommé — réglages
+    /// Prometheus de son organisation (URL, identifiants), jamais ceux du
+    /// parc sélectionné dans l'interface ni ceux de l'appelant.
+    pub async fn query_prometheus_in(
+        &self,
+        parc: &str,
+        query: &str,
+        time: Option<&str>,
+    ) -> Result<automation::PrometheusAnswer> {
+        let parc = self.parc_by_name(parc)?;
+        automation::validate_promql(query)?;
+        if let Some(t) = time {
+            automation::validate_prom_time(t)?;
+        }
+        let series = self
+            .prometheus_for(&parc.organization)?
+            .query_at(query, time)
+            .await?;
+        let (result, truncated) = automation::cap_series(series, automation::MAX_SERIES);
+        Ok(automation::PrometheusAnswer { parc: parc.name, result, truncated })
+    }
+
     pub fn list_hosts(&self, parc: &str) -> Result<Vec<automation::HostSummary>> {
         let parc = self.parc_by_name(parc)?;
         Ok(automation::host_summaries(&self.fleet(&parc.name)?))

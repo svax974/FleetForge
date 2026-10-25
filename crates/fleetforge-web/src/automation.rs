@@ -52,6 +52,28 @@ pub async fn alertmanager_alerts(state: &AppState, p: &Params) -> ApiResult {
     ok(state.core.alertmanager_alerts(&parc).await?)
 }
 
+/// `query_prometheus`, deux formes :
+///   • `{ query }` (frontal) : supervision du parc SÉLECTIONNÉ, liste de séries ;
+///   • `{ parc, query, time? }` : supervision du parc nommé, réponse
+///     `{ parc, result, truncated }`. Seule forme admise pour l'automatisation.
+pub async fn query_prometheus(state: &AppState, role: Role, p: &Params) -> ApiResult {
+    let query: String = p.get("query")?;
+    let Some(parc) = p.opt::<String>("parc")? else {
+        if role == Role::Automation {
+            return Err(anyhow!(Fault::invalid("argument manquant : parc")).into());
+        }
+        return ok(state.core.query_prometheus(&query).await?);
+    };
+    // Horodatage en nombre ou en chaîne : transmis tel qu'écrit, validé.
+    let time = match p.opt::<serde_json::Value>("time")? {
+        None => None,
+        Some(serde_json::Value::Number(n)) => Some(n.to_string()),
+        Some(serde_json::Value::String(s)) => Some(s),
+        Some(_) => return Err(anyhow!(Fault::invalid("argument time invalide")).into()),
+    };
+    ok(state.core.query_prometheus_in(&parc, &query, time.as_deref()).await?)
+}
+
 /// `{ host, verb, args?, parc? }`. Sans `args`, `verb` peut porter la demande
 /// entière (« logs docker searxng 1h ») : elle est découpée sur les espaces,
 /// puis validée comme le reste.

@@ -283,7 +283,8 @@ pub async fn dispatch(
         )?),
 
         // === Supervision ===
-        "query_prometheus" => ok(core.query_prometheus(&p.get::<String>("query")?).await?),
+        // Avec `parc` : supervision de ce parc (forme de l'automatisation).
+        "query_prometheus" => automation::query_prometheus(&state, role, &p).await,
         "get_probes" => {
             let scope = match p.opt::<String>("scope")?.unwrap_or_default().as_str() {
                 "system" => ProbeScope::System,

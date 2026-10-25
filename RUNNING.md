@@ -143,9 +143,10 @@ curl -s localhost:9750/healthz          # -> ok
 ### API d'automatisation (AgentHub)
 
 Le poste « Infrastructure Manager » d'AgentHub pilote le parc par le même
-`POST /api/<commande>` que le frontal, avec un **compte à lui**, cantonné à six
+`POST /api/<commande>` que le frontal, avec un **compte à lui**, cantonné à sept
 commandes et au flux d'un run (`auth::AUTOMATION_COMMANDS`) ; tout le reste
-répond `403 forbidden`. Commandes servies par le web seulement : elles n'ont
+répond `403 forbidden`. Commandes servies par le web seulement (sauf
+`query_prometheus`, dont seule la forme `parc` est propre au web) : elles n'ont
 pas d'équivalent dans l'application de bureau (CLAUDE.md § 3).
 
 **Identifiants** — jamais dans un dépôt. Par le déploiement : `ff_api_user:
@@ -195,6 +196,7 @@ l'authentification basique y circulerait en clair.
 | `list_hosts` | `{ "parc": "web3c" }` | `[{ "name", "ip", "port" (null = 22), "groups", "roles", "provider" (null si absent) }]` |
 | `list_playbooks` | — | `[{ "path": "deploy-x.yml", "family", "service", "label", "description" }]` — `family` : `deploy`, `update`, `remove`, `purge`, `security`, `monitoring`, `backup`, `setup`, `migrate`, `other` |
 | `alertmanager_alerts` | `{ "parc" }` | JSON de `GET /api/v2/alerts?active=true&silenced=false&inhibited=false`, tel quel |
+| `query_prometheus` | `{ "parc", "query", "time"? }` | `{ "parc", "result": [{ "metric": {…}, "timestamp", "value" }], "truncated" }` |
 | `ssh_diagnose` | `{ "host", "verb", "args"?: [..], "parc"? }` | `{ "parc", "host", "verb", "args", "exit_code", "output", "truncated" }` |
 | `run_ansible_playbook` | `{ "parc", "playbook", "limit"?, "extra_vars"?, "check"?, "diff"?, "detach"?, "run_id"?, "label"? }` | `detach: true` → `{ "run_id", "state": "running", "check", "diff" }` ; sinon le run terminé + `run_id` |
 | `run_status` | `{ "run_id", "tail_lines"? (50, ≤ 500) }` | `{ "run_id", "state": "running"\|"success"\|"failed", "exit_code", "started_at", "ended_at", "output_tail", "label", "check", "diff" }` |
@@ -220,6 +222,18 @@ Détails :
   d'inventaire) et `alertmanager_port` (9093), sinon l'entrée qui porte la
   famille `alertmanager`. La machine de FleetForge doit pouvoir joindre ce port
   (filtrage `DOCKER-USER` de la machine de supervision).
+- `query_prometheus` : requête INSTANTANÉE (`/api/v1/query`, lecture seule par
+  construction) sur la supervision du parc nommé — URL et identifiants
+  Prometheus de son organisation, réglés par l'opérateur (Configuration →
+  supervision du parc, `set_fleet_prometheus`), jamais transmis par
+  l'appelant ; sans eux, `503 not_configured`. `time` : horodatage Unix
+  (nombre ou chaîne) ou RFC 3339, défaut maintenant. Requête ≤ 4096
+  caractères ; seul un vecteur instantané est rendu (plage `x[5m]`, scalaire :
+  `400 invalid_argument`, comme une requête que Prometheus refuse en
+  `bad_data`) ; 1000 séries au plus (`truncated: true` au-delà), corps de
+  réponse plafonné à 8 Mio (`502 upstream_error`). `value` est la chaîne de
+  Prometheus. Sans `parc`, la forme du frontal (supervision du parc
+  sélectionné, liste nue) reste réservée à l'opérateur.
 
 **Webhook d'Alertmanager vers le poste** — `alertmanager_agenthub_webhook_url`
 (vault du parc, forme `https://<hub>/api/v1/agenthub/hooks/<postId>/<secret>`)

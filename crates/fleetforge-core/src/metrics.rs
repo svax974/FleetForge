@@ -12,10 +12,14 @@
 //! Deux interfaces qui écriraient chacune leurs requêtes finiraient par ne plus
 //! afficher le même parc : les requêtes sont donc ici, nommées, une seule fois.
 
+use crate::fault::{fail, Fault, FaultKind};
 use crate::models::PrometheusMetric;
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use std::time::Duration;
+
+/// Plafond du corps d'une réponse Prometheus lu par le serveur.
+pub const MAX_RESPONSE_BYTES: usize = 8 << 20;
 
 /// Job des exporters système (node_exporter). Défini par `prometheus_sd_jobs`
 /// dans le rôle `prometheus-install`.
@@ -137,14 +141,30 @@ impl PrometheusClient {
     }
 
     pub async fn query(&self, query: &str) -> Result<Vec<PrometheusMetric>> {
+        self.query_at(query, None).await
+    }
+
+    /// Requête instantanée (`/api/v1/query`), à l'instant `time` (horodatage
+    /// Unix ou RFC 3339) ou maintenant. Les identifiants partent d'ici, jamais
+    /// de l'appelant. Corps lu par morceaux et plafonné
+    /// ([`MAX_RESPONSE_BYTES`]) : une requête trop large ne doit pas faire
+    /// tenir des centaines de mégaoctets au serveur.
+    ///
+    /// Seul un vecteur instantané est rendu ; une plage (`up[5m]`), un scalaire
+    /// ou une chaîne sont refusés plutôt que rendus vides.
+    pub async fn query_at(&self, query: &str, time: Option<&str>) -> Result<Vec<PrometheusMetric>> {
         if !self.config.is_configured() {
-            return Err(anyhow!("Prometheus URL not configured"));
+            return fail(FaultKind::NotConfigured, "Prometheus URL not configured");
         }
         let url = format!(
             "{}/api/v1/query",
             self.config.url.trim_end_matches('/')
         );
-        let mut request = self.http.get(&url).query(&[("query", query)]);
+        let mut params = vec![("query", query)];
+        if let Some(t) = time {
+            params.push(("time", t));
+        }
+        let mut request = self.http.get(&url).query(&params);
         if !self.config.user.is_empty() {
             request = request.basic_auth(
                 &self.config.user,
@@ -156,20 +176,52 @@ impl PrometheusClient {
             );
         }
 
-        let resp = request
+        let mut resp = request
             .send()
             .await
-            .map_err(|e| anyhow!("Prometheus unreachable: {e}"))?;
-        let body: serde_json::Value = resp.json().await?;
+            .map_err(|e| Fault::new(FaultKind::Upstream, format!("Prometheus unreachable: {e}")))?;
+        let too_big = || Fault::new(
+            FaultKind::Upstream,
+            format!("réponse de Prometheus trop volumineuse (> {} Mio) : restreindre la requête", MAX_RESPONSE_BYTES >> 20),
+        );
+        if resp.content_length().is_some_and(|n| n as usize > MAX_RESPONSE_BYTES) {
+            return Err(too_big().into());
+        }
+        let mut raw = Vec::new();
+        while let Some(chunk) = resp
+            .chunk()
+            .await
+            .map_err(|e| Fault::new(FaultKind::Upstream, format!("Prometheus unreachable: {e}")))?
+        {
+            if raw.len() + chunk.len() > MAX_RESPONSE_BYTES {
+                return Err(too_big().into());
+            }
+            raw.extend_from_slice(&chunk);
+        }
+        let body: serde_json::Value = serde_json::from_slice(&raw)
+            .map_err(|e| Fault::new(FaultKind::Upstream, format!("Invalid Prometheus response format: {e}")))?;
 
         if body.get("status").and_then(|s| s.as_str()) != Some("success") {
             let err = body
                 .get("error")
                 .and_then(|e| e.as_str())
                 .unwrap_or("Unknown Prometheus error");
-            return Err(anyhow!("Prometheus error: {err}"));
+            // `bad_data` : la requête elle-même est fautive, pas Prometheus.
+            let kind = if body.get("errorType").and_then(|t| t.as_str()) == Some("bad_data") {
+                FaultKind::InvalidArgument
+            } else {
+                FaultKind::Upstream
+            };
+            return fail(kind, format!("Prometheus error: {err}"));
         }
 
+        let result_type = body["data"]["resultType"].as_str().unwrap_or("vector");
+        if result_type != "vector" {
+            return fail(
+                FaultKind::InvalidArgument,
+                format!("résultat « {result_type} » : seule une requête rendant un vecteur instantané est servie"),
+            );
+        }
         let results = body["data"]["result"]
             .as_array()
             .ok_or_else(|| anyhow!("Invalid Prometheus response format"))?;

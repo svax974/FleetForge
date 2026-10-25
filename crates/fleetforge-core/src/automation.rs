@@ -302,6 +302,56 @@ pub fn playbook_name(resolved: &Path) -> String {
         .to_string()
 }
 
+// === Prometheus ===
+
+/// Longueur maximale d'une requête PromQL reçue.
+pub const MAX_QUERY_LEN: usize = 4096;
+/// Séries rendues au plus par une requête ; au-delà, `truncated: true`.
+pub const MAX_SERIES: usize = 1000;
+
+/// Réponse de `query_prometheus` sous sa forme « parc ».
+#[derive(Debug, Clone, Serialize)]
+pub struct PrometheusAnswer {
+    pub parc: String,
+    pub result: Vec<crate::models::PrometheusMetric>,
+    pub truncated: bool,
+}
+
+/// PromQL : l'API de requête de Prometheus est en lecture seule par
+/// construction ; reste à borner ce qu'on lui transmet.
+pub fn validate_promql(query: &str) -> Result<()> {
+    if query.trim().is_empty() || query.len() > MAX_QUERY_LEN || query.contains('\0') {
+        return fail(
+            FaultKind::InvalidArgument,
+            format!("requête PromQL vide ou trop longue (≤ {MAX_QUERY_LEN} caractères)"),
+        );
+    }
+    Ok(())
+}
+
+/// Instant d'évaluation : horodatage Unix (`1729850000`, `1729850000.5`) ou
+/// RFC 3339 (`2026-10-25T10:00:00Z`).
+pub fn validate_prom_time(time: &str) -> Result<()> {
+    let valid = !time.is_empty()
+        && time.len() <= 40
+        && time.chars().all(|c| c.is_ascii_digit() || ".:+-TZtz".contains(c))
+        && time.starts_with(|c: char| c.is_ascii_digit());
+    if !valid {
+        return fail(
+            FaultKind::InvalidArgument,
+            format!("instant invalide : {time:?} (horodatage Unix ou RFC 3339)"),
+        );
+    }
+    Ok(())
+}
+
+/// Garde les `max` premières séries et dit s'il en a coupé.
+pub fn cap_series<T>(mut series: Vec<T>, max: usize) -> (Vec<T>, bool) {
+    let truncated = series.len() > max;
+    series.truncate(max);
+    (series, truncated)
+}
+
 // === Alertmanager ===
 
 /// Lit une variable SIMPLE de `group_vars/<groupe>.yml` : une chaîne ou un
@@ -472,6 +522,10 @@ mod tests {
             assert!(validate_parc_name(bad).is_err(), "{bad:?}");
         }
         assert!(validate_run_id("agenthub-1729:check").is_ok());
+        // Forme des identifiants d'AgentHub : `ih-` + 32 hexadécimaux minuscules.
+        let agenthub = format!("ih-{}", "0123456789abcdef".repeat(2));
+        assert_eq!(agenthub.len(), 35);
+        assert!(validate_run_id(&agenthub).is_ok(), "{agenthub}");
         let long = "a".repeat(129);
         for bad in ["", "a/b", "x y", "-x", long.as_str()] {
             assert!(validate_run_id(bad).is_err(), "{bad:?}");
@@ -488,6 +542,21 @@ mod tests {
         assert!(validate_extra_vars(&vars("ANSIBLE_BECOME", "x"), true).is_err());
         assert!(validate_extra_vars(&vars("x", "{{ lookup('pipe','id') }}"), true).is_err());
         assert!(validate_extra_vars(&vars("x", "{% if %}"), true).is_err());
+    }
+
+    #[test]
+    fn prometheus_inputs_are_bounded() {
+        assert!(validate_promql("up{job=\"exporter\"} == 0").is_ok());
+        assert!(validate_promql("").is_err());
+        assert!(validate_promql(&"a".repeat(MAX_QUERY_LEN + 1)).is_err());
+        for ok in ["1729850000", "1729850000.5", "2026-10-25T10:00:00Z", "2026-10-25T10:00:00+02:00"] {
+            assert!(validate_prom_time(ok).is_ok(), "{ok}");
+        }
+        for bad in ["", "now", "-1", "1729850000&query=x", "2026 10 25"] {
+            assert!(validate_prom_time(bad).is_err(), "{bad:?}");
+        }
+        assert_eq!(cap_series(vec![1, 2, 3], 2), (vec![1, 2], true));
+        assert_eq!(cap_series(vec![1, 2], 2), (vec![1, 2], false));
     }
 
     #[test]

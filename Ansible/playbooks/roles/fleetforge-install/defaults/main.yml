@@ -48,9 +48,9 @@ ff_web_user: "{{ remote_username }}"
 
 # ── Compte d'automatisation (AgentHub) — FACULTATIF ───────────────────────
 # Second compte d'authentification basique, cantonné à l'API d'automatisation
-# (list_hosts, list_playbooks, alertmanager_alerts, ssh_diagnose,
-# run_ansible_playbook, run_status et le flux d'un run) : pas de réglages, pas
-# de group_vars, pas d'hébergeurs. Ses runs réels exigent leur `--check`
+# (list_hosts, list_playbooks, alertmanager_alerts, query_prometheus avec
+# `parc`, ssh_diagnose, run_ansible_playbook, run_status et le flux d'un run) :
+# pas de réglages, pas de group_vars, pas d'hébergeurs. Ses runs réels exigent leur `--check`
 # préalable et ses sorties sont caviardées (RUNNING.md, « API
 # d'automatisation »).
 #

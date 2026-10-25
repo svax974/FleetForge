@@ -207,6 +207,54 @@ async fn fake_alertmanager() -> (u16, Arc<Mutex<Option<String>>>) {
     (port, seen)
 }
 
+/// Requêtes reçues par le Prometheus simulé : (chaîne de requête, en-tête
+/// Authorization).
+type PromCalls = Arc<Mutex<Vec<(String, Option<String>)>>>;
+
+/// Prometheus simulé : vecteur de deux séries ; matrice si la requête porte
+/// une plage ; `bad_data` (400) si elle contient « bad ».
+async fn fake_prometheus() -> (u16, PromCalls) {
+    let calls: PromCalls = Arc::new(Mutex::new(Vec::new()));
+    let record = calls.clone();
+    let app = Router::new().route(
+        "/api/v1/query",
+        get(move |RawQuery(query): RawQuery, headers: axum::http::HeaderMap| {
+            let record = record.clone();
+            async move {
+                let query = query.unwrap_or_default();
+                let auth = headers
+                    .get("authorization")
+                    .and_then(|v| v.to_str().ok())
+                    .map(String::from);
+                record.lock().unwrap().push((query.clone(), auth));
+                if query.contains("bad") {
+                    return (
+                        axum::http::StatusCode::BAD_REQUEST,
+                        Json(json!({ "status": "error", "errorType": "bad_data", "error": "parse error" })),
+                    );
+                }
+                if query.contains("%5B") {
+                    return (
+                        axum::http::StatusCode::OK,
+                        Json(json!({ "status": "success", "data": { "resultType": "matrix", "result": [] } })),
+                    );
+                }
+                (
+                    axum::http::StatusCode::OK,
+                    Json(json!({ "status": "success", "data": { "resultType": "vector", "result": [
+                        { "metric": { "__name__": "up", "instance": "proxy1", "job": "exporter" }, "value": [1729850000.0, "1"] },
+                        { "metric": { "__name__": "up", "instance": "proxy2", "job": "exporter" }, "value": [1729850000.0, "0"] }
+                    ] } })),
+                )
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (port, calls)
+}
+
 struct Api<'a> {
     http: Client,
     server: &'a Server,
@@ -295,6 +343,51 @@ async fn the_automation_api_end_to_end() {
     let (status, body) = api.agent("list_hosts", json!({})).await;
     assert_eq!((status, code(&body)), (StatusCode::BAD_REQUEST, "invalid_argument"));
 
+    // ── query_prometheus (forme « parc ») ─────────────────────────────────
+    let (prom_port, prom_calls) = fake_prometheus().await;
+    let (status, body) = api.agent("query_prometheus", json!({ "parc": "web3c", "query": "up" })).await;
+    assert_eq!((status, code(&body)), (StatusCode::SERVICE_UNAVAILABLE, "not_configured"));
+    let (status, _) = api
+        .call(
+            OPERATOR,
+            "set_fleet_prometheus",
+            json!({
+                "organization": "web3c", "url": format!("http://127.0.0.1:{prom_port}"),
+                "user": "prom", "password": "prom-secret"
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, answer) = api
+        .agent("query_prometheus", json!({ "parc": "web3c", "query": "up{job=\"exporter\"}", "time": 1729850000 }))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_eq!(
+        answer,
+        json!({ "parc": "web3c", "truncated": false, "result": [
+            { "metric": { "__name__": "up", "instance": "proxy1", "job": "exporter" }, "timestamp": 1729850000.0, "value": "1" },
+            { "metric": { "__name__": "up", "instance": "proxy2", "job": "exporter" }, "timestamp": 1729850000.0, "value": "0" }
+        ] })
+    );
+    let (query, auth) = prom_calls.lock().unwrap().last().cloned().unwrap();
+    assert!(query.contains("time=1729850000"), "{query}");
+    assert_eq!(
+        auth.as_deref(),
+        Some("Basic cHJvbTpwcm9tLXNlY3JldA=="),
+        "identifiants Prometheus posés par le serveur (prom:prom-secret)"
+    );
+    for (body, expected) in [
+        (json!({ "query": "up" }), (StatusCode::BAD_REQUEST, "invalid_argument")),
+        (json!({ "parc": "papanglabs", "query": "up" }), (StatusCode::NOT_FOUND, "unknown_parc")),
+        (json!({ "parc": "web3c", "query": "" }), (StatusCode::BAD_REQUEST, "invalid_argument")),
+        (json!({ "parc": "web3c", "query": "up", "time": "now&x=1" }), (StatusCode::BAD_REQUEST, "invalid_argument")),
+        (json!({ "parc": "web3c", "query": "up[5m]" }), (StatusCode::BAD_REQUEST, "invalid_argument")),
+        (json!({ "parc": "web3c", "query": "bad(" }), (StatusCode::BAD_REQUEST, "invalid_argument")),
+    ] {
+        let (status, answer) = api.agent("query_prometheus", body.clone()).await;
+        assert_eq!((status, code(&answer)), expected, "{body} → {answer}");
+    }
+
     // ── list_playbooks ─────────────────────────────────────────────────────
     let (status, playbooks) = api.agent("list_playbooks", json!({})).await;
     assert_eq!(status, StatusCode::OK);
@@ -369,9 +462,14 @@ async fn the_automation_api_end_to_end() {
     // ── --check, puis run réel ─────────────────────────────────────────────
     let inventory_file = server.root.join("ansible/inventories/web3c_inventory.yml");
     let before = std::fs::read_to_string(&inventory_file).unwrap();
-    let (status, started) = api.agent("run_ansible_playbook", launch(json!({ "check": true }))).await;
+    // Identifiant à la forme d'AgentHub : `ih-` + 32 hexadécimaux minuscules.
+    let agenthub_id = format!("ih-{}", "9f86d081884c7d659a2feaa0c55ad015");
+    let (status, started) = api
+        .agent("run_ansible_playbook", launch(json!({ "check": true, "run_id": agenthub_id })))
+        .await;
     assert_eq!(status, StatusCode::OK, "{started}");
     assert_eq!((started["state"].clone(), started["check"].clone()), (json!("running"), json!(true)));
+    assert_eq!(started["run_id"], json!(agenthub_id));
     let run_id = started["run_id"].as_str().unwrap().to_string();
     let done = api.wait_run(&run_id).await;
     assert_eq!((done["state"].clone(), done["exit_code"].clone()), (json!("success"), json!(0)));
