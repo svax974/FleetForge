@@ -158,6 +158,37 @@
     # toute la machine, pas seulement Prometheus.
     - docker-ports-security
 
+# Ancienne machine de supervision. Prometheus et Alertmanager
+# l'ont quittée pour `prometheus1`, mais elle héberge encore backindicators1,
+# proxy1, mail… et leurs ports publiés par Docker (Redis, back-lb). Ses règles
+# ne sont plus portées par `prometheus1` : elles vivent dans
+# host_vars/dbfmaster.yml, son entrée canonique. Sans ce play, plus rien ne
+# les rétablirait. Pas de `prometheus-security` ici : Prometheus n'y tourne plus.
+# Un nom absent d'un inventaire est ignoré (web3c n'a pas `dbfmaster`).
+- name: Former monitoring host (Docker-published ports)
+  hosts: dbfmaster
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - docker-ports-security
+
+# Back de production : machine dédiée, une seule entrée. Son
+# port back-lb est publié par Docker, donc filtré dans DOCKER-USER, avec les
+# proxies pour sources (dérivées du groupe `proxies`, host_vars/backindicators1-prod.yml).
+# Ces règles n'étaient posées que par deploy-papanglabs-back.yml : un proxy ajouté
+# au parc (proxy1/proxy2, 24/10/2026) restait donc bloqué (DROP) jusqu'au prochain
+# déploiement du back. C'est exactement le cas d'usage de ce playbook.
+# La préprod y figure par son entrée canonique `dbfmaster`
+# (host_vars/dbfmaster.yml) : ses proxies sont devenus distants, et sa règle 9741
+# ne les autorisait pas. `backindicators1` porte la même règle 9741 pour qu'un
+# déploiement du back, joué sur cette entrée, ne la remplace pas par une autre.
+- name: Back docker-published ports (production, and preproduction machine)
+  hosts: backindicators1-prod:dbfmaster
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - docker-ports-security
+
 # Destinations de sauvegarde. Sans ces règles, la source ne peut pas pousser :
 # `timescale` n'autorisait le port SSH que depuis les IP opérateur, et brk1
 # — dont la sauvegarde du magasin BRK doit atterrir là — n'y

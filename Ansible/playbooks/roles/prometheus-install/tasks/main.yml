@@ -2,6 +2,21 @@
 # Installe Prometheus (Docker) avec authentification basique, règles d'alerte et
 # lien vers Alertmanager.
 
+# ── DNS : alias CNAME vers le front des proxies ─────────────────────────────
+# Quand l'entrée déclare un nom public (`proxy_hostname`, ex. prometheus1.<zone>
+# pour le remote_write des back), le CNAME est garanti dès le premier
+# déploiement, sans attendre update-cloudflare-dns.yml (CLAUDE.md, « Obligation
+# DNS + vhost pour un service nommé »). Sans attribut propre, `proxy_hostname`
+# hérite du front du parc : rien à publier (web3c `monitor`).
+- name: Ensure the service CNAME to the canonical proxy front
+  ansible.builtin.include_role:
+    name: cloudflare-dns-update
+    tasks_from: cnames
+  vars:
+    cfdns_cname_scope:
+      - "{{ inventory_hostname }}"
+  when: proxy_hostname | default('') not in ['', 'proxy.' ~ domain_name]
+
 - name: Install required Python packages
   ansible.builtin.apt:
     name:

@@ -33,6 +33,11 @@
 
 - name: Mise à jour du back PapangLabs (code + build + redémarrage)
   hosts: backsindicators
+  # Un hôte à la fois : le pooler Supabase (mode session, port 5432) plafonne à
+  # 15 clients pour TOUS les back. Redémarrer les deux en parallèle empile les
+  # connexions de l'ancien et du nouveau conteneur, et `back` s'arrête sur
+  # EMAXCONNSESSION (back2-prod, 24/10/2026).
+  serial: 1
   remote_user: "{{ remote_username }}"
 
   roles:

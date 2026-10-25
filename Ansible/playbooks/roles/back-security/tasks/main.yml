@@ -1,19 +1,24 @@
 ---
 # Allow connections from proxies and whitelist
-- name: Allow connections on "{{ proxy_back_port }}" from proxies
+# Sources : les proxies — qui servent ces backs — ET les backs entre eux. Le
+# premier groupe manquait : un proxy ajouté au parc (proxy1/proxy2, 24/10/2026)
+# expirait en connexion sur le port du back, sans qu'aucune règle ne le prévoie.
+# Le port est celui du back (`app_port`, ex-`port` avant le rangement de
+# l'inventaire : l'ancien nom n'existe plus et faisait échouer tout le rôle).
+- name: Allow connections on "{{ proxy_back_port }}" from proxies and backs
   community.general.ufw:
     rule: allow
     proto: tcp
     from_ip: "{{ hostvars[item].ansible_host }}"
-    port: "{{ hostvars[item].port }}"
-  loop: "{{ groups['backsindicators'] | default([]) }}"
+    port: "{{ proxy_back_port }}"
+  loop: "{{ (groups['proxies'] | default([])) + (groups['backsindicators'] | default([])) }}"
 
 - name: Allow connections from whitelist
   community.general.ufw:
     rule: allow
     proto: tcp
     from_ip: "{{ item }}"
-    port: "{{ hostvars['backindicators1'].port }}"
+    port: "{{ hostvars['backindicators1'].app_port }}"
   with_items:
     "{{ whitelist }}"
 
@@ -22,6 +27,6 @@
     rule: allow
     proto: tcp
     from_ip: "{{ item }}"
-    port: "{{ hostvars['backindicators1'].port }}"
+    port: "{{ hostvars['backindicators1'].app_port }}"
   with_items:
     "{{ cloudflare_ips }}"

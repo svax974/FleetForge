@@ -184,6 +184,38 @@
     (item.json['data']['web.enable-remote-write-receiver'] | default('false')) | string | lower != 'true'
   tags: [monitoring]
 
+# Un back neuf n'est joignable sur le récepteur que si le vhost des proxies
+# (prometheus1.conf) l'autorise : son `allow` est dérivé de l'inventaire et ne
+# se met à jour qu'au rejeu de update-proxy.yml. Sans ce contrôle, vmagent
+# réessaie en silence (403 ou expiration) et aucune métrique n'arrive.
+# Un POST sans corps n'écrit rien : 400/401 prouvent que la requête est passée
+# jusqu'à Prometheus, 403 ou une expiration qu'elle a été arrêtée avant.
+- name: Check that the remote_write endpoints accept this host
+  ansible.builtin.uri:
+    url: "{{ item }}"
+    method: POST
+    status_code: [200, 204, 400, 401, 405]
+    timeout: 10
+  loop: "{{ pgb_rw_urls | default([]) }}"
+  register: pgb_rw_reach
+  failed_when: false
+  changed_when: false
+  check_mode: false
+  tags: [monitoring]
+
+- name: Warn when a remote_write endpoint refuses this host
+  ansible.builtin.debug:
+    msg: >-
+      ATTENTION — {{ item.item }} refuse ce back (HTTP {{ item.status | default('timeout') }}) :
+      aucune métrique applicative n'arrivera. Rejoue
+      `./play.sh {{ parc_name }} update-proxy.yml` pour que le vhost autorise
+      cet hôte, puis `--tags monitoring` sur ce déploiement.
+  loop: "{{ pgb_rw_reach.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: item.status | default(-1) not in [200, 204, 400, 401, 405]
+  tags: [monitoring]
+
 # ── 5. Sonde d'état ────────────────────────────────────────────────────────
 # `public: true` : sans lui les defaults de svcprobe-install (répertoire des
 # sondes, port) restent confinés à ses propres tâches et les tâches suivantes
