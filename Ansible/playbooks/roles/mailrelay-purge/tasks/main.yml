@@ -5,6 +5,33 @@
   ansible.builtin.import_role:
     name: mailrelay-remove
 
+# Retire les enregistrements publiés par `mailrelay-setup` pour CETTE machine.
+# Suppression par valeur exacte : un A ou un SPF déjà repointé vers un autre
+# relais n'est pas touché. Le DKIM et le DMARC ne sont pas supprimés — une clé
+# publique orpheline ne signe rien, et une politique peut servir encore.
+- name: Retire the DNS records this relay published on Cloudflare
+  include_vars: "{{ role_path }}/../mailrelay-setup/defaults/main.yml"
+  when: mailrelay_manage_dns | default(true) | bool
+  tags: [dns]
+
+- name: Remove the A and SPF records that still point at this relay
+  community.general.cloudflare_dns:
+    api_token: "{{ item.0.cloudflare_token | default(cloudflare_token) }}"
+    zone: "{{ item.0.zone | default(item.0.name.split('.')[-2:] | join('.')) }}"
+    record: "{{ item.0.name }}"
+    type: "{{ item.1.type }}"
+    value: "{{ item.1.value }}"
+    state: absent
+  vars:
+    _spf: "v=spf1 ip4:{{ mailrelay_public_ip }}{% for ip in mailrelay_spf_extra_ip4 %} ip4:{{ ip }}{% endfor %} {{ mailrelay_spf_qualifier }}"
+  loop: "{{ mail_domains | product([{'type': 'A', 'value': mailrelay_public_ip}, {'type': 'TXT', 'value': _spf}]) | list }}"
+  loop_control:
+    label: "{{ item.0.name }} {{ item.1.type }}"
+  delegate_to: localhost
+  become: false
+  when: mailrelay_manage_dns | default(true) | bool
+  tags: [dns]
+
 - name: Remove Postfix configuration directory
   ansible.builtin.file:
     path: /etc/postfix

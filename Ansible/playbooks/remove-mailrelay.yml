@@ -1,11 +1,15 @@
 ---
 - name: Remove mail relay services (certs and DKIM keys preserved)
-  hosts: mail:mail1
+  hosts: all
   remote_user: "{{ remote_username }}"
   become: yes
   gather_facts: yes
 
   pre_tasks:
+    - name: Skip hosts that do not carry the mailrelay family
+      ansible.builtin.meta: end_host
+      when: "'mailrelay' not in ansible_roles | default([])"
+
     - name: Confirm removal
       ansible.builtin.debug:
         msg: |

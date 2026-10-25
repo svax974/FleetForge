@@ -8,10 +8,10 @@
 #   ./play.sh papanglabs deploy-mailrelay.yml
 #   ./play.sh web3c deploy-mailrelay.yml --tags monitoring
 #
-# Motif couvrant les deux parcs : le relais s'appelle `mail` sur papanglabs et
-# `mail1` sur web3c. Avec `hosts: mail` seul, ce playbook n'a jamais rien fait
-# sur web3c — il matchait zéro hôte et se terminait sans erreur, ce qui explique
-# que les enregistrements DNS y aient été posés à la main.
+# `--limit` est OBLIGATOIRE : `hosts: all`, et seuls les hôtes portant la
+# famille `mailrelay` (ansible_roles) sont traités. Un motif de noms (`mail:mail1`)
+# ne matchait rien dès que le relais changeait d'entrée — le play se terminait
+# sans erreur.
 # ── Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ───────────────────────
 # Échoue immédiatement si le parc n'a pas d'hôte de supervision utilisable,
 # puis vérifie — et répare — le socle de la machine, node_exporter et sa cible
@@ -20,19 +20,28 @@
 # Les contrôles bloquants portent le tag `always` : ils s'appliquent même à un
 # rejeu ciblé par `--tags`.
 - name: Contrôle préalable
-  hosts: mail:mail1
+  hosts: all
   remote_user: "{{ remote_username }}"
+  pre_tasks:
+    - name: Skip hosts that do not carry the mailrelay family
+      ansible.builtin.meta: end_host
+      when: "'mailrelay' not in ansible_roles | default([])"
+      tags: [always]
   roles:
     - role: host-preflight
       preflight_require_docker: false
 
 - name: Deploy multi-domain SMTP relay (Postfix + OpenDKIM + Let's Encrypt)
-  hosts: mail:mail1
+  hosts: all
   remote_user: "{{ remote_username }}"
   become: yes
   gather_facts: yes
 
   pre_tasks:
+    - name: Skip hosts that do not carry the mailrelay family
+      ansible.builtin.meta: end_host
+      when: "'mailrelay' not in ansible_roles | default([])"
+
     - name: Validate required variables
       ansible.builtin.fail:
         msg: "Variable '{{ item }}' must be defined"

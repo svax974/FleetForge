@@ -32,6 +32,21 @@ mailrelay_hostname: "{{ hostname | default(inventory_hostname ~ '.' ~ domain_nam
 # IP publique annoncée pour le relais (enregistrement A et mécanisme SPF ip4).
 mailrelay_public_ip: "{{ ansible_host }}"
 
+# IP(s) d'un relais précédent encore autorisées par SPF PENDANT une bascule : le
+# temps que l'ancien relais ait fini d'émettre, on les garde en `ip4:` à côté de
+# l'IP courante. Vide en régime établi, à retirer une fois l'ancien éteint —
+# sinon SPF continue d'autoriser une machine qui n'envoie plus rien.
+#   mailrelay_spf_extra_ip4: ["<ip-ancien-relais>"]
+mailrelay_spf_extra_ip4: []
+
+# Bascule vers un nouveau relais : la clé DKIM est GÉNÉRÉE sur chaque machine,
+# donc le nouveau relais publierait une autre clé `mail._domainkey` et les
+# messages déjà signés par l'ancienne deviendraient invalides. Copier AVANT le
+# déploiement la clé privée de l'ancien relais vers le nouveau
+# (`/etc/opendkim/keys/<domaine>/mail.private` et `mail.txt`, propriétaire
+# `opendkim`, mode 0600) : `opendkim-genkey` est alors sauté (`creates:`) et la
+# clé publiée ne change pas.
+
 # Sélecteur DKIM — doit correspondre au nom de clé généré par ce rôle (mail.txt).
 mailrelay_dkim_selector: mail
 

@@ -110,6 +110,25 @@
     mode: '0700'
   loop: "{{ mail_domains }}"
 
+# Clé restaurée depuis le dépôt de parc (chiffrée) quand elle y est : la clé
+# publiée reste celle que les messages déjà en circulation signent. Sans fichier
+# dans le parc, `opendkim-genkey` ci-dessous en crée une nouvelle.
+- name: Restore the DKIM key of each domain from the parc (when present)
+  ansible.builtin.copy:
+    src: "{{ _dkim_src }}"
+    dest: "/etc/opendkim/keys/{{ item.0.name }}/{{ item.1 }}"
+    owner: opendkim
+    group: opendkim
+    mode: "{{ '0600' if item.1.endswith('.private') else '0644' }}"
+  vars:
+    _dkim_src: "{{ playbook_dir }}/../parcs/{{ parc_name }}/mailrelay/dkim/{{ item.0.name }}/{{ item.1 }}"
+  loop: "{{ mail_domains | product([mailrelay_dkim_selector ~ '.private', mailrelay_dkim_selector ~ '.txt']) | list }}"
+  loop_control:
+    label: "{{ item.0.name }} {{ item.1 }}"
+  # Clé privée : jamais dans le diff ni dans le log.
+  no_log: true
+  when: lookup('ansible.builtin.fileglob', _dkim_src) | length > 0
+
 - name: Generate DKIM key for each domain (skipped if key already exists)
   ansible.builtin.command:
     cmd: "opendkim-genkey -b 2048 -s mail -d {{ item.name }} -D /etc/opendkim/keys/{{ item.name }}"
@@ -382,7 +401,7 @@
         zone: "{{ item.zone | default(item.name.split('.')[-2:] | join('.')) }}"
         record: "{{ item.name }}"
         type: TXT
-        value: "v=spf1 ip4:{{ mailrelay_public_ip }} {{ mailrelay_spf_qualifier }}"
+        value: "v=spf1 ip4:{{ mailrelay_public_ip }}{% for ip in mailrelay_spf_extra_ip4 %} ip4:{{ ip }}{% endfor %} {{ mailrelay_spf_qualifier }}"
         solo: true
         state: present
       loop: "{{ mail_domains }}"
