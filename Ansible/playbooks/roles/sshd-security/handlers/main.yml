@@ -1,0 +1,8 @@
+---
+# Rechargement, pas redémarrage : les sessions ouvertes (dont celle d'Ansible) survivent.
+- name: reload sshd
+  ansible.builtin.shell:
+    cmd: systemctl reload ssh 2>/dev/null || systemctl reload sshd
+    executable: /bin/bash
+  become: true
+  changed_when: true

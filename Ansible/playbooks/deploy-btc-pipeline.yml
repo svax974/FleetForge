@@ -84,7 +84,7 @@
 # qui exige une base joignable. Dans l'ordre inverse, le déploiement échoue au
 # milieu, code livré mais schéma absent.
 - name: Base d'indicateurs TimescaleDB
-  hosts: timescale
+  hosts: timescale1
   remote_user: "{{ remote_username }}"
   roles:
     - timescaledb-install
@@ -130,7 +130,7 @@
     - rpcbtc-monitoring
 
 - name: node_exporter (dont collecteur textfile pour les sauvegardes)
-  hosts: rpcbtc1:timescale
+  hosts: rpcbtc1:timescale1
   remote_user: "{{ remote_username }}"
   become: true
   roles:
@@ -152,14 +152,19 @@
   gather_facts: false
   tags: [always]
   tasks:
+    # /metrics de l'ETL exige le jeton Bearer (`METRICS_AUTH_TOKEN`, le même que celui du scrape Prometheus) :
+    # sans lui la réponse est 401 et ce contrôle échouait sur un déploiement par ailleurs réussi (25/10/2026).
     - name: Interroger l'ETL
       ansible.builtin.uri:
         url: "http://127.0.0.1:{{ papangmetrics_etl_metrics_port }}/metrics"
+        headers:
+          Authorization: "Bearer {{ papangmetrics_metrics_auth_token | default('') }}"
         return_content: true
       register: pipeline_metrics
       retries: 12
       delay: 10
       until: pipeline_metrics.status == 200
+      no_log: true
 
     - name: Extraire les métriques clés
       ansible.builtin.set_fact:

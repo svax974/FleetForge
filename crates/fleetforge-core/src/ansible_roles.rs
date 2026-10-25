@@ -102,6 +102,9 @@ fn get_role_metadata(name: &str) -> (String, String) {
     match name {
         // Sécurité
         "security-ssh" => ("Sécurisation SSH (bootstrap)".into(), "Bascule SSH sur le port du parc et pose les règles UFW restreintes lors du bootstrap. Neutralise au passage le jeu de règles iptables des images cloud qui rendrait UFW décoratif. Pose les clés de keys/<parc>/ sur root.".into()),
+        "sshd-security" => ("Durcissement sshd + cloud-init".into(), "Ferme l'authentification par mot de passe et la connexion root par mot de passe (drop-in prioritaire sur celui de cloud-init) et désactive cloud-init, qui défaisait ce réglage à chaque démarrage.".into()),
+        "prometheus-monitoring" => ("Supervision de Prometheus".into(), "Dépose la sonde svcprobe de Prometheus (service_up + conteneur) : Prometheus ne se supervise pas lui-même de l'extérieur.".into()),
+        "umami-monitoring" => ("Supervision d'Umami".into(), "Dépose la sonde svcprobe d'Umami : heartbeat HTTP, conteneur applicatif et sa base PostgreSQL privée.".into()),
         "ssh-security-update" => ("MAJ sécurité SSH".into(), "Applique les mises à jour de configuration SSH et des règles firewall sur les serveurs existants.".into()),
         "create-user-remove" => ("Suppression utilisateur système".into(), "Supprime l'utilisateur de service et son répertoire personnel.".into()),
         "firewall-security" => ("Restrictions firewall".into(), "Applique des règles de restriction réseau avancées via UFW.".into()),

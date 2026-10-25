@@ -26,3 +26,4 @@
   roles:
     - umami-install
     - umami-security
+    - umami-monitoring

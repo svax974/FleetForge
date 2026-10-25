@@ -254,3 +254,8 @@ prom_alert_searxng_max_unresponsive: 3
 # 19/10/2026 (searxng_probe_interval) : 90 min couvrent deux mesures.
 prom_alert_searxng_min_contributing: 3
 prom_alert_searxng_few_engines_for: "90m"
+
+# Jobs qui DOIVENT avoir au moins une cible sur ce parc (une règle `JobWithoutTargets` chacun). Vide par
+# défaut : un job attendu dépend du parc. À renseigner dans group_vars/<parc>.yml.
+prom_expected_jobs: []
+prom_alert_empty_job_for: "15m"

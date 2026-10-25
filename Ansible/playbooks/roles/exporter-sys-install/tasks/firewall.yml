@@ -20,6 +20,7 @@
   become: yes
   when: ansible_host != hostvars[prometheus_host]['ansible_host']
   ignore_errors: true
+  tags: [monitoring]
 
 # Prometheus tourne en conteneur : quand il est sur la même machine, le scrape
 # arrive par le bridge Docker et non par l'IP publique. Le test porte sur l'IP
@@ -35,3 +36,4 @@
   become: yes
   when: ansible_host == hostvars[prometheus_host]['ansible_host']
   ignore_errors: true
+  tags: [monitoring]

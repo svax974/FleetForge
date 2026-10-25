@@ -1,0 +1,7 @@
+{
+  "service": "prometheus",
+  "up": {"kind": "http", "url": "{{ promon_url }}", "status": [200, 401], "timeout": 10},
+  "extra_checks": [
+    {"name": "container", "kind": "docker", "container": "{{ promon_container }}"}
+  ]
+}

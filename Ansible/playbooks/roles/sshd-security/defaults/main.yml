@@ -1,0 +1,22 @@
+---
+# Durcissement de sshd ET neutralisation de cloud-init, qui le défait à chaque démarrage.
+#
+# Constat du 25/10/2026 sur les 9 machines du parc papanglabs : la configuration cloud-init fournie
+# par l'hébergeur contient un `bootcmd` qui réécrit `PermitRootLogin yes` dans sshd_config à CHAQUE
+# démarrage, et `sshd_config.d/50-cloud-init.conf` impose `PasswordAuthentication yes`. Les deux
+# gagnaient sur le reste (sshd retient la première valeur lue) : connexion root et authentification
+# par mot de passe actives partout, seulement bornées par ufw. Le même `bootcmd` se termine en code 1
+# (`pkill -HUP sshd` : sshd n'est pas encore lancé), ce qui laisse `cloud-init-main.service` en échec
+# et fait sonner `SystemdUnitFailed` en permanence.
+
+# Valeur de PermitRootLogin. `prohibit-password` garde la connexion root PAR CLÉ (le bootstrap d'une
+# machine neuve, setup-server.yml phase 1) ; `no` la ferme tout à fait.
+sshd_permit_root_login: prohibit-password
+
+# Fichier posé en tête de sshd_config.d : sshd lit les drop-ins par ordre alphabétique et retient la
+# PREMIÈRE valeur, donc `00-` passe avant `50-cloud-init.conf`.
+sshd_hardening_dropin: /etc/ssh/sshd_config.d/00-hardening.conf
+
+# true : crée /etc/cloud/cloud-init.disabled (cloud-init ne s'exécute plus au démarrage). Réseau et nom
+# d'hôte restent ceux déjà écrits sur disque (netplan, hostnamectl) : la garde ci-dessous le vérifie.
+sshd_disable_cloud_init: true

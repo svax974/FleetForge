@@ -1,0 +1,114 @@
+---
+# Voir defaults/main.yml pour le pourquoi.
+
+# ── Gardes : ne jamais fermer le mot de passe si la clé ne suffit pas ──────────
+- name: Read the authorized keys of the service user
+  ansible.builtin.slurp:
+    src: "/home/{{ remote_username }}/.ssh/authorized_keys"
+  register: sshd_keys
+  failed_when: false
+  become: true
+
+- name: Refuse to disable password login without a working key for the service user
+  ansible.builtin.assert:
+    that:
+      - sshd_keys.content is defined
+      - (sshd_keys.content | b64decode | regex_findall('(?m)^(ssh-|ecdsa-|sk-)') | length) > 0
+    fail_msg: >-
+      {{ remote_username }} n'a aucune clé dans authorized_keys : fermer l'authentification par mot de passe
+      couperait l'accès. Poser les clés d'abord (security-ssh / security-create-user).
+    quiet: true
+
+# Désactiver cloud-init fige le réseau tel qu'il est écrit sur disque : il faut qu'il le soit.
+- name: Find the network configuration written on disk
+  ansible.builtin.find:
+    paths: [/etc/netplan, /etc/systemd/network]
+    patterns: ['*.yaml', '*.network']
+  register: sshd_net
+  become: true
+  when: sshd_disable_cloud_init | bool
+
+- name: Refuse to disable cloud-init when no network configuration exists on disk
+  ansible.builtin.assert:
+    that: sshd_net.matched | default(0) > 0
+    fail_msg: "Aucune configuration réseau dans /etc/netplan ni /etc/systemd/network : cloud-init est peut-être seul à la poser."
+    quiet: true
+  when: sshd_disable_cloud_init | bool
+
+# ── sshd ──────────────────────────────────────────────────────────────────────
+- name: Deploy the sshd hardening drop-in
+  ansible.builtin.copy:
+    dest: "{{ sshd_hardening_dropin }}"
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      # Géré par Ansible (rôle sshd-security). Chargé avant 50-cloud-init.conf : sshd retient la première valeur.
+      PasswordAuthentication no
+      KbdInteractiveAuthentication no
+      PermitRootLogin {{ sshd_permit_root_login }}
+  become: true
+  register: sshd_dropin
+  notify: reload sshd
+
+# Une configuration invalide ne doit jamais être rechargée : on retire le drop-in et on échoue.
+- name: Validate the resulting sshd configuration
+  ansible.builtin.command: sshd -t
+  become: true
+  changed_when: false
+  register: sshd_test
+  failed_when: false
+  check_mode: false
+
+- name: Roll the drop-in back when the configuration is invalid
+  ansible.builtin.file:
+    path: "{{ sshd_hardening_dropin }}"
+    state: absent
+  become: true
+  when: sshd_test.rc != 0
+
+- name: Fail when the sshd configuration is invalid
+  ansible.builtin.fail:
+    msg: "sshd -t refuse la configuration ({{ sshd_test.stderr }}) : drop-in retiré, rien n'a été rechargé."
+  when: sshd_test.rc != 0
+
+- name: Reload sshd now so that the checks below see the effective values
+  ansible.builtin.meta: flush_handlers
+
+- name: Read the effective sshd settings
+  ansible.builtin.command: sshd -T
+  become: true
+  changed_when: false
+  register: sshd_effective
+  check_mode: false
+
+- name: Check that the effective settings are the hardened ones
+  ansible.builtin.assert:
+    that:
+      - "'passwordauthentication no' in sshd_effective.stdout"
+      - "('permitrootlogin ' ~ sshd_permit_root_login) in sshd_effective.stdout"
+    fail_msg: >-
+      sshd applique encore d'autres valeurs que le drop-in :
+      {{ sshd_effective.stdout_lines | select('match', '^(passwordauthentication|permitrootlogin|kbdinteractiveauthentication) ') | list }}
+    quiet: true
+  when: not ansible_check_mode
+
+# ── cloud-init ────────────────────────────────────────────────────────────────
+- name: Disable cloud-init at boot
+  ansible.builtin.file:
+    path: /etc/cloud/cloud-init.disabled
+    state: touch
+    owner: root
+    group: root
+    mode: '0644'
+    modification_time: preserve
+    access_time: preserve
+  become: true
+  when: sshd_disable_cloud_init | bool
+
+- name: Clear the failed state of the cloud-init units
+  ansible.builtin.command: systemctl reset-failed cloud-init-main.service cloud-init-local.service cloud-init-network.service cloud-config.service cloud-final.service
+  become: true
+  changed_when: false
+  failed_when: false
+  when: sshd_disable_cloud_init | bool

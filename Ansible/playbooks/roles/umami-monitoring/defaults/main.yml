@@ -1,0 +1,8 @@
+---
+# Sonde svcprobe d'Umami (analytique web). Deux conteneurs : l'application et sa base PostgreSQL privée
+# (elle n'est partagée avec aucun autre service, voir umami-install).
+umamimon_container: umami
+umamimon_db_container: umami-db
+umamimon_port: "{{ umami_app_port | default(3400) }}"
+# `/api/heartbeat` est le point de santé d'Umami : 200 quand l'application tourne.
+umamimon_url: "http://127.0.0.1:{{ umami_app_port | default(3400) }}/api/heartbeat"

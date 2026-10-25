@@ -1,0 +1,8 @@
+{
+  "service": "umami",
+  "up": {"kind": "http", "url": "{{ umamimon_url }}", "status": [200], "timeout": 10},
+  "extra_checks": [
+    {"name": "app", "kind": "docker", "container": "{{ umamimon_container }}"},
+    {"name": "db", "kind": "docker", "container": "{{ umamimon_db_container }}"}
+  ]
+}

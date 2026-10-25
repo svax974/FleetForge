@@ -142,3 +142,14 @@
               — cette machine n'est pas supervisée. Le socle est posé. Pour
               l'enregistrer : ./play.sh {{ parc_name | default('<parc>') }}
               deploy-exporter-sys.yml --limit {{ inventory_hostname }}
+
+# ── Verrouillage SSH ─────────────────────────────────────────────────────────
+# Après le bootstrap : l'utilisateur de service et ses clés existent, la connexion se fait désormais
+# avec eux. Placer ce rôle dans la première étape couperait l'amorçage, qui s'authentifie par mot de
+# passe tant que la clé n'est pas posée.
+- name: SSH hardening and cloud-init neutralisation
+  hosts: all
+  remote_user: "{{ remote_username }}"
+  gather_facts: false
+  roles:
+    - sshd-security

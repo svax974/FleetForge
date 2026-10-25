@@ -6,3 +6,5 @@
     - prometheus-install
     - prometheus-alerts-update
     - prometheus-security
+    # Sonde `service_up{service="prometheus"}` : le rôle d'installation seul laissait Prometheus sans sonde.
+    - prometheus-monitoring

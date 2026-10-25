@@ -34,6 +34,21 @@ groups:
         annotations:
           summary: "Unité systemd en échec : {{ '{{' }} $labels.name {{ '}}' }} sur {{ '{{' }} $labels.instance {{ '}}' }}"
           description: "L'unité est en état failed. Avec StartLimitBurst configuré, c'est ce qui remonte une boucle de crash."
+{% for job in prom_expected_jobs | default([]) %}
+
+      # Un job SANS CIBLE n'alerte jamais : TargetDown ne peut pas se déclencher sur une cible qui n'existe pas,
+      # et les règles qui lisent ses séries restent `inactive` avec `health=ok`, indiscernables d'une règle qui
+      # veille. Constat du 25/10/2026 : `node-btc`, `papangmetrics-*`, `postfix` et `dmarc` vides, donc nœud
+      # Bitcoin, BRK, ETL et API sans aucune alerte. `absent()` rend les labels des matchers d'égalité.
+      - alert: JobWithoutTargets
+        expr: absent(up{job="{{ job }}"})
+        for: {{ prom_alert_empty_job_for }}
+        labels:
+          severity: warning
+        annotations:
+          summary: "Aucune cible pour le job {{ job }}"
+          description: "Le job `{{ job }}` n'a aucune cible enregistrée : les alertes qui lisent ses séries ne peuvent pas se déclencher. Rejouer le déploiement du service concerné avec --tags monitoring."
+{% endfor %}
 
 {% endif %}
 {% if 'resources' in prom_alert_groups %}

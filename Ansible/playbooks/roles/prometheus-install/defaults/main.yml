@@ -22,6 +22,7 @@ prometheus_sd_jobs:
   - papangmetrics-etl   # /metrics de l'ETL (porte brk_up et brk_height)
   - dmarc               # exporter des rapports agrégés DMARC
   - svcprobe            # sonde de service partagée (port 9110)
+  - alertmanager        # /metrics natif d'Alertmanager (alertmanager-monitoring) : notifications envoyées / en échec
 
 # Cible Alertmanager. Même machine aujourd'hui, mais adressée par son nom
 # d'inventaire pour que la séparation reste triviale plus tard.

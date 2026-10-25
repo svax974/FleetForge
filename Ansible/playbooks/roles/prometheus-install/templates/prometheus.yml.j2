@@ -106,6 +106,16 @@ scrape_configs:
       - files:
           - 'prometheus-configs/svcprobe/*.json'
 
+  # Alertmanager — /metrics natif. Cible déposée par `alertmanager-monitoring` dans
+  # prometheus-configs/alertmanager/ ; sans ce job le fichier restait là sans jamais être lu, et ni
+  # `alertmanager_notifications_failed_total` ni `up{job="alertmanager"}` n'existaient : on ne pouvait
+  # donc pas voir que plus AUCUN e-mail d'alerte ne partait (constat du 25/10/2026, 0 envoi en 24 h).
+  - job_name: 'alertmanager'
+    metrics_path: /metrics
+    file_sd_configs:
+      - files:
+          - 'prometheus-configs/alertmanager/*.json'
+
   # FleetForge — l'application de gestion du parc, qui expose Prometheus
   # nativement sur son port applicatif. Cible déposée par
   # `fleetforge-monitoring` ; sans ce job le fichier resterait là sans

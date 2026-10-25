@@ -1,0 +1,16 @@
+---
+# Durcit sshd (mot de passe et connexion root par mot de passe fermés) et neutralise cloud-init, sur
+# les machines DÉJÀ installées.
+#
+#   ./play.sh papanglabs update-sshd-security.yml --limit timescale2 --check --diff   # essai sur la machine sans service
+#   ./play.sh papanglabs update-sshd-security.yml
+#
+# Une machine à la fois (`serial: 1`) : plusieurs entrées d'inventaire désignent la même machine, et le
+# rôle est idempotent, mais un rechargement de sshd par entrée serait inutile en parallèle. Pour une
+# machine NEUVE, le même rôle est joué en fin de setup-server.yml, une fois la clé posée.
+- name: Durcissement de sshd et neutralisation de cloud-init
+  hosts: all
+  remote_user: "{{ remote_username }}"
+  serial: 1
+  roles:
+    - sshd-security

@@ -1,0 +1,10 @@
+---
+# Sonde svcprobe de Prometheus. Prometheus se scrape déjà lui-même (job `prometheus`, localhost) : cette
+# sonde apporte ce qu'un auto-scrape ne peut pas dire — `service_up{service="prometheus"}` reste visible
+# quand Prometheus lui-même ne répond plus, via le scrape svcprobe d'un AUTRE composant, et ne dépend
+# pas du chargement correct de sa configuration.
+promon_container: prometheus
+promon_port: "{{ prometheus_port | default(9090) }}"
+# `/-/ready` répond 401 quand l'authentification basique est active (web.yml) : c'est une RÉPONSE, donc un
+# service vivant. Un service arrêté ou planté ne répond pas du tout.
+promon_url: "http://127.0.0.1:{{ prometheus_port | default(9090) }}/-/ready"

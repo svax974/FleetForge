@@ -1,0 +1,43 @@
+---
+# Supervision de Prometheus.
+#
+# Convention `<service>-monitoring` (CLAUDE.md) : le rôle dépose une SONDE déclarative pour `svcprobe`,
+# qui expose `service_up{service="prometheus"}`. L'installation de svcprobe enregistre aussi la cible sur
+# `prometheus_host` et ouvre le scrape (ufw), sous le tag `monitoring`.
+- name: Ensure the shared probe is installed
+  ansible.builtin.include_role:
+    name: svcprobe-install
+    public: true
+  tags: [monitoring]
+
+- name: Deploy the prometheus probe
+  ansible.builtin.template:
+    src: check.json.j2
+    dest: "{{ svcprobe_checks_dir }}/prometheus.json"
+    owner: root
+    group: root
+    mode: '0644'
+  become: true
+  tags: [monitoring]
+
+# Une sonde qui répond `service_up 0` alors que le service tourne est MAL ÉCRITE et ferait sonner une
+# alerte en permanence : mieux vaut le voir au déploiement.
+- name: Verify the probe answers
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ svcprobe_listen_port }}/metrics"
+    return_content: true
+  register: promon_probe
+  retries: 6
+  delay: 5
+  until: promon_probe.status is defined and promon_probe.status == 200
+  changed_when: false
+  tags: [monitoring]
+
+- name: Fail when the probe reports the service down
+  ansible.builtin.fail:
+    msg: >-
+      La sonde répond mais annonce `service_up{service="prometheus"} 0` alors que le déploiement vient
+      de réussir : la sonde est mal écrite ou le service ne répond pas.
+  when: >-
+    'service_up{service="prometheus"} 0' in (promon_probe.content | default(''))
+  tags: [monitoring]

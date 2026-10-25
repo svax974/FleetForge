@@ -1,0 +1,99 @@
+---
+# Contrôle de la supervision d'un parc, par ses SÉRIES et non par l'état des règles : une règle `inactive`
+# avec `health=ok` peut simplement n'avoir rien à évaluer (CLAUDE.md, « Vérifier une alerte par ses séries »).
+#
+#   ./play.sh papanglabs check-monitoring.yml
+#
+# Lecture seule. Interroge l'API de Prometheus depuis son propre hôte et rapporte :
+#   1. pour chaque job : cibles totales / cibles `up` (un job à 0 cible n'alerte jamais) ;
+#   2. les jobs ATTENDUS (`prom_expected_jobs`) qui n'ont aucune cible : échec ;
+#   3. le nombre de séries des métriques-clés (`check_monitoring_series`) ;
+#   4. l'acheminement des alertes : notifications Alertmanager envoyées / en échec.
+# Le motif d'hôte est écrit en dur, couvrant les deux parcs (un nom absent d'un inventaire est ignoré).
+- name: Contrôle de la supervision
+  hosts: prometheus1:monitor
+  remote_user: "{{ remote_username }}"
+  gather_facts: false
+  vars:
+    check_monitoring_series:
+      - { metric: "up", expect_min: 1 }
+      - { metric: "service_up", expect_min: 1 }
+      - { metric: "node_systemd_unit_state", expect_min: 1 }
+      - { metric: "backup_last_success_timestamp_seconds", expect_min: 1 }
+      - { metric: "alertmanager_notifications_total", expect_min: 1 }
+    prom_query_base: "http://127.0.0.1:{{ prometheus_port | default(9090) }}/api/v1/query"
+  tasks:
+    - name: Interroger Prometheus (par job)
+      ansible.builtin.uri:
+        url: "{{ prom_query_base }}?query={{ item.q | urlencode }}"
+        user: "{{ prometheus_user | default(omit) }}"
+        password: "{{ prometheus_pass | default(omit) }}"
+        force_basic_auth: "{{ prometheus_user is defined }}"
+        return_content: true
+      loop:
+        - { name: total, q: "count by (job) (up)" }
+        - { name: up, q: "count by (job) (up == 1)" }
+      register: cm_jobs
+      changed_when: false
+      no_log: true
+
+    - name: Calculer la couverture par job
+      ansible.builtin.set_fact:
+        cm_total: "{{ dict(cm_jobs.results[0].json.data.result | map(attribute='metric.job') | zip(cm_jobs.results[0].json.data.result | map(attribute='value') | map('last') | map('int'))) }}"
+        cm_up: "{{ dict(cm_jobs.results[1].json.data.result | map(attribute='metric.job') | zip(cm_jobs.results[1].json.data.result | map(attribute='value') | map('last') | map('int'))) }}"
+
+    - name: Couverture par job
+      ansible.builtin.debug:
+        msg: "{{ cm_total.keys() | sort | map('regex_replace', '^(.*)$', '\\1') | list | zip(cm_total.keys() | sort | map('extract', cm_up) | map('default', 0)) | map('join', ' : up=') | list }}"
+
+    - name: Jobs attendus sans aucune cible
+      ansible.builtin.assert:
+        that: (cm_total[item] | default(0)) > 0
+        fail_msg: "Le job `{{ item }}` n'a AUCUNE cible : ses alertes ne peuvent pas se déclencher."
+        quiet: true
+      loop: "{{ prom_expected_jobs | default([]) }}"
+      register: cm_expected
+      ignore_errors: true
+
+    - name: Nombre de séries des métriques-clés
+      ansible.builtin.uri:
+        url: "{{ prom_query_base }}?query={{ ('count(' ~ item.metric ~ ')') | urlencode }}"
+        user: "{{ prometheus_user | default(omit) }}"
+        password: "{{ prometheus_pass | default(omit) }}"
+        force_basic_auth: "{{ prometheus_user is defined }}"
+        return_content: true
+      loop: "{{ check_monitoring_series }}"
+      register: cm_series
+      changed_when: false
+      no_log: true
+
+    - name: Rapport des séries
+      ansible.builtin.debug:
+        msg: >-
+          {{ item.item.metric }} : {{ (item.json.data.result | first | default({'value': [0, 0]})).value | last }} séries
+          {{ '(ATTENDU ≥ ' ~ item.item.expect_min ~ ')' if ((item.json.data.result | first | default({'value': [0, 0]})).value | last | int) < item.item.expect_min else '' }}
+      loop: "{{ cm_series.results }}"
+      loop_control:
+        label: "{{ item.item.metric }}"
+
+    # Une alerte n'a de valeur que si elle ARRIVE : des notifications en échec et aucune réussie signifient
+    # que toute la chaîne d'alerte est muette, quoi que disent les règles.
+    - name: Acheminement des alertes
+      ansible.builtin.uri:
+        url: "{{ prom_query_base }}?query={{ item.q | urlencode }}"
+        user: "{{ prometheus_user | default(omit) }}"
+        password: "{{ prometheus_pass | default(omit) }}"
+        force_basic_auth: "{{ prometheus_user is defined }}"
+        return_content: true
+      loop:
+        - { name: envoyées, q: 'sum(alertmanager_notifications_total{integration="email"})' }
+        - { name: en échec, q: 'sum(alertmanager_notifications_failed_total{integration="email"})' }
+      register: cm_notif
+      changed_when: false
+      no_log: true
+
+    - name: Rapport de l'acheminement
+      ansible.builtin.debug:
+        msg: >-
+          e-mails envoyés : {{ (cm_notif.results[0].json.data.result | first | default({'value': [0, 0]})).value | last }},
+          en échec : {{ (cm_notif.results[1].json.data.result | first | default({'value': [0, 0]})).value | last }}

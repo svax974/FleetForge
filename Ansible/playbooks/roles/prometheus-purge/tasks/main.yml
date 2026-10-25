@@ -31,3 +31,14 @@
     path: "{{ prometheus_home }}"
     state: absent
   become: true
+
+# ── Supervision ────────────────────────────────────────────────────────────
+# Convention `-monitoring` (CLAUDE.md) : c'est le rôle de suppression du service qui retire sa sonde.
+# Une sonde laissée en place publierait `service_up 0` indéfiniment et ferait sonner `ServiceDown`
+# sur un service volontairement désinstallé.
+- name: Remove the svcprobe check
+  ansible.builtin.file:
+    path: "/etc/svcprobe/checks.d/prometheus.json"
+    state: absent
+  become: true
+  tags: [monitoring]

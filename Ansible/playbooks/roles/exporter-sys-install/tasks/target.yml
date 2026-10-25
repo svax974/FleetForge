@@ -11,6 +11,7 @@
 - name: Set prometheus home on monitor host
   ansible.builtin.set_fact:
     prometheus_home: "/home/{{ remote_username }}/prometheus"
+  tags: [monitoring]
 
 - name: Create exporter prometheus-configs directory on monitor host
   ansible.builtin.file:
@@ -21,6 +22,7 @@
     mode: "0755"
   delegate_to: "{{ prometheus_host }}"
   remote_user: "{{ remote_username }}"
+  tags: [monitoring]
 
 # UNE cible par MACHINE, pas par entrée d'inventaire : plusieurs entrées
 # partagent la même adresse (ctdapi, dev, docker-repo, xbot…).
@@ -35,6 +37,7 @@
       {{ ('172.17.0.1:' ~ node_exporter_port)
          if ansible_host == hostvars[prometheus_host]['ansible_host']
          else (ansible_host ~ ':' ~ node_exporter_scrape_port) }}
+  tags: [monitoring]
 
 - name: Look for an existing node_exporter target for this MACHINE
   ansible.builtin.shell: >-
@@ -48,6 +51,7 @@
   register: exporter_existing_target
   changed_when: false
   check_mode: false
+  tags: [monitoring]
 
 # Déposé si aucune cible n'existe pour la machine, ou si c'est la nôtre (un
 # rejeu doit pouvoir la mettre à jour). Sinon une AUTRE entrée d'inventaire la
@@ -65,6 +69,7 @@
   when: >-
     exporter_existing_target.stdout_lines | length == 0
     or (inventory_hostname ~ '.json') in (exporter_existing_target.stdout_lines | map('basename') | list)
+  tags: [monitoring]
 
 - name: Note the inventory name carrying the node_exporter scrape
   ansible.builtin.debug:
@@ -75,8 +80,10 @@
   when:
     - exporter_existing_target.stdout_lines | length > 0
     - (inventory_hostname ~ '.json') not in (exporter_existing_target.stdout_lines | map('basename') | list)
+  tags: [monitoring]
 
 # Ouvertures de pare-feu — déportées dans firewall.yml pour être rejouables
 # indépendamment de l'installation (cf. update-ufw-all.yml).
 - name: Apply node_exporter firewall rules
   ansible.builtin.include_tasks: firewall.yml
+  tags: [monitoring]
