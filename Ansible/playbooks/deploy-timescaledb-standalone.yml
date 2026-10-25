@@ -21,7 +21,7 @@
 
 # ── Phase 1 : socle de la machine (root, port 22 → port du parc) ─────────────
 - name: Phase 1 — Base server setup
-  hosts: "{{ tsdb_target | default('timescale') }}"
+  hosts: "{{ tsdb_target | default('timescale1') }}"
   remote_user: root
   gather_facts: false
   # Même liste, même ordre et même répartition de `become` que

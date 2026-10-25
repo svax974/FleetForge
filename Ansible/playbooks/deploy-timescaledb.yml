@@ -28,14 +28,14 @@
 # Prometheus. Les contrôles bloquants portent le tag `always` : ils
 # s'appliquent même à un rejeu ciblé par `--tags`.
 - name: Contrôle préalable
-  hosts: "{{ tsdb_target | default('timescale') }}"
+  hosts: "{{ tsdb_target | default('timescale1') }}"
   remote_user: "{{ remote_username }}"
   roles:
     - role: host-preflight
       preflight_require_docker: true
 
 - name: Base d'indicateurs TimescaleDB
-  hosts: "{{ tsdb_target | default('timescale') }}"
+  hosts: "{{ tsdb_target | default('timescale1') }}"
   remote_user: "{{ remote_username }}"
   roles:
     - timescaledb-install

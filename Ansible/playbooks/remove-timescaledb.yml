@@ -1,14 +1,14 @@
 ---
-# Arrête TimescaleDB sur l'hôte `timescale`. Les données restent sur disque.
+# Arrête TimescaleDB sur l'hôte `timescale1` (ou `-e tsdb_target=<hôte>`). Les données restent sur disque.
 #
 # Ciblait `brk1` alors que la base vit sur `timescale` depuis sa migration : le
 # playbook ne trouvait aucun projet compose et se terminait « ok », donnant
 # l'impression d'avoir arrêté une base qui tournait toujours.
 #
-#   ./play.sh papanglabs remove-timescaledb.yml
+#   ./play.sh papanglabs remove-timescaledb.yml -e tsdb_target=<hôte>
 
 - name: Remove PapangMetrics TimescaleDB (keeps data on disk)
-  hosts: timescale
+  hosts: "{{ tsdb_target | default('timescale1') }}"
   remote_user: "{{ remote_username }}"
   roles:
     - timescaledb-backup-remove

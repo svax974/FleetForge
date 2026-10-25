@@ -3,11 +3,11 @@
 # déjà déployé (deploy-timescaledb[-standalone].yml -e tsdb_target=<cible>) : un dump
 # FRAIS de la source, puis restauration sur la cible, depuis `backup-timescale`.
 #
-#   ./play.sh papanglabs duplicate-timescale.yml                              # état seul (lecture)
+#   ./play.sh papanglabs duplicate-timescale.yml -e src_host=<source> -e dst_host=<cible>   # état seul
 #   ./play.sh papanglabs duplicate-timescale.yml -e confirm=yes               # copie, SOURCE ET ETL INTACTS
 #   ./play.sh papanglabs duplicate-timescale.yml -e confirm=yes -e freeze=yes # copie de BASCULE
 #   ./play.sh papanglabs duplicate-timescale.yml -e confirm=yes -e fresh_dump=no   # dernier dump existant
-#   ./play.sh papanglabs duplicate-timescale.yml -e src_host=timescale -e dst_host=timescale1 …
+#   (src_host et dst_host sont OBLIGATOIRES : la cible est écrasée, aucun défaut n'est sûr)
 #
 # ── Deux usages ──────────────────────────────────────────────────────────────
 #   • Répétition (sans `freeze`) : la source reste la référence, l'ETL et l'API continuent
@@ -41,14 +41,14 @@
 
 # ── 0. Garde-fous ────────────────────────────────────────────────────────────
 - name: Contrôle des paramètres
-  hosts: "{{ src_host | default('timescale') }}:{{ dst_host | default('timescale1') }}"
+  hosts: "{{ src_host }}:{{ dst_host }}"
   remote_user: "{{ remote_username }}"
   gather_facts: false
   tags: [always]
   tasks:
     - name: Refuser source = cible
       ansible.builtin.assert:
-        that: (src_host | default('timescale')) != (dst_host | default('timescale1'))
+        that: (src_host) != (dst_host)
         fail_msg: "La source et la cible sont le même hôte : la restauration détruirait la base."
         quiet: true
       run_once: true
@@ -56,10 +56,10 @@
     - name: Refuser une cible qui planifie ses propres dumps
       ansible.builtin.assert:
         that: >-
-          hostvars[dst_host | default('timescale1')].tsdb_backup_enabled | default(true) | bool == false
+          hostvars[dst_host].tsdb_backup_enabled | default(true) | bool == false
           or (confirm | default('')) != 'yes'
         fail_msg: >-
-          {{ dst_host | default('timescale1') }} planifie ses dumps (tsdb_backup_enabled). Ils porteraient le
+          {{ dst_host }} planifie ses dumps (tsdb_backup_enabled). Ils porteraient le
           même nom que ceux de la source dans le même dossier : la rotation ferait tourner les bons dumps.
           Mettre tsdb_backup_enabled: false dans ses host_vars, puis rejouer deploy-timescaledb.yml.
         quiet: true
@@ -89,7 +89,7 @@
 # TSDB_BACKUP_INTERVAL_DAYS=0 lève cette limite pour CET appel seulement. pg_dump lit un
 # instantané cohérent : la source peut rester en service (répétition).
 - name: Dump de la source
-  hosts: "{{ src_host | default('timescale') }}"
+  hosts: "{{ src_host }}"
   remote_user: "{{ remote_username }}"
   gather_facts: false
   tags: [dump]
@@ -139,7 +139,7 @@
 # La cible TIRE le dump depuis `backup-timescale` (clé + ouverture ufw posées par
 # timescaledb-backup-install à son déploiement). Le plus récent est pris.
 - name: Restauration sur la cible
-  hosts: "{{ dst_host | default('timescale1') }}"
+  hosts: "{{ dst_host }}"
   remote_user: "{{ remote_username }}"
   gather_facts: false
   tags: [restore]
@@ -177,7 +177,7 @@
 
 # ── 4. Comparaison source / cible ────────────────────────────────────────────
 - name: Comparaison des deux bases
-  hosts: "{{ src_host | default('timescale') }}:{{ dst_host | default('timescale1') }}"
+  hosts: "{{ src_host }}:{{ dst_host }}"
   remote_user: "{{ remote_username }}"
   gather_facts: false
   tags: [verify]

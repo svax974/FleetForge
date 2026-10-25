@@ -185,6 +185,7 @@ fn get_playbook_metadata(name: &str) -> (String, String) {
         "deploy-dbs" => ("Déploiement DB (maître + réplica)".into(), "Déploie le cluster PostgreSQL complet avec réplication streaming.".into()),
         "deploy-timescaledb-standalone" => ("Déploiement TimescaleDB (VPS neuf)".into(), "Bootstrap de la machine (root, port 22) puis import de deploy-timescaledb.yml. Seule différence avec ce dernier : la phase de bootstrap.".into()),
         "deploy-timescaledb" => ("Déploiement TimescaleDB".into(), "Déploie TimescaleDB self-hosted (indicateurs PapangMetrics) sur l'hôte `timescale` (ou un autre via -e tsdb_target=<hôte>) + sécurité.".into()),
+        "remove-dns-records" => ("Suppression d'enregistrements DNS".into(), "Supprime des enregistrements Cloudflare par nom (-e records=a,b) : la synchronisation générique ne retire jamais un nom dont l'entrée a quitté l'inventaire.".into()),
         "switch-timescale-service" => ("Bascule du nom TimescaleDB".into(), "Déplace timescale.<domaine> (nom de service de la base d'indicateurs) vers un autre serveur : A supprimé, CNAME vers la cible. -e target=<hôte>.".into()),
         "duplicate-timescale" => ("Duplication TimescaleDB".into(), "Copie la base d'indicateurs d'un serveur TimescaleDB vers un autre (dump frais puis restauration). -e confirm=yes ; freeze=yes arrête l'ETL/API pour une bascule.".into()),
         "remove-timescaledb" => ("Suppression TimescaleDB".into(), "Arrête TimescaleDB et ses sauvegardes sur `timescale` (conserve les données).".into()),

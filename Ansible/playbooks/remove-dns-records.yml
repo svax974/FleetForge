@@ -1,0 +1,96 @@
+---
+# Supprime des enregistrements DNS Cloudflare du parc, par nom. À utiliser quand une machine ou un
+# service quitte l'inventaire : la synchronisation générique (update-cloudflare-dns.yml) CRÉE et met à
+# jour, elle ne retire jamais un nom dont l'entrée a disparu — il reste alors à pointer vers une IP qui
+# n'appartient plus au parc (et que l'hébergeur peut réattribuer à un tiers).
+#
+#   ./play.sh papanglabs remove-dns-records.yml -e records=backindicators,dbfmaster --check
+#   ./play.sh papanglabs remove-dns-records.yml -e records=backindicators,dbfmaster
+#
+# `records` : noms RELATIFS à la zone (sans `.<domaine>`), séparés par des virgules. Tous les types
+# d'enregistrement portés par ces noms (A, AAAA, CNAME) sont supprimés ; ce qui n'existe pas est ignoré.
+# `content` (facultatif) : adresses séparées par des virgules ; supprime AUSSI tout enregistrement qui
+# pointe vers l'une d'elles, quel que soit son nom. C'est ce qui retrouve les noms oubliés quand une
+# machine quitte le parc. `records` peut alors être vide (`-e records=`) pour une recherche pure.
+# Joué sur `-e anchor=<entrée>` (défaut prometheus1) pour hériter des variables du parc (domain_name,
+# cloudflare_token) ; les appels sont délégués au poste de contrôle.
+- name: Supprimer des enregistrements DNS
+  hosts: "{{ anchor | default('prometheus1') }}"
+  gather_facts: false
+  tasks:
+    - name: Vérifier les paramètres et le jeton Cloudflare
+      ansible.builtin.assert:
+        that:
+          - records is defined
+          - (records | string | length) > 0 or content is defined
+          - (cloudflare_token | default('')) | length > 0
+        fail_msg: "-e records=nom1,nom2 requis (noms relatifs à la zone) ; `cloudflare_token` doit être au vault."
+        quiet: true
+      delegate_to: localhost
+      become: false
+
+    # Avant de supprimer : ce que Cloudflare porte réellement pour ces noms.
+    - name: Lister ce qui existe pour ces noms
+      ansible.builtin.uri:
+        url: "https://api.cloudflare.com/client/v4/zones?name={{ domain_name }}"
+        headers:
+          Authorization: "Bearer {{ cloudflare_token }}"
+        return_content: true
+      register: dns_zone
+      delegate_to: localhost
+      become: false
+      check_mode: false
+      no_log: true
+
+    - name: Lire les enregistrements de chaque nom
+      ansible.builtin.uri:
+        url: "https://api.cloudflare.com/client/v4/zones/{{ dns_zone.json.result[0].id }}/dns_records?name={{ item }}.{{ domain_name }}"
+        headers:
+          Authorization: "Bearer {{ cloudflare_token }}"
+        return_content: true
+      loop: "{{ records.split(',') | map('trim') | list }}"
+      register: dns_found
+      delegate_to: localhost
+      become: false
+      check_mode: false
+      no_log: true
+
+    - name: Lire toute la zone (recherche par contenu)
+      ansible.builtin.uri:
+        url: "https://api.cloudflare.com/client/v4/zones/{{ dns_zone.json.result[0].id }}/dns_records?per_page=5000"
+        headers:
+          Authorization: "Bearer {{ cloudflare_token }}"
+        return_content: true
+      register: dns_all
+      delegate_to: localhost
+      become: false
+      check_mode: false
+      no_log: true
+      when: content is defined
+
+    # Une seule liste de cibles {nom, type, valeur}, dédoublonnée : un nom peut sortir des deux sources.
+    - name: Constituer la liste à supprimer
+      ansible.builtin.set_fact:
+        dns_targets: >-
+          {{ (dns_found.results | map(attribute='json.result') | flatten
+              + ((dns_all.json.result | selectattr('content', 'in', content.split(',') | map('trim') | list) | list)
+                 if dns_all is not skipped else []))
+             | map('combine', {}) | unique(attribute='id') | list }}
+
+    - name: Annoncer la liste
+      ansible.builtin.debug:
+        msg: "{{ dns_targets | map(attribute='name') | zip(dns_targets | map(attribute='type'), dns_targets | map(attribute='content')) | map('join', '  ') | list or ['(rien à supprimer)'] }}"
+
+    - name: Supprimer chaque enregistrement
+      community.general.cloudflare_dns:
+        api_token: "{{ cloudflare_token }}"
+        zone: "{{ domain_name }}"
+        record: "{{ item.name | regex_replace('\\.' ~ domain_name ~ '$', '') }}"
+        type: "{{ item.type }}"
+        value: "{{ item.content }}"
+        state: absent
+      loop: "{{ dns_targets }}"
+      loop_control:
+        label: "{{ item.name }} {{ item.type }}"
+      delegate_to: localhost
+      become: false

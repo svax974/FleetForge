@@ -60,7 +60,7 @@
     - brk-backup-install
 
 - name: Repointage de la sauvegarde de la base d'indicateurs
-  hosts: timescale
+  hosts: timescale1
   remote_user: "{{ remote_username }}"
   roles:
     - timescaledb-backup-install
@@ -92,7 +92,7 @@
         var: brk_check.stdout_lines
 
 - name: Vérification — la destination des indicateurs répond
-  hosts: timescale
+  hosts: timescale1
   remote_user: "{{ remote_username }}"
   tasks:
     - name: Interroger la destination via timescaledb-restore.sh --check
@@ -106,7 +106,7 @@
 
 # ── Première sauvegarde immédiate (optionnelle) ────────────────────────────
 - name: Lancement immédiat des sauvegardes
-  hosts: brk1:timescale
+  hosts: brk1:timescale1
   remote_user: "{{ remote_username }}"
   gather_facts: false
   vars:

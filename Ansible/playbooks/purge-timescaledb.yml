@@ -11,7 +11,7 @@
 #   ./play.sh papanglabs purge-timescaledb.yml -e confirm=yes
 
 - name: Purge PapangMetrics TimescaleDB (DESTRUCTIVE — removes data + backups)
-  hosts: timescale
+  hosts: "{{ tsdb_target | default('timescale1') }}"
   remote_user: "{{ remote_username }}"
   roles:
     - timescaledb-backup-purge

@@ -1,7 +1,7 @@
 ---
 # Déploiement du back PapangLabs (NestJS, conteneurs Docker Compose).
 #
-#   ./play.sh papanglabs deploy-papanglabs-back.yml --limit backindicators1-prod
+#   ./play.sh papanglabs deploy-papanglabs-back.yml --limit back1-prod
 #
 # Pour une simple livraison de code (le cas courant), préférer
 # update-papanglabs-back.yml : même code+build+redémarrage, sans rejouer le

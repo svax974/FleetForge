@@ -30,7 +30,7 @@
 
 # ── Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ───────────────────────
 - name: Contrôle préalable (sources natives)
-  hosts: brk1:timescale
+  hosts: brk1:timescale1
   remote_user: "{{ remote_username }}"
   roles:
     - role: host-preflight
@@ -51,7 +51,7 @@
     - brk-backup-install
 
 - name: Sauvegarde de la base d'indicateurs
-  hosts: timescale
+  hosts: timescale1
   remote_user: "{{ remote_username }}"
   roles:
     - timescaledb-backup-install
@@ -90,7 +90,7 @@
 # node_exporter n'active le collecteur `textfile` que depuis cette mise à jour :
 # le rôle est rejoué ici pour que les hôtes concernés le portent réellement.
 - name: Collecteur textfile de node_exporter (métriques de sauvegarde)
-  hosts: brk1:timescale
+  hosts: brk1:timescale1
   remote_user: "{{ remote_username }}"
   become: true
   roles:

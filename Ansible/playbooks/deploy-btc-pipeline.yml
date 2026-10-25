@@ -37,7 +37,7 @@
 # Les contrôles bloquants portent le tag `always` : ils s'appliquent même à un
 # rejeu ciblé par `--tags`.
 - name: Contrôle préalable
-  hosts: rpcbtc1:brk1:papangmetrics1:timescale
+  hosts: rpcbtc1:brk1:papangmetrics1:timescale1
   remote_user: "{{ remote_username }}"
   roles:
     - role: host-preflight

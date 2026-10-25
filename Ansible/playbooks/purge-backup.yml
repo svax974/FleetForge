@@ -17,7 +17,7 @@
     - brk-backup-purge
 
 - name: Purge de la sauvegarde de la base d'indicateurs
-  hosts: timescale
+  hosts: timescale1
   remote_user: "{{ remote_username }}"
   roles:
     - timescaledb-backup-purge

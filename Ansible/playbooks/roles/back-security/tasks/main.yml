@@ -18,7 +18,7 @@
     rule: allow
     proto: tcp
     from_ip: "{{ item }}"
-    port: "{{ hostvars['backindicators1'].app_port }}"
+    port: "{{ app_port | default(9741) }}"
   with_items:
     "{{ whitelist }}"
 
@@ -27,6 +27,6 @@
     rule: allow
     proto: tcp
     from_ip: "{{ item }}"
-    port: "{{ hostvars['backindicators1'].app_port }}"
+    port: "{{ app_port | default(9741) }}"
   with_items:
     "{{ cloudflare_ips }}"

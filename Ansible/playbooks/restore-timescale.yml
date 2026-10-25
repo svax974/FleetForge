@@ -27,7 +27,7 @@
       when: (confirm | default('')) == 'yes'
 
 - name: Restauration de la base d'indicateurs
-  hosts: timescale
+  hosts: timescale1
   remote_user: "{{ remote_username }}"
   tasks:
     - name: État des dumps disponibles
