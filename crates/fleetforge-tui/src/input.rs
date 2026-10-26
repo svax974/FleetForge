@@ -1329,6 +1329,14 @@ fn connect_provider(app: &mut App, tx: &UnboundedSender<Msg>) {
             configure_provider(app);
             return;
         }
+        // Déjà ouvert : rouvrir la connexion refait un aller-retour chez
+        // l'hébergeur (et, pour Oracle, une sonde de compartiment) pour rien.
+        // On relit seulement les instances.
+        if app.selected_account().is_some_and(|a| a.connected) {
+            app.status = format!("{account} est déjà connecté — instances relues");
+            tokio::spawn(async move { refresh_instances(hub, account.provider, tx_clone).await });
+            return;
+        }
         app.status = format!("connexion à {account}…");
         tokio::spawn(async move {
             connect_and_list(hub, account, None, tx_clone).await;
@@ -1350,10 +1358,28 @@ fn connect_provider(app: &mut App, tx: &UnboundedSender<Msg>) {
         return;
     }
 
-    app.status = format!("connexion à {}…", info.label);
+    // Seuls les comptes encore FERMÉS : rouvrir ceux qui le sont déjà relancerait
+    // leur connexion (et leurs sondes) sans rien changer.
+    let closed: Vec<fleetforge_providers::AccountId> = app
+        .selected_provider()
+        .map(|p| {
+            p.accounts
+                .iter()
+                .filter(|a| !a.connected)
+                .map(|a| fleetforge_providers::AccountId { provider: kind, name: a.name.clone() })
+                .filter(|id| app.hub.has_credentials(id))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    app.status = if closed.is_empty() {
+        format!("{} : tout est déjà connecté — instances relues", info.label)
+    } else {
+        format!("connexion à {}…", info.label)
+    };
     tokio::spawn(async move {
-        for (account, result) in hub.reconnect_all(kind).await {
-            match result {
+        for account in closed {
+            match hub.reconnect(&account).await {
                 Ok(()) => {
                     let _ = tx_clone.send(Msg::Status(format!("{account} connecté")));
                 }
@@ -1364,10 +1390,20 @@ fn connect_provider(app: &mut App, tx: &UnboundedSender<Msg>) {
                 }
             }
         }
-        let _ = tx_clone.send(Msg::ProvidersLoaded(hub.statuses().await));
-        let (instances, _) = hub.list_instances_everywhere(kind).await;
-        let _ = tx_clone.send(Msg::InstancesLoaded(kind, instances));
+        refresh_instances(hub, kind, tx_clone).await;
     });
+}
+
+/// Relit l'état des comptes et les instances de l'hébergeur, sans toucher aux
+/// connexions.
+async fn refresh_instances(
+    hub: std::sync::Arc<fleetforge_providers::ProviderHub>,
+    kind: fleetforge_core::model::ProviderKind,
+    tx: UnboundedSender<Msg>,
+) {
+    let _ = tx.send(Msg::ProvidersLoaded(hub.statuses().await));
+    let (instances, _) = hub.list_instances_everywhere(kind).await;
+    let _ = tx.send(Msg::InstancesLoaded(kind, instances));
 }
 
 /// `x` : ferme la session du compte désigné, ou de tous ceux de l'hébergeur.

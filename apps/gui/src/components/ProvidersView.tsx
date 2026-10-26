@@ -17,7 +17,7 @@ import { useState, useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Cloud, RefreshCw, Power, RotateCw, Square, Link2, Unlink, Settings, Plus, Trash2, Globe, X, Pencil, Check } from 'lucide-react'
 import {
-  listProviders, reconnectProvider, reconnectProviderAccounts, disconnectProvider,
+  listProviders, reconnectProvider, disconnectProvider,
   forgetProvider, connectProvider, listInstances, powerInstance, reconcileFleet,
   runSessionAction, renameProvider,
 } from '../lib/api'
@@ -293,8 +293,19 @@ export default function ProvidersView({ selectedInventory }: ProvidersViewProps)
     setBusy(true)
     setError(null)
     try {
-      const results = await reconnectProviderAccounts(current.kind)
-      const failed = results.filter(([, err]) => err !== null)
+      // Seuls les comptes encore fermés : rouvrir ceux qui le sont déjà
+      // relancerait leur connexion sans rien changer.
+      const closed: string[] = current.accounts
+        .filter((a) => a.has_saved_credentials && !a.connected)
+        .map((a) => a.name)
+      const failed: [string, string][] = []
+      for (const name of closed) {
+        try {
+          await reconnectProvider(current.kind, name)
+        } catch (err: unknown) {
+          failed.push([name, String(err)])
+        }
+      }
       if (failed.length > 0) {
         setError(failed.map(([name, err]) => `${name} : ${err}`).join(' · '))
       }

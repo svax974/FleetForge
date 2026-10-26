@@ -515,6 +515,11 @@ impl ProviderHub {
                             "providers",
                             format!("{account} : session ouverte mais reconnexion refusée : {e}"),
                         );
+                        // Annoncer « session ouverte » seul laissait croire à un
+                        // compte connecté : la session l'est, pas le compte.
+                        return Err(ProviderError::Api(format!(
+                            "session ouverte, mais la connexion du compte reste refusée : {e}"
+                        )));
                     }
                 }
                 Ok(m)
