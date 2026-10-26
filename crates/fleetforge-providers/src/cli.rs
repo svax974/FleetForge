@@ -873,6 +873,52 @@ fn profile_section_exists(config: &str, profile: &str) -> bool {
     })
 }
 
+/// `config` avec `region` du profil réglée sur `region`. `None` si elle y est
+/// déjà ou si le profil n'a pas de section. Seule cette ligne change : le reste
+/// du fichier (autres profils, commentaires, ordre) reste tel quel.
+fn with_profile_region(config: &str, profile: &str, region: &str) -> Option<String> {
+    let wanted = if profile.trim().is_empty() { "DEFAULT" } else { profile.trim() };
+    let mut lines: Vec<String> = config.lines().map(String::from).collect();
+    let header = lines.iter().position(|l| {
+        l.trim()
+            .strip_prefix('[')
+            .and_then(|l| l.strip_suffix(']'))
+            .is_some_and(|n| n.trim() == wanted)
+    })?;
+    let end = lines[header + 1..]
+        .iter()
+        .position(|l| l.trim().starts_with('['))
+        .map_or(lines.len(), |i| header + 1 + i);
+    let existing = (header + 1..end).find(|&i| {
+        lines[i].split_once('=').is_some_and(|(k, _)| k.trim() == "region")
+    });
+    match existing {
+        Some(i) => {
+            if lines[i].split_once('=').is_some_and(|(_, v)| v.trim() == region) {
+                return None;
+            }
+            lines[i] = format!("region={region}");
+        }
+        None => lines.insert(header + 1, format!("region={region}")),
+    }
+    Some(lines.join("\n") + "\n")
+}
+
+/// Applique la région saisie à un profil qui existe déjà. Sans cela, la corriger
+/// dans le formulaire n'avait aucun effet : seul un profil neuf la lisait.
+fn apply_profile_region(profile: &str, region: &str) {
+    let path = dirs_home().join(".oci/config");
+    let Ok(text) = std::fs::read_to_string(&path) else { return };
+    let Some(updated) = with_profile_region(&text, profile, region) else { return };
+    match std::fs::write(&path, updated) {
+        Ok(()) => fleetforge_core::logging::info(
+            "oci",
+            format!("région du profil [{profile}] réglée sur {region}"),
+        ),
+        Err(e) => fleetforge_core::logging::warn("oci", format!("région non écrite dans ~/.oci/config : {e}")),
+    }
+}
+
 fn oci_profile_exists(profile: &str) -> bool {
     std::fs::read_to_string(dirs_home().join(".oci/config"))
         .map(|text| profile_section_exists(&text, profile))
@@ -1215,8 +1261,8 @@ impl Provider for OracleProvider {
                 AuthField::new("OCI_PROFILE", "Profil")
                     .hint("Une section de ~/.oci/config. Vide = DEFAULT. Un profil qui n'existe pas est CRÉÉ : le navigateur s'ouvre pour se connecter à la tenancy du compte.")
                     .optional(),
-                AuthField::new("OCI_REGION", "Région (création du profil)")
-                    .hint("eu-paris-1… Utilisée seulement pour créer un profil absent. Vide = région du profil DEFAULT.")
+                AuthField::new("OCI_REGION", "Région")
+                    .hint("eu-paris-1… Écrite dans le profil de ~/.oci/config (créé si absent). Vide = région du profil, ou celle de DEFAULT pour un profil neuf.")
                     .optional(),
                 AuthField::new("OCI_COMPARTMENT", "Compartiment (OCID)")
                     .hint("ocid1.compartment.oc1..… — Console → Identité → Compartiments. Sans lui, seules les instances de la racine de la tenancy seraient listées."),
@@ -1273,6 +1319,8 @@ impl Provider for OracleProvider {
                     "le profil [{wanted}] n'a pas été créé : la connexion dans le navigateur n'a pas abouti"
                 )));
             }
+        } else if let Some(region) = credentials.get("OCI_REGION").map(str::trim).filter(|r| !r.is_empty()) {
+            apply_profile_region(&wanted, region);
         }
 
         self.session = oci_profile_uses_session(self.profile.as_deref().unwrap_or("DEFAULT"));
@@ -1438,6 +1486,18 @@ fn dirs_home() -> std::path::PathBuf {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_profile_region_is_rewritten_alone() {
+        let cfg = "[DEFAULT]\nregion=eu-paris-1\ntenancy=t1\n\n[acme]\ntenancy=t2\nregion = us-ashburn-1\n";
+        let out = with_profile_region(cfg, "acme", "eu-frankfurt-1").unwrap();
+        assert!(out.contains("[DEFAULT]\nregion=eu-paris-1\ntenancy=t1"));
+        assert!(out.contains("[acme]\ntenancy=t2\nregion=eu-frankfurt-1\n"));
+        assert!(with_profile_region(cfg, "acme", "us-ashburn-1").is_none(), "déjà réglée");
+        assert!(with_profile_region(cfg, "absent", "x").is_none());
+        let bare = with_profile_region("[p]\ntenancy=t\n", "p", "eu-paris-1").unwrap();
+        assert!(bare.contains("[p]\nregion=eu-paris-1\ntenancy=t"));
+    }
+
     #[test]
     fn only_an_oci_login_may_be_stopped() {
         assert!(is_oci_login("/usr/bin/python3 /opt/bin/oci session authenticate --region eu-paris-1"));
