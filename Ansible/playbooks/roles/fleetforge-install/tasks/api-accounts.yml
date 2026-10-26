@@ -1,0 +1,166 @@
+---
+# Comptes d'automatisation BORNÉS (`ff_api_accounts`, voir defaults).
+#
+# Même principe que `ff_api_password` (secrets.yml) : chaque mot de passe est
+# tiré UNE fois, sur le poste, au premier déploiement du compte, puis vit
+# chiffré dans le group_vars du parc (`ff_api_password_<user>`). La machine
+# n'en reçoit que les empreintes argon2, produites par le binaire lui-même,
+# dans un fichier 0600 que lit le serveur (`FLEETFORGE_API_ACCOUNTS_FILE`).
+#
+# Tirage sous le tag `secrets` (il écrit au vault, comme secrets.yml), fichier
+# sous `config` (il suit le binaire construit).
+
+- name: Check the bounded automation accounts
+  ansible.builtin.assert:
+    that:
+      - item.user is defined
+      - item.user is match('^[a-z][a-z0-9_]{0,31}$')
+      - item.mode | default('read') in ['read', 'run']
+      - item.parcs | default([parc_name]) is not string
+      - item.parcs | default([parc_name]) | length > 0
+      - item.user not in [ff_web_user, ff_api_user]
+      - ff_api_accounts | selectattr('user', 'defined') | map(attribute='user') | select('equalto', item.user) | list | length == 1
+    fail_msg: >-
+      Compte `{{ item.user | default('?') }}` de `ff_api_accounts` invalide :
+      `user` en minuscules, chiffres et `_` (il nomme la variable
+      `ff_api_password_<user>`), unique, distinct de `ff_web_user` et de
+      `ff_api_user` ; `mode` read ou run ; `parcs` une liste non vide
+      (défaut : [{{ parc_name }}]).
+  loop: "{{ ff_api_accounts }}"
+  loop_control:
+    label: "{{ item.user | default('?') }}"
+  tags: [secrets, config]
+
+# ── Tirage et mise au vault (poste de contrôle) ───────────────────────────
+- name: Draw the passwords of the new bounded accounts (first deployment only)
+  ansible.builtin.set_fact:
+    ff_api_new_passwords: >-
+      {{ ff_api_new_passwords | default({})
+         | combine({item.user: lookup('ansible.builtin.password',
+                                      '/dev/null length=40 chars=ascii_letters,digits')}) }}
+  loop: "{{ ff_api_accounts }}"
+  loop_control:
+    label: "{{ item.user }}"
+  when: lookup('ansible.builtin.vars', 'ff_api_password_' ~ item.user, default='') | length == 0
+  no_log: true
+  tags: [secrets]
+
+# `--stdin-name` et non la valeur en argument : `ps` rend les arguments de
+# commande lisibles par tous les comptes de la machine.
+- name: Encrypt the new bounded account passwords for the fleet vault
+  ansible.builtin.command:
+    cmd: "ansible-vault encrypt_string --stdin-name ff_api_password_{{ item.key }}"
+    chdir: "{{ ff_repo_root }}"
+    stdin: "{{ item.value }}"
+    stdin_add_newline: false
+  delegate_to: localhost
+  become: false
+  register: ff_api_accounts_vaulted
+  changed_when: true
+  no_log: true
+  loop: "{{ ff_api_new_passwords | default({}) | dict2items }}"
+  tags: [secrets]
+
+- name: Store the new bounded account passwords in the fleet vault
+  ansible.builtin.blockinfile:
+    path: "{{ ff_vault_file }}"
+    marker: "# {mark} ff_api_password_{{ item.item.key }} — posé par fleetforge-install"
+    insertbefore: EOF
+    block: |
+      # Mot de passe du compte d'automatisation « {{ item.item.key }} » de FleetForge
+      # (`ff_api_accounts`), à saisir chez son client. Tiré au premier
+      # déploiement, puis inchangé ; la machine n'en reçoit que l'empreinte argon2.
+      {{ item.stdout }}
+  delegate_to: localhost
+  become: false
+  loop: "{{ ff_api_accounts_vaulted.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.key }}"
+  tags: [secrets]
+
+- name: Remind that the fleet vault has changed
+  ansible.builtin.debug:
+    msg: >-
+      {{ ff_vault_file }} a reçu le mot de passe de
+      {{ ff_api_new_passwords.keys() | join(', ') }}. Committer ce fichier dans
+      le dépôt privé : c'est le seul endroit d'où le relire, et un autre clone
+      en tirerait d'autres.
+  when: ff_api_new_passwords | default({}) | length > 0
+  tags: [secrets]
+
+# ── Empreintes et fichier des comptes (machine) ────────────────────────────
+# Clair du vault, ou tiré par ce passage : celui qui vient d'être mis au vault.
+- name: Check every bounded account has its password
+  ansible.builtin.assert:
+    that: >-
+      (ff_api_new_passwords | default({}))[item.user]
+      | default(lookup('ansible.builtin.vars', 'ff_api_password_' ~ item.user, default=''))
+      | length > 0
+    fail_msg: >-
+      `ff_api_password_{{ item.user }}` absent du vault du parc : le tirage se
+      fait sous le tag `secrets`. Jouer le déploiement complet (ou
+      `--tags secrets,config`), puis committer le group_vars du parc.
+    quiet: true
+  loop: "{{ ff_api_accounts }}"
+  loop_control:
+    label: "{{ item.user }}"
+  tags: [config]
+
+# `stdin:` et non un argument de commande, comme pour les autres comptes.
+- name: Hash the bounded account passwords on the machine
+  ansible.builtin.command:
+    cmd: "{{ ff_dir }}/target/{{ ff_cargo_profile }}/fleetforge-web hash-password"
+    stdin: >-
+      {{ (ff_api_new_passwords | default({}))[item.user]
+         | default(lookup('ansible.builtin.vars', 'ff_api_password_' ~ item.user, default=''))
+         | trim }}
+    stdin_add_newline: false
+  become: true
+  become_user: "{{ ff_user }}"
+  register: ff_api_account_hashes
+  changed_when: false
+  no_log: true
+  loop: "{{ ff_api_accounts }}"
+  loop_control:
+    label: "{{ item.user }}"
+  tags: [config]
+
+# 0600 : une empreinte se casse hors ligne, et le serveur refuse de démarrer
+# sur un fichier lisible par d'autres comptes.
+- name: Deploy the bounded accounts file
+  ansible.builtin.template:
+    src: api-accounts.json.j2
+    dest: "{{ ff_api_accounts_file }}"
+    owner: "{{ ff_user }}"
+    group: "{{ ff_user }}"
+    mode: '0600'
+  become: true
+  no_log: true
+  notify: restart fleetforge
+  when: ff_api_accounts | length > 0
+  tags: [config]
+
+# Liste vidée : plus aucun compte borné, le fichier ne doit pas survivre à
+# la variable qui l'a posé (FLEETFORGE_API_ACCOUNTS_FILE disparaît avec elle).
+- name: Remove the bounded accounts file when no account is declared
+  ansible.builtin.file:
+    path: "{{ ff_api_accounts_file }}"
+    state: absent
+  become: true
+  notify: restart fleetforge
+  when: ff_api_accounts | length == 0
+  tags: [config]
+
+- name: Report the bounded automation accounts
+  ansible.builtin.debug:
+    msg: >-
+      Comptes bornés : {{ ff_api_accounts | map(attribute='user') | join(', ') }}
+      ({% for a in ff_api_accounts %}{{ a.user }} = {{ a.mode | default('read') }}
+      sur {{ a.parcs | default([parc_name]) | join('+') }}{{ '' if loop.last else ' ; ' }}{% endfor %}).
+      Mot de passe de chacun, à saisir chez son client (API
+      https://{{ proxy_hostname }}/api, MCP https://{{ proxy_hostname }}/mcp) :
+      `ansible -i inventories/<parc>_inventory.yml -e @playbooks/group_vars/{{ parc_name }}.yml -m debug -a 'var=ff_api_password_<user>' {{ inventory_hostname }}`.
+      L'adresse du client doit être admise par le vhost (`access_linked` de
+      {{ inventory_hostname }}, puis `deploy-fleetforge.yml --tags proxy-conf`).
+  when: ff_api_accounts | length > 0
+  tags: [config]

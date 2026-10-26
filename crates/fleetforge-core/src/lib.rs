@@ -861,6 +861,18 @@ impl Core {
             Some(name) => vec![self.parc_by_name(name)?],
             None => self.list_parcs()?,
         };
+        self.find_host_among(parcs, host)
+    }
+
+    /// [`Self::find_host`] sans `parc`, borné aux parcs nommés : ceux que
+    /// couvre un compte d'automatisation. Un nom absent de la machine n'y
+    /// ajoute rien.
+    pub fn find_host_in(&self, names: &[String], host: &str) -> Result<(String, AnsibleHost)> {
+        let parcs = self.list_parcs()?.into_iter().filter(|p| names.contains(&p.name)).collect();
+        self.find_host_among(parcs, host)
+    }
+
+    fn find_host_among(&self, parcs: Vec<parc::Parc>, host: &str) -> Result<(String, AnsibleHost)> {
         let mut found: Vec<(String, AnsibleHost)> = Vec::new();
         for p in parcs {
             if let Ok(fleet) = self.fleet(&p.name) {

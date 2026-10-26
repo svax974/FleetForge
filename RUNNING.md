@@ -80,6 +80,7 @@ Sans `dist/`, le serveur refuse de démarrer et le dit.
 | `FLEETFORGE_API_USER` | — | compte d'automatisation (AgentHub), voir « API d'automatisation » |
 | `FLEETFORGE_API_PASSWORD_HASH` | — | son empreinte argon2id (production) |
 | `FLEETFORGE_API_PASSWORD` | — | son mot de passe en clair (**développement seul**) |
+| `FLEETFORGE_API_ACCOUNTS_FILE` | — | comptes d'automatisation BORNÉS (fichier JSON 0600), voir « API d'automatisation » |
 | `FLEETFORGE_ANSIBLE_DIR` | — | arbre Ansible : impose `<dossier>/inventories` et `<dossier>/playbooks` |
 | `FLEETFORGE_INVENTORIES_PATH` | réglage stocké | impose les inventaires (prime sur `FLEETFORGE_ANSIBLE_DIR`) |
 | `FLEETFORGE_PLAYBOOKS_PATH` | réglage stocké | impose les playbooks (prime sur `FLEETFORGE_ANSIBLE_DIR`) |
@@ -276,6 +277,37 @@ répond `403 forbidden`. Commandes servies par le web seulement (sauf
 `query_prometheus`, dont seule la forme `parc` est propre au web) : elles n'ont
 pas d'équivalent dans l'application de bureau (CLAUDE.md § 3).
 
+**Comptes bornés** — un compte par client (AgentHub, OpenClaw…), chacun
+cantonné à SES parcs et à un mode, tenu à l'identique par l'API REST et le
+serveur MCP :
+- `read` : `list_hosts`, `list_playbooks`, `alertmanager_alerts`,
+  `query_prometheus`, `ssh_diagnose` ;
+- `run` : la lecture, plus `run_ansible_playbook`, `run_status` et le flux
+  `GET /api/events/<run_id>`.
+
+Une commande hors du mode, un parc hors périmètre (existant ou non : la
+réponse est la même), un `ssh_diagnose` sur un hôte qu'aucun parc du
+périmètre ne porte, un run lancé sur un autre parc : `403 forbidden`. Sans
+`parc`, `ssh_diagnose` ne cherche l'hôte que dans les parcs du compte ; par
+MCP, `tools/list` ne montre que les outils du mode. Fichier lu au démarrage
+(`FLEETFORGE_API_ACCOUNTS_FILE`), 0600 exigé, tout défaut refuse le
+démarrage :
+
+```json
+[
+  { "user": "agenthub", "password_hash": "$argon2id$…", "parcs": ["web3c"], "mode": "read" },
+  { "user": "openclaw", "password_hash": "$argon2id$…", "parcs": ["web3c"], "mode": "read" }
+]
+```
+
+Par le déploiement : `ff_api_accounts: [{ user, parcs?, mode }]` dans
+`playbooks/group_vars/<parc>.yml` (`parcs` : `[<parc_name>]` par défaut) ; le
+mot de passe de chacun, `ff_api_password_<user>`, est tiré au premier passage
+et chiffré dans ce même fichier (à committer), la machine n'en reçoit que les
+empreintes. Le compte hérité `FLEETFORGE_API_USER` (`ff_api_user`) reste un
+compte `run` sur tous les parcs de la machine — le sien seul, la machine ne
+recevant que les données de son parc.
+
 **Identifiants** — jamais dans un dépôt. Par le déploiement : `ff_api_user:
 agenthub` dans `playbooks/group_vars/<parc>.yml`, puis
 `./play.sh web3c deploy-fleetforge.yml` ; le mot de passe est tiré au premier
@@ -285,6 +317,7 @@ Le relire pour le saisir dans AgentHub :
 
 ```sh
 ansible -i inventories/web3c_inventory.yml -e @playbooks/group_vars/web3c.yml -m debug -a 'var=ff_api_password' infra1
+ansible -i inventories/web3c_inventory.yml -e @playbooks/group_vars/web3c.yml -m debug -a 'var=ff_api_password_agenthub' infra1   # compte borné
 ```
 
 À la main (autre machine) : tirer un mot de passe, en produire l'empreinte par

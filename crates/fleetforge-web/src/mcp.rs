@@ -14,7 +14,9 @@
 //!
 //! Toujours sous les règles de l'automatisation ([`Role::Automation`]), quel
 //! que soit le compte : un client MCP est un programme, souvent un modèle, et
-//! le compte opérateur ne lui ouvre pas la forme permissive du frontal.
+//! le compte opérateur ne lui ouvre pas la forme permissive du frontal. Le
+//! périmètre du compte ([`Scope`]) borne les outils : `tools/list` ne montre
+//! que ceux de son mode, et chaque appel est tenu à ses parcs.
 //!
 //! Transport Streamable HTTP, SANS session (chaque requête est servie seule)
 //! et en réponses JSON : rien à tenir en mémoire d'une requête à l'autre, ce
@@ -26,6 +28,7 @@
 //! même code par les deux voies. Seul un nom d'outil inconnu reste une erreur
 //! de protocole (-32602), comme le prévoit la spécification.
 
+use axum::http::request::Parts;
 use axum::Json;
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
@@ -41,7 +44,7 @@ use std::sync::{Arc, LazyLock};
 
 use crate::api::Params;
 use crate::automation;
-use crate::config::Role;
+use crate::config::{Role, Scope};
 use crate::state::AppState;
 
 /// Consigne remise au client à l'initialisation.
@@ -92,9 +95,12 @@ impl ServerHandler for Mcp {
     async fn list_tools(
         &self,
         _request: Option<PaginatedRequestParams>,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
-        Ok(ListToolsResult::with_all_items(TOOLS.clone()))
+        let scope = scope_of(&context);
+        Ok(ListToolsResult::with_all_items(
+            TOOLS.iter().filter(|t| scope.may(&t.name)).cloned().collect(),
+        ))
     }
 
     /// Définition d'un outil, pour la vérification des en-têtes `Mcp-Param-*`
@@ -106,15 +112,18 @@ impl ServerHandler for Mcp {
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
         let name = request.name.as_ref();
         if !TOOLS.iter().any(|t| t.name == name) {
             return Err(McpError::invalid_params(format!("unknown tool: {name}"), None));
         }
+        // Un outil hors du mode du compte est refusé par `serve` même, en
+        // erreur d'outil `forbidden` : il existe, ce compte ne l'a pas.
+        let scope = scope_of(&context);
         let arguments = Value::Object(request.arguments.unwrap_or_default());
-        let outcome =
-            automation::serve(&self.state, Role::Automation, name, &Params::new(defaults(name, arguments))).await;
+        let params = Params::new(defaults(name, arguments));
+        let outcome = automation::serve(&self.state, Role::Automation, &scope, name, &params).await;
         Ok(match outcome {
             Ok(Json(value)) => CallToolResult::success(vec![ContentBlock::text(value.to_string())]),
             Err(e) => CallToolResult::error(vec![ContentBlock::text(
@@ -135,6 +144,17 @@ fn defaults(tool: &str, mut arguments: Value) -> Value {
         arguments["detach"] = json!(true);
     }
     arguments
+}
+
+/// Périmètre du compte de l'appel, déposé par `auth::middleware` dans la
+/// requête HTTP que le SDK transmet au gestionnaire. Absent : rien.
+fn scope_of(context: &RequestContext<RoleServer>) -> Arc<Scope> {
+    context
+        .extensions
+        .get::<Parts>()
+        .and_then(|parts| parts.extensions.get::<Arc<Scope>>())
+        .cloned()
+        .unwrap_or_else(|| Arc::new(Scope::nothing()))
 }
 
 fn schema(value: Value) -> Arc<JsonObject> {
@@ -214,7 +234,8 @@ static TOOLS: LazyLock<Vec<Tool>> = LazyLock::new(|| {
              redacted output). Verbs: logs journal [DURATION] [all] | logs unit NAME [DURATION] [all] | \
              logs docker NAME [DURATION] [all], status UNIT, containers, stats, firewall, system, ports, \
              http PORT [PATH]. Without args, verb may carry the whole request (\"logs docker searxng \
-             1h\"). Without parc the host is searched in every parc, refused when ambiguous.",
+             1h\"). Without parc the host is searched in every parc of the account, refused when \
+             ambiguous.",
             schema(json!({
                 "type": "object",
                 "properties": {

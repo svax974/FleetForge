@@ -27,6 +27,9 @@ pub struct AppState {
     pub ro_gate: Arc<RoGateConfig>,
     /// `--check` récents du compte d'automatisation.
     pub checks: CheckLedger,
+    /// Parc de chaque run de playbook, pour borner `run_status` et le flux
+    /// d'un run au périmètre d'un compte.
+    pub run_parcs: RunParcs,
     /// Compteurs de runs. Le registre ne peut pas en tenir lieu : il oublie les
     /// runs terminés (`clear_finished`), or un compteur Prometheus ne doit
     /// jamais décroître — un `rate()` sur une série qui recule rend n'importe
@@ -49,6 +52,7 @@ impl AppState {
             started: Instant::now(),
             ro_gate: Arc::new(ro_gate),
             checks: CheckLedger::default(),
+            run_parcs: RunParcs::default(),
             counters: Arc::new(Counters::default()),
         }
     }
@@ -101,6 +105,37 @@ impl CheckLedger {
             .unwrap_or_else(|e| e.into_inner())
             .get(fingerprint)
             .is_some_and(|at| at.elapsed() < CHECK_VALIDITY)
+    }
+}
+
+/// Parc de chaque run lancé par `run_ansible_playbook` (le nom passé en
+/// `parc`/`inventoryPath`).
+///
+/// Le registre des runs du cœur ne le retient pas ; le web le garde à côté.
+/// Un run absent d'ici (déploiement de rôles, run d'avant un redémarrage)
+/// n'est visible que d'un compte couvrant tous les parcs. Élagué avec le
+/// registre (`clear_finished_runs`), dont il suit donc la taille.
+#[derive(Clone, Default)]
+pub struct RunParcs(Arc<Mutex<HashMap<String, String>>>);
+
+impl RunParcs {
+    pub fn record(&self, run_id: &str, parc: &str) {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(run_id.to_string(), parc.to_string());
+    }
+
+    pub fn parc_of(&self, run_id: &str) -> Option<String> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).get(run_id).cloned()
+    }
+
+    /// Oublie les runs que le registre a oubliés.
+    pub fn keep(&self, runs: &[fleetforge_core::RunHandle]) {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|id, _| runs.iter().any(|r| &r.id == id));
     }
 }
 

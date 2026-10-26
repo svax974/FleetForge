@@ -25,8 +25,9 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 
 use crate::automation;
-use crate::config::Role;
+use crate::config::{Role, Scope};
 use crate::state::AppState;
+use std::sync::Arc;
 
 /// Erreur rendue au client : `{ "error": <message>, "code": <code stable> }`.
 ///
@@ -61,6 +62,12 @@ impl ApiError {
 
     pub(crate) fn invalid(message: String) -> Self {
         Self::from_fault(&Fault::invalid(message))
+    }
+
+    /// Hors du périmètre du compte : parc, hôte ou run d'un autre parc,
+    /// commande hors de son mode.
+    pub(crate) fn forbidden(message: String) -> Self {
+        Self { status: StatusCode::FORBIDDEN, code: "forbidden", message }
     }
 
     fn from_fault(fault: &Fault) -> Self {
@@ -190,12 +197,14 @@ fn provider_kind(name: &str) -> Result<fleetforge_core::model::ProviderKind, Api
 pub async fn dispatch(
     State(state): State<AppState>,
     role: Option<Extension<Role>>,
+    scope: Option<Extension<Arc<Scope>>>,
     Path(command): Path<String>,
     body: String,
 ) -> ApiResult {
-    // Rôle absent = requête qui n'est pas passée par l'authentification :
-    // traitée comme la moins privilégiée.
+    // Rôle ou périmètre absent = requête qui n'est pas passée par
+    // l'authentification : traitée comme la moins privilégiée.
     let role = role.map_or(Role::Automation, |Extension(r)| r);
+    let scope = scope.map_or_else(|| Arc::new(Scope::nothing()), |Extension(s)| s);
     // Corps lu en texte plutôt que par l'extracteur `Json` : une commande sans
     // argument est appelée avec un corps vide, que `Json` rejetterait avant
     // même d'arriver ici — l'erreur parlerait alors de désérialisation là où le
@@ -299,7 +308,7 @@ pub async fn dispatch(
 
         // === Supervision ===
         // Avec `parc` : supervision de ce parc (forme de l'automatisation).
-        "query_prometheus" => automation::serve(&state, role, &command, &p).await,
+        "query_prometheus" => automation::serve(&state, role, &scope, &command, &p).await,
         "get_probes" => {
             let scope = match p.opt::<String>("scope")?.unwrap_or_default().as_str() {
                 "system" => ProbeScope::System,
@@ -331,10 +340,14 @@ pub async fn dispatch(
         }
         // `check`, `diff`, `detach` ; validation stricte et `--check` exigé
         // pour le compte d'automatisation (voir `automation.rs`).
-        "run_ansible_playbook" => automation::serve(&state, role, &command, &p).await,
+        "run_ansible_playbook" => automation::serve(&state, role, &scope, &command, &p).await,
         "get_active_runs" => ok(core.runs().active()),
         "get_run_handle" => ok(core.runs().get(&p.get::<String>("runId")?)),
-        "clear_finished_runs" => ok(core.runs().clear_finished()),
+        "clear_finished_runs" => {
+            core.runs().clear_finished();
+            state.run_parcs.keep(&core.runs().all());
+            ok(())
+        }
 
         // === Historique et services ===
         "get_ansible_runs" => ok(core.ansible_runs()?),
@@ -467,11 +480,11 @@ pub async fn dispatch(
         // Servies par `automation::serve`, que le serveur MCP appelle aussi :
         // validation, garde-fous et caviardage sont donc les mêmes par les
         // deux voies.
-        "list_hosts" => automation::serve(&state, role, &command, &p).await,
-        "list_playbooks" => automation::serve(&state, role, &command, &p).await,
-        "alertmanager_alerts" => automation::serve(&state, role, &command, &p).await,
-        "ssh_diagnose" => automation::serve(&state, role, &command, &p).await,
-        "run_status" => automation::serve(&state, role, &command, &p).await,
+        "list_hosts" => automation::serve(&state, role, &scope, &command, &p).await,
+        "list_playbooks" => automation::serve(&state, role, &scope, &command, &p).await,
+        "alertmanager_alerts" => automation::serve(&state, role, &scope, &command, &p).await,
+        "ssh_diagnose" => automation::serve(&state, role, &scope, &command, &p).await,
+        "run_status" => automation::serve(&state, role, &scope, &command, &p).await,
 
         other => Err(ApiError::invalid(format!("commande inconnue : {other}"))),
     }

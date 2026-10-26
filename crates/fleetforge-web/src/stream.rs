@@ -20,10 +20,12 @@
 //!
 //! Pour le compte d'automatisation, chaque ligne passe par le caviardage
 //! (`fleetforge_core::redact`) : elle part chez le fournisseur d'un modèle.
+//! Un compte borné à certains parcs n'ouvre que le flux d'un run lancé sur
+//! l'un d'eux — déjà inscrit, donc : il le lance avant de s'y raccorder.
 
 use axum::extract::{Path, State};
 use axum::response::sse::{Event, KeepAlive, Sse};
-use axum::response::IntoResponse;
+use axum::response::{IntoResponse, Response};
 use axum::Extension;
 use fleetforge_core::redact::Redactor;
 use futures_util::future::ready;
@@ -32,9 +34,10 @@ use std::convert::Infallible;
 use std::time::Duration;
 use tokio::sync::broadcast::error::RecvError;
 
-use crate::config::Role;
+use crate::config::{Role, Scope};
 use crate::events::Line;
 use crate::state::AppState;
+use std::sync::Arc;
 
 /// Ce que le flux transporte, avant mise en forme SSE.
 enum Item {
@@ -45,8 +48,13 @@ enum Item {
 pub async fn sse(
     State(state): State<AppState>,
     role: Option<Extension<Role>>,
+    scope: Option<Extension<Arc<Scope>>>,
     Path(run_id): Path<String>,
-) -> impl IntoResponse {
+) -> Response {
+    let scope = scope.map_or_else(|| Arc::new(Scope::nothing()), |Extension(s)| s);
+    if let Err(refused) = crate::automation::run_within(&state, &scope, &run_id) {
+        return refused.into_response();
+    }
     let receiver = state.events.subscribe(&run_id);
 
     let handle = state.core.runs().get(&run_id);
@@ -87,6 +95,7 @@ pub async fn sse(
         // pour interrompu alors qu'il se déroule normalement.
         KeepAlive::new().interval(Duration::from_secs(15)),
     )
+    .into_response()
 }
 
 fn data(line: &str) -> Event {

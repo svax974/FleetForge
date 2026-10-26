@@ -30,7 +30,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::api::{ok, ApiError, ApiResult, Params};
-use crate::config::Role;
+use crate::config::{Role, Scope};
 use crate::state::AppState;
 
 /// Lignes de sortie rendues par défaut par `run_status`.
@@ -42,21 +42,38 @@ const MAX_TAIL_LINES: usize = 500;
 /// Seule porte vers ces commandes, pour `POST /api/{commande}` comme pour les
 /// outils du serveur MCP (`mcp.rs`) : ce qui est validé, refusé ou caviardé
 /// l'est à l'identique par les deux voies.
-pub async fn serve(state: &AppState, role: Role, command: &str, p: &Params) -> ApiResult {
+///
+/// Le périmètre du compte ([`Scope`]) y est tenu : une commande hors de son
+/// mode, un parc, un hôte ou un run hors de ses parcs répondent
+/// `403 forbidden` — avant toute lecture d'inventaire, et sans dire si le
+/// parc ou l'hôte refusé existe.
+pub async fn serve(state: &AppState, role: Role, scope: &Scope, command: &str, p: &Params) -> ApiResult {
+    if !scope.may(command) {
+        return Err(ApiError::forbidden(format!("{command} : hors du mode du compte (lecture seule)")));
+    }
     match command {
-        "list_hosts" => list_hosts(state, p).await,
+        "list_hosts" => list_hosts(state, scope, p).await,
         "list_playbooks" => list_playbooks(state),
-        "alertmanager_alerts" => alertmanager_alerts(state, p).await,
-        "query_prometheus" => query_prometheus(state, role, p).await,
-        "ssh_diagnose" => ssh_diagnose(state, role, p).await,
-        "run_ansible_playbook" => run_playbook(state, role, p).await,
-        "run_status" => run_status(state, role, p),
+        "alertmanager_alerts" => alertmanager_alerts(state, scope, p).await,
+        "query_prometheus" => query_prometheus(state, role, scope, p).await,
+        "ssh_diagnose" => ssh_diagnose(state, role, scope, p).await,
+        "run_ansible_playbook" => run_playbook(state, role, scope, p).await,
+        "run_status" => run_status(state, role, scope, p),
         other => Err(ApiError::invalid(format!("commande inconnue : {other}"))),
     }
 }
 
-async fn list_hosts(state: &AppState, p: &Params) -> ApiResult {
+/// Le parc nommé est-il dans le périmètre du compte ?
+fn within(scope: &Scope, parc: &str) -> Result<(), ApiError> {
+    if scope.covers(parc) {
+        return Ok(());
+    }
+    Err(ApiError::forbidden(format!("parc hors du périmètre du compte : {parc}")))
+}
+
+async fn list_hosts(state: &AppState, scope: &Scope, p: &Params) -> ApiResult {
     let parc: String = p.get("parc")?;
+    within(scope, &parc)?;
     let core = state.core.clone();
     // `ansible-inventory` est un sous-processus : hors du fil asynchrone.
     ok(tokio::task::spawn_blocking(move || core.list_hosts(&parc)).await??)
@@ -66,8 +83,9 @@ fn list_playbooks(state: &AppState) -> ApiResult {
     ok(state.core.list_playbook_summaries()?)
 }
 
-async fn alertmanager_alerts(state: &AppState, p: &Params) -> ApiResult {
+async fn alertmanager_alerts(state: &AppState, scope: &Scope, p: &Params) -> ApiResult {
     let parc: String = p.get("parc")?;
+    within(scope, &parc)?;
     ok(state.core.alertmanager_alerts(&parc).await?)
 }
 
@@ -75,7 +93,7 @@ async fn alertmanager_alerts(state: &AppState, p: &Params) -> ApiResult {
 ///   • `{ query }` (frontal) : supervision du parc SÉLECTIONNÉ, liste de séries ;
 ///   • `{ parc, query, time? }` : supervision du parc nommé, réponse
 ///     `{ parc, result, truncated }`. Seule forme admise pour l'automatisation.
-async fn query_prometheus(state: &AppState, role: Role, p: &Params) -> ApiResult {
+async fn query_prometheus(state: &AppState, role: Role, scope: &Scope, p: &Params) -> ApiResult {
     let query: String = p.get("query")?;
     let Some(parc) = p.opt::<String>("parc")? else {
         if role == Role::Automation {
@@ -83,6 +101,7 @@ async fn query_prometheus(state: &AppState, role: Role, p: &Params) -> ApiResult
         }
         return ok(state.core.query_prometheus(&query).await?);
     };
+    within(scope, &parc)?;
     // Horodatage en nombre ou en chaîne : transmis tel qu'écrit, validé.
     let time = match p.opt::<serde_json::Value>("time")? {
         None => None,
@@ -96,7 +115,11 @@ async fn query_prometheus(state: &AppState, role: Role, p: &Params) -> ApiResult
 /// `{ host, verb, args?, parc? }`. Sans `args`, `verb` peut porter la demande
 /// entière (« logs docker searxng 1h ») : elle est découpée sur les espaces,
 /// puis validée comme le reste.
-async fn ssh_diagnose(state: &AppState, role: Role, p: &Params) -> ApiResult {
+///
+/// Sans `parc`, l'hôte n'est cherché que dans les parcs du périmètre ; absent
+/// de tous, la réponse est `forbidden` pour un compte borné — `unknown_host`
+/// dirait qu'il existe ailleurs.
+async fn ssh_diagnose(state: &AppState, role: Role, scope: &Scope, p: &Params) -> ApiResult {
     let host: String = p.get("host")?;
     let parc: Option<String> = p.opt("parc")?;
     let raw_verb: String = p.get("verb")?;
@@ -111,9 +134,21 @@ async fn ssh_diagnose(state: &AppState, role: Role, p: &Params) -> ApiResult {
     // lecture d'inventaire.
     ro_gate::validate(&verb, &args)?;
 
+    if let Some(parc) = &parc {
+        within(scope, parc)?;
+    }
     let core = state.core.clone();
-    let (parc, entry) =
-        tokio::task::spawn_blocking(move || core.find_host(parc.as_deref(), &host)).await??;
+    let bounded: Option<Vec<String>> = scope.parcs.as_ref().map(|parcs| parcs.iter().cloned().collect());
+    let lookup = tokio::task::spawn_blocking(move || match (parc, bounded) {
+        (None, Some(parcs)) => core.find_host_in(&parcs, &host).map_err(|e| match fleetforge_core::fault::kind_of(&e) {
+            Some(FaultKind::UnknownHost) => {
+                ApiError::forbidden(format!("hôte hors du périmètre du compte : {host}"))
+            }
+            _ => e.into(),
+        }),
+        (parc, _) => core.find_host(parc.as_deref(), &host).map_err(ApiError::from),
+    });
+    let (parc, entry) = lookup.await??;
     let mut diagnosis = ro_gate::diagnose(&state.ro_gate, &entry, &verb, &args).await?;
     if role == Role::Automation {
         // ro-gate caviarde déjà sur l'hôte ; une passerelle d'une autre version
@@ -126,7 +161,7 @@ async fn ssh_diagnose(state: &AppState, role: Role, p: &Params) -> ApiResult {
 }
 
 /// `{ run_id }` (ou `runId`) → état d'un run du registre.
-fn run_status(state: &AppState, role: Role, p: &Params) -> ApiResult {
+fn run_status(state: &AppState, role: Role, scope: &Scope, p: &Params) -> ApiResult {
     let id: String = p.first(&["run_id", "runId"])?;
     validate_run_id(&id)?;
     let run = state
@@ -134,6 +169,7 @@ fn run_status(state: &AppState, role: Role, p: &Params) -> ApiResult {
         .runs()
         .get(&id)
         .ok_or_else(|| ApiError::from(anyhow!(Fault::new(FaultKind::UnknownRun, format!("run inconnu : {id}")))))?;
+    run_within(state, scope, &id)?;
     let wanted = p
         .opt::<usize>("tail_lines")?
         .unwrap_or(DEFAULT_TAIL_LINES)
@@ -151,6 +187,18 @@ fn run_status(state: &AppState, role: Role, p: &Params) -> ApiResult {
         "check": run.options.check,
         "diff": run.options.diff,
     }))
+}
+
+/// Un run n'est visible d'un compte borné (`run_status`, flux SSE) que s'il a
+/// été lancé sur l'un de ses parcs.
+pub fn run_within(state: &AppState, scope: &Scope, run_id: &str) -> Result<(), ApiError> {
+    if scope.parcs.is_none() {
+        return Ok(());
+    }
+    match state.run_parcs.parc_of(run_id) {
+        Some(parc) if scope.covers(&parc) => Ok(()),
+        _ => Err(ApiError::forbidden(format!("run hors du périmètre du compte : {run_id}"))),
+    }
 }
 
 /// Identifiant de run fabriqué quand l'appelant n'en fournit pas.
@@ -184,7 +232,7 @@ fn fingerprint(parc: &str, playbook: &str, limit: &Option<Vec<String>>, extra: &
 /// `detach: true` rend la main dès le run inscrit (`{ run_id, state }`) ; sans
 /// lui, la réponse attend la fin du run (comportement du frontal). Dans les
 /// deux cas le run se termine et se clôt même si le client se déconnecte.
-async fn run_playbook(state: &AppState, role: Role, p: &Params) -> ApiResult {
+async fn run_playbook(state: &AppState, role: Role, scope: &Scope, p: &Params) -> ApiResult {
     let strict = role == Role::Automation;
     let playbook: String = p.first(&["playbookPath", "playbook"])?;
     let inventory: String = p.first(&["inventoryPath", "parc"])?;
@@ -201,6 +249,7 @@ async fn run_playbook(state: &AppState, role: Role, p: &Params) -> ApiResult {
     let core = state.core.clone();
     let mut print = None;
     if strict {
+        within(scope, &inventory)?;
         // Un NOM de parc, jamais un chemin de fichier d'inventaire.
         core.parc_by_name(&inventory)?;
         validate_extra_vars(&extra, true)?;
@@ -217,6 +266,7 @@ async fn run_playbook(state: &AppState, role: Role, p: &Params) -> ApiResult {
         print = options.check.then_some(fp);
     }
 
+    let run_parc = inventory.clone();
     let req = PlaybookRequest {
         id,
         label,
@@ -235,6 +285,8 @@ async fn run_playbook(state: &AppState, role: Role, p: &Params) -> ApiResult {
         let prepared =
             tokio::task::spawn_blocking(move || core.prepare_playbook(req, options, lock)).await??;
         let run_id = prepared.id().to_string();
+        // Avant le lancement : un `run_status` immédiat doit déjà le trouver.
+        shared.run_parcs.record(&run_id, &run_parc);
         Ok::<_, anyhow::Error>((run_id, launch(shared, prepared, print)))
     })
     .await??;

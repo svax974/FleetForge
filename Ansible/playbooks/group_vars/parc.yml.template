@@ -258,6 +258,19 @@ theta_passwd: CHANGE_ME                          # 🔒
 theta_wallet: ""
 
 
+# ── FleetForge (nœud de contrôle, API d'automatisation REST + MCP) ───────────
+# [fleetforge-install]
+# Comptes d'automatisation, un par client, bornés à leurs parcs et à un mode
+# (read : lecture et diagnostic ; run : + runs de playbook). Mot de passe de
+# chacun tiré au premier déploiement et ajouté ici, chiffré
+# (`ff_api_password_<user>`, à committer) ; la machine n'en reçoit que
+# l'empreinte.
+# ff_api_accounts:
+#   - { user: agenthub, mode: read }             # parcs : [<parc_name>] par défaut
+#   - { user: openclaw, mode: read }
+# ff_api_user: agenthub                          # raccourci hérité : UN compte run sur le parc
+
+
 # ── OpenClaw (gateway d'agents) ──────────────────────────────────────────────
 # [openclaw-install]
 # openclaw_auth_choice: openai-api-key           # ou `skip` : aucun fournisseur au premier onboarding

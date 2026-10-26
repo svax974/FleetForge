@@ -1,0 +1,14 @@
+{#- Comptes d'automatisation bornés de FleetForge (`ff_api_accounts`), généré
+    par fleetforge-install. Empreintes argon2id seules : les clairs sont au
+    vault du parc (`ff_api_password_<user>`). Format : crates/fleetforge-web,
+    config.rs (`accounts_from_file`). -#}
+{%- set ns = namespace(accounts=[]) -%}
+{%- for account in ff_api_accounts -%}
+{%- set ns.accounts = ns.accounts + [{
+      'user': account.user,
+      'password_hash': ff_api_account_hashes.results[loop.index0].stdout | trim,
+      'parcs': account.parcs | default([parc_name]),
+      'mode': account.mode | default('read')
+    }] -%}
+{%- endfor -%}
+{{ ns.accounts | to_nice_json }}

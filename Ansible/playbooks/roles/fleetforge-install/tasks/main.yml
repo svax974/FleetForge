@@ -316,6 +316,12 @@
   when: ff_api_user | length > 0
   tags: [config]
 
+# Comptes bornés (`ff_api_accounts`) : tirage au vault, empreintes, fichier
+# 0600. Les tâches portent leurs propres tags (`secrets`, `config`).
+- name: Settle the bounded automation accounts
+  ansible.builtin.include_tasks: api-accounts.yml
+  tags: [secrets, config]
+
 # ── Diagnostic lecture seule ───────────────────────────────────────────────
 - name: Set up the read-only diagnostics key
   ansible.builtin.include_tasks: ro-diagnostics.yml

@@ -10,10 +10,14 @@
 //! Aucune valeur n'est écrite dans la base : le serveur doit pouvoir démarrer
 //! sur une machine neuve, avant toute configuration applicative.
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
+use argon2::password_hash::PasswordHash;
 use fleetforge_core::ro_gate::RoGateConfig;
+use serde::Deserialize;
+use std::collections::BTreeSet;
 use std::net::{IpAddr, SocketAddr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Port applicatif par défaut. Inscrit au registre des ports de CLAUDE.md :
@@ -41,10 +45,58 @@ pub enum Role {
     Automation,
 }
 
+/// Lecture seule ou pilotage : ce qu'un compte d'automatisation peut lancer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    /// `auth::READ_COMMANDS` : inventaire, playbooks, alertes, Prometheus,
+    /// diagnostic lecture seule.
+    Read,
+    /// Tout `auth::AUTOMATION_COMMANDS` : la lecture, plus les runs de
+    /// playbook (`run_ansible_playbook`, `run_status`, flux d'un run).
+    Run,
+}
+
+/// Périmètre d'un compte : les parcs qu'il atteint et son mode.
+///
+/// Tenu à l'identique par l'API REST et le serveur MCP : un parc hors
+/// périmètre, un hôte qui n'est dans aucun parc du périmètre, un run d'un
+/// autre parc répondent `403 forbidden`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Scope {
+    /// `None` : tous les parcs de la machine — l'opérateur, et le compte
+    /// hérité `FLEETFORGE_API_USER` (sur une machine qui ne reçoit que les
+    /// données de son parc, ce parc seul).
+    pub parcs: Option<BTreeSet<String>>,
+    pub mode: Mode,
+}
+
+impl Scope {
+    /// Tout : l'opérateur, le compte hérité, l'absence d'authentification.
+    pub fn everything() -> Self {
+        Self { parcs: None, mode: Mode::Run }
+    }
+
+    /// Rien : une requête qui n'est pas passée par l'authentification.
+    pub fn nothing() -> Self {
+        Self { parcs: Some(BTreeSet::new()), mode: Mode::Read }
+    }
+
+    pub fn covers(&self, parc: &str) -> bool {
+        self.parcs.as_ref().is_none_or(|parcs| parcs.contains(parc))
+    }
+
+    /// Commande (ou outil MCP) que ce mode permet.
+    pub fn may(&self, command: &str) -> bool {
+        crate::auth::commands(self.mode).contains(&command)
+    }
+}
+
 pub struct Account {
     pub user: String,
     pub secret: Secret,
     pub role: Role,
+    pub scope: Arc<Scope>,
 }
 
 /// Ce que le serveur détient pour vérifier un mot de passe.
@@ -61,7 +113,8 @@ pub enum Secret {
 }
 
 impl Config {
-    /// Lit `FLEETFORGE_WEB_*`, `FLEETFORGE_API_*` et `FLEETFORGE_RO_*`.
+    /// Lit `FLEETFORGE_WEB_*`, `FLEETFORGE_API_*` (dont le fichier des
+    /// comptes bornés, `FLEETFORGE_API_ACCOUNTS_FILE`) et `FLEETFORGE_RO_*`.
     /// Échoue plutôt que de démarrer dans un état qui exposerait le pilotage
     /// du parc sans authentification.
     pub fn from_env() -> Result<Self> {
@@ -79,24 +132,40 @@ impl Config {
 
         let mut accounts = Vec::new();
         if let (Some(user), Some(secret)) = (env("FLEETFORGE_WEB_USER"), secret_of("FLEETFORGE_WEB")) {
-            accounts.push(Account { user, secret, role: Role::Operator });
+            accounts.push(Account { user, secret, role: Role::Operator, scope: Arc::new(Scope::everything()) });
         }
 
-        // Compte d'automatisation (AgentHub). À moitié renseigné, c'est une
-        // erreur de déploiement : la taire laisserait AgentHub en 401 sans que
-        // rien n'en désigne la cause.
+        // Compte d'automatisation hérité (AgentHub) : pilotage, tous les
+        // parcs de la machine. À moitié renseigné, c'est une erreur de
+        // déploiement : la taire laisserait AgentHub en 401 sans que rien
+        // n'en désigne la cause.
         match (env("FLEETFORGE_API_USER"), secret_of("FLEETFORGE_API")) {
             (Some(user), Some(secret)) => {
                 if accounts.iter().any(|a| a.user == user) {
                     bail!("FLEETFORGE_API_USER doit différer de FLEETFORGE_WEB_USER ({user})");
                 }
-                accounts.push(Account { user, secret, role: Role::Automation });
+                accounts.push(Account {
+                    user,
+                    secret,
+                    role: Role::Automation,
+                    scope: Arc::new(Scope::everything()),
+                });
             }
             (None, None) => {}
             _ => bail!(
                 "compte d'automatisation incomplet : FLEETFORGE_API_USER et \
                  FLEETFORGE_API_PASSWORD_HASH vont ensemble"
             ),
+        }
+
+        // Comptes bornés (un par client : AgentHub, OpenClaw…).
+        if let Some(path) = env("FLEETFORGE_API_ACCOUNTS_FILE") {
+            for account in accounts_from_file(Path::new(&path))? {
+                if accounts.iter().any(|a| a.user == account.user) {
+                    bail!("{path} : compte {} déclaré deux fois (ou homonyme d'un autre compte)", account.user);
+                }
+                accounts.push(account);
+            }
         }
 
         // Cette application lance des playbooks Ansible sur tout le parc, avec
@@ -121,6 +190,69 @@ impl Config {
             ro_gate: ro_gate_from_env()?,
         })
     }
+}
+
+/// Une entrée du fichier des comptes bornés.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AccountEntry {
+    user: String,
+    /// Empreinte argon2id (PHC), jamais le mot de passe.
+    password_hash: String,
+    parcs: Vec<String>,
+    mode: Mode,
+}
+
+/// Comptes bornés, lus dans un fichier JSON (`FLEETFORGE_API_ACCOUNTS_FILE`,
+/// posé par `fleetforge-install`) :
+///
+/// ```json
+/// [{ "user": "agenthub", "password_hash": "$argon2id$…", "parcs": ["web3c"], "mode": "read" }]
+/// ```
+///
+/// Tout défaut refuse le démarrage plutôt qu'un compte : un fichier ignoré
+/// laisserait ses clients en 401 sans que rien n'en désigne la cause, et un
+/// compte dont le périmètre se perdrait à la lecture serait plus large que
+/// voulu.
+fn accounts_from_file(path: &Path) -> Result<Vec<Account>> {
+    let shown = path.display();
+    // Une empreinte se casse hors ligne : lisible par d'autres comptes de la
+    // machine, le fichier exposerait les mots de passe.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(path).with_context(|| format!("{shown}"))?.permissions().mode();
+        if mode & 0o077 != 0 {
+            bail!("{shown} est lisible par d'autres comptes (mode {:o}) : 0600 attendu", mode & 0o777);
+        }
+    }
+    let text = std::fs::read_to_string(path).with_context(|| format!("{shown}"))?;
+    let entries: Vec<AccountEntry> =
+        serde_json::from_str(&text).with_context(|| format!("{shown} : comptes illisibles"))?;
+    entries
+        .into_iter()
+        .map(|e| {
+            if e.user.is_empty() || e.user.contains(':') {
+                bail!("{shown} : nom de compte invalide {:?}", e.user);
+            }
+            if PasswordHash::new(&e.password_hash).is_err() {
+                bail!("{shown} : empreinte invalide pour {} (format PHC argon2id attendu)", e.user);
+            }
+            if e.parcs.is_empty() {
+                bail!("{shown} : {} ne couvre aucun parc", e.user);
+            }
+            for parc in &e.parcs {
+                fleetforge_core::automation::validate_parc_name(parc)
+                    .with_context(|| format!("{shown} : compte {}", e.user))?;
+            }
+            Ok(Account {
+                user: e.user,
+                secret: Secret::Hash(e.password_hash),
+                role: Role::Automation,
+                scope: Arc::new(Scope { parcs: Some(e.parcs.into_iter().collect()), mode: e.mode }),
+            })
+        })
+        .collect()
 }
 
 /// Secret d'un compte : `<PRÉFIXE>_PASSWORD_HASH`, à défaut `<PRÉFIXE>_PASSWORD`.

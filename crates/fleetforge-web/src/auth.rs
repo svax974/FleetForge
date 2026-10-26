@@ -13,9 +13,11 @@
 //! filtrage entièrement décoratives (ufw sur un port publié par Docker) sans
 //! que rien ne le signale.
 //!
-//! Deux comptes possibles : l'opérateur (tout) et l'automatisation (AgentHub),
-//! cantonnée à [`AUTOMATION_COMMANDS`] et au flux d'un run. Le rôle reconnu
-//! est déposé dans les extensions de la requête ([`Role`]).
+//! Deux sortes de comptes : l'opérateur (tout) et l'automatisation (AgentHub,
+//! OpenClaw…), cantonnée à [`AUTOMATION_COMMANDS`] et au flux d'un run, et
+//! bornée par son périmètre ([`Scope`] : ses parcs, lecture ou pilotage). Le
+//! rôle et le périmètre reconnus sont déposés dans les extensions de la
+//! requête ([`Role`], `Arc<Scope>`), où les lisent l'API et le serveur MCP.
 //!
 //! `/metrics` et `/healthz` en sont exemptés : ils sont scrapés par Prometheus,
 //! qui n'a pas d'identifiants ici, et restreints par ufw à sa seule adresse.
@@ -30,10 +32,10 @@ use argon2::password_hash::{PasswordHash, PasswordVerifier};
 use argon2::Argon2;
 use base64::Engine;
 use serde_json::json;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use subtle::ConstantTimeEq;
 
-use crate::config::{Account, Role, Secret};
+use crate::config::{Account, Mode, Role, Scope, Secret};
 
 /// Commandes ouvertes au compte d'automatisation. Tout le reste — réglages,
 /// group_vars, hébergeurs, alimentation des machines, sorties brutes des runs
@@ -49,6 +51,24 @@ pub const AUTOMATION_COMMANDS: &[&str] = &[
     "run_status",
 ];
 
+/// Commandes d'un compte en LECTURE (`mode: read`) : ni run, ni état de run,
+/// ni flux. `ssh_diagnose` en est : la passerelle ro-gate n'a que des verbes
+/// de lecture.
+pub const READ_COMMANDS: &[&str] = &[
+    "list_hosts",
+    "list_playbooks",
+    "alertmanager_alerts",
+    "query_prometheus",
+    "ssh_diagnose",
+];
+
+pub fn commands(mode: Mode) -> &'static [&'static str] {
+    match mode {
+        Mode::Read => READ_COMMANDS,
+        Mode::Run => AUTOMATION_COMMANDS,
+    }
+}
+
 /// Chemins servis sans authentification.
 fn is_public(path: &str) -> bool {
     path == "/metrics" || path == "/healthz"
@@ -60,18 +80,19 @@ pub fn is_mcp(path: &str) -> bool {
     path == "/mcp" || path.starts_with("/mcp/")
 }
 
-/// Ce que le compte d'automatisation peut atteindre : une commande de la
-/// liste, le flux SSE d'un run, ou le serveur MCP.
-fn automation_may(method: &Method, path: &str) -> bool {
+/// Ce qu'un compte d'automatisation peut atteindre : une commande de son mode,
+/// le flux SSE d'un run (pilotage seulement), ou le serveur MCP.
+fn automation_may(method: &Method, path: &str, mode: Mode) -> bool {
     if is_mcp(path) {
         return true;
     }
     if method == Method::POST {
         if let Some(command) = path.strip_prefix("/api/") {
-            return AUTOMATION_COMMANDS.contains(&command);
+            return commands(mode).contains(&command);
         }
     }
-    method == Method::GET
+    mode == Mode::Run
+        && method == Method::GET
         && path
             .strip_prefix("/api/events/")
             .is_some_and(|id| !id.is_empty() && !id.contains('/'))
@@ -97,6 +118,7 @@ pub async fn middleware(
         // Pas d'authentification configurée : le seul cas autorisé est
         // l'écoute sur la boucle locale, refusée au démarrage sinon.
         request.extensions_mut().insert(Role::Operator);
+        request.extensions_mut().insert(Arc::new(Scope::everything()));
         return next.run(request).await;
     }
 
@@ -112,50 +134,58 @@ pub async fn middleware(
         .and_then(|v| base64::engine::general_purpose::STANDARD.decode(v).ok())
         .and_then(|v| String::from_utf8(v).ok());
 
-    let Some(role) = presented.and_then(|c| identify(&c, &accounts)) else {
+    let Some(account) = presented.and_then(|c| identify(&c, &accounts)) else {
         return refusal(StatusCode::UNAUTHORIZED, "unauthorized", "authentification requise");
     };
 
-    if role == Role::Automation && !automation_may(request.method(), request.uri().path()) {
+    if account.role == Role::Automation
+        && !automation_may(request.method(), request.uri().path(), account.scope.mode)
+    {
         return refusal(
             StatusCode::FORBIDDEN,
             "forbidden",
-            "commande réservée à l'opérateur",
+            match account.scope.mode {
+                Mode::Run => "commande réservée à l'opérateur",
+                Mode::Read => "commande hors du mode du compte (lecture seule)",
+            },
         );
     }
 
-    request.extensions_mut().insert(role);
+    request.extensions_mut().insert(account.role);
+    request.extensions_mut().insert(account.scope.clone());
     next.run(request).await
 }
 
-/// Rôle du compte dont le couple présenté est exact.
+/// Compte dont le couple présenté est exact.
 ///
-/// TOUS les comptes sont vérifiés, même après une correspondance : s'arrêter
-/// au premier renseignerait, par la seule durée de la réponse, sur le compte
-/// visé.
-fn identify(presented: &str, accounts: &[Account]) -> Option<Role> {
-    let mut found = None;
+/// Toujours UNE vérification de mot de passe, et une seule : celle du compte
+/// dont le nom correspond (comparé à temps constant, à tous les comptes), ou
+/// celle d'une empreinte factice quand aucun ne correspond. La durée de la
+/// réponse ne renseigne donc ni sur l'existence d'un nom, ni sur le compte
+/// visé — et elle ne croît pas avec le nombre de comptes, ce que ferait une
+/// vérification argon2 par compte.
+fn identify<'a>(presented: &str, accounts: &'a [Account]) -> Option<&'a Account> {
+    let (user, password) = presented.split_once(':')?;
+    let mut candidate = None;
     for account in accounts {
-        if matches(presented, account) && found.is_none() {
-            found = Some(account.role);
+        let same: bool = user.as_bytes().ct_eq(account.user.as_bytes()).into();
+        if same && candidate.is_none() {
+            candidate = Some(account);
         }
     }
-    found
+    match candidate {
+        Some(account) => verify(password, &account.secret).then_some(account),
+        None => {
+            verify(password, &DECOY);
+            None
+        }
+    }
 }
 
-/// Vérifie le couple présenté.
-///
-/// Les deux moitiés sont TOUJOURS évaluées, même quand la première a déjà
-/// échoué : court-circuiter sur l'utilisateur renseignerait sur son existence
-/// par la seule durée de la réponse.
-fn matches(presented: &str, expected: &Account) -> bool {
-    let Some((user, password)) = presented.split_once(':') else {
-        return false;
-    };
-    let user_ok: bool = user.as_bytes().ct_eq(expected.user.as_bytes()).into();
-    let pass_ok = verify(password, &expected.secret);
-    user_ok & pass_ok
-}
+/// Empreinte sans mot de passe connu, vérifiée quand aucun compte ne porte le
+/// nom présenté.
+static DECOY: LazyLock<Secret> =
+    LazyLock::new(|| Secret::Hash(hash_password("fleetforge-decoy").unwrap_or_default()));
 
 fn verify(presented: &str, secret: &Secret) -> bool {
     match secret {
@@ -193,7 +223,12 @@ mod tests {
     use super::*;
 
     fn account(user: &str, secret: Secret, role: Role) -> Account {
-        Account { user: user.into(), secret, role }
+        Account { user: user.into(), secret, role, scope: Arc::new(Scope::everything()) }
+    }
+
+    /// Le couple présenté ouvre-t-il ce compte ?
+    fn matches(presented: &str, expected: &Account) -> bool {
+        identify(presented, std::slice::from_ref(expected)).is_some()
     }
 
     fn creds() -> Account {
@@ -260,32 +295,48 @@ mod tests {
             creds(),
             account("agenthub", Secret::Plain("other".into()), Role::Automation),
         ];
-        assert_eq!(identify("steph:correct horse", &accounts), Some(Role::Operator));
-        assert_eq!(identify("agenthub:other", &accounts), Some(Role::Automation));
-        assert_eq!(identify("agenthub:correct horse", &accounts), None);
-        assert_eq!(identify("steph:other", &accounts), None);
+        let role = |presented: &str| identify(presented, &accounts).map(|a| a.role);
+        assert_eq!(role("steph:correct horse"), Some(Role::Operator));
+        assert_eq!(role("agenthub:other"), Some(Role::Automation));
+        assert_eq!(role("agenthub:correct horse"), None);
+        assert_eq!(role("steph:other"), None);
+        assert_eq!(role("nobody:other"), None);
     }
 
     #[test]
     fn automation_reaches_only_its_commands_and_run_streams() {
-        assert!(automation_may(&Method::POST, "/api/list_hosts"));
-        assert!(automation_may(&Method::POST, "/api/run_ansible_playbook"));
-        assert!(automation_may(&Method::POST, "/api/run_status"));
-        assert!(automation_may(&Method::POST, "/api/query_prometheus"));
-        assert!(automation_may(&Method::GET, "/api/events/run-1"));
-
-        for (method, path) in [
-            (Method::POST, "/api/write_group_vars_file"),
-            (Method::POST, "/api/set_inventories_path"),
-            (Method::POST, "/api/power_instance"),
-            (Method::POST, "/api/get_run_handle"),
-            (Method::POST, "/api/run_ansible_deploy"),
-            (Method::GET, "/api/list_hosts"),
-            (Method::GET, "/"),
-            (Method::GET, "/api/events/"),
-            (Method::GET, "/api/events/a/b"),
-        ] {
-            assert!(!automation_may(&method, path), "{method} {path}");
+        for mode in [Mode::Read, Mode::Run] {
+            assert!(automation_may(&Method::POST, "/api/list_hosts", mode));
+            assert!(automation_may(&Method::POST, "/api/query_prometheus", mode));
+            assert!(automation_may(&Method::POST, "/api/ssh_diagnose", mode));
+            assert!(automation_may(&Method::POST, "/mcp", mode), "le tri des outils se fait dans mcp.rs");
         }
+        assert!(automation_may(&Method::POST, "/api/run_ansible_playbook", Mode::Run));
+        assert!(automation_may(&Method::POST, "/api/run_status", Mode::Run));
+        assert!(automation_may(&Method::GET, "/api/events/run-1", Mode::Run));
+
+        for (method, path, mode) in [
+            (Method::POST, "/api/write_group_vars_file", Mode::Run),
+            (Method::POST, "/api/set_inventories_path", Mode::Run),
+            (Method::POST, "/api/power_instance", Mode::Run),
+            (Method::POST, "/api/get_run_handle", Mode::Run),
+            (Method::POST, "/api/run_ansible_deploy", Mode::Run),
+            (Method::GET, "/api/list_hosts", Mode::Run),
+            (Method::GET, "/", Mode::Run),
+            (Method::GET, "/api/events/", Mode::Run),
+            (Method::GET, "/api/events/a/b", Mode::Run),
+            (Method::POST, "/api/run_ansible_playbook", Mode::Read),
+            (Method::POST, "/api/run_status", Mode::Read),
+            (Method::GET, "/api/events/run-1", Mode::Read),
+        ] {
+            assert!(!automation_may(&method, path, mode), "{method} {path} {mode:?}");
+        }
+    }
+
+    #[test]
+    fn the_read_commands_are_the_automation_commands_without_runs() {
+        let mut runs: Vec<&str> = AUTOMATION_COMMANDS.iter().copied().filter(|c| !READ_COMMANDS.contains(c)).collect();
+        runs.sort_unstable();
+        assert_eq!(runs, ["run_ansible_playbook", "run_status"]);
     }
 }

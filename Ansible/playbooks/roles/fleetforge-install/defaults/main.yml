@@ -61,7 +61,35 @@ ff_web_user: "{{ remote_username }}"
 # AgentHub (connecteur FleetForge) :
 #   ansible -i inventories/<parc>_inventory.yml -e @playbooks/group_vars/<parc>.yml -m debug -a 'var=ff_api_password' infra1
 # (le `-e @…` est requis : une commande ad hoc ne charge pas playbooks/group_vars/)
+#
+# Ce compte-là pilote (lecture ET runs) tous les parcs de la machine, c'est-à-
+# dire le sien seul (la machine ne reçoit que les données de son parc) : un
+# raccourci. Pour plusieurs clients, chacun borné, `ff_api_accounts`.
 ff_api_user: ""
+
+# ── Comptes d'automatisation bornés — FACULTATIF ───────────────────────────
+# Un compte par client (AgentHub, OpenClaw…), chacun cantonné à SES parcs et
+# à un mode, tenu à l'identique par l'API REST et le serveur MCP (`/mcp`) :
+#   read — list_hosts, list_playbooks, alertmanager_alerts, query_prometheus,
+#          ssh_diagnose ;
+#   run  — la lecture, plus run_ansible_playbook, run_status et le flux d'un
+#          run (toujours sous `--check` préalable).
+# Un parc hors périmètre, un hôte d'un autre parc, un run d'un autre parc :
+# `403 forbidden`. Dans le group_vars du parc :
+#   ff_api_accounts:
+#     - { user: agenthub, mode: read }            # parcs : [<parc_name>] par défaut
+#     - { user: openclaw, parcs: [web3c], mode: read }
+# `user` : minuscules, chiffres et `_` (il nomme une variable). Le mot de passe
+# de chacun, `ff_api_password_<user>`, est tiré au PREMIER déploiement et
+# chiffré dans playbooks/group_vars/<parc>.yml (à committer), comme
+# `ff_api_password` ; la machine ne reçoit que les empreintes argon2, dans
+# `ff_api_accounts_file` (0600, `FLEETFORGE_API_ACCOUNTS_FILE`). Retirer un
+# compte de la liste le retire de la machine au déploiement suivant ; son
+# mot de passe reste au vault (le supprimer à la main pour le révoquer à jamais).
+# Relire un mot de passe :
+#   ansible -i inventories/<parc>_inventory.yml -e @playbooks/group_vars/<parc>.yml -m debug -a 'var=ff_api_password_<user>' infra1
+ff_api_accounts: []
+ff_api_accounts_file: "{{ ff_dir }}/api-accounts.json"
 
 # ── Diagnostic lecture seule (`ssh_diagnose`) — FACULTATIF ────────────────
 # Clé SSH SANS passphrase, créée sur la machine au premier déploiement, qui

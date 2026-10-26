@@ -123,13 +123,30 @@ fn hash_with_binary(password: &str) -> String {
     String::from_utf8(out.stdout).unwrap().trim().to_string()
 }
 
+/// Répertoire de test neuf, propre à l'appel.
+///
+/// Le compteur est indispensable : les tests tournent en parallèle et
+/// l'horloge de macOS ne va qu'à la microseconde — deux serveurs lancés
+/// ensemble partageaient sinon leur `HOME`, donc leur base et leur arbre.
+fn fresh_root() -> PathBuf {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    std::env::temp_dir().join(format!(
+        "ff-automation-api-{}-{}-{}",
+        std::process::id(),
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ))
+}
+
 /// Parc factice, serveur lancé, `/healthz` attendu.
 async fn start(alertmanager_port: u16) -> Server {
-    let root = std::env::temp_dir().join(format!(
-        "ff-automation-api-{}-{}",
-        std::process::id(),
-        chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
-    ));
+    start_with(alertmanager_port, |_| Vec::new()).await
+}
+
+/// [`start`], avec des fichiers et variables d'environnement en plus :
+/// `setup` reçoit la racine du test et rend les variables à poser.
+async fn start_with(alertmanager_port: u16, setup: impl FnOnce(&Path) -> Vec<(String, String)>) -> Server {
+    let root = fresh_root();
     let ansible = root.join("ansible");
     write(&ansible.join("inventories/web3c_inventory.yml"), INVENTORY);
     write(
@@ -145,6 +162,7 @@ async fn start(alertmanager_port: u16) -> Server {
     script(&root.join("bin/ansible-playbook"), ANSIBLE_STUB);
     script(&root.join("bin/ssh"), SSH_STUB);
     std::fs::create_dir_all(root.join("home")).unwrap();
+    let extra_env = setup(&root);
 
     let port = free_port();
     let child = Command::new(env!("CARGO_BIN_EXE_fleetforge-web"))
@@ -163,6 +181,7 @@ async fn start(alertmanager_port: u16) -> Server {
         .env("FLEETFORGE_RO_SSH_KEY", root.join("ro-key"))
         .env("FLEETFORGE_RO_KNOWN_HOSTS", root.join("known_hosts"))
         .env("FF_STUB_LOG", root.join("stub.log"))
+        .envs(extra_env)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -769,4 +788,199 @@ fn a_half_configured_automation_account_refuses_to_start() {
         .unwrap();
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("FLEETFORGE_API_USER"));
+}
+
+// ── Comptes bornés (`FLEETFORGE_API_ACCOUNTS_FILE`) ───────────────────────
+
+const READER: (&str, &str) = ("lecteur", "mot-de-passe-lecteur");
+const RUNNER: (&str, &str) = ("pilote", "mot-de-passe-pilote");
+
+/// Second parc : `proxy1` y existe aussi (même nom, autre machine), `vpn1`
+/// n'existe qu'ici.
+const SECOND_INVENTORY: &str = "\
+all:
+  vars:
+    ansible_roles: []
+  children:
+    papanglabs:
+      children:
+        proxies:
+          hosts:
+            proxy1:
+              ansible_host: 10.1.0.1
+              provider: ovh
+        vpns:
+          hosts:
+            vpn1:
+              ansible_host: 10.1.0.2
+              provider: ovh
+";
+
+/// Fichier des comptes en 0600, tel que `fleetforge-install` le pose.
+fn accounts_file(root: &Path, accounts: Value) -> PathBuf {
+    let path = root.join("api-accounts.json");
+    write(&path, &accounts.to_string());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    path
+}
+
+fn bounded_accounts() -> Value {
+    json!([
+        { "user": READER.0, "password_hash": hash_with_binary(READER.1), "parcs": ["web3c"], "mode": "read" },
+        { "user": RUNNER.0, "password_hash": hash_with_binary(RUNNER.1), "parcs": ["papanglabs"], "mode": "run" }
+    ])
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn bounded_accounts_keep_to_their_parcs_and_mode() {
+    let (am_port, _) = fake_alertmanager().await;
+    let accounts = bounded_accounts();
+    let server = start_with(am_port, |root| {
+        let ansible = root.join("ansible");
+        write(&ansible.join("inventories/papanglabs_inventory.yml"), SECOND_INVENTORY);
+        write(&ansible.join("playbooks/group_vars/papanglabs.yml"), "parc_name: papanglabs\n");
+        let file = accounts_file(root, accounts);
+        vec![("FLEETFORGE_API_ACCOUNTS_FILE".into(), file.display().to_string())]
+    })
+    .await;
+    let api = Api { http: Client::new(), server: &server };
+    let forbidden = |(status, body): (StatusCode, Value)| status == StatusCode::FORBIDDEN && code(&body) == "forbidden";
+
+    // ── Lecture, borné à web3c ─────────────────────────────────────────────
+    let (status, hosts) = api.call(READER, "list_hosts", json!({ "parc": "web3c" })).await;
+    assert_eq!(status, StatusCode::OK, "{hosts}");
+    for (command, body) in [
+        ("list_hosts", json!({ "parc": "papanglabs" })),
+        // Hors périmètre ET inexistant : même réponse, rien n'est révélé.
+        ("list_hosts", json!({ "parc": "nulle-part" })),
+        ("alertmanager_alerts", json!({ "parc": "papanglabs" })),
+        ("query_prometheus", json!({ "parc": "papanglabs", "query": "up" })),
+        ("ssh_diagnose", json!({ "host": "vpn1", "verb": "system" })),
+        ("ssh_diagnose", json!({ "host": "proxy1", "verb": "system", "parc": "papanglabs" })),
+        // Mode lecture : ni run, ni état de run.
+        ("run_ansible_playbook", json!({ "parc": "web3c", "playbook": "deploy-demo.yml", "check": true })),
+        ("run_status", json!({ "run_id": "nope" })),
+    ] {
+        let answer = api.call(READER, command, body.clone()).await;
+        assert!(forbidden(answer.clone()), "{command} {body} → {answer:?}");
+    }
+    // `proxy1` est dans les deux parcs : sans `parc`, le lecteur ne voit que
+    // le sien, sans ambiguïté…
+    let (status, diag) = api.call(READER, "ssh_diagnose", json!({ "host": "proxy1", "verb": "system" })).await;
+    assert_eq!((status, diag["parc"].clone()), (StatusCode::OK, json!("web3c")), "{diag}");
+    assert!(diag["output"].as_str().unwrap().contains("10.0.0.1"), "{diag}");
+    // … alors que le compte hérité, qui couvre tout, doit préciser.
+    let (status, body) = api.agent("ssh_diagnose", json!({ "host": "proxy1", "verb": "system" })).await;
+    assert_eq!((status, code(&body)), (StatusCode::BAD_REQUEST, "ambiguous_host"));
+
+    // ── Pilotage, borné à papanglabs ───────────────────────────────────────
+    let launch = |parc: &str, host: &str| {
+        json!({ "parc": parc, "playbook": "deploy-demo.yml", "limit": [host], "check": true, "detach": true })
+    };
+    assert!(forbidden(api.call(RUNNER, "run_ansible_playbook", launch("web3c", "proxy1")).await));
+    let (status, own) = api.call(RUNNER, "run_ansible_playbook", launch("papanglabs", "vpn1")).await;
+    assert_eq!(status, StatusCode::OK, "{own}");
+    let own_id = own["run_id"].as_str().unwrap().to_string();
+    let (_, other) = api.agent("run_ansible_playbook", launch("web3c", "proxy1")).await;
+    let other_id = other["run_id"].as_str().unwrap().to_string();
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let (status, run) = api.call(RUNNER, "run_status", json!({ "run_id": own_id })).await;
+        assert_eq!(status, StatusCode::OK, "{run}");
+        if run["state"] != "running" {
+            break;
+        }
+        assert!(Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    api.wait_run(&other_id).await;
+    assert!(
+        forbidden(api.call(RUNNER, "run_status", json!({ "run_id": other_id })).await),
+        "un run de web3c n'est pas visible d'un compte borné à papanglabs"
+    );
+    let stream = |who: (&str, &str), id: &str| {
+        api.http
+            .get(format!("{}/api/events/{id}", server.base))
+            .basic_auth(who.0, Some(who.1))
+            .send()
+    };
+    assert_eq!(stream(RUNNER, &own_id).await.unwrap().status(), StatusCode::OK);
+    assert_eq!(stream(RUNNER, &other_id).await.unwrap().status(), StatusCode::FORBIDDEN);
+    assert_eq!(stream(READER, &own_id).await.unwrap().status(), StatusCode::FORBIDDEN);
+    assert_eq!(stream(AGENTHUB, &own_id).await.unwrap().status(), StatusCode::OK, "le compte hérité couvre tout");
+
+    // ── Même périmètre par MCP ─────────────────────────────────────────────
+    let tools = |listed: Value| -> Vec<String> {
+        listed["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect()
+    };
+    assert_eq!(
+        tools(api.rpc(READER, "tools/list", json!({})).await),
+        ["list_hosts", "list_playbooks", "alertmanager_alerts", "query_prometheus", "ssh_diagnose"]
+    );
+    assert_eq!(tools(api.rpc(RUNNER, "tools/list", json!({})).await).len(), 7);
+    for (name, arguments) in [
+        ("run_ansible_playbook", launch("web3c", "proxy1")),
+        ("run_status", json!({ "run_id": own_id })),
+        ("list_hosts", json!({ "parc": "papanglabs" })),
+        ("ssh_diagnose", json!({ "host": "vpn1", "verb": "system" })),
+    ] {
+        let (failed, error) = api.tool(READER, name, arguments.clone()).await;
+        assert!(failed && error["code"] == "forbidden", "{name} {arguments} → {error}");
+    }
+    let (failed, error) = api.tool(RUNNER, "run_status", json!({ "run_id": other_id })).await;
+    assert!(failed && error["code"] == "forbidden", "{error}");
+    let (failed, hosts) = api.tool(RUNNER, "list_hosts", json!({ "parc": "papanglabs" })).await;
+    assert!(!failed && hosts.as_array().unwrap().len() == 2, "{hosts}");
+}
+
+/// Le serveur refuse de démarrer sur ce fichier de comptes ; `expected` doit
+/// figurer dans son message.
+fn refuses_accounts(accounts: Value, mode: u32, expected: &str) {
+    let root = fresh_root();
+    let file = accounts_file(&root, accounts);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+    let out = Command::new(env!("CARGO_BIN_EXE_fleetforge-web"))
+        .env_clear()
+        .env("HOME", &root)
+        .env("FLEETFORGE_LOG_DIR", root.join("logs"))
+        .env("FLEETFORGE_WEB_PORT", free_port().to_string())
+        .env("FLEETFORGE_WEB_USER", OPERATOR.0)
+        .env("FLEETFORGE_WEB_PASSWORD", OPERATOR.1)
+        .env("FLEETFORGE_API_ACCOUNTS_FILE", &file)
+        .output()
+        .unwrap();
+    let _ = std::fs::remove_dir_all(&root);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "démarrage accepté, attendu : {expected}");
+    assert!(stderr.contains(expected), "{stderr}");
+}
+
+#[test]
+fn a_flawed_accounts_file_refuses_to_start() {
+    let hash = hash_with_binary("x");
+    let entry = |user: &str, parcs: Value, mode: &str| json!({ "user": user, "password_hash": hash, "parcs": parcs, "mode": mode });
+    refuses_accounts(json!([entry("a", json!(["web3c"]), "read")]), 0o644, "0600");
+    refuses_accounts(json!([entry("a", json!(["web3c"]), "admin")]), 0o600, "comptes illisibles");
+    refuses_accounts(json!([entry("a", json!([]), "read")]), 0o600, "aucun parc");
+    refuses_accounts(json!([entry("a", json!(["../etc"]), "read")]), 0o600, "compte a");
+    refuses_accounts(json!([entry(OPERATOR.0, json!(["web3c"]), "read")]), 0o600, "deux fois");
+    refuses_accounts(
+        json!([{ "user": "a", "password_hash": "clair", "parcs": ["web3c"], "mode": "read" }]),
+        0o600,
+        "empreinte invalide",
+    );
+    refuses_accounts(
+        json!([{ "user": "a", "password": "clair", "parcs": ["web3c"], "mode": "read" }]),
+        0o600,
+        "comptes illisibles",
+    );
 }
