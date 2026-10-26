@@ -917,6 +917,53 @@ fn oci_instance(inst: &Value) -> Instance {
     }
 }
 
+/// `NotAuthorizedOrNotFound` : OCI ne distingue volontairement pas « n'existe
+/// pas » de « tu n'as pas le droit » (pour ne pas révéler l'existence d'une
+/// ressource). Le brut — un JSON de plusieurs lignes dont la barre d'état ne
+/// montre que le début — ne dit rien de ce qu'il faut vérifier.
+fn oci_compartment_error(error: ProviderError, compartment: &str) -> ProviderError {
+    let text = error.to_string();
+    if !text.contains("NotAuthorized") {
+        return error;
+    }
+    ProviderError::Api(format!(
+        "compartiment OCI introuvable ou accès refusé ({compartment}) : vérifier l'OCID, que \
+         le profil est authentifié sur CETTE tenancy, et que la politique IAM autorise \
+         « read instances » dessus."
+    ))
+}
+
+/// Fin d'un OCID, assez pour distinguer deux tenancies dans une barre d'état.
+fn ocid_tail(ocid: &str) -> &str {
+    &ocid[ocid.len().saturating_sub(8)..]
+}
+
+/// Le compartiment visé est la RACINE d'une tenancy (son OCID est celui de la
+/// tenancy) mais le profil est authentifié sur une AUTRE.
+///
+/// Une session ne vaut que pour une tenancy. Deux comptes qui partagent le
+/// profil `DEFAULT` n'en atteignent donc qu'une, et l'autre répond
+/// `NotAuthorizedOrNotFound` — indiscernable d'une politique IAM manquante, ce
+/// qui envoie chercher au mauvais endroit. Le profil écrit sa tenancy : on la
+/// compare avant d'interroger Oracle.
+fn oci_tenancy_mismatch(
+    compartment: &str,
+    profile: &str,
+    profile_tenancy: Option<&str>,
+) -> Option<ProviderError> {
+    let tenancy = profile_tenancy?;
+    if !compartment.starts_with("ocid1.tenancy.") || compartment == tenancy {
+        return None;
+    }
+    Some(ProviderError::Auth(format!(
+        "le profil [{profile}] est authentifié sur la tenancy …{} mais ce compte vise …{} : \
+         une session ne vaut que pour une tenancy. Donner à ce compte son propre profil \
+         (champ « Profil ») : `oci session authenticate --profile-name <profil> --region <région>`.",
+        ocid_tail(tenancy),
+        ocid_tail(compartment),
+    )))
+}
+
 /// Traduit un échec du CLI `oci` en quelque chose d'actionnable.
 ///
 /// Une session expire — une heure par défaut. Le CLI le signale en proposant
@@ -1028,6 +1075,31 @@ impl Provider for OracleProvider {
             self.connected = false;
             return Err(oci_auth_error(e, self.session));
         }
+
+        // `iam region list` aboutit avec n'importe quels identifiants valides :
+        // il ne dit rien du COMPARTIMENT. Un OCID erroné, ou une politique IAM
+        // qui n'accorde pas la lecture des instances, ne se découvrait qu'au
+        // premier listage — le compte était déjà vert, et l'erreur tombait
+        // ensuite dans la barre d'état. On touche donc le compartiment ici.
+        let compartment = self.compartment.clone().unwrap_or_default();
+        if let Some(mismatch) = oci_tenancy_mismatch(
+            &compartment,
+            self.profile_name(),
+            oci_profile_key(self.profile_name(), "tenancy").as_deref(),
+        ) {
+            self.connected = false;
+            return Err(mismatch);
+        }
+        if let Err(e) = run_json(
+            "oci",
+            &self.base_args(&[
+                "compute", "instance", "list", "--compartment-id", &compartment, "--limit", "1",
+            ]),
+            OCI_INSTALL,
+        ) {
+            self.connected = false;
+            return Err(oci_compartment_error(oci_auth_error(e, self.session), &compartment));
+        }
         Ok(())
     }
 
@@ -1057,7 +1129,7 @@ impl Provider for OracleProvider {
             ]),
             OCI_INSTALL,
         )
-        .map_err(|e| oci_auth_error(e, self.session))?;
+        .map_err(|e| oci_compartment_error(oci_auth_error(e, self.session), compartment))?;
 
         Ok(body
             .get("data")
@@ -1259,6 +1331,47 @@ mod tests {
         assert!(!text.contains("terminal"), "{text}");
         assert!(!text.contains("oci session"), "{text}");
         assert!(matches!(translated, ProviderError::Auth(_)));
+    }
+
+    #[test]
+    fn a_denied_compartment_says_what_to_check_instead_of_dumping_the_service_error() {
+        let raw = ProviderError::Api(
+            "oci a échoué : ServiceError:\n{ \"code\": \"NotAuthorizedOrNotFound\" }".into(),
+        );
+        let text = oci_compartment_error(raw, "ocid1.compartment.oc1..aaa").to_string();
+        assert!(text.contains("ocid1.compartment.oc1..aaa"), "{text}");
+        assert!(text.contains("IAM"), "{text}");
+        assert!(!text.contains("ServiceError"), "{text}");
+    }
+
+    #[test]
+    fn a_profile_authenticated_on_another_tenancy_is_named_as_the_cause() {
+        let err = oci_tenancy_mismatch(
+            "ocid1.tenancy.oc1..aaaaaaaaexample1",
+            "DEFAULT",
+            Some("ocid1.tenancy.oc1..aaaaaaaaexample2"),
+        )
+        .expect("deux tenancies différentes");
+        let text = err.to_string();
+        assert!(text.contains("DEFAULT") && text.contains("example2"), "{text}");
+        assert!(text.contains("example1"), "{text}");
+        assert!(matches!(err, ProviderError::Auth(_)));
+    }
+
+    #[test]
+    fn the_same_tenancy_or_a_sub_compartment_is_not_flagged() {
+        let t = "ocid1.tenancy.oc1..aaaa";
+        assert!(oci_tenancy_mismatch(t, "DEFAULT", Some(t)).is_none());
+        // Un sous-compartiment ne dit rien de sa tenancy : on ne peut pas conclure.
+        assert!(oci_tenancy_mismatch("ocid1.compartment.oc1..bbbb", "DEFAULT", Some(t)).is_none());
+        // Profil sans tenancy lisible : on laisse Oracle répondre.
+        assert!(oci_tenancy_mismatch(t, "DEFAULT", None).is_none());
+    }
+
+    #[test]
+    fn an_unrelated_oci_error_passes_through_untouched() {
+        let raw = ProviderError::Api("oci a échoué : timeout".into());
+        assert_eq!(oci_compartment_error(raw, "x").to_string(), "oci a échoué : timeout");
     }
 
     #[test]
