@@ -34,7 +34,7 @@
     group: "{{ ff_user }}"
     mode: '0600'
   become: true
-  notify: restart fleetforge agent
+  register: ff_agent_key
   tags: [secrets]
 
 # ssh compare la clé publique aux identités que l'agent détient : sans ce
@@ -59,7 +59,7 @@
     mode: '0600'
   become: true
   no_log: true
-  notify: restart fleetforge agent
+  register: ff_agent_pass
   tags: [secrets]
 
 # ssh-add n'accepte pas la passphrase sur son entrée standard : il exige un
@@ -87,7 +87,7 @@
     group: "{{ ff_user }}"
     mode: '0750'
   become: true
-  notify: restart fleetforge agent
+  register: ff_agent_loader
   tags: [secrets]
 
 - name: Deploy the ssh-agent unit
@@ -98,7 +98,7 @@
     group: root
     mode: '0644'
   become: true
-  notify: restart fleetforge agent
+  register: ff_agent_unit
   tags: [secrets]
 
 - name: Enable and start the ssh-agent
@@ -110,8 +110,20 @@
   become: true
   tags: [secrets]
 
-- name: Flush handlers so the check hits the agent just deployed
-  ansible.builtin.meta: flush_handlers
+# Redémarrage EN LIGNE et non par handler. L'agent est un handler comme un
+# autre : `meta: flush_handlers` ici vidait aussi `restart fleetforge`, notifié
+# par la livraison du code et la compilation — avant que l'unité fleetforge.service
+# n'existe (« Could not find the requested service fleetforge ») au premier
+# déploiement. Redémarrer l'agent à la main ne vide rien d'autre.
+- name: Restart the ssh-agent when its key material or unit changed
+  ansible.builtin.systemd:
+    name: fleetforge-agent
+    state: restarted
+    daemon_reload: true
+  become: true
+  when: >-
+    ff_agent_key is changed or ff_agent_pass is changed
+    or ff_agent_loader is changed or ff_agent_unit is changed
   tags: [secrets]
 
 # Un agent démarré mais VIDE laisse l'application dans l'état qu'on cherche

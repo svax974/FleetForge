@@ -1,14 +1,4 @@
 ---
-# L'agent est déclaré EN PREMIER : les handlers s'exécutent dans leur ordre de
-# déclaration, pas dans celui des notifications. L'application doit trouver une
-# socket garnie, pas un agent en cours de redémarrage.
-- name: restart fleetforge agent
-  ansible.builtin.systemd:
-    name: fleetforge-agent
-    state: restarted
-    daemon_reload: true
-  become: true
-
 - name: restart fleetforge
   ansible.builtin.systemd:
     name: fleetforge
