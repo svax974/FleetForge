@@ -158,6 +158,7 @@ async fn run(terminal: &mut Term, core: Arc<Core>, hub: Arc<ProviderHub>) -> Res
     }
 
     reload_all(&app, tx.clone());
+    reconnect_saved(&app, tx.clone());
 
     let mut events = EventStream::new();
     let mut keepalive = tokio::time::interval(KEEPALIVE);
@@ -228,6 +229,43 @@ fn deliver(app: &mut App, msg: Msg, tx: &mpsc::UnboundedSender<Msg>) {
         }
         other => app.apply(other),
     }
+}
+
+/// Au lancement, rouvre TOUS les comptes enregistrés, qu'ils aient été
+/// connectés ou non à la dernière fermeture : l'état « connecté » ne survit pas
+/// au processus, et le rouvrir à la main à chaque lancement n'apporte rien.
+///
+/// Un échec ne s'affiche PAS en fenêtre : le compte reste jaune, la ligne
+/// d'état le dit, et `c` réessaie. Un jeton expiré à chaque lancement ouvrirait
+/// sinon une fenêtre d'erreur avant même qu'on ait regardé quoi que ce soit.
+/// Le détail reste dans le journal.
+fn reconnect_saved(app: &App, tx: mpsc::UnboundedSender<Msg>) {
+    let hub = app.hub.clone();
+    tokio::spawn(async move {
+        let _ = tx.send(Msg::Status("reconnexion des comptes…".to_string()));
+        let results = hub.reconnect_saved().await;
+
+        let mut failed: Vec<String> = Vec::new();
+        let mut kinds = Vec::new();
+        for (account, result) in results {
+            match result {
+                Ok(()) if !kinds.contains(&account.provider) => kinds.push(account.provider),
+                Ok(()) => {}
+                Err(_) => failed.push(account.to_string()),
+            }
+        }
+        let _ = tx.send(Msg::ProvidersLoaded(hub.statuses().await));
+        for kind in kinds {
+            let (instances, _) = hub.list_instances_everywhere(kind).await;
+            let _ = tx.send(Msg::InstancesLoaded(kind, instances));
+        }
+        let _ = tx.send(Msg::ReloadControls);
+        let _ = tx.send(Msg::Status(if failed.is_empty() {
+            String::new()
+        } else {
+            format!("⚠ non connecté : {} — c pour réessayer, détail dans le journal", failed.join(", "))
+        }));
+    });
 }
 
 pub fn reload_all(app: &App, tx: mpsc::UnboundedSender<Msg>) {

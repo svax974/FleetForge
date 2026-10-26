@@ -106,6 +106,16 @@ async fn main() -> Result<()> {
 
     let state = AppState::new(core, config.ro_gate.clone());
 
+    // Rouvre les comptes d'hébergeurs enregistrés : l'état « connecté » ne
+    // survit pas au processus. En arrière-plan, pour ne pas retarder
+    // l'écoute ; un échec laisse le compte non connecté, le détail est au journal.
+    {
+        let hub = state.hub.clone();
+        tokio::spawn(async move {
+            hub.reconnect_saved().await;
+        });
+    }
+
     // Le frontal est une application à page unique : toute route inconnue doit
     // rendre `index.html`, faute de quoi un rechargement (F5) sur une vue
     // interne renverrait 404 alors que la navigation interne fonctionne.

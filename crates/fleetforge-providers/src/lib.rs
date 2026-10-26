@@ -255,6 +255,24 @@ impl ProviderHub {
         out
     }
 
+    /// Au lancement d'une façade : rouvre TOUS les comptes enregistrés qui ne le
+    /// sont pas, tous hébergeurs confondus. L'état « connecté » ne survit pas au
+    /// processus. Un échec laisse le compte non connecté et est rendu avec les
+    /// autres : c'est à la façade de décider comment le montrer.
+    pub async fn reconnect_saved(&self) -> Vec<(AccountId, Result<()>)> {
+        let mut out = Vec::new();
+        for info in describe_all() {
+            for account in self.store.accounts(info.kind) {
+                if self.is_connected(&account).await {
+                    continue;
+                }
+                let result = self.reconnect(&account).await;
+                out.push((account, result));
+            }
+        }
+        out
+    }
+
     /// Ferme la session SANS oublier les identifiants — la déconnexion du
     /// prototype effaçait la configuration, ce qui n'est pas la même chose.
     pub async fn disconnect(&self, account: &AccountId) {

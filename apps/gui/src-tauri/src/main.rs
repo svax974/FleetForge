@@ -24,7 +24,7 @@ use fleetforge_core::{
     PlaybookRequest, ProbeScope, PrometheusMetric, ServerService, ServerServiceState, SettingKey,
 };
 use std::collections::HashMap;
-use tauri::State;
+use tauri::{Manager, State};
 
 /// Traduit une erreur du cœur en message affichable.
 fn err(e: anyhow::Error) -> String {
@@ -663,6 +663,16 @@ fn main() {
     tauri::Builder::default()
         .manage(core)
         .manage(ProviderHub::new())
+        .setup(|app| {
+            // Rouvre les comptes d'hébergeurs enregistrés : l'état « connecté »
+            // ne survit pas au processus. En arrière-plan ; un échec laisse le
+            // compte non connecté, le détail est au journal.
+            let handle = app.handle();
+            tauri::async_runtime::spawn(async move {
+                handle.state::<ProviderHub>().reconnect_saved().await;
+            });
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             // réglages
             get_inventories_path,
