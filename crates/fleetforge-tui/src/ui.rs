@@ -1720,6 +1720,49 @@ fn draw_credentials(frame: &mut Frame, form: &CredentialsForm) {
         ]));
     }
 
+    // Lecture seule : la tenancy du profil est celle du compte Oracle auquel il
+    // est connecté, écrite par le CLI. Elle se compare au compartiment saisi,
+    // qui doit être cette tenancy ou l'un de ses compartiments.
+    let mut tenancy_rows = 0;
+    if form.kind == fleetforge_core::model::ProviderKind::Oracle {
+        let profile = method
+            .fields
+            .iter()
+            .find(|f| f.key == "OCI_PROFILE")
+            .map(|f| f.value.trim())
+            .filter(|v| !v.is_empty())
+            .unwrap_or("DEFAULT");
+        let tenancy = fleetforge_providers::cli::oci_profile_tenancy(profile);
+        let compartment = method
+            .fields
+            .iter()
+            .find(|f| f.key == "OCI_COMPARTMENT")
+            .map(|f| f.value.trim().to_string())
+            .unwrap_or_default();
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled(format!("   {:<26}", "Tenancy du profil"), dim_style()),
+            Span::styled(format!("[{profile}] · lecture seule"), dim_style()),
+        ]));
+        match tenancy {
+            Some(t) => {
+                let same = !compartment.is_empty() && compartment == t;
+                lines.push(Line::from(vec![
+                    Span::styled(format!("   {t}"), text_style()),
+                    Span::styled(if same { "  = racine" } else { "" }.to_string(), tone_style(Tone::Ok)),
+                ]));
+                tenancy_rows = 2;
+            }
+            None => {
+                lines.push(Line::from(Span::styled(
+                    "   profil absent de ~/.oci/config : il sera créé à la connexion".to_string(),
+                    dim_style(),
+                )));
+                tenancy_rows = 1;
+            }
+        }
+    }
+
     if let Some(field) = form.current_field() {
         if !field.hint.is_empty() {
             lines.push(Line::from(""));
@@ -1756,7 +1799,7 @@ fn draw_credentials(frame: &mut Frame, form: &CredentialsForm) {
     // Hauteur demandée par le contenu, comme l'aide : un cadre en pourcentage
     // tronque le pied de page sur un terminal de 24 lignes, et c'est lui qui
     // dit comment sortir.
-    let wanted = lines.len() as u16 + 2;
+    let wanted = lines.len() as u16 + 2 + tenancy_rows;
     let area = centered_rows(frame.area(), 72, wanted.min(frame.area().height));
     frame.render_widget(Clear, area);
     frame.render_widget(

@@ -862,6 +862,12 @@ fn oci_profile_key(profile: &str, key: &str) -> Option<String> {
     None
 }
 
+/// Tenancy à laquelle le profil est connecté, telle que l'écrit `oci session
+/// authenticate`. Sert à l'AFFICHER : l'application ne l'écrit jamais.
+pub fn oci_profile_tenancy(profile: &str) -> Option<String> {
+    oci_profile_key(profile, "tenancy")
+}
+
 /// Le profil a-t-il une section dans `~/.oci/config` ?
 fn profile_section_exists(config: &str, profile: &str) -> bool {
     let wanted = if profile.trim().is_empty() { "DEFAULT" } else { profile.trim() };
