@@ -193,6 +193,21 @@ impl ProviderHub {
         if let Err(e) = provider.connect(credentials).await {
             fleetforge_core::logging::error("providers", format!("connexion {account} refusée : {e}"));
 
+            // Modifier un compte qui existe, c'est vouloir ses nouvelles valeurs
+            // MÊME quand la connexion échoue : un profil Oracle neuf dont la
+            // session reste à ouvrir, une région corrigée. Les jeter renvoyait
+            // l'ancienne valeur au formulaire suivant, comme si rien n'avait
+            // été enregistré. Un compte NEUF qui échoue, lui, n'est pas gardé :
+            // il laisserait un compte fantôme.
+            if self.store.load(account).is_some() {
+                if let Err(save) = self.store.save(account, credentials) {
+                    fleetforge_core::logging::warn(
+                        "providers",
+                        format!("identifiants {account} non enregistrés : {save}"),
+                    );
+                }
+            }
+
             // Une session OCI expirée fait échouer la connexion, et c'est
             // précisément le moment où l'opérateur a besoin de la commande qui
             // en rouvre une. Jeter le provider ici l'en privait : plus aucune
