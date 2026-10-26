@@ -396,6 +396,22 @@ async fn get_server_current_services(
 }
 
 #[tauri::command]
+async fn get_fleet_services(
+    core: State<'_, Core>,
+    inventory_path: String,
+) -> Result<Vec<ServerServiceState>, String> {
+    core.fleet_services(&inventory_path).map_err(err)
+}
+
+#[tauri::command]
+fn list_actions(
+    subject: fleetforge_core::actions::Subject,
+    context: fleetforge_core::actions::ActionContext,
+) -> Vec<fleetforge_core::actions::ItemAction> {
+    fleetforge_core::actions::actions_for(subject, &context)
+}
+
+#[tauri::command]
 async fn add_manual_service(
     core: State<'_, Core>,
     server_name: String,
@@ -693,6 +709,8 @@ fn main() {
             get_ansible_run_output,
             get_server_services,
             get_server_current_services,
+            get_fleet_services,
+            list_actions,
             add_manual_service,
             // modèles
             get_models,

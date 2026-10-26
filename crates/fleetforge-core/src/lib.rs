@@ -13,6 +13,7 @@
 //!
 //! Point d'entrée : [`Core`].
 
+pub mod actions;
 pub mod alert_rules;
 pub mod ansible_group_vars;
 pub mod ansible_inventory;
@@ -57,7 +58,7 @@ pub use settings::{SettingKey, Settings};
 ///
 /// `candidate_roles` propose du plus sûr au plus spéculatif ; c'est le
 /// catalogue qui tranche, parce que toutes les familles n'ont pas leur `-purge`.
-fn resolve_role(roles: &[AnsibleRole], service_name: &str, action: &str) -> Option<AnsibleRole> {
+pub fn resolve_role(roles: &[AnsibleRole], service_name: &str, action: &str) -> Option<AnsibleRole> {
     service_tracker::candidate_roles(service_name, action)
         .into_iter()
         .find_map(|c| roles.iter().find(|r| r.name == c).cloned())
@@ -454,6 +455,20 @@ impl Core {
 
     pub fn current_services(&self, server_id: Option<i64>) -> Result<Vec<ServerServiceState>> {
         self.with_db(|db| db.get_server_current_services(server_id))
+    }
+
+    /// Services suivis sur les hôtes du parc, et d'eux seuls.
+    ///
+    /// Le journal est indexé par NOM d'hôte, sans parc : `proxy1` ou `mail`
+    /// existent dans plusieurs parcs, et `current_services(None)` mélangeait
+    /// leurs services. Le parc courant fait foi sur ce qui lui appartient.
+    pub fn fleet_services(&self, inventory_path: &str) -> Result<Vec<ServerServiceState>> {
+        let fleet = self.fleet(inventory_path)?;
+        let all = self.current_services(None)?;
+        Ok(all
+            .into_iter()
+            .filter(|s| fleet.host(&s.server_name).is_some())
+            .collect())
     }
 
     pub fn server_services(

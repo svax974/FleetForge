@@ -330,6 +330,11 @@ pub async fn dispatch(
             p.opt::<String>("statusFilter")?.as_deref(),
         )?),
         "get_server_current_services" => ok(core.current_services(p.opt("serverId")?)?),
+        "get_fleet_services" => ok(core.fleet_services(&p.get::<String>("inventoryPath")?)?),
+        "list_actions" => ok(fleetforge_core::actions::actions_for(
+            p.get("subject")?,
+            &p.get("context")?,
+        )),
         "add_manual_service" => ok(core.add_manual_service(
             &p.get::<String>("serverName")?,
             &p.get::<String>("serviceName")?,
@@ -535,6 +540,8 @@ pub const COMMANDS: &[&str] = &[
     "get_ansible_run_output",
     "get_server_services",
     "get_server_current_services",
+    "get_fleet_services",
+    "list_actions",
     "add_manual_service",
     "list_providers",
     "connect_provider",
