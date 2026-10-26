@@ -286,6 +286,10 @@ openclaw_heartbeat_account_id: moncompte
 openclaw_heartbeat_to: "000000000"               # identifiant de chat Telegram
 openclaw_heartbeat_model: provider/model
 openclaw_telegram_bot_token: CHANGE_ME           # 🔒 @BotFather
+# Veille fleet-watch par la FleetForge du parc (API + serveur MCP, compte en
+# lecture de `ff_api_accounts`) au lieu de l'Alertmanager en direct.
+# openclaw_fleetwatch_source: fleetforge         # défaut : alertmanager
+# openclaw_fleetforge_user: openclaw             # mot de passe : ff_api_password_openclaw
 
 
 # ── SearXNG ──────────────────────────────────────────────────────────────────

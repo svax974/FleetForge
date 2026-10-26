@@ -178,7 +178,8 @@ static TOOLS: LazyLock<Vec<Tool>> = LazyLock::new(|| {
         Tool::new(
             "list_hosts",
             "List the inventory hosts of a parc: name, ip (ansible_host, empty when undeclared), \
-             SSH port (null = 22), inventory groups, role families (ansible_roles) and provider.",
+             SSH port (null = 22), inventory groups, role families (ansible_roles), provider, and \
+             monitored (false for a host deliberately left unmonitored: ignore its alerts).",
             schema(json!({
                 "type": "object",
                 "properties": { "parc": parc_property() },

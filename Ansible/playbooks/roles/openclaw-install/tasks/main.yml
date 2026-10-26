@@ -21,6 +21,28 @@
       le bloc obtenu dans group_vars/web3c.yml.
   when: openclaw_auth_choice == 'openai-api-key'
 
+# Veille par la FleetForge du parc (defaults, `openclaw_fleetwatch_source`) :
+# sans URL ni mot de passe, l'automation partirait et échouerait à chaque
+# passage, en n'envoyant qu'un « FleetForge injoignable ».
+- name: Fail early when the fleet-watch source is not usable
+  ansible.builtin.assert:
+    that:
+      - openclaw_fleetwatch_source in ['alertmanager', 'fleetforge']
+      - >-
+        openclaw_fleetwatch_source != 'fleetforge'
+        or (openclaw_fleetforge_url is match('^https://')
+            and openclaw_fleetforge_password | length > 0
+            and openclaw_fleetforge_mcp_name is match('^[A-Za-z0-9_]+$'))
+    fail_msg: >-
+      openclaw_fleetwatch_source={{ openclaw_fleetwatch_source }} :
+      `alertmanager` ou `fleetforge`. Avec `fleetforge`, il faut
+      `openclaw_fleetforge_url` en https:// (vaut « {{ openclaw_fleetforge_url }} » :
+      aucune entrée du parc ne porte la famille `fleetforge` avec un
+      `proxy_hostname` ?) et le mot de passe du compte
+      « {{ openclaw_fleetforge_user }} » (`ff_api_password_{{ openclaw_fleetforge_user }}`,
+      tiré par `deploy-fleetforge.yml` quand le compte figure dans
+      `ff_api_accounts`).
+
 # Le socle (curl, tar, ca-certificates) est garanti par host-preflight ; ceux-ci
 # sont les seuls en plus, spécifiques à l'installeur OpenClaw.
 - name: Install required packages
@@ -474,6 +496,61 @@
     mode: '0644'
   become: true
 
+# Serveur MCP de la FleetForge du parc (source `fleetforge`, voir defaults).
+# L'en-tête d'authentification n'est qu'une RÉFÉRENCE `${…}` à l'environnement
+# de la gateway (`.openclaw.env`, plus bas) : openclaw.json ne porte aucun
+# identifiant. Filtre d'outils : la lecture, seule permise au compte de toute
+# façon. `config set` et non `mcp set`/`mcp add` : rien n'est sondé à
+# l'écriture, or la variable n'existe pas dans l'environnement d'Ansible.
+# Objet remplacé en entier : l'inventaire fait foi.
+- name: Register the FleetForge MCP server
+  ansible.builtin.command:
+    cmd: >-
+      {{ openclaw_binary }} config set --batch-json
+      '{{ [{"path": "mcp.servers." ~ openclaw_fleetforge_mcp_name,
+            "value": {"url": openclaw_fleetforge_url ~ "/mcp",
+                      "transport": "streamable-http",
+                      "enabled": true,
+                      "headers": {"Authorization": "Basic ${" ~ openclaw_fleetforge_auth_env ~ "}"},
+                      "connectionTimeoutMs": 10000,
+                      "requestTimeoutMs": 120000,
+                      "toolFilter": {"include": openclaw_fleetforge_mcp_tools}}}] | to_json }}'
+    chdir: "{{ openclaw_home }}"
+  become: true
+  become_user: "{{ openclaw_user }}"
+  environment:
+    HOME: "{{ openclaw_home }}"
+  changed_when: true
+  when: openclaw_fleetwatch_source == 'fleetforge'
+
+# Retour à la source `alertmanager` : le serveur ne doit pas rester offert aux
+# agents dont le profil admet `bundle-mcp` (`coding` de `main`). `config get`
+# sort en 1 quand le chemin n'existe pas.
+- name: Look for a FleetForge MCP server left by the fleetforge source
+  ansible.builtin.command:
+    cmd: "{{ openclaw_binary }} config get mcp.servers.{{ openclaw_fleetforge_mcp_name }} --json"
+    chdir: "{{ openclaw_home }}"
+  become: true
+  become_user: "{{ openclaw_user }}"
+  environment:
+    HOME: "{{ openclaw_home }}"
+  register: openclaw_fleetforge_mcp_present
+  changed_when: false
+  failed_when: false
+  when: openclaw_fleetwatch_source != 'fleetforge'
+
+- name: Remove the FleetForge MCP server
+  ansible.builtin.command:
+    cmd: "{{ openclaw_binary }} config unset mcp.servers.{{ openclaw_fleetforge_mcp_name }}"
+    chdir: "{{ openclaw_home }}"
+  become: true
+  become_user: "{{ openclaw_user }}"
+  environment:
+    HOME: "{{ openclaw_home }}"
+  when:
+    - openclaw_fleetwatch_source != 'fleetforge'
+    - openclaw_fleetforge_mcp_present.rc | default(1) == 0
+
 # `minimal` puis ajouts explicites : un outil absent de la liste n'existe pas
 # pour l'agent. `read` confiné à son workspace (le dépôt) : hors de lui,
 # openclaw.json et ses clés API. Ni écriture, ni web, ni sessions, ni
@@ -483,13 +560,23 @@
 # lui, mimo-v2.6-flash a relancé huit fois `status agenthub` à l'identique
 # jusqu'au timeout (constat du 21/10/2026, aucune des 4 analyses depuis le
 # 20/10 n'avait abouti).
+#
+# Source `fleetforge` : ni `exec` (fleet-ssh) ni plugin Prometheus, les outils
+# de lecture du serveur MCP de la FleetForge à la place (`<serveur>__<outil>`,
+# servis par le plugin `bundle-mcp` d'OpenClaw), sous un compte borné au parc
+# et à la lecture.
 - name: Restrict the watch agent tools
+  vars:
+    watch_tools: >-
+      {{ ['read'] + (openclaw_fleetforge_mcp_tools | map('regex_replace', '^', openclaw_fleetforge_mcp_name ~ '__') | list)
+         if openclaw_fleetwatch_source == 'fleetforge'
+         else ['exec', 'process', 'read'] + openclaw_watch_prometheus_tools }}
   ansible.builtin.command:
     cmd: >-
       {{ openclaw_binary }} config set --batch-json
       '{{ [{"path": "agents.entries." ~ openclaw_watch_agent ~ ".tools",
             "value": {"profile": "minimal",
-                      "alsoAllow": ["exec", "process", "read"] + openclaw_watch_prometheus_tools,
+                      "alsoAllow": watch_tools,
                       "deny": ["gateway", "write", "edit", "apply_patch",
                                "group:web", "group:sessions", "group:memory", "group:ui"],
                       "fs": {"workspaceOnly": true},
@@ -665,6 +752,10 @@
       # Secrets de la gateway (Ansible). Clé du fournisseur : uniquement si définie.
       {% if openclaw_openai_api_key | trim | length > 0 %}
       OPENAI_API_KEY={{ openclaw_openai_api_key | trim }}
+      {% endif %}
+      {% if openclaw_fleetwatch_source == 'fleetforge' %}
+      # Compte FleetForge en lecture (fleet-watch et serveur MCP), user:password en base64.
+      {{ openclaw_fleetforge_auth_env }}={{ (openclaw_fleetforge_user ~ ':' ~ (openclaw_fleetforge_password | trim)) | b64encode }}
       {% endif %}
   become: true
   become_user: "{{ openclaw_user }}"

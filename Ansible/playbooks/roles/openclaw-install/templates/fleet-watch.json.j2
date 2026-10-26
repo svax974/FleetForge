@@ -1,4 +1,20 @@
-{#- Configuration de fleet-watch.py, entièrement dérivée de l'inventaire. -#}
+{#- Configuration de fleet-watch.py, entièrement dérivée de l'inventaire.
+    Source `fleetforge` : hôtes et `monitor: off` relus à chaque passage par
+    `list_hosts` (champ `monitored`) ; seules les exclusions en plus figurent
+    ici, et aucun identifiant (variable d'environnement `auth_env`). -#}
+{%- if openclaw_fleetwatch_source == 'fleetforge' -%}
+{%- set origin = {
+  'source': 'fleetforge',
+  'fleetforge': {
+    'url': openclaw_fleetforge_url,
+    'parc': openclaw_fleetwatch_parc,
+    'auth_env': openclaw_fleetforge_auth_env,
+    'timeout': 60
+  },
+  'ignore': openclaw_fleetwatch_ignore_extra | list,
+  'hosts': {}
+} -%}
+{%- else -%}
 {%- set amh = namespace(name='') -%}
 {%- for h in groups[parc_name] | default([]) -%}
 {%- if 'alertmanager' in (hostvars[h].ansible_roles | default([])) and not amh.name -%}{%- set amh.name = h -%}{%- endif -%}
@@ -11,10 +27,14 @@
 {%- set ns.hosts = ns.hosts | combine({h: {'ip': hostvars[h].ansible_host | default(h), 'roles': hostvars[h].ansible_roles | default([])}}) -%}
 {%- endif -%}
 {%- endfor -%}
-{{ {
+{%- set origin = {
+  'source': 'alertmanager',
   'alertmanager': 'http://' ~ hostvars[amh.name].ansible_host ~ ':' ~ (hostvars[amh.name].alertmanager_port | default(9093)),
   'ignore': ns.ignore,
-  'hosts': ns.hosts,
+  'hosts': ns.hosts
+} -%}
+{%- endif -%}
+{{ origin | combine({
   'renotify_hours': openclaw_fleetwatch_renotify_hours,
   'state_file': openclaw_home ~ '/.openclaw/state/fleet-watch.json',
   'binary': openclaw_binary,
@@ -27,4 +47,4 @@
   'timeout': openclaw_fleetwatch_timeout,
   'quiet_reply': openclaw_fleetwatch_quiet_reply,
   'prompt': lookup('ansible.builtin.template', 'fleet-watch-prompt.j2') | trim
-} | to_nice_json }}
+}) | to_nice_json }}

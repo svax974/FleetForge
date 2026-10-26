@@ -197,6 +197,66 @@ openclaw_fleetwatch_ignore_extra: [mtbridge1]
 # rétablissements (demande opérateur du 24/10/2026).
 openclaw_fleetwatch_quiet_reply: "RAS"
 
+# ── Source de fleet-watch : Alertmanager ou FleetForge ──────────────────────
+# `alertmanager` (défaut, comportement historique) : l'Alertmanager du parc,
+# joint directement ; hôtes et `monitor: off` lus dans l'inventaire au
+# déploiement ; l'agent `watch` diagnostique par fleet-ssh et le plugin
+# Prometheus.
+# `fleetforge` : la FleetForge du parc, en HTTPS, sous un compte
+# d'automatisation en LECTURE (l'un des `ff_api_accounts` du parc,
+# `mode: read`). fleet-watch.py y lit à chaque passage les alertes
+# (`alertmanager_alerts`) et les hôtes (`list_hosts`, dont `monitored`), et
+# l'agent `watch` reçoit le serveur MCP de cette FleetForge, restreint à ses
+# outils de lecture, À LA PLACE de fleet-ssh et du plugin Prometheus. Aucun
+# accès SSH ni Prometheus propre à OpenClaw n'est alors nécessaire : le
+# compte, borné à son parc et à la lecture, est le seul accès.
+# Activer : déclarer le compte côté FleetForge (`ff_api_accounts` :
+# `{ user: openclaw, mode: read }`, puis `deploy-fleetforge.yml`), admettre
+# l'entrée `openclaw` dans `access_linked` de l'entrée FleetForge (vhost
+# privé), puis `openclaw_fleetwatch_source: fleetforge` et
+# `deploy-openclaw.yml`.
+openclaw_fleetwatch_source: alertmanager
+# Nom du parc veillé, tel que FleetForge le connaît.
+openclaw_fleetwatch_parc: "{{ parc_name }}"
+# URL de la FleetForge : `https://` + `proxy_hostname` de l'entrée du parc qui
+# porte la famille `fleetforge` — par les proxies, jamais le port applicatif
+# en direct, où l'authentification basique circulerait en clair.
+openclaw_fleetforge_url: >-
+  {%- set ns = namespace(url='') -%}
+  {%- for h in groups[parc_name] | default([]) | sort -%}
+  {%- if not ns.url and 'fleetforge' in (hostvars[h].ansible_roles | default([]))
+        and hostvars[h].proxy_hostname is defined -%}
+  {%- set ns.url = 'https://' ~ hostvars[h].proxy_hostname -%}
+  {%- endif -%}
+  {%- endfor -%}
+  {{ ns.url }}
+# Compte d'automatisation en lecture (un `user` des `ff_api_accounts` du parc).
+openclaw_fleetforge_user: openclaw
+# Son mot de passe : celui que fleetforge-install a tiré au premier
+# déploiement et chiffré dans le group_vars du parc (`ff_api_password_<user>`).
+# Pour la FleetForge d'un AUTRE parc, le recopier, chiffré, sous ce nom dans
+# le group_vars du parc d'OpenClaw.
+openclaw_fleetforge_password: "{{ lookup('ansible.builtin.vars', 'ff_api_password_' ~ openclaw_fleetforge_user, default='') }}"
+# Nom du serveur dans `mcp.servers` : préfixe des outils vus par l'agent
+# (`fleetforge__list_hosts`). Lettres, chiffres et `_` seulement, le préfixe
+# d'outil ne garde pas les autres caractères.
+openclaw_fleetforge_mcp_name: fleetforge
+# Outils de la FleetForge offerts à l'agent `watch` (filtre du serveur MCP ET
+# liste blanche de l'agent). Jamais `run_ansible_playbook` : l'agent soumet,
+# l'humain décide — et le compte, en lecture, le refuserait de toute façon.
+openclaw_fleetforge_mcp_tools:
+  - list_hosts
+  - list_playbooks
+  - alertmanager_alerts
+  - query_prometheus
+  - ssh_diagnose
+# Variable d'environnement de la gateway (`.openclaw.env`, 0600) qui porte les
+# identifiants, encodés pour l'en-tête `Authorization: Basic`. openclaw.json
+# n'en garde que la référence `${…}` : `mcp.servers.*.headers` n'accepte pas de
+# SecretRef (au 26/10/2026), mais toute chaîne de la configuration est
+# substituée depuis l'environnement du processus.
+openclaw_fleetforge_auth_env: FLEETFORGE_BASIC_AUTH
+
 # ── Travail de fond facturé au modèle ───────────────────────────────────────
 # Constat du 20/10/2026 : 9 234 points Poe dans la journée, dont 4 % pour la
 # seule réponse utile, puis 402 (points épuisés) et plus aucun modèle.

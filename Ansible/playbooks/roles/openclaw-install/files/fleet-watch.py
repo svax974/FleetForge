@@ -5,12 +5,22 @@ Interroge Alertmanager, retire les hôtes volontairement non surveillés, puis
 ne réveille le modèle que si l'ensemble des alertes a CHANGÉ (ou s'il persiste
 depuis plus de `renotify_hours`). Un ensemble qui disparaît puis revient dans
 cette fenêtre n'est pas un changement. Rien d'ouvert = aucun token consommé.
+
+Deux sources (`source` de la configuration) :
+- `alertmanager` : l'Alertmanager du parc, en direct ; hôtes et `monitor: off`
+  figés dans la configuration au déploiement ;
+- `fleetforge` : la FleetForge du parc (API d'automatisation, compte en
+  lecture) — alertes par `alertmanager_alerts`, hôtes et `monitored` par
+  `list_hosts`, relus à chaque passage. Identifiants dans l'environnement de
+  la gateway (`auth_env`, posé par `.openclaw.env`), jamais dans ce fichier.
 """
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 import uuid
 from pathlib import Path
@@ -39,14 +49,53 @@ def send(text: str) -> None:
         check=False, timeout=60)
 
 
+def source() -> str:
+    """Ce qui est interrogé, pour les messages d'échec."""
+    if CONF.get("source") == "fleetforge":
+        return f"FleetForge ({CONF['fleetforge']['url']})"
+    return f"Alertmanager ({CONF['alertmanager']})"
+
+
+def fleetforge(command: str, body: dict):
+    """Commande de l'API d'automatisation de la FleetForge du parc. Un refus
+    remonte avec son code (`forbidden`, `unknown_parc`…), pas seulement le
+    statut HTTP : c'est lui qui dit quoi corriger."""
+    ff = CONF["fleetforge"]
+    auth = os.environ.get(ff["auth_env"], "")
+    if not auth:
+        raise RuntimeError(f"{ff['auth_env']} absent de l'environnement de la gateway (.openclaw.env)")
+    request = urllib.request.Request(
+        f"{ff['url']}/api/{command}", data=json.dumps(body).encode(), method="POST",
+        headers={"Content-Type": "application/json", "Authorization": f"Basic {auth}"})
+    try:
+        with urllib.request.urlopen(request, timeout=ff["timeout"]) as r:
+            return json.load(r)
+    except urllib.error.HTTPError as e:
+        try:
+            detail = json.load(e)
+            reason = f"{detail.get('code')} : {detail.get('error')}"
+        except ValueError:
+            reason = e.reason
+        raise RuntimeError(f"{command} → HTTP {e.code} {reason}") from None
+
+
 def fetch_alerts() -> list:
+    if CONF.get("source") == "fleetforge":
+        parc = CONF["fleetforge"]["parc"]
+        hosts = fleetforge("list_hosts", {"parc": parc})
+        # Mêmes champs que la configuration de la source `alertmanager`.
+        CONF["hosts"] = {h["name"]: {"ip": h["ip"], "roles": h["roles"]}
+                         for h in hosts if h.get("monitored", True)}
+        CONF["ignore"] = CONF["ignore"] + [h["name"] for h in hosts if not h.get("monitored", True)]
+        return fleetforge("alertmanager_alerts", {"parc": parc})
     url = f"{CONF['alertmanager']}/api/v2/alerts?active=true&silenced=false&inhibited=false"
     with urllib.request.urlopen(url, timeout=15) as r:
         return json.load(r)
 
 
 def resolve_machine(instance: str) -> str | None:
-    """Nom d'inventaire à passer à fleet-ssh. Une `instance` n'en est pas
+    """Nom d'inventaire à passer à fleet-ssh (`ssh_diagnose` avec la source
+    `fleetforge`). Une `instance` n'en est pas
     toujours un : llamacpp numérote ses instances (`lamacpp-1` pour l'entrée
     `lamacpp`), et l'agent tournait alors en rond sur « instance inconnue »
     (constat du 21/10/2026, analyse de 07:56)."""
@@ -61,9 +110,9 @@ def main() -> int:
     now = time.time()
     try:
         alerts = fetch_alerts()
-    except Exception as e:  # noqa: BLE001 — toute panne d'Alertmanager est le signal
+    except Exception as e:  # noqa: BLE001 — toute panne de la source est le signal
         if not state.get("am_down"):
-            send(f"⚠️ Alertmanager injoignable ({CONF['alertmanager']}) : {e}")
+            send(f"⚠️ {source()} injoignable : {e}")
         save_state({**state, "am_down": True})
         return 0
 

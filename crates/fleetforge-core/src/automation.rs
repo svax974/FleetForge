@@ -15,7 +15,7 @@
 
 use crate::fault::{fail, Fault, FaultKind};
 use crate::model::Fleet;
-use crate::models::{AnsibleGroup, AnsiblePlaybook};
+use crate::models::{AnsibleGroup, AnsibleHost, AnsiblePlaybook};
 use anyhow::Result;
 use serde::Serialize;
 use std::collections::{BTreeSet, HashMap};
@@ -38,6 +38,18 @@ pub struct HostSummary {
     pub roles: Vec<String>,
     /// Hébergeur (`provider`), `None` quand l'entrée l'a oublié.
     pub provider: Option<String>,
+    /// `false` quand l'entrée déclare `monitor: "off"` : machine
+    /// volontairement non supervisée, dont une veille (fleet-watch) écarte les
+    /// alertes. Même lecture que les rôles (`monitor | string | lower == 'off'`).
+    pub monitored: bool,
+}
+
+/// `monitor: "off"` sur l'entrée.
+fn unmonitored(host: &AnsibleHost) -> bool {
+    host.vars
+        .get("monitor")
+        .and_then(|v| v.as_str())
+        .is_some_and(|v| v.trim().eq_ignore_ascii_case("off"))
 }
 
 /// Groupes qui contiennent chaque hôte, chemin d'ancêtres compris.
@@ -84,6 +96,7 @@ pub fn host_summaries(fleet: &Fleet) -> Vec<HostSummary> {
                 groups: all,
                 roles: h.ansible_roles.clone(),
                 provider: h.provider.clone(),
+                monitored: !unmonitored(h),
             }
         })
         .collect()
@@ -479,7 +492,10 @@ mod tests {
                     name: "monitoring".into(),
                     hosts: vec![
                         host("monitor", "10.0.0.2", &["monitoring"]),
-                        host("alertmanager1", "10.0.0.2", &["alertmanager"]),
+                        AnsibleHost {
+                            vars: [("monitor".to_string(), serde_json::json!("Off"))].into(),
+                            ..host("alertmanager1", "10.0.0.2", &["alertmanager"])
+                        },
                     ],
                     children: vec![],
                 },
@@ -503,6 +519,9 @@ mod tests {
         assert_eq!(proxy.roles, vec!["proxy"]);
         assert_eq!(proxy.ip, "10.0.0.1");
         assert_eq!(proxy.provider.as_deref(), Some("contabo"));
+        assert!(proxy.monitored);
+        let muted = hosts.iter().find(|h| h.name == "alertmanager1").unwrap();
+        assert!(!muted.monitored, "monitor: \"off\", sans égard à la casse");
     }
 
     #[test]

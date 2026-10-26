@@ -80,6 +80,7 @@ all:
               ansible_host: 10.0.0.9
               provider: contabo
               ansible_roles: [proxy]
+              monitor: \"off\"
         monitoring:
           hosts:
             alertmanager1:
@@ -353,9 +354,12 @@ async fn the_automation_api_end_to_end() {
         proxy1,
         &json!({
             "name": "proxy1", "ip": "10.0.0.1", "port": 2222,
-            "groups": ["web3c", "proxies"], "roles": ["proxy"], "provider": "contabo"
+            "groups": ["web3c", "proxies"], "roles": ["proxy"], "provider": "contabo",
+            "monitored": true
         })
     );
+    let proxy2 = hosts.as_array().unwrap().iter().find(|h| h["name"] == "proxy2").unwrap();
+    assert_eq!(proxy2["monitored"], json!(false), "monitor: \"off\" : {proxy2}");
     let (status, body) = api.agent("list_hosts", json!({ "parc": "../etc" })).await;
     assert_eq!((status, code(&body)), (StatusCode::BAD_REQUEST, "invalid_argument"));
     let (status, body) = api.agent("list_hosts", json!({ "parc": "papanglabs" })).await;

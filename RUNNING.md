@@ -353,7 +353,7 @@ l'authentification basique y circulerait en clair.
 
 | Commande | Corps | Réponse |
 |---|---|---|
-| `list_hosts` | `{ "parc": "web3c" }` | `[{ "name", "ip", "port" (null = 22), "groups", "roles", "provider" (null si absent) }]` |
+| `list_hosts` | `{ "parc": "web3c" }` | `[{ "name", "ip", "port" (null = 22), "groups", "roles", "provider" (null si absent), "monitored" (false : `monitor: "off"`) }]` |
 | `list_playbooks` | — | `[{ "path": "deploy-x.yml", "family", "service", "label", "description" }]` — `family` : `deploy`, `update`, `remove`, `purge`, `security`, `monitoring`, `backup`, `setup`, `migrate`, `other` |
 | `alertmanager_alerts` | `{ "parc" }` | JSON de `GET /api/v2/alerts?active=true&silenced=false&inhibited=false`, tel quel |
 | `query_prometheus` | `{ "parc", "query", "time"? }` | `{ "parc", "result": [{ "metric": {…}, "timestamp", "value" }], "truncated" }` |
@@ -410,6 +410,9 @@ refus est une erreur d'outil (`isError: true`) dont le texte est le corps
 d'erreur de l'API, `{ "error", "code" }` ; un outil inconnu, une erreur de
 protocole (-32602). L'en-tête `Host` n'est contrôlé (boucle locale seule) que
 sans authentification. Adresse, par le vhost : `https://infra.<domaine>/mcp`.
+Client OpenClaw (veille fleet-watch d'un parc, sans AgentHub) :
+`openclaw_fleetwatch_source: fleetforge` dans `openclaw-install`, sous un
+compte `read` de `ff_api_accounts` (voir les defaults du rôle).
 
 ```sh
 curl -su "$USER_API:$MOT_DE_PASSE" https://infra.<domaine>/mcp \
