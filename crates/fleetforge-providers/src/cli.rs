@@ -1108,6 +1108,21 @@ impl OracleProvider {
     }
 }
 
+/// Adresses (publiques et privées) lues dans la réponse de `list-vnics`.
+fn oci_vnic_addresses(body: &Value) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for vnic in body.get("data").and_then(|d| d.as_array()).into_iter().flatten() {
+        for key in ["public-ip", "private-ip"] {
+            if let Some(ip) = vnic.get(key).and_then(|v| v.as_str()).filter(|v| !v.is_empty()) {
+                if !out.iter().any(|a| a == ip) {
+                    out.push(ip.to_string());
+                }
+            }
+        }
+    }
+    out
+}
+
 fn oci_instance(inst: &Value) -> Instance {
     let raw_state = inst
         .get("lifecycle-state")
@@ -1395,11 +1410,50 @@ impl Provider for OracleProvider {
         )
         .map_err(|e| oci_compartment_error(oci_auth_error(e, self.session), compartment))?;
 
-        Ok(body
+        let mut instances: Vec<Instance> = body
             .get("data")
             .and_then(|d| d.as_array())
             .map(|arr| arr.iter().map(oci_instance).collect())
-            .unwrap_or_default())
+            .unwrap_or_default();
+
+        // `instance list` ne rend AUCUNE adresse : elles vivent sur les cartes
+        // réseau virtuelles. Sans elles, le rapprochement avec l'inventaire
+        // (par adresse) ne pouvait jamais aboutir — toutes les machines Oracle
+        // restaient « non rapprochées ». Un appel par instance, en parallèle.
+        let base: Vec<String> = self.base_args(&[]).into_iter().map(String::from).collect();
+        std::thread::scope(|scope| {
+            let jobs: Vec<_> = instances
+                .iter()
+                .filter(|i| !matches!(i.raw_state.as_str(), "TERMINATED" | "TERMINATING"))
+                .map(|i| {
+                    let id = i.reference.id.clone();
+                    let base = &base;
+                    scope.spawn(move || {
+                        let mut args: Vec<&str> = vec!["compute", "instance", "list-vnics", "--instance-id", &id];
+                        args.extend(base.iter().map(String::as_str));
+                        let found = run_json("oci", &args, OCI_INSTALL)
+                            .map(|v| oci_vnic_addresses(&v))
+                            .map_err(|e| {
+                                fleetforge_core::logging::warn(
+                                    "oci",
+                                    format!("adresses de l'instance {id} illisibles : {e}"),
+                                )
+                            })
+                            .unwrap_or_default();
+                        (id, found)
+                    })
+                })
+                .collect();
+            for job in jobs {
+                if let Ok((id, found)) = job.join() {
+                    if let Some(inst) = instances.iter_mut().find(|i| i.reference.id == id) {
+                        inst.addresses = found;
+                    }
+                }
+            }
+        });
+
+        Ok(instances)
     }
 
     async fn get_instance(&self, reference: &InstanceRef) -> Result<Instance> {
@@ -1492,6 +1546,17 @@ fn dirs_home() -> std::path::PathBuf {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn vnic_addresses_keep_public_and_private_without_duplicates() {
+        let body: Value = serde_json::json!({"data": [
+            {"public-ip": "203.0.113.10", "private-ip": "10.0.0.5", "is-primary": true},
+            {"public-ip": null, "private-ip": "10.0.0.5"},
+            {"private-ip": "10.0.0.6"}
+        ]});
+        assert_eq!(oci_vnic_addresses(&body), vec!["203.0.113.10", "10.0.0.5", "10.0.0.6"]);
+        assert!(oci_vnic_addresses(&serde_json::json!({})).is_empty());
+    }
+
     #[test]
     fn a_profile_region_is_rewritten_alone() {
         let cfg = "[DEFAULT]\nregion=eu-paris-1\ntenancy=t1\n\n[acme]\ntenancy=t2\nregion = us-ashburn-1\n";

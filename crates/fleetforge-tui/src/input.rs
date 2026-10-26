@@ -1404,6 +1404,7 @@ async fn refresh_instances(
     let _ = tx.send(Msg::ProvidersLoaded(hub.statuses().await));
     let (instances, _) = hub.list_instances_everywhere(kind).await;
     let _ = tx.send(Msg::InstancesLoaded(kind, instances));
+    let _ = tx.send(Msg::ReloadControls);
 }
 
 /// `x` : ferme la session du compte désigné, ou de tous ceux de l'hébergeur.
