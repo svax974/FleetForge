@@ -11,7 +11,10 @@
 //! détail à droite), barre d'aide. Le détail suit la sélection — c'est
 //! l'équivalent clavier du survol dans le GUI.
 
-use crate::app::{App, CredentialsForm, Overlay, ProviderFocus, Screen, SessionMenu};
+use crate::app::{
+    ActionMenu, App, CredentialsForm, Overlay, Picker, ProviderFocus, Screen, Scope, Section,
+    SessionMenu,
+};
 use crate::theme::*;
 use fleetforge_core::model::Health;
 use fleetforge_core::style::Tone;
@@ -23,7 +26,7 @@ use ratatui::widgets::{
 
 pub fn draw(frame: &mut Frame, app: &App) {
     let chunks = Layout::vertical([
-        Constraint::Length(1),
+        Constraint::Length(2),
         Constraint::Min(3),
         Constraint::Length(1),
     ])
@@ -40,25 +43,30 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Some(Overlay::Confirm(c)) => draw_confirm(frame, &c.prompt),
         Some(Overlay::Credentials(form)) => draw_credentials(frame, form),
         Some(Overlay::SessionMenu(menu)) => draw_session_menu(frame, menu),
+        Some(Overlay::Picker(picker)) => draw_picker(frame, picker),
+        Some(Overlay::Actions(menu)) => draw_actions(frame, menu),
+        Some(Overlay::Message(text)) => draw_message(frame, text),
         None => {}
     }
 }
 
 fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
+    let rows = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(area);
+
     let mut left = vec![
         Span::styled(" infra ", title_style()),
         Span::styled("│ ", dim_style()),
     ];
 
-    // Onglets : le numéro est le raccourci, montré plutôt qu'à retenir.
-    for screen in Screen::ALL {
-        let active = screen == app.screen;
+    // Sections : le numéro est le raccourci, montré plutôt qu'à retenir.
+    for section in Section::ALL {
+        let active = section == app.section();
         left.push(Span::styled(
-            format!("{}", screen.index() + 1),
+            format!("{}", section.index() + 1),
             if active { title_style() } else { dim_style() },
         ));
         left.push(Span::styled(
-            format!(" {} ", screen.title()),
+            format!(" {} ", section.title()),
             if active {
                 Style::default().fg(TEXT).add_modifier(Modifier::BOLD)
             } else {
@@ -69,12 +77,9 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
 
     let (errors, warnings) = app.finding_counts();
     let mut right: Vec<Span> = Vec::new();
-    if !app.organization.is_empty() {
-        right.push(Span::styled(format!("{} ", app.organization), text_style()));
-    }
     if let Some(fleet) = &app.fleet {
         right.push(Span::styled(
-            format!("· {} srv · {} hôtes ", fleet.servers.len(), fleet.hosts.len()),
+            format!("{} srv · {} hôtes ", fleet.servers.len(), fleet.hosts.len()),
             dim_style(),
         ));
     }
@@ -93,7 +98,83 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     spans.push(Span::raw(" ".repeat(pad)));
     spans.extend(right);
 
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    frame.render_widget(Paragraph::new(Line::from(spans)), rows[0]);
+    frame.render_widget(Paragraph::new(Line::from(breadcrumb(app))), rows[1]);
+}
+
+/// Où l'on est : le parc, puis chaque cran de la descente, puis la liste.
+///
+/// C'est la seule trace de ce chemin — sans elle, `⎋` remonte vers un endroit
+/// qu'on ne voit pas.
+fn breadcrumb(app: &App) -> Vec<Span<'static>> {
+    let sep = || Span::styled(" › ", dim_style());
+    let current = |text: &str| {
+        Span::styled(text.to_string(), Style::default().fg(TEXT).add_modifier(Modifier::BOLD))
+    };
+    let mut out = vec![Span::raw(" ")];
+
+    match app.section() {
+        Section::Parc => {
+            if app.organization.is_empty() {
+                out.push(Span::styled("aucun parc — P pour en choisir un", tone_style(Tone::Warn)));
+                return out;
+            }
+            out.push(Span::styled(app.organization.clone(), title_style()));
+            for scope in &app.scope {
+                out.push(sep());
+                out.push(Span::styled(
+                    match scope {
+                        Scope::Machine(key) => key.to_string(),
+                        Scope::Host(name) => name.clone(),
+                    },
+                    text_style(),
+                ));
+            }
+            out.push(sep());
+            out.push(current(app.screen.title()));
+        }
+        Section::Ansible => {
+            out.push(Span::styled("Ansible", title_style()));
+            out.push(sep());
+            for (i, screen) in [Screen::Roles, Screen::Playbooks].into_iter().enumerate() {
+                if i > 0 {
+                    out.push(Span::styled(" │ ", dim_style()));
+                }
+                if screen == app.screen {
+                    out.push(current(screen.title()));
+                } else {
+                    out.push(Span::styled(screen.title().to_string(), dim_style()));
+                }
+            }
+            out.push(Span::styled("   ← → pour changer", dim_style()));
+        }
+        Section::Providers => {
+            out.push(Span::styled("Providers", title_style()));
+            if let Some(provider) = app.selected_provider() {
+                out.push(sep());
+                out.push(Span::styled(provider.info.label.clone(), text_style()));
+                if let Some(account) = app.selected_account().filter(|_| app.focus != ProviderFocus::Providers) {
+                    out.push(sep());
+                    out.push(Span::styled(account.name, text_style()));
+                }
+                if app.focus.instance().is_some() {
+                    out.push(sep());
+                    out.push(current("Instances"));
+                }
+            }
+        }
+        Section::Runs | Section::Diagnostics => {
+            out.push(current(app.screen.title()));
+        }
+    }
+    out
+}
+
+/// Complément du titre de liste. Dans le parc, la liste est bornée par le fil
+/// d'Ariane : le dire dans le titre évite de croire qu'elle est complète.
+fn list_hint(app: &App) -> Option<String> {
+    (!app.scope.is_empty() && app.section() == Section::Parc)
+        .then(|| "bornée par le fil d'Ariane".to_string())
 }
 
 fn draw_body(frame: &mut Frame, app: &App, area: Rect) {
@@ -102,13 +183,12 @@ fn draw_body(frame: &mut Frame, app: &App, area: Rect) {
         .split(area);
 
     let (items, detail) = match app.screen {
-        Screen::Inventories => (inventories_rows(app), inventory_detail(app)),
         Screen::Servers => (servers_rows(app), server_detail(app)),
         Screen::Hosts => (hosts_rows(app), host_detail(app)),
         Screen::Services => (services_rows(app), services_detail(app)),
         Screen::Roles => (roles_rows(app), role_detail(app)),
         Screen::Playbooks => (playbooks_rows(app), playbook_detail(app)),
-        Screen::Runs => (runs_rows(app), run_detail(app)),
+        Screen::Runs => (runs_rows(app), run_detail(app, cols[1].height)),
         Screen::Diagnostics => (diagnostics_rows(app), finding_detail(app)),
         Screen::Providers => (providers_rows(app), provider_detail(app)),
     };
@@ -119,6 +199,9 @@ fn draw_body(frame: &mut Frame, app: &App, area: Rect) {
     }
     if !app.marked_hosts.is_empty() {
         title = format!("{title}· {} marqué(s) ", app.marked_hosts.len());
+    }
+    if let Some(label) = &list_hint(app) {
+        title = format!("{title}· {label} ");
     }
 
     // Sur Providers, `↵` fait passer le curseur dans le panneau de DROITE :
@@ -185,7 +268,7 @@ fn draw_body(frame: &mut Frame, app: &App, area: Rect) {
 /// la barre les annonce toutes, et n'en annonce aucune de morte.
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Scope {
+pub enum KeyScope {
     /// Annoncé sur tous les écrans, en fin de ligne.
     Everywhere,
     /// Annoncé sur ces écrans seulement.
@@ -203,47 +286,57 @@ pub enum Scope {
 /// des raccourcis incomplets est pire qu'une barre vide : on croit avoir fait
 /// le tour.
 #[cfg(test)]
-pub const KEYS: &[(&str, Scope)] = &[
-    ("q", Scope::Everywhere),
-    ("?", Scope::Everywhere),
-    ("/", Scope::Everywhere),
-    ("f", Scope::Everywhere),
-    ("r", Scope::Everywhere),
+pub const KEYS: &[(&str, KeyScope)] = &[
+    ("q", KeyScope::Everywhere),
+    ("?", KeyScope::Everywhere),
+    ("/", KeyScope::Everywhere),
+    ("f", KeyScope::Everywhere),
+    ("r", KeyScope::Everywhere),
+    ("P", KeyScope::Everywhere),
     // Alias de `/` pour les doigts venus de vim : l'annoncer doublerait
     // l'entrée sans rien apprendre.
-    (":", Scope::HelpOnly),
-    ("↵", Scope::On(&[
-        Screen::Inventories,
+    (":", KeyScope::HelpOnly),
+    // Sur Services, `↵` ouvre les mêmes actions que `espace` : une seule
+    // des deux est annoncée.
+    ("↵", KeyScope::On(&[
         Screen::Servers,
         Screen::Hosts,
+        Screen::Roles,
+        Screen::Playbooks,
         Screen::Diagnostics,
         Screen::Providers,
     ])),
-    ("espace", Scope::On(&[Screen::Servers, Screen::Hosts])),
-    ("d", Scope::On(&[Screen::Roles])),
+    ("espace", KeyScope::On(&[Screen::Servers, Screen::Hosts, Screen::Services])),
+    ("m", KeyScope::On(&[Screen::Servers, Screen::Hosts])),
+    ("d", KeyScope::On(&[Screen::Servers, Screen::Hosts, Screen::Services])),
+    ("p", KeyScope::On(&[Screen::Servers, Screen::Hosts, Screen::Services])),
+    ("e", KeyScope::On(&[Screen::Hosts])),
     // Ailleurs, `⎋` efface le filtre ou les marques — qu'on vient de poser
-    // soi-même. Sur Providers il REMONTE d'un niveau, ce qui ne se devine pas.
-    ("⎋", Scope::On(&[Screen::Providers])),
-    ("c", Scope::On(&[Screen::Providers])),
-    ("C", Scope::On(&[Screen::Providers])),
-    ("a", Scope::On(&[Screen::Providers])),
-    ("x", Scope::On(&[Screen::Providers])),
-    ("X", Scope::On(&[Screen::Providers])),
-    ("s", Scope::On(&[Screen::Providers])),
-    ("S", Scope::On(&[Screen::Providers, Screen::Servers, Screen::Hosts])),
-    ("A", Scope::On(&[Screen::Providers, Screen::Servers, Screen::Hosts])),
-    ("R", Scope::On(&[Screen::Providers, Screen::Servers, Screen::Hosts])),
-    ("j", Scope::HelpOnly),
-    ("k", Scope::HelpOnly),
-    ("g", Scope::HelpOnly),
-    ("G", Scope::HelpOnly),
-    ("↑", Scope::HelpOnly),
-    ("↓", Scope::HelpOnly),
-    ("⇞", Scope::HelpOnly),
-    ("⇟", Scope::HelpOnly),
-    ("⇥", Scope::HelpOnly),
-    ("⇧⇥", Scope::HelpOnly),
-    ("1-9", Scope::HelpOnly),
+    // soi-même. Dans le parc et sur Providers il REMONTE d'un niveau, ce qui
+    // ne se devine pas.
+    ("⎋", KeyScope::On(&[Screen::Hosts, Screen::Services, Screen::Providers])),
+    ("c", KeyScope::On(&[Screen::Providers])),
+    ("C", KeyScope::On(&[Screen::Providers])),
+    ("a", KeyScope::On(&[Screen::Providers])),
+    ("x", KeyScope::On(&[Screen::Services, Screen::Providers])),
+    ("X", KeyScope::On(&[Screen::Services, Screen::Providers])),
+    ("s", KeyScope::On(&[Screen::Providers])),
+    ("S", KeyScope::On(&[Screen::Providers, Screen::Servers, Screen::Hosts, Screen::Services])),
+    ("A", KeyScope::On(&[Screen::Providers, Screen::Servers, Screen::Hosts, Screen::Services])),
+    ("R", KeyScope::On(&[Screen::Providers, Screen::Servers, Screen::Hosts, Screen::Services])),
+    ("j", KeyScope::HelpOnly),
+    ("k", KeyScope::HelpOnly),
+    ("g", KeyScope::HelpOnly),
+    ("G", KeyScope::HelpOnly),
+    ("↑", KeyScope::HelpOnly),
+    ("↓", KeyScope::HelpOnly),
+    ("←", KeyScope::HelpOnly),
+    ("→", KeyScope::HelpOnly),
+    ("⇞", KeyScope::HelpOnly),
+    ("⇟", KeyScope::HelpOnly),
+    ("⇥", KeyScope::HelpOnly),
+    ("⇧⇥", KeyScope::HelpOnly),
+    ("1-5", KeyScope::HelpOnly),
 ];
 
 /// Ce que la barre du bas doit savoir de l'ÉLÉMENT désigné.
@@ -258,14 +351,13 @@ pub const KEYS: &[(&str, Scope)] = &[
 /// monter un `App` complet, ce qui suppose un cœur et une connexion.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct HintContext {
-    /// Inventaires : la ligne désignée est DÉJÀ le parc courant.
-    pub on_current_inventory: bool,
-    /// Serveurs / Hôtes : la ligne désignée est marquée.
+    /// Machines / Hôtes : la ligne désignée est marquée.
     pub marked: bool,
-    /// Serveurs / Hôtes : il y a quelque chose sous le curseur.
+    /// Il y a quelque chose sous le curseur.
     pub has_row: bool,
-    /// Rôles : nombre d'hôtes que `d` viserait. Zéro = `d` refusera.
-    pub targets: usize,
+    /// Services : le catalogue offre un rôle `-remove` / `-purge` au service.
+    pub can_remove: bool,
+    pub can_purge: bool,
     /// Diagnostics : le constat désigné mène à un écran. Un constat de parc
     /// n'a pas de sujet où aller.
     pub navigable: bool,
@@ -300,13 +392,7 @@ impl HintContext {
         };
 
         match app.screen {
-            Screen::Inventories => {
-                ctx.on_current_inventory = app
-                    .visible_inventories()
-                    .get(app.cursor())
-                    .is_some_and(|i| i.file_path == app.inventory_path);
-            }
-            Screen::Servers | Screen::Hosts => {
+            Screen::Servers | Screen::Hosts | Screen::Services => {
                 ctx.marked = match app.screen {
                     Screen::Servers => {
                         let hosts = app
@@ -316,6 +402,7 @@ impl HintContext {
                             .unwrap_or_default();
                         !hosts.is_empty() && hosts.iter().all(|h| app.marked_hosts.contains(h))
                     }
+                    Screen::Services => false,
                     _ => app
                         .selected_host_name()
                         .is_some_and(|n| app.marked_hosts.contains(&n)),
@@ -323,14 +410,21 @@ impl HintContext {
                 // Rien tant que l'hébergeur n'est pas connecté : la machine
                 // n'est alors rapprochée d'aucune instance, et les touches
                 // d'alimentation n'ont rien à viser.
-                if let Some((_, _, caps, state)) = app.power_target() {
-                    ctx.can_start = caps.start && state != PowerState::Running;
-                    ctx.can_stop =
-                        (caps.stop || caps.stop_graceful) && state != PowerState::Stopped;
-                    ctx.can_reboot = caps.reboot || caps.reboot_graceful;
+                if let Some(power) = app.power_state() {
+                    ctx.can_start = power.can_start;
+                    ctx.can_stop = power.can_stop;
+                    ctx.can_reboot = power.can_reboot;
+                }
+                if app.screen == Screen::Services {
+                    if let Some(service) = app.visible_services().get(app.cursor()) {
+                        let name = &service.service_name;
+                        ctx.can_remove =
+                            fleetforge_core::resolve_role(&app.roles, name, "remove").is_some();
+                        ctx.can_purge =
+                            fleetforge_core::resolve_role(&app.roles, name, "purge").is_some();
+                    }
                 }
             }
-            Screen::Roles => ctx.targets = app.target_hosts().len(),
             Screen::Diagnostics => {
                 use fleetforge_core::diagnostics::Subject;
                 ctx.navigable = app.visible_findings().get(app.cursor()).is_some_and(|f| {
@@ -386,16 +480,28 @@ pub fn screen_hints(
     let mut add = |key: &'static str, what: &str| out.push((key, what.to_string()));
 
     match screen {
-        Screen::Inventories => {
-            // Basculer sur le parc où l'on est déjà ne fait rien.
-            if !ctx.on_current_inventory && ctx.has_row {
-                add("↵", "basculer sur ce parc");
-            }
-        }
-        Screen::Servers | Screen::Hosts => {
+        Screen::Servers | Screen::Hosts | Screen::Services => {
             if ctx.has_row {
-                add("↵", if screen == Screen::Servers { "hôtes" } else { "services" });
-                add("espace", if ctx.marked { "démarquer" } else { "marquer" });
+                match screen {
+                    Screen::Servers => add("↵", "hôtes"),
+                    Screen::Hosts => add("↵", "services"),
+                    _ => {}
+                }
+                add("espace", "actions");
+                if screen != Screen::Services {
+                    add("m", if ctx.marked { "démarquer" } else { "marquer" });
+                }
+                add("d", "déployer");
+                add("p", "playbook");
+                if screen == Screen::Hosts {
+                    add("e", "exemptions");
+                }
+                if screen == Screen::Services && ctx.can_remove {
+                    add("x", "retirer");
+                }
+                if screen == Screen::Services && ctx.can_purge {
+                    add("X", "purger");
+                }
                 // Piloter la machine là où on la regarde. Absent tant qu'elle
                 // n'est rapprochée d'aucune instance — hébergeur non connecté,
                 // machine sans API, ou adresse revendiquée par deux comptes.
@@ -409,12 +515,20 @@ pub fn screen_hints(
                     add("R", "redémarrer");
                 }
             }
+            // Dans le parc `⎋` remonte toujours : d'un cran, ou vers Machines
+            // quand la liste a été ouverte à plat par la palette.
+            if screen != Screen::Servers {
+                add("⎋", "remonter");
+            }
         }
         Screen::Roles => {
-            // `d` sans hôte ciblé refuse. L'annoncer apprendrait une touche
-            // qui répond « aucun hôte ciblé » — `?` la donne, elle.
-            if ctx.targets > 0 {
-                out.push(("d", format!("déployer sur {} hôte(s)", ctx.targets)));
+            if ctx.has_row {
+                add("↵", "déployer sur…");
+            }
+        }
+        Screen::Playbooks => {
+            if ctx.has_row {
+                add("↵", "lancer");
             }
         }
         Screen::Diagnostics => {
@@ -422,10 +536,7 @@ pub fn screen_hints(
                 add("↵", "aller au sujet");
             }
         }
-        // Playbooks n'annonce pas « ↵ exécuter » : le TUI ne sait PAS lancer
-        // de playbook, `↵` n'y est lié à rien. Promettre une action qui ne
-        // part pas est le défaut que cette table existe pour empêcher.
-        Screen::Services | Screen::Playbooks | Screen::Runs => {}
+        Screen::Runs => {}
         Screen::Providers => match focus {
             ProviderFocus::Providers => {
                 // Avec un seul compte, ce niveau EST le niveau compte : les
@@ -507,6 +618,7 @@ pub fn screen_hints(
 /// Raccourcis valables partout, annoncés après ceux de l'écran.
 /// `? aide` n'y est pas : il est rendu à part, et jamais retiré.
 const EVERYWHERE: &[(&str, &str)] = &[
+    ("P", "parc"),
     ("r", "recharger"),
     ("f", "filtrer"),
     ("/", "commande"),
@@ -608,76 +720,6 @@ fn elide(spans: Vec<Span<'static>>, room: usize) -> Vec<Span<'static>> {
 }
 
 // === Lignes par écran ===
-
-fn inventories_rows(app: &App) -> Vec<ListItem<'static>> {
-    let current = app.inventory_path.clone();
-    app.visible_inventories()
-        .into_iter()
-        .map(|i| {
-            // Le parc actif est marqué, sinon rien ne distingue la ligne où on
-            // se trouve de celle où le curseur passe.
-            let active = i.file_path == current;
-            let mark = if active { "●" } else { "○" };
-            ListItem::new(Line::from(vec![
-                Span::styled(
-                    format!(" {mark} "),
-                    if active { tone_style(Tone::Ok) } else { dim_style() },
-                ),
-                Span::styled(format!("{:<24}", i.name), text_style()),
-                Span::styled(i.organization.clone(), dim_style()),
-            ]))
-        })
-        .collect()
-}
-
-fn inventory_detail(app: &App) -> Vec<Line<'static>> {
-    let inventories = app.visible_inventories();
-    let Some(info) = inventories.get(app.cursor()) else {
-        return vec![Line::from(Span::styled(
-            "aucun inventaire — renseigner le chemin des inventaires",
-            dim_style(),
-        ))];
-    };
-
-    let active = info.file_path == app.inventory_path;
-    vec![
-        Line::from(Span::styled(info.name.clone(), title_style())),
-        Line::from(Span::styled(info.organization.clone(), dim_style())),
-        Line::from(""),
-    ]
-    .into_iter()
-    // Un parc est l'union de ses fichiers `<parc>_*.yml` : on les énumère.
-    .chain(info.files.iter().map(|f| {
-        let name = std::path::Path::new(f)
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| f.clone());
-        Line::from(Span::styled(format!("  {name}"), dim_style()))
-    }))
-    .chain([
-        Line::from(""),
-        // Les compteurs ne valent que pour le parc chargé : les afficher pour
-        // les autres lignes supposerait de parser tous les inventaires à
-        // l'ouverture de l'écran, et chacun interroge Prometheus.
-        Line::from(if active {
-            match &app.fleet {
-                Some(f) => Span::styled(
-                    format!("{} machines · {} hôtes", f.servers.len(), f.hosts.len()),
-                    text_style(),
-                ),
-                None => Span::styled("chargement…", dim_style()),
-            }
-        } else {
-            Span::styled("", dim_style())
-        }),
-        Line::from(""),
-        Line::from(Span::styled(
-            if active { "parc courant" } else { "↵ pour basculer sur ce parc" },
-            if active { tone_style(Tone::Ok) } else { tone_style(Tone::Info) },
-        )),
-    ])
-    .collect()
-}
 
 fn servers_rows(app: &App) -> Vec<ListItem<'static>> {
     app.visible_servers()
@@ -908,11 +950,7 @@ fn server_detail(app: &App) -> Vec<Line<'static>> {
 
     // Constats rattachés à cette machine — le détail répond « pourquoi ce
     // serveur est-il en ambre ? » sans changer d'écran.
-    let related: Vec<&fleetforge_core::diagnostics::Finding> = app
-        .findings
-        .iter()
-        .filter(|f| finding_touches(f, &server.key.to_string(), &server.hosts))
-        .collect();
+    let related = app.findings_touching(&server.key.to_string(), &server.hosts);
 
     if !related.is_empty() {
         lines.push(Line::from(""));
@@ -926,19 +964,6 @@ fn server_detail(app: &App) -> Vec<Line<'static>> {
     }
 
     lines
-}
-
-fn finding_touches(
-    finding: &fleetforge_core::diagnostics::Finding,
-    server_key: &str,
-    hosts: &[String],
-) -> bool {
-    use fleetforge_core::diagnostics::Subject;
-    match &finding.subject {
-        Subject::Server(id) => id == server_key,
-        Subject::Host(name) => hosts.contains(name),
-        _ => false,
-    }
 }
 
 fn host_detail(app: &App) -> Vec<Line<'static>> {
@@ -1021,7 +1046,13 @@ fn host_detail(app: &App) -> Vec<Line<'static>> {
 fn services_detail(app: &App) -> Vec<Line<'static>> {
     let services = app.visible_services();
     let Some(s) = services.get(app.cursor()) else {
-        return vec![Line::from(Span::styled("aucun service", dim_style()))];
+        return vec![
+            Line::from(Span::styled("aucun service suivi", dim_style())),
+            Line::from(Span::styled(
+                "le journal ne connaît que ce que FleetForge a déployé",
+                dim_style(),
+            )),
+        ];
     };
     vec![
         heading(s.service_name.clone()),
@@ -1097,7 +1128,7 @@ fn playbook_detail(app: &App) -> Vec<Line<'static>> {
     lines
 }
 
-fn run_detail(app: &App) -> Vec<Line<'static>> {
+fn run_detail(app: &App, height: u16) -> Vec<Line<'static>> {
     let Some(run) = app.runs.get(app.cursor()) else {
         return vec![Line::from(Span::styled("aucun run", dim_style()))];
     };
@@ -1109,8 +1140,11 @@ fn run_detail(app: &App) -> Vec<Line<'static>> {
         Line::from(""),
     ];
     // Les dernières lignes seulement : un run Ansible en produit des milliers,
-    // et ce sont les dernières qui portent l'échec.
-    let tail = run.output.iter().rev().take(30).rev();
+    // et ce sont les dernières qui portent l'échec. Autant que le panneau en
+    // contient — au-delà, c'est la FIN qui débordait, donc justement ce qu'on
+    // venait lire.
+    let room = (height as usize).saturating_sub(2 + lines.len()).max(3);
+    let tail = run.output.iter().rev().take(room).rev();
     for line in tail {
         lines.push(Line::from(Span::styled(line.clone(), dim_style())));
     }
@@ -1336,20 +1370,22 @@ fn overlay_block(title: &str) -> Block<'static> {
 /// entrée de `KEYS` n'y manque. Écrire « (ou : ) » ou « Maj-Tab » y casserait
 /// la correspondance sans que rien ne le dise.
 const HELP: &[(&str, &str)] = &[
-    ("1-9", "aller à un écran"),
-    ("⇥ ⇧⇥", "écran suivant / précédent"),
+    ("1-5", "aller à une section"),
+    ("⇥ ⇧⇥", "section suivante / précédente"),
+    ("← →", "remonter / descendre dans le parc ; Rôles ↔ Playbooks"),
     ("j k ↑ ↓", "se déplacer"),
-    ("⇞ ⇟", "page précédente / suivante"),
-    ("g G", "début / fin de liste"),
-    ("espace", "marquer un hôte ou une machine entière"),
+    ("⇞ ⇟ g G", "page précédente / suivante, début / fin de liste"),
+    ("espace", "actions de l'élément désigné (menu)"),
+    ("m", "marquer un hôte ou une machine entière"),
     ("⎋", "remonter d'un niveau, effacer le filtre ou les marques"),
     ("/ :", "palette de commandes"),
     ("f", "filtrer la liste courante"),
-    ("d", "déployer le rôle courant sur la sélection"),
+    ("P", "choisir le parc"),
+    ("d p e", "déployer un rôle / lancer un playbook / exemptions d'alertes"),
     ("↵", "descendre d'un niveau, ou exécuter ce que l'écran propose"),
-    ("c x", "connecter / déconnecter un provider"),
+    ("c x", "connecter / déconnecter un provider ; x retire un service"),
     ("C", "saisir les identifiants du compte désigné"),
-    ("a X", "ajouter / oublier un compte d'hébergeur"),
+    ("a X", "ajouter / oublier un compte ; X purge un service"),
     ("s", "commande de session du compte (renouveler un jeton)"),
     ("S A R", "démarrer / arrêter / redémarrer la machine désignée"),
     ("r", "recharger"),
@@ -1407,6 +1443,173 @@ fn draw_session_menu(frame: &mut Frame, menu: &SessionMenu) {
                         title_style(),
                     )),
             )
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+/// Lignes qu'occupe `text` une fois replié sur `width` colonnes.
+///
+/// Repli GLOUTON PAR MOTS, comme celui du `Paragraph` : diviser la longueur par
+/// la largeur sous-compte dès qu'un mot ne tient pas en fin de ligne, et le
+/// pied de la fenêtre (« ⎋ pour fermer ») sortait alors du cadre.
+fn wrapped_rows(text: &str, width: usize) -> usize {
+    let width = width.max(1);
+    text.split('\n')
+        .map(|line| {
+            let mut rows = 1;
+            let mut used = 0;
+            for word in line.split_whitespace() {
+                // Un mot plus long que la ligne se coupe, il occupe plusieurs rangées.
+                let len = word.chars().count();
+                let extra = len.saturating_sub(1) / width;
+                if used == 0 {
+                    used = len % width.max(1);
+                    rows += extra;
+                } else if used + 1 + len <= width {
+                    used += 1 + len;
+                } else {
+                    rows += 1 + extra;
+                    used = len % width;
+                }
+            }
+            rows
+        })
+        .sum()
+}
+
+/// Erreur lue en entier. Le texte vient tel que l'outil l'a rendu : le replier
+/// à la largeur de la fenêtre le garde lisible sans le réécrire.
+fn draw_message(frame: &mut Frame, text: &str) {
+    let width = (frame.area().width as usize * 70 / 100).max(30);
+    // Deux colonnes de bordure, deux de marge à gauche.
+    let inner = width.saturating_sub(4);
+    // Ligne vide, texte, ligne vide, pied, plus les deux bordures.
+    let rows = (wrapped_rows(text, inner) + 5).min(frame.area().height as usize);
+    let area = centered_rows(frame.area(), 70, rows as u16);
+
+    let mut lines: Vec<Line> = vec![Line::from("")];
+    for line in text.split('\n') {
+        lines.push(Line::from(Span::styled(format!("  {line}"), text_style())));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  ⎋ ou ↵ pour fermer".to_string(),
+        dim_style(),
+    )));
+
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(tone_style(Tone::Danger))
+                    .title(Span::styled(" Erreur ", tone_style(Tone::Danger))),
+            ),
+        area,
+    );
+}
+
+/// Fenêtre de `max` lignes qui garde `cursor` visible.
+fn window(len: usize, cursor: usize, max: usize) -> std::ops::Range<usize> {
+    if len <= max {
+        return 0..len;
+    }
+    let start = cursor.saturating_sub(max / 2).min(len - max);
+    start..start + max
+}
+
+/// Choix filtrable : parc, rôle, playbook, hôte, alerte.
+fn draw_picker(frame: &mut Frame, picker: &Picker) {
+    let visible = picker.visible();
+    let max_rows = (frame.area().height as usize).saturating_sub(8).clamp(3, 14);
+    let span = window(visible.len(), picker.cursor, max_rows);
+
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled("  ▸ ", tone_style(Tone::Info)),
+            Span::styled(picker.query.clone(), text_style()),
+            Span::styled("▏", tone_style(Tone::Info)),
+        ]),
+        Line::from(""),
+    ];
+    if visible.is_empty() {
+        lines.push(Line::from(Span::styled("  aucun résultat", dim_style())));
+    }
+    for index in span.clone() {
+        let item = visible[index];
+        let here = index == picker.cursor;
+        lines.push(Line::from(vec![
+            Span::styled(if here { " ▸ " } else { "   " }.to_string(), tone_style(Tone::Ok)),
+            Span::styled(
+                format!("{:<34}", item.label),
+                if here { selected_style() } else { text_style() },
+            ),
+            Span::styled(item.detail.clone(), dim_style()),
+        ]));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        format!(
+            "   {}/{}   ↑↓ choisir   ↵ valider   ⎋ annuler   taper pour filtrer",
+            visible.len().min(picker.cursor + 1),
+            visible.len()
+        ),
+        dim_style(),
+    )));
+
+    let wanted = lines.len() as u16 + 2;
+    let area = centered_rows(frame.area(), 72, wanted.min(frame.area().height));
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines).block(overlay_block(&picker.title)),
+        area,
+    );
+}
+
+/// Actions de l'élément désigné. Une action indisponible reste LISTÉE et dit
+/// pourquoi : une entrée absente ne distingue pas « n'existe pas » de
+/// « une condition manque ».
+fn draw_actions(frame: &mut Frame, menu: &ActionMenu) {
+    let mut lines: Vec<Line> = Vec::new();
+    for (index, action) in menu.entries.iter().enumerate() {
+        let here = index == menu.cursor;
+        let style = if !action.enabled {
+            dim_style()
+        } else if here {
+            selected_style()
+        } else if action.destructive {
+            tone_style(Tone::Warn)
+        } else {
+            text_style()
+        };
+        lines.push(Line::from(vec![
+            Span::styled(if here { " ▸ " } else { "   " }.to_string(), tone_style(Tone::Ok)),
+            Span::styled(format!("{:<38}", action.label), style),
+            Span::styled(action.key.clone().unwrap_or_default(), tone_style(Tone::Info)),
+        ]));
+    }
+
+    // La raison de la seule ligne désignée, comme le menu de session.
+    if let Some(reason) = menu.selected().and_then(|a| a.reason.as_ref()) {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(format!("   {reason}"), tone_style(Tone::Warn))));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "   j k choisir   ↵ lancer   ⎋ fermer".to_string(),
+        dim_style(),
+    )));
+
+    let wanted = lines.len() as u16 + 2;
+    let area = centered_rows(frame.area(), 64, wanted.min(frame.area().height));
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(overlay_block(&menu.title))
             .wrap(Wrap { trim: false }),
         area,
     );
@@ -1568,15 +1771,15 @@ fn draw_help(frame: &mut Frame) {
 
 /// Commandes de la palette. Tout ce que la souris fait dans le GUI se tape ici.
 pub const COMMANDS: &[(&str, &str)] = &[
-    ("servers", "aller aux serveurs"),
-    ("hosts", "aller aux hôtes"),
-    ("services", "aller aux services"),
+    ("servers", "aller aux machines"),
+    ("hosts", "tous les hôtes, à plat"),
+    ("services", "tous les services, à plat"),
     ("roles", "aller aux rôles"),
     ("playbooks", "aller aux playbooks"),
     ("runs", "aller aux runs"),
     ("diagnostics", "aller aux diagnostics"),
     ("providers", "aller aux providers"),
-    ("inventory", "changer de parc (sans argument : la liste)"),
+    ("inventory", "changer de parc (sans argument : le sélecteur)"),
     ("reload", "tout recharger"),
     ("clear-marks", "effacer la sélection d'hôtes"),
     ("exempt", "exempter l'hôte courant d'une alerte (:exempt <alerte>)"),
@@ -1718,7 +1921,7 @@ mod tests {
                     // `Char('x')` ; `Char(c @ '1'..='9')` couvre les chiffres.
                     match rest.strip_prefix("Char('").and_then(|r| r.chars().next()) {
                         Some(c) => c.to_string(),
-                        None if rest.starts_with("Char(c @ '1'..='9')") => "1-9".into(),
+                        None if rest.starts_with("Char(c @ '1'..='5')") => "1-5".into(),
                         None => continue,
                     }
                 }
@@ -1726,6 +1929,8 @@ mod tests {
                 "Esc" => "⎋".into(),
                 "Tab" => "⇥".into(),
                 "BackTab" => "⇧⇥".into(),
+                "Left" => "←".into(),
+                "Right" => "→".into(),
                 "Up" => "↑".into(),
                 "Down" => "↓".into(),
                 "PageUp" => "⇞".into(),
@@ -1788,9 +1993,8 @@ mod tests {
         let base = HintContext { has_row: true, ..Default::default() };
         vec![
             base,
-            HintContext { on_current_inventory: true, ..base },
             HintContext { marked: true, ..base },
-            HintContext { targets: 3, ..base },
+            HintContext { can_remove: true, can_purge: true, ..base },
             HintContext { navigable: true, ..base },
             // Hébergeur : rien d'enregistré, puis enregistré non connecté,
             // puis connecté.
@@ -1851,14 +2055,14 @@ mod tests {
     fn every_key_active_on_a_screen_is_announced_there() {
         // C'est la garantie demandée : sur chaque écran, la dernière ligne
         // annonce tout ce qui y agit. Les déplacements en sont exclus
-        // explicitement — `Scope::HelpOnly` — et `?` les redonne.
+        // explicitement — `KeyScope::HelpOnly` — et `?` les redonne.
         for screen in Screen::ALL {
             let announced = footer_keys(screen);
             for (key, scope) in KEYS {
                 let active = match scope {
-                    Scope::Everywhere => true,
-                    Scope::On(screens) => screens.contains(&screen),
-                    Scope::HelpOnly => false,
+                    KeyScope::Everywhere => true,
+                    KeyScope::On(screens) => screens.contains(&screen),
+                    KeyScope::HelpOnly => false,
                 };
                 assert!(
                     !active || announced.contains(key),
@@ -1883,9 +2087,9 @@ mod tests {
                         .map(|(_, s)| *s)
                         .unwrap_or_else(|| panic!("`{key}` annoncée mais absente de KEYS"));
                     let active = match scope {
-                        Scope::Everywhere => true,
-                        Scope::On(screens) => screens.contains(&screen),
-                        Scope::HelpOnly => false,
+                        KeyScope::Everywhere => true,
+                        KeyScope::On(screens) => screens.contains(&screen),
+                        KeyScope::HelpOnly => false,
                     };
                     assert!(active, "`{key}` annoncée sur {} sans y agir", screen.title());
                 }
@@ -1967,38 +2171,104 @@ mod tests {
     }
 
     #[test]
-    fn the_current_inventory_is_not_offered_a_switch_to_itself() {
-        let ctx = HintContext { has_row: true, on_current_inventory: true, ..Default::default() };
-        assert!(keys_at(Screen::Inventories, LEVELS[0], ctx).is_empty());
-    }
-
-    #[test]
     fn a_marked_row_is_offered_the_unmarking() {
         let ctx = HintContext { has_row: true, marked: true, ..Default::default() };
         let hints = screen_hints(Screen::Hosts, LEVELS[0], ctx);
-        let space = hints.iter().find(|(k, _)| *k == "espace").expect("espace absent");
-        assert_eq!(space.1, "démarquer");
+        let mark = hints.iter().find(|(k, _)| *k == "m").expect("m absent");
+        assert_eq!(mark.1, "démarquer");
     }
 
     #[test]
-    fn a_role_without_a_target_is_not_offered_a_deployment() {
-        // `d` répondrait « aucun hôte ciblé » : l'annoncer apprend une touche
-        // qui refuse.
-        let none = HintContext { has_row: true, ..Default::default() };
-        assert!(keys_at(Screen::Roles, LEVELS[0], none).is_empty());
-
-        let some = HintContext { has_row: true, targets: 3, ..Default::default() };
+    fn a_role_is_deployable_from_its_row_without_marking_anything() {
+        // Le déploiement ne dépend plus de marques posées AILLEURS : `↵` sur le
+        // rôle demande où le poser.
+        let some = HintContext { has_row: true, ..Default::default() };
         let hints = screen_hints(Screen::Roles, LEVELS[0], some);
-        assert_eq!(hints[0].1, "déployer sur 3 hôte(s)");
+        assert_eq!(hints[0], ("↵", "déployer sur…".to_string()));
+        assert!(keys_at(Screen::Roles, LEVELS[0], HintContext::default()).is_empty());
+    }
+
+    #[test]
+    fn a_service_is_offered_removal_only_when_the_catalogue_has_the_role() {
+        let none = HintContext { has_row: true, ..Default::default() };
+        let keys = keys_at(Screen::Services, LEVELS[0], none);
+        assert!(!keys.contains(&"x") && !keys.contains(&"X"), "{keys:?}");
+
+        let both = HintContext { has_row: true, can_remove: true, can_purge: true, ..Default::default() };
+        let keys = keys_at(Screen::Services, LEVELS[0], both);
+        assert!(keys.contains(&"x") && keys.contains(&"X"), "{keys:?}");
+    }
+
+    #[test]
+    fn the_parc_levels_below_the_root_announce_the_way_up() {
+        let ctx = HintContext::default();
+        assert!(keys_at(Screen::Hosts, LEVELS[0], ctx).contains(&"⎋"));
+        assert!(keys_at(Screen::Services, LEVELS[0], ctx).contains(&"⎋"));
+        assert!(!keys_at(Screen::Servers, LEVELS[0], ctx).contains(&"⎋"));
+    }
+
+    #[test]
+    fn a_long_message_is_wrapped_to_the_rows_it_needs() {
+        assert_eq!(wrapped_rows("court", 40), 1);
+        assert_eq!(wrapped_rows(&"x".repeat(100), 40), 3);
+        // Un mot qui ne tient pas en fin de ligne passe à la suivante.
+        assert_eq!(wrapped_rows("aaaa bbbb cccc", 9), 2);
+        // Un saut de ligne compte, même sur une ligne vide.
+        assert_eq!(wrapped_rows("a\n\nb", 40), 3);
+        assert_eq!(wrapped_rows("", 40), 1);
+    }
+
+    #[test]
+    fn a_long_error_is_shown_whole_in_its_window() {
+        let text = "le profil [DEFAULT] est authentifié sur la tenancy …example2 mais ce compte \
+                    vise …example1 : une session ne vaut que pour une tenancy. Donner à ce \
+                    compte son propre profil (champ « Profil »).";
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw_message(f, text)).unwrap();
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        // Le texte est replié : on cherche ses mots, pas la phrase d'un bloc.
+        for word in ["DEFAULT", "example2", "Profil", "Erreur", "fermer"] {
+            assert!(screen.contains(word), "« {word} » absent de la fenêtre");
+        }
+    }
+
+    #[test]
+    fn the_message_window_stays_inside_a_small_terminal() {
+        let area = Rect::new(0, 0, 80, 24);
+        let rows = (wrapped_rows(&"x".repeat(5000), 50) + 5).min(area.height as usize);
+        let frame = centered_rows(area, 70, rows as u16);
+        assert!(frame.bottom() <= area.bottom());
+    }
+
+    #[test]
+    fn a_picker_window_keeps_the_cursor_in_view() {
+        assert_eq!(window(5, 4, 14), 0..5);
+        let span = window(100, 99, 14);
+        assert!(span.contains(&99) && span.len() == 14);
+        let span = window(100, 0, 14);
+        assert!(span.contains(&0) && span.len() == 14);
     }
 
     #[test]
     fn an_empty_list_offers_nothing_to_act_on() {
         // Curseur sur une liste vide : `↵` et `espace` ne désignent rien.
         let empty = HintContext::default();
-        for screen in [Screen::Inventories, Screen::Servers, Screen::Hosts] {
+        for screen in [Screen::Servers, Screen::Hosts, Screen::Services] {
+            // `⎋` remonte même sur une liste vide : ce n'est pas une action sur
+            // une ligne.
+            let acting: Vec<&str> = keys_at(screen, LEVELS[0], empty)
+                .into_iter()
+                .filter(|k| *k != "⎋")
+                .collect();
             assert!(
-                keys_at(screen, LEVELS[0], empty).is_empty(),
+                acting.is_empty(),
                 "{} annonce des actions sur une liste vide",
                 screen.title()
             );

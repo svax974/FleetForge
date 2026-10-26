@@ -12,10 +12,11 @@
 //! d'interaction est ici : navigation vim, palette `:`, filtre `/`, aide `?`.
 
 use crate::app::{
-    App, Confirm, ConfirmedAction, CredentialsForm, MenuEntry, Msg, Overlay, ProviderFocus,
-    Screen, SessionMenu,
+    ActionMenu, ActionTarget, App, Confirm, ConfirmedAction, CredentialsForm, MenuEntry, Msg,
+    Overlay, PickItem, PickPurpose, Picker, ProviderFocus, Screen, Section, SessionMenu,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use fleetforge_core::actions::{actions_for, ActionContext, ActionId, Subject};
 use fleetforge_core::deploy::{DeployRequest, PlaybookRequest};
 use fleetforge_providers::PowerAction;
 use fleetforge_core::SettingKey;
@@ -41,6 +42,17 @@ pub fn handle_key(app: &mut App, key: KeyEvent, tx: &UnboundedSender<Msg>) {
         Some(Overlay::Confirm(c)) => handle_confirm(app, key, c, tx),
         Some(Overlay::Credentials(form)) => handle_credentials(app, key, *form, tx),
         Some(Overlay::SessionMenu(menu)) => handle_session_menu(app, key, menu, tx),
+        Some(Overlay::Picker(picker)) => handle_picker(app, key, *picker, tx),
+        Some(Overlay::Actions(menu)) => handle_actions(app, key, *menu),
+        // Fermée par une touche voulue, pas par n'importe laquelle : une
+        // frappe en cours quand l'erreur arrive la ferait disparaître sans
+        // avoir été lue.
+        Some(Overlay::Message(_)) => {
+            if matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char(' ')) {
+                app.overlay = None;
+                app.status.clear();
+            }
+        }
         Some(Overlay::Help) => {
             // N'importe quelle touche referme l'aide : y chercher la bonne
             // serait absurde.
@@ -209,31 +221,56 @@ fn handle_normal(app: &mut App, key: KeyEvent, tx: &UnboundedSender<Msg>) {
         }
 
         // Échap dégrade par étapes plutôt que de tout jeter d'un coup : on
-        // efface d'abord le filtre, puis les marques.
+        // remonte d'un niveau (comptes), puis on efface le filtre, puis on
+        // remonte dans le parc, et c'est tout en haut seulement qu'il efface
+        // les marques.
         KeyCode::Esc => {
+            // Le message de la barre d'état reste jusqu'au suivant : sans cela
+            // une erreur lue y demeurait indéfiniment. `⎋` l'efface EN PLUS de
+            // son action, pour ne pas coûter une frappe de plus.
+            app.status.clear();
             if app.screen == Screen::Providers && app.focus_shallower() {
                 // Remonté d'un niveau dans l'arborescence des comptes.
             } else if !app.filter.is_empty() {
                 app.filter.clear();
                 app.set_cursor(app.cursor());
+            } else if app.ascend() {
+                // Remonté d'un cran dans le fil d'Ariane du parc.
             } else {
                 app.clear_marks();
             }
         }
 
         KeyCode::Tab => {
-            let next = app.screen.next();
-            app.go(next);
+            let next = app.section().next();
+            app.go_section(next);
         }
         KeyCode::BackTab => {
-            let prev = app.screen.previous();
-            app.go(prev);
+            let prev = app.section().previous();
+            app.go_section(prev);
         }
-        KeyCode::Char(c @ '1'..='9') => {
-            if let Some(screen) = Screen::from_digit(c) {
-                app.go(screen);
+        KeyCode::Char(c @ '1'..='5') => {
+            if let Some(section) = Section::from_digit(c) {
+                app.go_section(section);
             }
         }
+        // ← → : descendre / remonter dans le parc, comme ↵ et ⎋ ; entre Rôles
+        // et Playbooks, passer de l'un à l'autre.
+        KeyCode::Right => match app.section() {
+            Section::Parc => {
+                app.descend();
+            }
+            Section::Ansible => app.toggle_ansible_view(),
+            _ => {}
+        },
+        KeyCode::Left => match app.section() {
+            Section::Parc => {
+                app.ascend();
+            }
+            Section::Ansible => app.toggle_ansible_view(),
+            _ => {}
+        },
+        KeyCode::Char('P') => open_parc_picker(app),
 
         KeyCode::Char('j') | KeyCode::Down => move_down(app, 1),
         KeyCode::Char('k') | KeyCode::Up => move_down(app, -1),
@@ -242,7 +279,8 @@ fn handle_normal(app: &mut App, key: KeyEvent, tx: &UnboundedSender<Msg>) {
         KeyCode::Char('g') | KeyCode::Home => app.cursor_home(),
         KeyCode::Char('G') | KeyCode::End => app.cursor_end(),
 
-        KeyCode::Char(' ') => app.toggle_mark(),
+        KeyCode::Char(' ') => open_actions(app),
+        KeyCode::Char('m') => app.toggle_mark(),
 
         KeyCode::Char('r') => {
             app.loading = true;
@@ -252,14 +290,25 @@ fn handle_normal(app: &mut App, key: KeyEvent, tx: &UnboundedSender<Msg>) {
 
         KeyCode::Enter => drill_in(app, tx),
         KeyCode::Char('d') => request_deploy(app),
+        KeyCode::Char('p') => request_playbook(app),
+        KeyCode::Char('e') => request_exemption(app),
         KeyCode::Char('c') => connect_provider(app, tx),
         KeyCode::Char('C') => configure_provider(app),
         KeyCode::Char('a') => add_account(app),
-        KeyCode::Char('x') => disconnect_provider(app, tx),
+        // Sur Services, `x`/`X` retirent / purgent le service ; sur Providers,
+        // ils ferment la session / effacent les identifiants. Même gravité
+        // croissante, même confirmation.
+        KeyCode::Char('x') => match app.screen {
+            Screen::Services => request_uninstall(app, "remove"),
+            _ => disconnect_provider(app, tx),
+        },
         // Majuscule, et derrière confirmation : `x` ferme une session, `X`
         // efface des identifiants. La distinction doit se payer d'une touche
         // plus difficile à atteindre par accident.
-        KeyCode::Char('X') => forget_account(app),
+        KeyCode::Char('X') => match app.screen {
+            Screen::Services => request_uninstall(app, "purge"),
+            _ => forget_account(app),
+        },
         // `s` comme session. Sans confirmation : renouveler un jeton ne
         // détruit rien, et l'échec se lit dans la barre d'état.
         KeyCode::Char('s') => run_session_action(app, tx),
@@ -305,7 +354,10 @@ enum PowerKind {
 /// `stop_graceful` l'arrêt propre : plusieurs hébergeurs n'ont que l'un des
 /// deux, tester le premier seul refuserait l'action chez GCP.
 fn request_power(app: &mut App, kind: PowerKind) {
-    if !matches!(app.screen, Screen::Providers | Screen::Servers | Screen::Hosts) {
+    if !matches!(
+        app.screen,
+        Screen::Providers | Screen::Servers | Screen::Hosts | Screen::Services
+    ) {
         return;
     }
 
@@ -354,53 +406,30 @@ fn request_power(app: &mut App, kind: PowerKind) {
 /// `↵` : descendre d'un niveau, ou exécuter ce que l'écran propose.
 fn drill_in(app: &mut App, tx: &UnboundedSender<Msg>) {
     match app.screen {
-        Screen::Inventories => {
-            let wanted = app
-                .visible_inventories()
-                .get(app.cursor())
-                .map(|i| i.name.clone());
-            if let Some(name) = wanted {
-                switch_inventory(app, Some(&name), tx);
-                app.go(Screen::Servers);
+        Screen::Servers | Screen::Hosts => {
+            app.descend();
+        }
+        // Au bas de l'arbre, il n'y a plus où descendre : `↵` offre ce qu'on
+        // peut faire du service.
+        Screen::Services => open_actions(app),
+        Screen::Roles => {
+            if let Some(role) = app.selected_role_name() {
+                deploy_role_on_targets(app, role);
             }
         }
-        // Depuis une machine, on va voir ses hôtes — filtrés sur son adresse,
-        // ce qui reproduit le « clic pour ouvrir » du GUI.
-        Screen::Servers => {
-            if let Some(key) = app.selected_server_key() {
-                app.go(Screen::Hosts);
-                app.filter = key.address.clone();
-                app.cursor_home();
-            }
-        }
-        Screen::Hosts => {
-            if let Some(name) = app.selected_host_name() {
-                app.go(Screen::Services);
-                app.filter = name;
-                app.cursor_home();
-            }
-        }
+        Screen::Playbooks => request_run_playbook(app),
         Screen::Diagnostics => {
             // Aller à l'élément que le constat désigne : un diagnostic sans
             // chemin vers son sujet oblige à le chercher à la main.
-            use fleetforge_core::diagnostics::Subject;
+            use fleetforge_core::diagnostics::Subject as Target;
             let subject = app
                 .visible_findings()
                 .get(app.cursor())
                 .map(|f| f.subject.clone());
             match subject {
-                Some(Subject::Host(name)) => {
-                    app.go(Screen::Hosts);
-                    app.filter = name;
-                    app.cursor_home();
-                }
-                Some(Subject::Server(id)) => {
-                    app.go(Screen::Servers);
-                    // La clé affichée peut porter un port ; l'adresse suffit.
-                    app.filter = id.split(':').next().unwrap_or(&id).to_string();
-                    app.cursor_home();
-                }
-                Some(Subject::RoleFamily(family)) => {
+                Some(Target::Host(name)) => app.reveal_host(&name),
+                Some(Target::Server(id)) => app.reveal_server(&id),
+                Some(Target::RoleFamily(family)) => {
                     app.go(Screen::Roles);
                     app.filter = family;
                     app.cursor_home();
@@ -408,8 +437,6 @@ fn drill_in(app: &mut App, tx: &UnboundedSender<Msg>) {
                 _ => {}
             }
         }
-        // Instances déjà chargées : ↵ descend dedans pour pouvoir agir sur
-        // l'une d'elles. Sinon il connecte, ce qui les charge.
         // ↵ descend d'un niveau : hébergeur → comptes → instances. Au plus
         // bas, ou quand il n'y a rien où descendre, il connecte — ce qui est
         // précisément ce qui fera apparaître le niveau suivant.
@@ -418,29 +445,451 @@ fn drill_in(app: &mut App, tx: &UnboundedSender<Msg>) {
                 connect_provider(app, tx);
             }
         }
-        _ => {}
+        Screen::Runs => {}
     }
 }
 
+// === Sélecteur ===
+
+/// Ouvre le choix du parc — la liste déroulante du GUI. Lit les inventaires
+/// au moment de l'ouverture : la liste ne dépend pas du parc courant.
+pub fn open_parc_picker(app: &mut App) {
+    let available = match app.core.list_inventories() {
+        Ok(list) => list,
+        Err(e) => {
+            app.status = format!("\u{26a0} inventaires illisibles : {e}");
+            return;
+        }
+    };
+    if available.is_empty() {
+        app.status = "aucun inventaire — renseigner le chemin des inventaires".into();
+        return;
+    }
+    let items: Vec<PickItem> = available
+        .iter()
+        .map(|i| PickItem {
+            label: i.name.clone(),
+            detail: format!(
+                "{}{}",
+                if i.file_path == app.inventory_path { "● courant · " } else { "" },
+                i.organization
+            ),
+            value: i.name.clone(),
+        })
+        .collect();
+    let mut picker = Picker::new("Parc", PickPurpose::Parc, items);
+    // Le curseur part sur le parc courant : on le voit, et `↵` ne change rien.
+    picker.cursor = available
+        .iter()
+        .position(|i| i.file_path == app.inventory_path)
+        .unwrap_or(0);
+    app.overlay = Some(Overlay::Picker(Box::new(picker)));
+}
+
+fn handle_picker(app: &mut App, key: KeyEvent, mut picker: Picker, tx: &UnboundedSender<Msg>) {
+    match key.code {
+        KeyCode::Esc => {
+            app.overlay = None;
+            return;
+        }
+        KeyCode::Up => picker.move_cursor(-1),
+        KeyCode::Down => picker.move_cursor(1),
+        KeyCode::Backspace => {
+            picker.query.pop();
+            picker.retarget();
+        }
+        // Tout caractère filtre — `j`/`k` compris : c'est une liste où l'on
+        // TAPE le nom, les flèches suffisent à s'y déplacer.
+        KeyCode::Char(c) => {
+            picker.query.push(c);
+            picker.retarget();
+        }
+        KeyCode::Enter => {
+            let Some(item) = picker.selected().cloned() else { return };
+            app.overlay = None;
+            choose(app, picker.purpose, item, tx);
+            return;
+        }
+        _ => {}
+    }
+    app.overlay = Some(Overlay::Picker(Box::new(picker)));
+}
+
+/// Suite donnée à un choix, selon ce qu'on choisissait.
+fn choose(app: &mut App, purpose: PickPurpose, item: PickItem, tx: &UnboundedSender<Msg>) {
+    match purpose {
+        PickPurpose::Parc => switch_inventory(app, Some(&item.value), tx),
+        PickPurpose::Role { hosts } => confirm_deploy(app, item.value, hosts),
+        PickPurpose::HostFor { role } => confirm_deploy(app, role, vec![item.value]),
+        PickPurpose::Playbook { hosts } => confirm_playbook(app, item.label, item.value, hosts),
+        PickPurpose::Alert { host } => toggle_exemption(app, &host, &item.value, tx),
+    }
+}
+
+// === Menu d'actions ===
+
+/// Ce que le cœur a besoin de savoir pour décider des actions possibles.
+fn action_context(app: &App, target: &ActionTarget) -> ActionContext {
+    let mut ctx = ActionContext {
+        has_roles: !app.roles.is_empty(),
+        has_playbooks: !app.playbooks.is_empty(),
+        power: app.power_state(),
+        ..Default::default()
+    };
+    match target {
+        ActionTarget::Machine(key) => {
+            let hosts = app
+                .visible_servers()
+                .iter()
+                .find(|s| &s.key == key)
+                .map(|s| s.hosts.clone())
+                .unwrap_or_default();
+            ctx.findings = app.findings_touching(&key.to_string(), &hosts).len();
+        }
+        ActionTarget::Host(name) => {
+            ctx.findings = app.findings_touching("", std::slice::from_ref(name)).len();
+        }
+        ActionTarget::Service { name, .. } => {
+            ctx.can_remove = fleetforge_core::resolve_role(&app.roles, name, "remove").is_some();
+            ctx.can_purge = fleetforge_core::resolve_role(&app.roles, name, "purge").is_some();
+        }
+    }
+    ctx
+}
+
+/// `espace` : les actions de l'élément désigné, avec leur raison quand l'une
+/// n'est pas disponible.
+fn open_actions(app: &mut App) {
+    let (subject, target, title) = match app.screen {
+        Screen::Servers => {
+            let Some(key) = app.selected_server_key() else { return };
+            let title = key.to_string();
+            (Subject::Machine, ActionTarget::Machine(key), title)
+        }
+        Screen::Hosts => {
+            let Some(name) = app.selected_host_name() else { return };
+            (Subject::Host, ActionTarget::Host(name.clone()), name)
+        }
+        Screen::Services => {
+            let Some((name, host)) = app
+                .visible_services()
+                .get(app.cursor())
+                .map(|s| (s.service_name.clone(), s.server_name.clone()))
+            else {
+                return;
+            };
+            let title = format!("{name} @ {host}");
+            (Subject::Service, ActionTarget::Service { name, host }, title)
+        }
+        _ => return,
+    };
+
+    let entries = actions_for(subject, &action_context(app, &target));
+    // Le curseur part sur la première action disponible : `↵` fait alors
+    // quelque chose plutôt que de répondre « indisponible ».
+    let cursor = entries.iter().position(|a| a.enabled).unwrap_or(0);
+    app.overlay = Some(Overlay::Actions(Box::new(ActionMenu {
+        title,
+        entries,
+        cursor,
+    })));
+}
+
+fn handle_actions(app: &mut App, key: KeyEvent, mut menu: ActionMenu) {
+    let chosen = match key.code {
+        KeyCode::Esc => {
+            app.overlay = None;
+            return;
+        }
+        KeyCode::Char('j') | KeyCode::Down => {
+            menu.move_cursor(1);
+            None
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            menu.move_cursor(-1);
+            None
+        }
+        KeyCode::Enter => menu.selected().cloned(),
+        // Le raccourci direct de l'entrée, pour qui le connaît déjà.
+        KeyCode::Char(c) => menu
+            .entries
+            .iter()
+            .find(|a| a.key.as_deref() == Some(c.to_string().as_str()))
+            .cloned(),
+        _ => None,
+    };
+
+    let Some(action) = chosen else {
+        app.overlay = Some(Overlay::Actions(Box::new(menu)));
+        return;
+    };
+
+    if !action.enabled {
+        // Le menu reste ouvert : l'indisponibilité s'explique, elle ne ferme pas.
+        app.status = format!(
+            "{} : {}",
+            action.label.trim_end_matches('…'),
+            action.reason.clone().unwrap_or_default()
+        );
+        app.overlay = Some(Overlay::Actions(Box::new(menu)));
+        return;
+    }
+
+    app.overlay = None;
+    execute_action(app, action.id);
+}
+
+/// Exécute l'action choisie sur la sélection courante — l'écran n'a pas
+/// bougé depuis l'ouverture du menu, les helpers lisent donc la même ligne.
+fn execute_action(app: &mut App, id: ActionId) {
+    match id {
+        ActionId::Start => request_power(app, PowerKind::Start),
+        ActionId::Stop => request_power(app, PowerKind::Stop),
+        ActionId::Reboot => request_power(app, PowerKind::Reboot),
+        ActionId::DeployRole => request_deploy(app),
+        ActionId::RunPlaybook => request_playbook(app),
+        ActionId::ExemptAlert => request_exemption(app),
+        ActionId::ViewHosts | ActionId::ViewServices => {
+            app.descend();
+        }
+        ActionId::ViewFindings => {
+            let name = match app.screen {
+                Screen::Servers => app.selected_server_key().map(|k| k.address),
+                Screen::Hosts => app.selected_host_name(),
+                _ => None,
+            };
+            if let Some(name) = name {
+                app.go(Screen::Diagnostics);
+                app.filter = name;
+                app.cursor_home();
+            }
+        }
+        ActionId::Remove => request_uninstall(app, "remove"),
+        ActionId::Purge => request_uninstall(app, "purge"),
+        // Ces deux-là n'existent que dans le catalogue partagé : le TUI les
+        // porte par `↵` sur Rôles et Playbooks, sans menu.
+        ActionId::DeployOn | ActionId::Run => {}
+    }
+}
+
+// === Déployer, lancer, retirer ===
+
+/// `d` : sur une machine, un hôte ou un service, choisir le rôle à y déployer ;
+/// sur un rôle, choisir où.
 fn request_deploy(app: &mut App) {
-    if app.screen != Screen::Roles {
-        app.status = "sélectionner un rôle (écran 4) pour déployer".into();
+    match app.screen {
+        Screen::Roles => {
+            if let Some(role) = app.selected_role_name() {
+                deploy_role_on_targets(app, role);
+            }
+        }
+        Screen::Servers | Screen::Hosts | Screen::Services => {
+            let hosts = app.target_hosts();
+            if hosts.is_empty() {
+                app.status = "aucun hôte désigné".into();
+                return;
+            }
+            if app.roles.is_empty() {
+                app.status = "aucun rôle dans le catalogue — renseigner le chemin des playbooks".into();
+                return;
+            }
+            // Les rôles de la famille de l'hôte d'abord : c'est eux qu'on vient
+            // chercher, les cinquante autres restent à portée de frappe.
+            let families: Vec<String> = app
+                .fleet
+                .as_ref()
+                .map(|f| {
+                    hosts
+                        .iter()
+                        .filter_map(|h| f.host(h))
+                        .flat_map(|h| h.ansible_roles.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let relevant = |name: &str| families.iter().any(|f| name.starts_with(&format!("{f}-")));
+            let mut roles: Vec<&fleetforge_core::AnsibleRole> = app.roles.iter().collect();
+            roles.sort_by_key(|r| !relevant(&r.name));
+            let items = roles
+                .into_iter()
+                .map(|r| PickItem {
+                    label: r.name.clone(),
+                    detail: if relevant(&r.name) {
+                        format!("● famille de l'hôte · {}", r.category)
+                    } else {
+                        r.category.clone()
+                    },
+                    value: r.name.clone(),
+                })
+                .collect();
+            let title = format!("Déployer un rôle sur {} hôte(s)", hosts.len());
+            app.overlay = Some(Overlay::Picker(Box::new(Picker::new(
+                &title,
+                PickPurpose::Role { hosts },
+                items,
+            ))));
+        }
+        _ => app.status = "sélectionner une machine, un hôte ou un rôle pour déployer".into(),
+    }
+}
+
+/// Déploie `role` sur les hôtes marqués, sinon demande où.
+fn deploy_role_on_targets(app: &mut App, role: String) {
+    if !app.marked_hosts.is_empty() {
+        let hosts = app.target_hosts();
+        confirm_deploy(app, role, hosts);
         return;
     }
-    let Some(role) = app.selected_role_name() else { return };
-    let hosts = app.target_hosts();
-
-    if hosts.is_empty() {
-        // Refuser tôt et dire pourquoi : le cœur refuserait aussi, mais après
-        // avoir laissé croire que le déploiement partait.
-        app.status = "aucun hôte ciblé — marquer des hôtes avec espace".into();
+    let Some(fleet) = &app.fleet else {
+        app.status = "parc non chargé".into();
         return;
-    }
+    };
+    let items = fleet
+        .hosts
+        .iter()
+        .map(|h| PickItem {
+            label: h.name.clone(),
+            detail: h.ansible_host.clone(),
+            value: h.name.clone(),
+        })
+        .collect();
+    let title = format!("Déployer `{role}` sur…");
+    app.overlay = Some(Overlay::Picker(Box::new(Picker::new(
+        &title,
+        PickPurpose::HostFor { role },
+        items,
+    ))));
+}
 
+fn confirm_deploy(app: &mut App, role: String, hosts: Vec<String>) {
     app.overlay = Some(Overlay::Confirm(Confirm {
         prompt: format!("Déployer `{role}` sur {} hôte(s) : {} ?", hosts.len(), hosts.join(", ")),
         action: ConfirmedAction::Deploy { role, hosts },
     }));
+}
+
+/// `p` : choisir un playbook à lancer, limité à la sélection.
+fn request_playbook(app: &mut App) {
+    if !matches!(app.screen, Screen::Servers | Screen::Hosts | Screen::Services) {
+        app.status = "sélectionner une machine ou un hôte pour lancer un playbook".into();
+        return;
+    }
+    let hosts = app.target_hosts();
+    if hosts.is_empty() {
+        app.status = "aucun hôte désigné".into();
+        return;
+    }
+    if app.playbooks.is_empty() {
+        app.status = "aucun playbook dans le catalogue — renseigner le chemin des playbooks".into();
+        return;
+    }
+    let items = app
+        .playbooks
+        .iter()
+        .map(|p| PickItem {
+            label: p.label.clone(),
+            detail: p.name.clone(),
+            value: p.path.clone(),
+        })
+        .collect();
+    let title = format!("Lancer un playbook sur {} hôte(s)", hosts.len());
+    app.overlay = Some(Overlay::Picker(Box::new(Picker::new(
+        &title,
+        PickPurpose::Playbook { hosts },
+        items,
+    ))));
+}
+
+/// `↵` sur Playbooks : lance le playbook désigné, sur les hôtes marqués s'il y
+/// en a, sinon sur tout ce qu'il cible.
+fn request_run_playbook(app: &mut App) {
+    let Some((label, path)) = app
+        .visible_playbooks()
+        .get(app.cursor())
+        .map(|p| (p.label.clone(), p.path.clone()))
+    else {
+        return;
+    };
+    let hosts = if app.marked_hosts.is_empty() {
+        Vec::new()
+    } else {
+        app.target_hosts()
+    };
+    confirm_playbook(app, label, path, hosts);
+}
+
+fn confirm_playbook(app: &mut App, label: String, path: String, hosts: Vec<String>) {
+    let scope = if hosts.is_empty() {
+        "tout le parc (sans --limit)".to_string()
+    } else {
+        format!("{} hôte(s) : {}", hosts.len(), hosts.join(", "))
+    };
+    app.overlay = Some(Overlay::Confirm(Confirm {
+        prompt: format!("Lancer `{label}` sur {scope} ?"),
+        action: ConfirmedAction::RunPlaybook { label, path, hosts },
+    }));
+}
+
+/// `x` / `X` sur Services : retire (binaire + service) ou purge (données et
+/// configuration) le service désigné, par son rôle `-remove` / `-purge`.
+fn request_uninstall(app: &mut App, action: &str) {
+    let Some((service, host)) = app
+        .visible_services()
+        .get(app.cursor())
+        .map(|s| (s.service_name.clone(), s.server_name.clone()))
+    else {
+        return;
+    };
+    let Some(role) = fleetforge_core::resolve_role(&app.roles, &service, action) else {
+        app.status = format!("pas de rôle -{action} pour {service}");
+        return;
+    };
+    let verb = if action == "purge" { "Purger" } else { "Retirer" };
+    app.overlay = Some(Overlay::Confirm(Confirm {
+        prompt: format!("{verb} {service} de {host} (rôle {}) ? (o/n)", role.name),
+        action: ConfirmedAction::Deploy {
+            role: role.name,
+            hosts: vec![host],
+        },
+    }));
+}
+
+/// `e` : choisir une alerte dont on bascule l'exemption sur l'hôte désigné.
+fn request_exemption(app: &mut App) {
+    if app.screen != Screen::Hosts {
+        app.status = "sélectionner un hôte pour gérer ses exemptions".into();
+        return;
+    }
+    let Some(host) = app.visible_hosts().get(app.cursor()).map(|h| (*h).clone()) else { return };
+    let rules = match app.core.list_alert_rules(&app.inventory_path) {
+        Ok(rules) => rules,
+        Err(e) => {
+            app.status = format!("\u{26a0} {e}");
+            return;
+        }
+    };
+    let items: Vec<PickItem> = rules
+        .iter()
+        .filter(|r| r.loaded)
+        .map(|r| PickItem {
+            label: r.name.clone(),
+            detail: if host.alert_exclude.contains(&r.name) {
+                format!("● exemptée · {}", r.group)
+            } else {
+                r.group.clone()
+            },
+            value: r.name.clone(),
+        })
+        .collect();
+    if items.is_empty() {
+        app.status = "aucune règle d'alerte chargée sur ce parc".into();
+        return;
+    }
+    let title = format!("Exemptions de {} — ↵ bascule", host.name);
+    app.overlay = Some(Overlay::Picker(Box::new(Picker::new(
+        &title,
+        PickPurpose::Alert { host: host.name },
+        items,
+    ))));
 }
 
 fn perform(app: &mut App, action: ConfirmedAction, tx: &UnboundedSender<Msg>) {
@@ -477,7 +926,7 @@ fn perform(app: &mut App, action: ConfirmedAction, tx: &UnboundedSender<Msg>) {
                 }
             });
         }
-        ConfirmedAction::RunPlaybook { label, path } => {
+        ConfirmedAction::RunPlaybook { label, path, hosts } => {
             let core = app.core.clone();
             let inventory = app.inventory_path.clone();
             let tx = tx.clone();
@@ -489,7 +938,7 @@ fn perform(app: &mut App, action: ConfirmedAction, tx: &UnboundedSender<Msg>) {
                     label,
                     playbook_path: path,
                     inventory_path: inventory,
-                    limit_hosts: None,
+                    limit_hosts: (!hosts.is_empty()).then_some(hosts),
                     extra_vars: HashMap::new(),
                 };
                 match core.run_playbook(request, |_| {}) {
@@ -889,12 +1338,7 @@ fn switch_inventory(app: &mut App, wanted: Option<&str>, tx: &UnboundedSender<Ms
     };
 
     let Some(wanted) = wanted else {
-        let names: Vec<&str> = available.iter().map(|i| i.name.as_str()).collect();
-        app.status = if names.is_empty() {
-            "aucun inventaire — renseigner le chemin des inventaires".to_string()
-        } else {
-            format!(":inventory <parc> parmi {}", names.join(", "))
-        };
+        open_parc_picker(app);
         return;
     };
 
@@ -922,7 +1366,8 @@ fn switch_inventory(app: &mut App, wanted: Option<&str>, tx: &UnboundedSender<Ms
     // hôtes de l'ancien inventaire, les garder déploierait sur des noms qui
     // n'existent plus ici.
     app.clear_marks();
-    app.filter.clear();
+    app.scope.clear();
+    app.go(Screen::Servers);
     app.status = format!("inventaire : {}", found.name);
     app.loading = true;
     crate::reload_all(app, tx.clone());
@@ -933,9 +1378,15 @@ fn run_command(app: &mut App, input: &str, tx: &UnboundedSender<Msg>) {
     let Some(command) = parts.next() else { return };
 
     match command {
-        "servers" => app.go(Screen::Servers),
-        "hosts" => app.go(Screen::Hosts),
-        "services" => app.go(Screen::Services),
+        // Liste à plat : la palette saute le fil d'Ariane.
+        "servers" | "hosts" | "services" => {
+            app.scope.clear();
+            app.go(match command {
+                "servers" => Screen::Servers,
+                "hosts" => Screen::Hosts,
+                _ => Screen::Services,
+            });
+        }
         "roles" => app.go(Screen::Roles),
         "playbooks" => app.go(Screen::Playbooks),
         "runs" => app.go(Screen::Runs),
@@ -961,7 +1412,7 @@ fn run_command(app: &mut App, input: &str, tx: &UnboundedSender<Msg>) {
 /// (`alert_exclude` dans l'inventaire). Effet au prochain `:apply-alerts`.
 fn edit_exemption(app: &mut App, alert: Option<&str>, add: bool, tx: &UnboundedSender<Msg>) {
     if app.screen != Screen::Hosts {
-        app.status = "sélectionner un hôte (écran 2) pour gérer ses exemptions".into();
+        app.status = "sélectionner un hôte (Parc › Hôtes) pour gérer ses exemptions".into();
         return;
     }
     let Some(host) = app.visible_hosts().get(app.cursor()).map(|h| (*h).clone()) else { return };
@@ -974,24 +1425,40 @@ fn edit_exemption(app: &mut App, alert: Option<&str>, add: bool, tx: &UnboundedS
         );
         return;
     };
-    let mut next = host.alert_exclude.clone();
-    if add {
-        if next.iter().any(|a| a == alert) {
-            app.status = format!("{} est déjà exempté de {alert}", host.name);
-            return;
-        }
+    let exempt = host.alert_exclude.iter().any(|a| a == alert);
+    if add && exempt {
+        app.status = format!("{} est déjà exempté de {alert}", host.name);
+    } else if !add && !exempt {
+        app.status = format!("{} n'est pas exempté de {alert}", host.name);
+    } else {
+        toggle_exemption(app, &host.name, alert, tx);
+    }
+}
+
+/// Bascule l'exemption de `alert` sur `host` : la pose si absente, la retire
+/// sinon. Partagé par `:exempt`, `:unexempt` et le sélecteur de `e`.
+fn toggle_exemption(app: &mut App, host: &str, alert: &str, tx: &UnboundedSender<Msg>) {
+    let Some(current) = app
+        .fleet
+        .as_ref()
+        .and_then(|f| f.host(host))
+        .map(|h| h.alert_exclude.clone())
+    else {
+        return;
+    };
+    let mut next = current.clone();
+    let added = !next.iter().any(|a| a == alert);
+    if added {
         next.push(alert.to_string());
     } else {
-        let before = next.len();
         next.retain(|a| a != alert);
-        if next.len() == before {
-            app.status = format!("{} n'est pas exempté de {alert}", host.name);
-            return;
-        }
     }
-    match app.core.set_alert_exclusions(&app.inventory_path, &host.name, &next) {
+    match app.core.set_alert_exclusions(&app.inventory_path, host, &next) {
         Ok(()) => {
-            app.status = format!("{} : exemptions enregistrées — :apply-alerts pour les appliquer", host.name);
+            app.status = format!(
+                "{host} : {alert} {} — :apply-alerts pour l'appliquer",
+                if added { "exemptée" } else { "réactivée" }
+            );
             app.loading = true;
             crate::reload_all(app, tx.clone());
         }
@@ -1008,7 +1475,11 @@ fn request_apply_alerts(app: &mut App) {
     };
     app.overlay = Some(Overlay::Confirm(Confirm {
         prompt: format!("Rendre les règles d'alerte du parc ({APPLY_ALERTS_PLAYBOOK}.yml) ? (o/n)"),
-        action: ConfirmedAction::RunPlaybook { label: playbook.label.clone(), path: playbook.path.clone() },
+        action: ConfirmedAction::RunPlaybook {
+            label: playbook.label.clone(),
+            path: playbook.path.clone(),
+            hosts: Vec::new(),
+        },
     }));
 }
 

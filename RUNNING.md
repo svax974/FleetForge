@@ -382,31 +382,60 @@ est en `target/release/fleetforge`.
 avec le GUI (les deux doivent annoncer les mêmes chiffres) et ce qui reste
 utilisable depuis un script ou une session non-TTY.
 
+### Navigation : cinq sections, un fil d'Ariane
+
+`1 Parc` · `2 Ansible` · `3 Runs` · `4 Diagnostics` · `5 Providers` (`⇥` / `⇧⇥`
+pour les parcourir). **Parc** est une arborescence : Machines → Hôtes → Services.
+`↵` (ou `→`) descend, `⎋` (ou `←`) remonte, et l'en-tête affiche le chemin :
+`web3c › 203.0.113.10 › proxy1 › Services`. Le filtre `f` reste à l'utilisateur ;
+le drill-down ne le réécrit plus. `2 Ansible` regroupe Rôles et Playbooks
+(`←` `→` pour passer de l'un à l'autre).
+
+Le parc courant n'est plus un écran mais un sélecteur : `P` (ou `:inventory`).
+Les services affichés sont ceux **du parc courant** : le journal les indexe par
+nom d'hôte, et ces noms se répètent d'un parc à l'autre.
+
+### Agir : `espace` ouvre les actions de l'élément
+
+Sur une machine, un hôte ou un service, `espace` liste ce qui est possible, avec
+le raccourci direct de chacune. Une action indisponible reste listée et dit
+**pourquoi** (hébergeur non connecté, pas de rôle `-purge`…). La liste vient du
+cœur (`fleetforge_core::actions`, commande `list_actions`) : le GUI et la version
+web lisent le même catalogue.
+
+| Touche | Action |
+|---|---|
+| `d` | déployer un rôle (liste filtrable, rôles de la famille de l'hôte en tête) |
+| `p` | lancer un playbook, limité à la sélection (`--limit`) |
+| `e` | exemptions d'alertes de l'hôte (↵ bascule) ; effet au prochain `:apply-alerts` |
+| `x` / `X` | sur Services : retirer / purger (rôles `-remove` / `-purge`) |
+| `S` `A` `R` | démarrer / arrêter / redémarrer la machine |
+| `m` | marquer pour une action de masse (`espace` n'est plus le marquage) |
+| `↵` sur un rôle / un playbook | choisir où déployer / lancer (tout le parc, ou les hôtes marqués) |
+
 ### Raccourcis
 
 `?` donne la liste complète. La dernière ligne annonce ceux qui agissent sur
 l'écran courant — sur Providers, ceux du NIVEAU courant : hébergeur, compte ou
-instance. Les déplacements (`j k g G ⇥ ⇞ ⇟ 1-9`) n'y figurent pas, faute de
+instance. Les déplacements (`j k g G ⇥ ⇞ ⇟ ← → 1-5`) n'y figurent pas, faute de
 place ; `? aide` reste affiché même sur un terminal étroit, où les autres
 entrées s'effacent par la fin.
 
 Elle tient compte de l'**état de l'élément désigné**, comme le GUI masque ses
 boutons : `A arrêter` n'apparaît pas sur une machine déjà éteinte, `x
-déconnecter` pas sur un compte fermé, `X oublier` pas sur un compte sans
-identifiants, `d déployer` pas tant qu'aucun hôte n'est marqué.
+déconnecter` pas sur un compte fermé, `x retirer` pas sur un service sans rôle
+`-remove`.
 
 Deux tests lient cette ligne au code : toute touche traitée par `handle_normal`
 doit y être annoncée, et rien ne peut y être annoncé qui ne soit lié à une
-action. C'est ainsi qu'a été trouvé le « ↵ exécuter » de l'écran Playbooks : le
-TUI ne sait **pas** lancer de playbook — c'est le GUI et la version web qui le
-font.
+action.
 
 ### Piloter une machine
 
 `S` démarrer, `A` arrêter, `R` redémarrer — en majuscules et derrière
 confirmation (`r` minuscule recharge le parc, `R` redémarre un serveur).
 
-Depuis **Serveurs** (`2`) et **Hôtes** (`3`) directement : c'est le
+Depuis **Machines**, **Hôtes** et **Services** (section `1`) directement : c'est le
 rapprochement machine ↔ instance qui les rend actionnables, le même que celui
 de l'écran Providers. Dans le GUI et la version web, les mêmes trois boutons
 sont sur le détail d'une machine (Serveurs) et sur son en-tête (Inventaire,
@@ -415,7 +444,7 @@ axe « machines »).
 Les touches n'apparaissent que si l'action partirait vraiment. Elles sont
 absentes quand :
 
-- l'hébergeur n'est pas connecté — rien à rapprocher (écran `9`, `c`) ;
+- l'hébergeur n'est pas connecté — rien à rapprocher (section `5`, `c`) ;
 - la machine est `custom` — pas d'API, SSH seulement (`hub`, `nuc`) ;
 - son adresse est revendiquée par DEUX comptes — agir là où rien ne dit
   laquelle des deux tenancies répond serait piloter au hasard. L'écran

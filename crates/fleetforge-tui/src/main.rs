@@ -18,7 +18,7 @@ mod theme;
 mod ui;
 
 use anyhow::{Context, Result};
-use app::{App, Msg, Screen};
+use app::{App, Msg};
 use crossterm::event::{Event, EventStream};
 use crossterm::execute;
 use crossterm::terminal::{
@@ -151,8 +151,8 @@ async fn run(terminal: &mut Term, core: Arc<Core>, hub: Arc<ProviderHub>) -> Res
             // Ouvrir sur l'écran des inventaires plutôt que sur un parc vide :
             // les huit autres écrans n'ont rien à montrer tant que le choix
             // n'est pas fait, et un tableau vide ne dit pas quoi faire.
-            app.screen = Screen::Inventories;
-            app.status = "choisir un inventaire : ↵ sur la ligne voulue".into()
+            app.status = "choisir un parc : ↵ sur la ligne voulue".into();
+            input::open_parc_picker(&mut app);
         }
         Err(e) => app.status = format!("⚠ {e}"),
     }
@@ -238,17 +238,11 @@ pub fn reload_all(app: &App, tx: mpsc::UnboundedSender<Msg>) {
         let core = core.clone();
         let tx = tx.clone();
         tokio::task::spawn_blocking(move || {
-            if let Ok(inventories) = core.list_inventories() {
-                let _ = tx.send(Msg::InventoriesLoaded(inventories));
-            }
             if let Ok(roles) = core.list_roles() {
                 let _ = tx.send(Msg::RolesLoaded(roles));
             }
             if let Ok(playbooks) = core.list_playbooks() {
                 let _ = tx.send(Msg::PlaybooksLoaded(playbooks));
-            }
-            if let Ok(services) = core.current_services(None) {
-                let _ = tx.send(Msg::ServicesLoaded(services));
             }
         });
     }
@@ -264,7 +258,23 @@ pub fn reload_all(app: &App, tx: mpsc::UnboundedSender<Msg>) {
     }
 
     if inventory.is_empty() {
+        // Sans parc, aucun service n'est « du parc » : liste vide plutôt que
+        // les services de tous les parcs mélangés.
+        let _ = tx.send(Msg::ServicesLoaded(Vec::new()));
         return;
+    }
+
+    // Les services suivis ne sont connus que par nom d'hôte, et ces noms se
+    // répètent d'un parc à l'autre : le cœur ne garde que ceux du parc courant.
+    {
+        let core = core.clone();
+        let inventory = inventory.clone();
+        let tx = tx.clone();
+        tokio::task::spawn_blocking(move || {
+            if let Ok(services) = core.fleet_services(&inventory) {
+                let _ = tx.send(Msg::ServicesLoaded(services));
+            }
+        });
     }
 
     // Ce que chaque machine permet de piloter. Interroge les API des

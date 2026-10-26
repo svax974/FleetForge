@@ -11,11 +11,12 @@
 //! rien qui ne soit déjà décidé côté cœur. C'est ce qui garantit que le TUI et
 //! le GUI comptent les mêmes machines.
 
+use fleetforge_core::actions::{ItemAction, PowerState as PowerAvailability};
 use fleetforge_core::deploy::RunHandle;
 use fleetforge_core::diagnostics::Finding;
 use fleetforge_core::model::{Fleet, MachineKey, ProviderKind};
 use fleetforge_core::{
-    AnsibleInventoryInfo, AnsiblePlaybook, AnsibleRole, Core, ServerServiceState,
+    AnsiblePlaybook, AnsibleRole, Core, ServerServiceState,
 };
 use fleetforge_providers::{
     AccountId, AccountStatus, Capabilities, Credentials, Instance, InstanceRef, MachineControl,
@@ -24,14 +25,62 @@ use fleetforge_providers::{
 use std::collections::HashSet;
 use std::sync::Arc;
 
-/// Écrans. Même colonne vertébrale que le GUI, un raccourci chiffré chacun.
+/// Sections de l'en-tête : ce qu'on choisit avec `1`-`5` ou `⇥`.
+///
+/// Huit listes à plat faisaient des onglets pairs de ce qui est une
+/// HIÉRARCHIE (machine → hôte → service) ou un couple (rôles / playbooks).
+/// Les sections regroupent ; les `Screen` restent les listes elles-mêmes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Section {
+    Parc,
+    Ansible,
+    Runs,
+    Diagnostics,
+    Providers,
+}
+
+impl Section {
+    pub const ALL: [Section; 5] = [
+        Section::Parc,
+        Section::Ansible,
+        Section::Runs,
+        Section::Diagnostics,
+        Section::Providers,
+    ];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Section::Parc => "Parc",
+            Section::Ansible => "Ansible",
+            Section::Runs => "Runs",
+            Section::Diagnostics => "Diagnostics",
+            Section::Providers => "Providers",
+        }
+    }
+
+    pub fn index(self) -> usize {
+        Section::ALL.iter().position(|s| *s == self).unwrap_or(0)
+    }
+
+    pub fn next(self) -> Section {
+        Section::ALL[(self.index() + 1) % Section::ALL.len()]
+    }
+
+    pub fn previous(self) -> Section {
+        Section::ALL[(self.index() + Section::ALL.len() - 1) % Section::ALL.len()]
+    }
+
+    pub fn from_digit(d: char) -> Option<Section> {
+        d.to_digit(10)
+            .and_then(|n| (n >= 1).then(|| n as usize - 1))
+            .and_then(|i| Section::ALL.get(i).copied())
+    }
+}
+
+/// Listes. Le choix du parc n'en est plus une : c'est un réglage, qui se
+/// choisit dans un sélecteur (`P`) comme la liste déroulante du GUI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
-    /// Premier écran : le parc courant conditionne tout ce que les suivants
-    /// affichent. Le TUI héritait du choix fait dans le GUI sans pouvoir en
-    /// changer, ce qui rendait les huit autres écrans muets sur un poste où
-    /// le GUI n'avait jamais tourné.
-    Inventories,
     Servers,
     Hosts,
     Services,
@@ -46,10 +95,9 @@ impl Screen {
     /// Une seule source pour le nombre d'écrans : le tableau des curseurs
     /// s'indexe par `Screen::index()`, un écran ajouté sans l'agrandir
     /// paniquerait hors bornes au premier affichage.
-    pub const COUNT: usize = 9;
+    pub const COUNT: usize = 8;
 
     pub const ALL: [Screen; Screen::COUNT] = [
-        Screen::Inventories,
         Screen::Servers,
         Screen::Hosts,
         Screen::Services,
@@ -62,8 +110,7 @@ impl Screen {
 
     pub fn title(self) -> &'static str {
         match self {
-            Screen::Inventories => "Inventaires",
-            Screen::Servers => "Serveurs",
+            Screen::Servers => "Machines",
             Screen::Hosts => "Hôtes",
             Screen::Services => "Services",
             Screen::Roles => "Rôles",
@@ -78,19 +125,24 @@ impl Screen {
         Screen::ALL.iter().position(|s| *s == self).unwrap_or(0)
     }
 
-    pub fn next(self) -> Screen {
-        Screen::ALL[(self.index() + 1) % Screen::ALL.len()]
+    pub fn section(self) -> Section {
+        match self {
+            Screen::Servers | Screen::Hosts | Screen::Services => Section::Parc,
+            Screen::Roles | Screen::Playbooks => Section::Ansible,
+            Screen::Runs => Section::Runs,
+            Screen::Diagnostics => Section::Diagnostics,
+            Screen::Providers => Section::Providers,
+        }
     }
+}
 
-    pub fn previous(self) -> Screen {
-        Screen::ALL[(self.index() + Screen::ALL.len() - 1) % Screen::ALL.len()]
-    }
-
-    pub fn from_digit(d: char) -> Option<Screen> {
-        d.to_digit(10)
-            .and_then(|n| (n >= 1).then(|| n as usize - 1))
-            .and_then(|i| Screen::ALL.get(i).copied())
-    }
+/// Un cran de descente dans le parc. La pile de ces crans EST le fil
+/// d'Ariane : `↵` en pousse un, `⎋` en retire un. Il remplace le filtre texte
+/// que le drill-down posait à la place de l'utilisateur.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Scope {
+    Machine(MachineKey),
+    Host(String),
 }
 
 /// Superpositions modales. Une seule à la fois : les empiler rendrait `Esc`
@@ -114,6 +166,121 @@ pub enum Overlay {
     /// sert — il n'y a pas de GUI, et `c` échouait sur « aucun identifiant
     /// enregistré » sans offrir d'en poser.
     Credentials(Box<CredentialsForm>),
+    /// Choix dans une liste filtrable : parc, rôle, playbook, hôte, alerte.
+    Picker(Box<Picker>),
+    /// Actions possibles sur l'élément désigné (`espace`).
+    Actions(Box<ActionMenu>),
+    /// Erreur trop longue pour la barre d'état : lue en entier, puis fermée.
+    Message(String),
+}
+
+/// Au-delà, une erreur ne tient pas sur la ligne d'état — qui la tronque — et
+/// s'affiche dans une fenêtre. En deçà, elle reste en bas : une fenêtre pour
+/// « machine non rapprochée » serait plus lourde que le mal.
+pub const LONG_ERROR: usize = 72;
+
+/// À quoi sert le choix en cours : ce qui se passe quand on valide.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PickPurpose {
+    Parc,
+    /// Rôle à déployer sur ces hôtes.
+    Role { hosts: Vec<String> },
+    /// Playbook à lancer, limité à ces hôtes.
+    Playbook { hosts: Vec<String> },
+    /// Hôte où déployer ce rôle.
+    HostFor { role: String },
+    /// Alerte dont on bascule l'exemption sur cet hôte.
+    Alert { host: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PickItem {
+    /// Ce qui est tapé pour filtrer et affiché en premier.
+    pub label: String,
+    pub detail: String,
+    /// Ce que le choix transmet (nom de parc, de rôle, chemin de playbook…).
+    pub value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Picker {
+    pub title: String,
+    pub purpose: PickPurpose,
+    pub items: Vec<PickItem>,
+    pub query: String,
+    pub cursor: usize,
+}
+
+impl Picker {
+    pub fn new(title: &str, purpose: PickPurpose, items: Vec<PickItem>) -> Picker {
+        Picker {
+            title: title.to_string(),
+            purpose,
+            items,
+            query: String::new(),
+            cursor: 0,
+        }
+    }
+
+    pub fn visible(&self) -> Vec<&PickItem> {
+        let needle = self.query.to_lowercase();
+        self.items
+            .iter()
+            .filter(|i| {
+                needle.is_empty()
+                    || i.label.to_lowercase().contains(&needle)
+                    || i.detail.to_lowercase().contains(&needle)
+            })
+            .collect()
+    }
+
+    pub fn selected(&self) -> Option<&PickItem> {
+        self.visible().get(self.cursor).copied()
+    }
+
+    pub fn move_cursor(&mut self, delta: isize) {
+        let count = self.visible().len();
+        if count == 0 {
+            self.cursor = 0;
+            return;
+        }
+        self.cursor = (self.cursor as isize + delta).clamp(0, count as isize - 1) as usize;
+    }
+
+    /// Le filtre a changé : le curseur peut désigner une ligne exclue.
+    pub fn retarget(&mut self) {
+        self.cursor = self.cursor.min(self.visible().len().saturating_sub(1));
+    }
+}
+
+/// L'élément sur lequel le menu agit — ce qu'il faut pour exécuter, pas pour
+/// décrire.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActionTarget {
+    Machine(MachineKey),
+    Host(String),
+    Service { name: String, host: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActionMenu {
+    pub title: String,
+    pub entries: Vec<ItemAction>,
+    pub cursor: usize,
+}
+
+impl ActionMenu {
+    pub fn move_cursor(&mut self, delta: isize) {
+        if self.entries.is_empty() {
+            return;
+        }
+        let next = (self.cursor as isize + delta).rem_euclid(self.entries.len() as isize);
+        self.cursor = next as usize;
+    }
+
+    pub fn selected(&self) -> Option<&ItemAction> {
+        self.entries.get(self.cursor)
+    }
 }
 
 /// Où se trouve le focus sur l'écran Providers.
@@ -415,8 +582,13 @@ pub enum ConfirmedAction {
         role: String,
         hosts: Vec<String>,
     },
-    /// Lance un playbook sur le parc courant, sans `--limit`.
-    RunPlaybook { label: String, path: String },
+    /// Lance un playbook. `hosts` vide = sans `--limit`, donc tout ce que le
+    /// playbook cible.
+    RunPlaybook {
+        label: String,
+        path: String,
+        hosts: Vec<String>,
+    },
     /// Efface les identifiants d'un compte — pas seulement sa session.
     ForgetAccount { account: AccountId },
     /// Porte la désignation complète et l'action typée, pas leur description.
@@ -435,7 +607,6 @@ pub enum ConfirmedAction {
 /// à chaque aller-retour.
 #[derive(Debug)]
 pub enum Msg {
-    InventoriesLoaded(Vec<AnsibleInventoryInfo>),
     FleetLoaded(Box<Fleet>),
     DiagnosticsLoaded(Vec<Finding>),
     RolesLoaded(Vec<AnsibleRole>),
@@ -469,9 +640,6 @@ pub struct App {
 
     pub inventory_path: String,
     pub organization: String,
-    /// Les parcs disponibles. Chargés au démarrage comme les catalogues : ce
-    /// qui est proposé ici ne dépend pas de l'inventaire courant.
-    pub inventories: Vec<AnsibleInventoryInfo>,
 
     pub fleet: Option<Fleet>,
     pub findings: Vec<Finding>,
@@ -496,6 +664,13 @@ pub struct App {
     /// Écran Providers : à quel niveau de l'arborescence on se trouve.
     pub focus: ProviderFocus,
 
+    /// Descente dans le parc : machine, puis hôte. Vide = liste à plat.
+    pub scope: Vec<Scope>,
+    /// Dernière liste vue dans chaque section à plusieurs listes : revenir sur
+    /// « Parc » rend la liste qu'on y avait laissée.
+    parc_view: Screen,
+    ansible_view: Screen,
+
     pub filter: String,
     pub palette_input: String,
     pub status: String,
@@ -512,7 +687,6 @@ impl App {
             should_quit: false,
             inventory_path: String::new(),
             organization: String::new(),
-            inventories: Vec::new(),
             fleet: None,
             findings: Vec::new(),
             roles: Vec::new(),
@@ -525,6 +699,9 @@ impl App {
             cursors: [0; Screen::COUNT],
             marked_hosts: HashSet::new(),
             focus: ProviderFocus::Providers,
+            scope: Vec::new(),
+            parc_view: Screen::Servers,
+            ansible_view: Screen::Roles,
             filter: String::new(),
             palette_input: String::new(),
             status: String::new(),
@@ -565,9 +742,141 @@ impl App {
 
     pub fn go(&mut self, screen: Screen) {
         self.screen = screen;
+        match screen.section() {
+            Section::Parc => self.parc_view = screen,
+            Section::Ansible => self.ansible_view = screen,
+            _ => {}
+        }
         // Le filtre est propre à une liste ; le garder d'un écran à l'autre
         // ferait apparaître le suivant vide sans raison visible.
         self.filter.clear();
+    }
+
+    pub fn section(&self) -> Section {
+        self.screen.section()
+    }
+
+    /// Va à une section, sur la liste qu'on y avait laissée.
+    pub fn go_section(&mut self, section: Section) {
+        let screen = match section {
+            Section::Parc => self.parc_view,
+            Section::Ansible => self.ansible_view,
+            Section::Runs => Screen::Runs,
+            Section::Diagnostics => Screen::Diagnostics,
+            Section::Providers => Screen::Providers,
+        };
+        self.go(screen);
+    }
+
+    /// Passe de Rôles à Playbooks et inversement.
+    pub fn toggle_ansible_view(&mut self) {
+        let other = match self.ansible_view {
+            Screen::Roles => Screen::Playbooks,
+            _ => Screen::Roles,
+        };
+        self.go(other);
+    }
+
+    fn machine_scope(&self) -> Option<&MachineKey> {
+        self.scope.iter().find_map(|s| match s {
+            Scope::Machine(key) => Some(key),
+            Scope::Host(_) => None,
+        })
+    }
+
+    fn host_scope(&self) -> Option<&str> {
+        self.scope.iter().find_map(|s| match s {
+            Scope::Host(name) => Some(name.as_str()),
+            Scope::Machine(_) => None,
+        })
+    }
+
+    /// Descend d'un cran dans le parc : machine → hôtes → services.
+    /// Rend faux quand il n'y a rien où descendre.
+    pub fn descend(&mut self) -> bool {
+        match self.screen {
+            Screen::Servers => {
+                let Some(key) = self.selected_server_key() else { return false };
+                self.scope = vec![Scope::Machine(key)];
+                self.enter(Screen::Hosts)
+            }
+            Screen::Hosts => {
+                let Some(name) = self.selected_host_name() else { return false };
+                self.scope.retain(|s| matches!(s, Scope::Machine(_)));
+                self.scope.push(Scope::Host(name));
+                self.enter(Screen::Services)
+            }
+            _ => false,
+        }
+    }
+
+    fn enter(&mut self, screen: Screen) -> bool {
+        self.go(screen);
+        self.cursor_home();
+        true
+    }
+
+    /// Remonte d'un cran. Rend faux en haut, pour qu'`Esc` continue vers ce
+    /// qu'il fait d'habitude (effacer les marques).
+    ///
+    /// Le curseur de la liste retrouvée n'est PAS réinitialisé : on revient
+    /// sur la ligne d'où l'on était parti.
+    pub fn ascend(&mut self) -> bool {
+        if self.screen.section() != Section::Parc {
+            return false;
+        }
+        let target = match self.scope.pop() {
+            Some(Scope::Host(_)) => Screen::Hosts,
+            Some(Scope::Machine(_)) => Screen::Servers,
+            // Liste à plat atteinte par la palette : la racine est Machines.
+            None if self.screen != Screen::Servers => Screen::Servers,
+            None => return false,
+        };
+        self.go(target);
+        true
+    }
+
+    /// Montre un hôte dans sa machine. Sert à Diagnostics : le constat
+    /// désigne un sujet, on y va sans toucher au filtre de l'utilisateur.
+    pub fn reveal_host(&mut self, name: &str) {
+        let Some(key) = self
+            .fleet
+            .as_ref()
+            .and_then(|f| f.host(name))
+            .map(MachineKey::of)
+        else {
+            return;
+        };
+        self.scope = vec![Scope::Machine(key)];
+        self.go(Screen::Hosts);
+        let index = self.visible_hosts().iter().position(|h| h.name == name);
+        self.set_cursor(index.unwrap_or(0));
+    }
+
+    pub fn reveal_server(&mut self, id: &str) {
+        self.scope.clear();
+        self.go(Screen::Servers);
+        // La clé affichée peut porter un port ; à défaut, l'adresse suffit.
+        let address = id.split(':').next().unwrap_or(id);
+        let servers = self.visible_servers();
+        let index = servers
+            .iter()
+            .position(|s| s.key.to_string() == id)
+            .or_else(|| servers.iter().position(|s| s.key.address == address));
+        self.set_cursor(index.unwrap_or(0));
+    }
+
+    /// Constats rattachés à une machine et à ses hôtes.
+    pub fn findings_touching(&self, server_key: &str, hosts: &[String]) -> Vec<&Finding> {
+        use fleetforge_core::diagnostics::Subject;
+        self.findings
+            .iter()
+            .filter(|f| match &f.subject {
+                Subject::Server(id) => id == server_key,
+                Subject::Host(name) => hosts.contains(name),
+                _ => false,
+            })
+            .collect()
     }
 
     // === Données filtrées ===
@@ -578,13 +887,6 @@ impl App {
         }
         let needle = self.filter.to_lowercase();
         haystack.to_lowercase().contains(&needle)
-    }
-
-    pub fn visible_inventories(&self) -> Vec<&AnsibleInventoryInfo> {
-        self.inventories
-            .iter()
-            .filter(|i| self.matches(&i.name) || self.matches(&i.organization))
-            .collect()
     }
 
     pub fn visible_servers(&self) -> Vec<&fleetforge_core::model::Server> {
@@ -602,9 +904,11 @@ impl App {
 
     pub fn visible_hosts(&self) -> Vec<&fleetforge_core::AnsibleHost> {
         let Some(fleet) = &self.fleet else { return Vec::new() };
+        let machine = self.machine_scope();
         fleet
             .hosts
             .iter()
+            .filter(|h| machine.map_or(true, |key| &MachineKey::of(h) == key))
             .filter(|h| {
                 self.matches(&h.name)
                     || self.matches(&h.ansible_host)
@@ -628,8 +932,16 @@ impl App {
     }
 
     pub fn visible_services(&self) -> Vec<&ServerServiceState> {
+        let host = self.host_scope();
+        // Sans hôte désigné, la machine du fil d'Ariane borne la liste.
+        let machine_hosts: Option<&Vec<String>> = match (host, self.machine_scope(), &self.fleet) {
+            (None, Some(key), Some(fleet)) => fleet.server(key).map(|s| &s.hosts),
+            _ => None,
+        };
         self.services
             .iter()
+            .filter(|s| host.map_or(true, |name| s.server_name == name))
+            .filter(|s| machine_hosts.map_or(true, |hosts| hosts.contains(&s.server_name)))
             .filter(|s| self.matches(&s.service_name) || self.matches(&s.server_name))
             .collect()
     }
@@ -643,7 +955,6 @@ impl App {
 
     pub fn row_count(&self) -> usize {
         match self.screen {
-            Screen::Inventories => self.visible_inventories().len(),
             Screen::Servers => self.visible_servers().len(),
             Screen::Hosts => self.visible_hosts().len(),
             Screen::Services => self.visible_services().len(),
@@ -734,8 +1045,11 @@ impl App {
             // L'action porte sur la MACHINE, pas sur l'entrée d'inventaire :
             // huit entrées partagent 203.0.113.10, les éteindre une par une
             // n'aurait aucun sens.
-            Screen::Hosts => {
-                let name = self.selected_host_name()?;
+            Screen::Hosts | Screen::Services => {
+                let name = match self.screen {
+                    Screen::Services => self.selected_service_host()?,
+                    _ => self.selected_host_name()?,
+                };
                 let fleet = self.fleet.as_ref()?;
                 MachineKey::of(fleet.hosts.iter().find(|h| h.name == name)?)
             }
@@ -767,6 +1081,21 @@ impl App {
             control.capabilities,
             control.state,
         ))
+    }
+
+    /// Ce que l'hébergeur permet sur l'élément désigné, dans les termes du
+    /// catalogue d'actions. `None` : rien à piloter (machine non rapprochée).
+    ///
+    /// `stop` est l'arrêt BRUTAL et `stop_graceful` l'arrêt propre : plusieurs
+    /// hébergeurs n'ont que l'un des deux, tester le premier seul effacerait
+    /// l'entrée chez GCP, qui ne sait que l'autre.
+    pub fn power_state(&self) -> Option<PowerAvailability> {
+        let (_, _, caps, state) = self.power_target()?;
+        Some(PowerAvailability {
+            can_start: caps.start && state != PowerState::Running,
+            can_stop: (caps.stop || caps.stop_graceful) && state != PowerState::Stopped,
+            can_reboot: caps.reboot || caps.reboot_graceful,
+        })
     }
 
     /// Instance désignée, seulement quand le focus est descendu dessus.
@@ -845,6 +1174,13 @@ impl App {
         self.visible_hosts().get(self.cursor()).map(|h| h.name.clone())
     }
 
+    /// Hôte du service désigné.
+    pub fn selected_service_host(&self) -> Option<String> {
+        self.visible_services()
+            .get(self.cursor())
+            .map(|s| s.server_name.clone())
+    }
+
     pub fn selected_role_name(&self) -> Option<String> {
         self.visible_roles().get(self.cursor()).map(|r| r.name.clone())
     }
@@ -860,6 +1196,7 @@ impl App {
         }
         match self.screen {
             Screen::Hosts => self.selected_host_name().into_iter().collect(),
+            Screen::Services => self.selected_service_host().into_iter().collect(),
             Screen::Servers => self
                 .visible_servers()
                 .get(self.cursor())
@@ -920,10 +1257,6 @@ impl App {
 
     pub fn apply(&mut self, msg: Msg) {
         match msg {
-            Msg::InventoriesLoaded(list) => {
-                self.inventories = list;
-                self.clamp_cursors();
-            }
             Msg::FleetLoaded(fleet) => {
                 self.organization = fleet.organization.clone();
                 self.fleet = Some(*fleet);
@@ -966,6 +1299,22 @@ impl App {
             Msg::Error(e) => {
                 self.loading = false;
                 self.status = format!("⚠ {e}");
+                if e.chars().count() > LONG_ERROR {
+                    match &mut self.overlay {
+                        // Plusieurs échecs d'affilée (un compte par échec) :
+                        // ils s'empilent dans la même fenêtre plutôt que de
+                        // s'écraser, le premier se lisant sinon jamais.
+                        Some(Overlay::Message(text)) => {
+                            text.push_str("\n\n");
+                            text.push_str(&e);
+                        }
+                        // Jamais par-dessus une saisie en cours : un formulaire
+                        // ou un sélecteur ouvert ne doit pas disparaître sous
+                        // une erreur arrivée de l'arrière-plan.
+                        None => self.overlay = Some(Overlay::Message(e)),
+                        Some(_) => {}
+                    }
+                }
             }
         }
     }
@@ -1150,19 +1499,43 @@ mod tests {
     }
 
     #[test]
-    fn screens_cycle_both_ways() {
-        assert_eq!(Screen::Inventories.next(), Screen::Servers);
-        assert_eq!(Screen::Inventories.previous(), Screen::Providers);
-        assert_eq!(Screen::Providers.next(), Screen::Inventories);
+    fn sections_cycle_both_ways() {
+        assert_eq!(Section::Parc.previous(), Section::Providers);
+        assert_eq!(Section::Providers.next(), Section::Parc);
+        assert_eq!(Section::Parc.next(), Section::Ansible);
     }
 
     #[test]
-    fn digits_select_screens_from_one() {
-        // Le choix du parc est en tête : c'est lui qui conditionne ce que les
-        // autres écrans montrent.
-        assert_eq!(Screen::from_digit('1'), Some(Screen::Inventories));
-        assert_eq!(Screen::from_digit('9'), Some(Screen::Providers));
-        assert_eq!(Screen::from_digit('0'), None);
+    fn digits_select_sections_from_one() {
+        assert_eq!(Section::from_digit('1'), Some(Section::Parc));
+        assert_eq!(Section::from_digit('5'), Some(Section::Providers));
+        assert_eq!(Section::from_digit('6'), None);
+        assert_eq!(Section::from_digit('0'), None);
+    }
+
+    #[test]
+    fn every_screen_belongs_to_a_section_reachable_by_digit() {
+        for screen in Screen::ALL {
+            assert!(Section::ALL.contains(&screen.section()));
+        }
+    }
+
+    #[test]
+    fn a_picker_filters_by_what_is_typed_and_keeps_its_cursor_inside() {
+        let item = |l: &str| PickItem { label: l.into(), detail: String::new(), value: l.into() };
+        let mut picker = Picker::new(
+            "t",
+            PickPurpose::Parc,
+            vec![item("web3c"), item("papanglabs"), item("gcp")],
+        );
+        picker.cursor = 2;
+        picker.query = "web".into();
+        picker.retarget();
+        assert_eq!(picker.cursor, 0);
+        assert_eq!(picker.selected().map(|i| i.label.as_str()), Some("web3c"));
+        picker.query = "zzz".into();
+        picker.retarget();
+        assert!(picker.selected().is_none());
     }
 
     #[test]
