@@ -150,4 +150,23 @@ ff_rsync_excludes:
 # `ff_ansible_sync: false`, pour que le déploiement ne le réécrive pas.
 ff_ansible_dir: "{{ ff_dir }}/Ansible"
 ff_ansible_sync: true
+
+# ── Ce que l'arbre livré contient (tasks/ansible-tree.yml) ─────────────────
+# Les données du SEUL parc déployé : ses inventaires, `keys/<parc>/`,
+# `parcs/<parc>/`, les group_vars/host_vars de ses groupes et hôtes, et le
+# `playbooks/` générique. Jamais `.private`, `.claude`, `backups/`.
+#
+# Livrer en plus, chemins relatifs à Ansible/ — typiquement un fichier de rôle lié
+# au dépôt privé (écarté par défaut, aucun nom de parc dans son chemin) ou un
+# fichier de variables dont le nom est AUSSI celui d'un hôte d'un autre parc :
+#   ff_ansible_extra_files:
+#     - playbooks/roles/freellm-install/files/freellmapi-config/freellmapi.config.json
+ff_ansible_extra_files: []
+
+# Retirer de la machine ce qu'une livraison antérieure y a laissé d'autres parcs
+# (inventaires, clés, vhosts, group_vars/host_vars hors liste), plus les chemins
+# ci-dessous (archives du poste, dépôt privé). Répertoire par répertoire : l'état
+# propre à la machine n'est jamais touché.
+ff_ansible_prune: true
+ff_ansible_foreign_paths: [.private, .claude, backups/roles, backups/wordpress]
 ff_install_ansible: true

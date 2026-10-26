@@ -178,7 +178,9 @@
   tags: [code]
 
 # L'arbre Ansible EST la donnée de l'application : inventaires, playbooks,
-# rôles. Sans lui elle démarre sur un parc vide.
+# rôles. Sans lui elle démarre sur un parc vide. Mais UNIQUEMENT ceux du parc
+# déployé : voir tasks/ansible-tree.yml (filtres calculés, nettoyage de ce qu'une
+# livraison antérieure a laissé d'autres parcs).
 #
 # `delete: false` volontairement, à l'inverse du code : les rôles déposent des
 # fichiers d'état sur le nœud de contrôle (`backups/`, artefacts de run), et
@@ -187,13 +189,10 @@
 # `ff_ansible_sync: false` : l'arbre est tenu ailleurs (voir defaults), le
 # déploiement n'y écrit rien.
 - name: Sync the Ansible tree
-  ansible.posix.synchronize:
-    src: "{{ ff_src }}/Ansible/"
-    dest: "{{ ff_ansible_dir }}/"
-    delete: false
-    rsync_opts: "{{ ff_rsync_excludes }}"
-  become: true
-  become_user: "{{ ff_user }}"
+  ansible.builtin.include_tasks:
+    file: ansible-tree.yml
+    apply:
+      tags: [code, ansible]
   when: ff_ansible_sync | bool
   tags: [code, ansible]
 
@@ -273,12 +272,13 @@
   become_user: "{{ ff_user }}"
   register: ff_ansible_version
   changed_when: false
+  check_mode: false
   when: ff_install_ansible | bool
   tags: [ansible]
 
 - name: Report the ansible version
   ansible.builtin.debug:
-    msg: "{{ ff_ansible_version.stdout_lines | first }}"
+    msg: "{{ ff_ansible_version.stdout_lines | first | default('ansible-playbook absent') }}"
   when: ff_install_ansible | bool
   tags: [ansible]
 

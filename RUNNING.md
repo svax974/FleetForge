@@ -176,6 +176,34 @@ le relire (depuis `Ansible/`) : `ansible -i inventories/<parc>_inventory.yml -e 
 Le CNAME est publié par le déploiement ; `update-cloudflare-dns.yml` le
 resynchronise avec l'inventaire à la demande.
 
+#### Ce que la machine reçoit de l'arbre Ansible
+
+Uniquement les données du parc déployé — celles des autres parcs ne quittent pas le
+poste (le mot de passe du vault est sur la machine : leurs secrets chiffrés y seraient
+lisibles). Les filtres sont calculés depuis `parc_name` et les groupes et hôtes de
+l'inventaire joué (`fleetforge-install/tasks/ansible-tree.yml`) :
+
+| Livré | Jamais livré |
+|---|---|
+| `inventories/<parc>.yml`, `<parc>_*.yml` | les inventaires des autres parcs |
+| `keys/<parc>/`, `parcs/<parc>/` | `keys/`, `parcs/` des autres parcs |
+| group_vars et host_vars des groupes et hôtes du parc | ceux dont le **nom** existe aussi dans un autre parc (écartés et signalés) |
+| `playbooks/` (rôles, playbooks), `ansible.cfg`, scripts | `.private`, `.claude`, `backups/` |
+| — | les fichiers de rôles liés au dépôt privé (base Pritunl, configuration FreeLLM) |
+
+Les liens du poste sont déréférencés : la machine reçoit des fichiers ordinaires et n'a
+pas de `.private`. Pour livrer malgré tout un fichier écarté (chemin relatif à `Ansible/`) :
+
+```yaml
+ff_ansible_extra_files:
+  - playbooks/roles/freellm-install/files/freellmapi-config/freellmapi.config.json
+```
+
+Une livraison antérieure de l'arbre complet laisse ses données sur la machine :
+`ff_ansible_prune` (vrai par défaut) les retire à chaque déploiement, répertoire par
+répertoire, sans toucher à l'état propre à la machine. Pour vérifier :
+`ls ~/fleetforge/Ansible/inventories ~/fleetforge/Ansible/keys` ne doit montrer que le parc.
+
 #### Pilotage réel du parc (décision explicite)
 
 ```sh

@@ -1,0 +1,230 @@
+---
+# Arbre Ansible livré à la machine : les données du parc DÉPLOYÉ, et d'aucun autre.
+#
+# Le dépôt réunit les inventaires, clés, vhosts et variables de TOUS les parcs
+# (liens vers le dépôt privé). Une machine qui sert un parc n'a aucune raison de
+# porter ceux des autres — d'autant que le mot de passe du vault y est déposé :
+# des secrets chiffrés d'un autre parc y seraient lisibles. Constat du 26/10/2026 :
+# l'arbre complet (21 Mo de `.private`, 41 Mo de sauvegardes WordPress, les clés
+# et inventaires des trois parcs) avait été livré à infra1.
+#
+# Une seule synchronisation, filtrée. Les filtres sont CALCULÉS depuis ce que le
+# déploiement sait déjà (`parc_name`, groupes et hôtes de l'inventaire joué),
+# jamais d'une liste de parcs recopiée : un parc ajouté n'exige rien ici.
+#
+#   livré  : inventaires du parc (`<parc>.yml`, `<parc>_*.yml`), `keys/<parc>/`,
+#            `parcs/<parc>/`, group_vars et host_vars des groupes et hôtes du parc,
+#            tout `playbooks/` générique (rôles, playbooks), ansible.cfg, scripts ;
+#   jamais : `.private`, `.claude`, `backups/` (archives du poste), les fichiers de
+#            rôles qui sont des liens vers `.private` (voir plus bas).
+#
+# Les liens du poste sont DÉRÉFÉRENCÉS (`copy_links`) : la machine reçoit des
+# fichiers ordinaires et n'a besoin d'aucun `.private`.
+
+- name: Locate the Ansible tree on the control machine
+  ansible.builtin.set_fact:
+    ff_tree: "{{ (ff_src ~ '/Ansible') | realpath }}"
+
+# ── Quels inventaires sont ceux de CE parc ─────────────────────────────────
+# Même définition que `fleetforge-core::parc` : l'union de `<parc>.yml` et de
+# `<parc>_*.yml`.
+- name: Name the inventory files of this parc and of the others
+  ansible.builtin.set_fact:
+    ff_inv_own: >-
+      {{ query('ansible.builtin.fileglob', ff_tree ~ '/inventories/' ~ parc_name ~ '.yml')
+         + query('ansible.builtin.fileglob', ff_tree ~ '/inventories/' ~ parc_name ~ '_*.yml') }}
+    ff_inv_all: "{{ query('ansible.builtin.fileglob', ff_tree ~ '/inventories/*.yml') }}"
+
+- name: Fail when this parc has no inventory file
+  ansible.builtin.assert:
+    that: ff_inv_own | length > 0
+    fail_msg: >-
+      Aucun inventaire `{{ parc_name }}.yml` ni `{{ parc_name }}_*.yml` dans
+      {{ ff_tree }}/inventories : le filtre ne saurait pas quoi livrer, et ne
+      doit pas livrer « tout » à la place.
+
+# ── Noms partagés avec un autre parc ───────────────────────────────────────
+# Un fichier de group_vars ou de host_vars se rattache à un NOM, pas à un parc :
+# `host_vars/monitor.yml` est celui de la supervision EasyNode (mot de passe root
+# chiffré), mais web3c a aussi un hôte `monitor`. Livrer par nom livrerait le
+# secret d'un autre parc. Un nom présent dans un autre inventaire est donc
+# ÉCARTÉ et signalé ; `ff_ansible_extra_files` permet de le livrer en connaissance
+# de cause. Les noms viennent de `--graph` (texte) : `--list` embarque les valeurs
+# chiffrées, que le templating refuse de relire en JSON.
+- name: Read the host and group names of the other parcs
+  ansible.builtin.command:
+    cmd: "ansible-inventory -i {{ item }} --graph"
+  loop: "{{ ff_inv_all | difference(ff_inv_own) }}"
+  register: ff_other_inv
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  delegate_to: localhost
+  become: false
+
+- name: Work out which names this parc may ship
+  ansible.builtin.set_fact:
+    ff_names_own: "{{ (['all'] + (groups.keys() | list) + (groups['all'] | default([]))) | unique | list }}"
+    ff_names_other: >-
+      {%- set ns = namespace(n=[]) -%}
+      {%- for r in ff_other_inv.results if r.rc == 0 -%}
+      {%- for line in r.stdout_lines if '--' in line -%}
+      {%- set ns.n = ns.n + [line.split('--')[-1] | trim | replace('@', '') | replace(':', '')] -%}
+      {%- endfor -%}
+      {%- endfor -%}
+      {{ ns.n | unique | list }}
+
+- name: Split the names into shippable and shared
+  ansible.builtin.set_fact:
+    ff_names_shared: "{{ ff_names_own | intersect(ff_names_other) | difference(['all', 'ungrouped']) }}"
+    ff_names_ship: "{{ ff_names_own | difference(ff_names_other | difference(['all', 'ungrouped'])) }}"
+
+- name: Report the variable files left out because their name is shared with another parc
+  ansible.builtin.debug:
+    msg: >-
+      NON livré (nom d'hôte ou de groupe présent dans un autre parc) :
+      {{ ff_left_out | join(', ') }}. Pour le livrer malgré tout :
+      `ff_ansible_extra_files: [playbooks/host_vars/<nom>.yml]`.
+  vars:
+    ff_left_out: >-
+      {%- set ns = namespace(out=[]) -%}
+      {%- for n in ff_names_shared -%}
+      {%- for kind in ['group_vars', 'host_vars'] -%}
+      {%- if query('ansible.builtin.fileglob', ff_tree ~ '/playbooks/' ~ kind ~ '/' ~ n ~ '.yml') | length > 0 -%}
+      {%- set ns.out = ns.out + [kind ~ '/' ~ n ~ '.yml'] -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {%- endfor -%}
+      {{ ns.out }}
+  when: ff_left_out | length > 0
+
+# ── Fichiers de rôles qui sont des liens vers `.private` ───────────────────
+# `vpn-setup/templates/pritunl.dump` (20 Mo, base Pritunl) et la configuration de
+# FreeLLM : aucun nom de parc dans leur chemin, donc aucun moyen de décider seul
+# à quel parc ils appartiennent. Jamais livrés par défaut ; `ff_ansible_extra_files`
+# nomme ceux qu'une machine doit recevoir.
+# `find -lname` et non le module `find` : celui-ci ne rend pas la cible des liens.
+- name: Find the files of the roles that link into the private repository
+  ansible.builtin.command:
+    argv: [find, "{{ ff_tree }}/playbooks/roles", -type, l, -lname, "*.private*"]
+  register: ff_role_links
+  changed_when: false
+  check_mode: false
+  delegate_to: localhost
+  become: false
+
+- name: Keep them as paths relative to the tree, minus the ones asked for
+  ansible.builtin.set_fact:
+    ff_role_private: >-
+      {{ ff_role_links.stdout_lines | map('relpath', ff_tree) | list
+         | difference(ff_ansible_extra_files) }}
+
+# ── Filtres rsync ──────────────────────────────────────────────────────────
+# rsync retient la PREMIÈRE règle qui correspond : les inclusions d'un répertoire
+# précèdent son `--exclude=/<dir>/*`. Pas d'antislash dans ces expressions
+# (CLAUDE.md, « Pièges Ansible »).
+- name: Build the rsync filters
+  ansible.builtin.set_fact:
+    ff_tree_filters: >-
+      {%- set ns = namespace(f=['--exclude=/.private', '--exclude=/.claude', '--exclude=/backups']) -%}
+      {%- for p in ff_ansible_extra_files -%}{%- set ns.f = ns.f + ['--include=/' ~ p] -%}{%- endfor -%}
+      {%- set ns.f = ns.f + ['--include=/inventories/'] -%}
+      {%- for p in ff_inv_own -%}{%- set ns.f = ns.f + ['--include=/inventories/' ~ (p | basename)] -%}{%- endfor -%}
+      {%- set ns.f = ns.f + ['--exclude=/inventories/*'] -%}
+      {%- for d in ['keys', 'parcs'] -%}
+      {%- set ns.f = ns.f + ['--include=/' ~ d ~ '/', '--include=/' ~ d ~ '/README.md', '--include=/' ~ d ~ '/' ~ parc_name ~ '/', '--include=/' ~ d ~ '/' ~ parc_name ~ '/**', '--exclude=/' ~ d ~ '/*'] -%}
+      {%- endfor -%}
+      {%- for d in ['group_vars', 'host_vars'] -%}
+      {%- set ns.f = ns.f + ['--include=/playbooks/' ~ d ~ '/'] -%}
+      {%- for n in ff_names_ship -%}{%- set ns.f = ns.f + ['--include=/playbooks/' ~ d ~ '/' ~ n ~ '.yml'] -%}{%- endfor -%}
+      {%- set ns.f = ns.f + ['--exclude=/playbooks/' ~ d ~ '/*'] -%}
+      {%- endfor -%}
+      {%- for p in ff_role_private -%}{%- set ns.f = ns.f + ['--exclude=/' ~ p] -%}{%- endfor -%}
+      {{ ns.f }}
+
+- name: Sync the Ansible tree (the data of this parc only)
+  ansible.posix.synchronize:
+    src: "{{ ff_src }}/Ansible/"
+    dest: "{{ ff_ansible_dir }}/"
+    delete: false
+    copy_links: true
+    rsync_opts: "{{ ff_tree_filters + ff_rsync_excludes }}"
+  become: true
+  become_user: "{{ ff_user }}"
+
+# ── Ce qui est déjà sur la machine ─────────────────────────────────────────
+# `delete: false` (les rôles y déposent leur état) : une livraison antérieure de
+# l'arbre complet laisse sur place les données des autres parcs. Retirées ici,
+# répertoire par répertoire, sur ce que la machine contient réellement — jamais
+# un `rm` du dossier entier, qui emporterait aussi l'état propre à la machine.
+- name: Describe what each data directory may hold on the machine
+  ansible.builtin.set_fact:
+    ff_tree_keep:
+      - dir: inventories
+        keep: "{{ ff_inv_own | map('basename') | list }}"
+      - dir: keys
+        keep: ['README.md', "{{ parc_name }}"]
+      - dir: parcs
+        keep: ['README.md', "{{ parc_name }}"]
+      - dir: playbooks/group_vars
+        keep: "{{ ff_names_ship | map('regex_replace', '$', '.yml') | list + (ff_ansible_extra_files | map('basename') | list) }}"
+      - dir: playbooks/host_vars
+        keep: "{{ ff_names_ship | map('regex_replace', '$', '.yml') | list + (ff_ansible_extra_files | map('basename') | list) }}"
+  when: ff_ansible_prune | bool
+
+- name: List what the machine holds in each data directory
+  ansible.builtin.find:
+    paths: "{{ ff_ansible_dir }}/{{ item.dir }}"
+    file_type: any
+    hidden: true
+  loop: "{{ ff_tree_keep | default([]) }}"
+  loop_control:
+    label: "{{ item.dir }}"
+  register: ff_tree_found
+  become: true
+  become_user: "{{ ff_user }}"
+  when: ff_ansible_prune | bool
+
+- name: Name the entries that belong to another parc
+  ansible.builtin.set_fact:
+    ff_tree_foreign: >-
+      {%- set ns = namespace(out=[]) -%}
+      {%- for r in ff_tree_found.results | default([]) if r.files is defined -%}
+      {%- for f in r.files -%}
+      {%- set b = f.path | basename -%}
+      {%- if b not in r.item.keep and not b.endswith('.template') -%}
+      {%- set ns.out = ns.out + [f.path] -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {%- endfor -%}
+      {%- for p in ff_ansible_foreign_paths -%}{%- set ns.out = ns.out + [ff_ansible_dir ~ '/' ~ p] -%}{%- endfor -%}
+      {{ ns.out }}
+  when: ff_ansible_prune | bool
+
+- name: Remove the data of the other parcs left by an earlier delivery
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ ff_tree_foreign | default([]) }}"
+  become: true
+  become_user: "{{ ff_user }}"
+  when: ff_ansible_prune | bool
+
+# Les liens de l'ancienne livraison pointaient vers `.private`, retiré ci-dessus.
+- name: Remove the links left dangling
+  ansible.builtin.command:
+    cmd: "find {{ ff_ansible_dir }} -xtype l -print -delete"
+  register: ff_tree_dangling
+  changed_when: ff_tree_dangling.stdout | length > 0
+  become: true
+  become_user: "{{ ff_user }}"
+  when: ff_ansible_prune | bool
+
+- name: Report what this machine now carries
+  ansible.builtin.debug:
+    msg: >-
+      Arbre livré pour le parc « {{ parc_name }} » : inventaires
+      {{ ff_inv_own | map('basename') | join(', ') }} ; group_vars et host_vars de
+      {{ ff_names_ship | length }} noms ; fichiers de rôles liés au dépôt privé
+      écartés : {{ ff_role_private | length }} ;
+      {{ (ff_tree_foreign | default([])) | length }} entrée(s) d'autres parcs retirée(s).
