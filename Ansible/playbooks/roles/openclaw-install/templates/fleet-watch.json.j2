@@ -1,10 +1,10 @@
 {#- Configuration de fleet-watch.py, entièrement dérivée de l'inventaire. -#}
 {%- set amh = namespace(name='') -%}
-{%- for h in groups['web3c'] | default([]) -%}
+{%- for h in groups[parc_name] | default([]) -%}
 {%- if 'alertmanager' in (hostvars[h].ansible_roles | default([])) and not amh.name -%}{%- set amh.name = h -%}{%- endif -%}
 {%- endfor -%}
 {%- set ns = namespace(ignore=openclaw_fleetwatch_ignore_extra | list, hosts={}) -%}
-{%- for h in groups['web3c'] | default([]) -%}
+{%- for h in groups[parc_name] | default([]) -%}
 {%- if hostvars[h].monitor | default('on') | string | lower == 'off' -%}
 {%- set ns.ignore = ns.ignore + [h] -%}
 {%- else -%}

@@ -169,6 +169,13 @@ openclaw_prometheus_monitor_enabled: true
 # change ou persiste plus de `openclaw_fleetwatch_renotify_hours`. Le modèle
 # analyse alors et PROPOSE des solutions, sans rien appliquer. Active si
 # `openclaw_heartbeat_to` est renseigné (même route Telegram).
+# Veille de CE parc par fleet-watch (le parc du play : `parc_name`). `false` :
+# l'automation est DÉSACTIVÉE, pas supprimée — script, configuration et
+# historique restent, `true` la réactive. Pour un parc dont la veille est
+# reprise par le poste « Infrastructure Manager » d'AgentHub (webhook
+# d'Alertmanager vers le poste, `alertmanager_agenthub_webhook_url`) : web3c
+# depuis le 26/10/2026. Sans effet tant que `openclaw_heartbeat_to` est vide.
+openclaw_fleetwatch_enabled: true
 openclaw_fleetwatch_every: 30m
 openclaw_fleetwatch_renotify_hours: 6
 # Modèle d'analyse (`provider/model`) ; vide = défaut de l'agent. Jamais un
