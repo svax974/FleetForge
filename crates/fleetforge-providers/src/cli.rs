@@ -198,9 +198,16 @@ fn run_text(tool: &str, args: &[&str], install: &str) -> Result<String> {
                 stderr.trim()
             ),
         );
+        // Certains outils écrivent leur erreur sur la sortie standard : sans ce
+        // repli, `oci session authenticate` échouait sur « oci a échoué : »
+        // suivi de rien, et le journal ne disait pas pourquoi.
+        let detail = match meaningful_error(&stderr) {
+            msg if msg.trim().is_empty() => String::from_utf8_lossy(&out.stdout).trim().to_string(),
+            msg => msg,
+        };
         return Err(ProviderError::Api(format!(
             "{tool} a échoué : {}",
-            meaningful_error(&stderr)
+            if detail.is_empty() { format!("code {}", out.status.code().unwrap_or(-1)) } else { detail }
         )));
     }
 
@@ -821,7 +828,29 @@ fn creation_region(typed: Option<&str>, default_profile: Option<String>) -> Opti
 /// Sur un fil dédié : la commande attend que l'opérateur se connecte dans son
 /// navigateur, ce qui prend le temps qu'il faut. La laisser sur l'exécuteur
 /// asynchrone y bloquerait un fil et figerait l'interface.
+/// Port où `oci session authenticate` attend la redirection OAuth du navigateur.
+const OCI_LOGIN_PORT: u16 = 8181;
+
+/// Quelqu'un écoute-t-il déjà sur ce port, en local ?
+fn port_in_use(port: u16) -> bool {
+    std::net::TcpStream::connect_timeout(
+        &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+        std::time::Duration::from_millis(300),
+    )
+    .is_ok()
+}
+
 async fn oci_session_login(profile: String, region: String) -> Result<String> {
+    // Une autre connexion en attente (lancée dans un terminal, ou restée là
+    // après un navigateur fermé) tient le port : la nouvelle échoue en une
+    // fraction de seconde, SANS message — indiscernable d'une panne d'Oracle.
+    if port_in_use(OCI_LOGIN_PORT) {
+        return Err(ProviderError::Auth(format!(
+            "le port {OCI_LOGIN_PORT} est déjà utilisé : une autre `oci session authenticate` \
+             attend sa connexion (terminal ouvert ?). La terminer ou l'interrompre (Ctrl-C), \
+             puis recommencer."
+        )));
+    }
     fleetforge_core::logging::info(
         "oci",
         format!("ouverture d'une session pour le profil [{profile}] ({region})"),
@@ -1400,6 +1429,14 @@ mod tests {
         assert!(text.contains("ocid1.compartment.oc1..aaa"), "{text}");
         assert!(text.contains("IAM"), "{text}");
         assert!(!text.contains("ServiceError"), "{text}");
+    }
+
+    #[test]
+    fn a_listening_port_is_reported_busy() {
+        // Pas de contre-épreuve « port libre » : un port rendu peut être repris
+        // à l'instant par un autre test, et le test deviendrait aléatoire.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        assert!(port_in_use(listener.local_addr().unwrap().port()));
     }
 
     #[test]
