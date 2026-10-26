@@ -200,7 +200,7 @@ impl ProviderHub {
             // été enregistré. Un compte NEUF qui échoue, lui, n'est pas gardé :
             // il laisserait un compte fantôme.
             if self.store.load(account).is_some() {
-                if let Err(save) = self.store.save(account, credentials) {
+                if let Err(save) = self.store.save(account, &persistent(credentials)) {
                     fleetforge_core::logging::warn(
                         "providers",
                         format!("identifiants {account} non enregistrés : {save}"),
@@ -223,7 +223,7 @@ impl ProviderHub {
             return Err(e);
         }
 
-        if let Err(e) = self.store.save(account, credentials) {
+        if let Err(e) = self.store.save(account, &persistent(credentials)) {
             // Échouer ici serait absurde : la connexion, elle, a réussi.
             fleetforge_core::logging::warn(
                 "providers",
@@ -237,7 +237,7 @@ impl ProviderHub {
 
     /// Reconnecte depuis les identifiants enregistrés.
     pub async fn reconnect(&self, account: &AccountId) -> Result<()> {
-        let credentials = self.store.load(account).ok_or_else(|| {
+        let credentials = self.store.load(account).map(|c| persistent(&c)).ok_or_else(|| {
             ProviderError::Auth(format!("aucun identifiant enregistré pour {account}"))
         })?;
         self.connect(account, &credentials).await
@@ -631,6 +631,16 @@ impl ProviderHub {
 /// `FLEETFORGE_NO_LOCAL_BROWSER=1` force le retrait : le serveur web le pose, parce
 /// qu'il peut très bien tourner sur le poste de l'opérateur sans que son
 /// navigateur y soit — un tunnel SSH suffit à les séparer.
+/// Ce qu'on garde d'une saisie. `OCI_REGION` est un ORDRE (« règle cette région
+/// dans le profil »), pas un état : le fichier `~/.oci/config` fait foi. Le
+/// conserver le rejouerait à chaque reconnexion et écraserait une région
+/// corrigée à la main depuis.
+fn persistent(credentials: &Credentials) -> Credentials {
+    let mut kept = credentials.clone();
+    kept.fields.remove("OCI_REGION");
+    kept
+}
+
 fn filter_session_actions(actions: Vec<SessionAction>) -> Vec<SessionAction> {
     let forced_off = std::env::var("FLEETFORGE_NO_LOCAL_BROWSER")
         .map(|v| v.trim() != "0" && !v.trim().is_empty())
@@ -779,6 +789,16 @@ pub fn reconcile(fleet: &Fleet, kind: ProviderKind, instances: &[Instance]) -> R
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_region_order_is_not_remembered() {
+        let mut c = Credentials::default();
+        c.fields.insert("OCI_REGION".into(), "eu-paris-1".into());
+        c.fields.insert("OCI_PROFILE".into(), "acme".into());
+        let kept = persistent(&c);
+        assert!(kept.get("OCI_REGION").is_none());
+        assert_eq!(kept.get("OCI_PROFILE"), Some("acme"));
+    }
+
     use super::*;
     use fleetforge_core::models::{AnsibleGroup, AnsibleHost};
     use std::collections::HashMap;
