@@ -1,0 +1,38 @@
+---
+# Récapitulatif de fin de déploiement : où ouvrir OpenClaw et où lire son jeton.
+# Joué par la dernière étape de deploy-openclaw.yml, une fois le vhost posé : le
+# message ne dit pas « prêt » avant que le nom public réponde.
+#
+# Le jeton lui-même n'est JAMAIS affiché : la sortie d'Ansible finit dans des
+# terminaux partagés, des journaux et l'historique des runs de l'application.
+# On donne la commande qui le lit sur l'hôte.
+
+- name: Check that the gateway token exists
+  ansible.builtin.stat:
+    path: "{{ openclaw_home }}/.gateway_token"
+  become: true
+  register: openclaw_token_file
+
+- name: Show the OpenClaw URL and where to read the token
+  ansible.builtin.debug:
+    msg:
+      - "OpenClaw — {{ inventory_hostname }}"
+      - >-
+        URL : https://{{ proxy_hostname }}
+        ({{ 'privé : VPN ou adresse en whitelist' if (access_mode | default('private')) == 'private'
+            else 'public' }})
+      - >-
+        Jeton de la gateway : {{ openclaw_home }}/.gateway_token sur {{ ansible_host }} —
+        {{ "ssh -p " ~ (ansible_port | default(22)) ~ " " ~ remote_username ~ "@" ~ ansible_host
+           ~ " cat " ~ openclaw_home ~ "/.gateway_token"
+           if openclaw_token_file.stat.exists
+           else "ABSENT : le déploiement n'a pas généré le jeton, relire la sortie ci-dessus" }}
+      - >-
+        Interface de contrôle : coller ce jeton à la première connexion. Un nouveau
+        navigateur peut demander un appairage : `openclaw devices list` puis
+        l'approbation, sur l'hôte (la commande `openclaw` y est dans le PATH).
+      - >-
+        Fournisseur de modèles :
+        {{ 'AUCUN (openclaw_auth_choice: skip) — à régler dans l interface ou par openclaw_custom_provider_* dans le group_vars du parc'
+           if openclaw_auth_choice == 'skip'
+           else openclaw_auth_choice }}

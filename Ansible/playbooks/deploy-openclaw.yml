@@ -82,3 +82,15 @@
       vars:
         site: openclaw.conf
       when: vhost_wanted | bool
+
+# ── Récapitulatif ───────────────────────────────────────────────────────────
+# Dernier play, après le vhost : où ouvrir OpenClaw et où lire son jeton. Le
+# jeton n'est pas affiché, seulement la commande qui le lit (tasks/report.yml).
+- name: Où ouvrir OpenClaw
+  hosts: openclaw
+  remote_user: "{{ remote_username }}"
+  tasks:
+    - name: Show the URL and the token location
+      ansible.builtin.include_role:
+        name: openclaw-install
+        tasks_from: report
