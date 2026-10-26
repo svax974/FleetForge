@@ -17,8 +17,15 @@
 # station/nuc/proxy2/vpn1 ; host-preflight retrouve node_exporter/svcprobe
 # déjà enregistrés par adresse + port de scrape.
 #
+# Embarque `deploy-llamacpp.yml` : la mémoire d'OpenClaw interroge les embeddings
+# de llama.cpp (127.0.0.1:9932), qui doivent exister avant son premier démarrage.
+# Idempotent ; un parc sans entrée `lamacpp` ignore simplement ces plays.
+# `--tags monitoring` / `proxy-conf` couvrent donc aussi llama.cpp.
+#
 #   ./play.sh web3c deploy-openclaw.yml
 #   ./play.sh web3c deploy-openclaw.yml --tags monitoring   # réarmer la supervision
+
+- import_playbook: deploy-llamacpp.yml
 
 # ── Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ───────────────────────
 - name: Contrôle préalable
