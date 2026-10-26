@@ -21,6 +21,7 @@ import {
   GroupVarEntry, ServerService, ServerServiceState, PrometheusMetric, CatalogService,
   Fleet, Finding, Probe, ProbeScopeName, RunHandle,
   ProviderStatus, ServerProvider, Instance, InstanceRef, Reconciliation, MachineControl, AlertRule,
+  ActionSubject, ActionContext, ItemAction,
 } from '../types'
 
 // === Modèles ===
@@ -100,6 +101,16 @@ export const getServerServices = async (
     serviceName: serviceName ?? null,
     statusFilter: statusFilter ?? null,
   })
+
+/** Services suivis sur les hôtes du parc, et d'eux seuls : le journal les
+ *  indexe par nom d'hôte, et ces noms se répètent d'un parc à l'autre. */
+export const getFleetServices = async (inventoryPath: string): Promise<ServerServiceState[]> =>
+  call('get_fleet_services', { inventoryPath })
+
+/** Ce qu'on peut faire sur un élément, et pourquoi pas — décidé par le cœur,
+ *  comme dans le TUI. */
+export const listActions = async (subject: ActionSubject, context: ActionContext): Promise<ItemAction[]> =>
+  call('list_actions', { subject, context })
 
 export const getServerCurrentServices = async (serverId?: number): Promise<ServerServiceState[]> =>
   call('get_server_current_services', { serverId: serverId ?? null })

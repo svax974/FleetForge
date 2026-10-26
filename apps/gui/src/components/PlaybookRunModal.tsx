@@ -26,6 +26,8 @@ import { AnsiblePlaybook, AnsibleGroup, AnsibleHost, PlaybookLaunchConfig } from
 
 interface PlaybookRunModalProps {
   playbook: AnsiblePlaybook
+  /** Hôtes préchargés : le playbook est alors limité à eux, comme `p` dans le TUI. */
+  initialHosts?: string[]
   onClose: () => void
   onLaunch: (config: PlaybookLaunchConfig) => void
 }
@@ -116,7 +118,7 @@ function GroupBlock({
   )
 }
 
-export default function PlaybookRunModal({ playbook, onClose, onLaunch }: PlaybookRunModalProps) {
+export default function PlaybookRunModal({ playbook, initialHosts, onClose, onLaunch }: PlaybookRunModalProps) {
   const { t } = useTranslation()
 
   const [loadingInit, setLoadingInit] = useState(true)
@@ -125,8 +127,8 @@ export default function PlaybookRunModal({ playbook, onClose, onLaunch }: Playbo
   const [inventoryPath, setInventoryPath] = useState('')
   const [groups, setGroups] = useState<AnsibleGroup[]>([])
 
-  const [hostsMode, setHostsMode] = useState<HostsMode>('all')
-  const [selectedHosts, setSelectedHosts] = useState<Set<string>>(new Set())
+  const [hostsMode, setHostsMode] = useState<HostsMode>(initialHosts?.length ? 'specific' : 'all')
+  const [selectedHosts, setSelectedHosts] = useState<Set<string>>(new Set(initialHosts ?? []))
 
   const [extraVars, setExtraVars] = useState<ExtraVar[]>([])
   const [newVarKey, setNewVarKey] = useState('')

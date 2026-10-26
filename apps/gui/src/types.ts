@@ -361,3 +361,35 @@ export interface CatalogService {
   actions: string[]
   playbooks: string[]
 }
+
+// === Actions par élément (catalogue partagé : fleetforge_core::actions) ===
+
+export type ActionSubject = 'machine' | 'host' | 'service' | 'role' | 'playbook'
+
+export type ActionId =
+  | 'start' | 'stop' | 'reboot'
+  | 'deploy_role' | 'run_playbook' | 'exempt_alert'
+  | 'view_hosts' | 'view_services' | 'view_findings'
+  | 'remove' | 'purge' | 'deploy_on' | 'run'
+
+export interface ItemAction {
+  id: ActionId
+  /** Libellé de repli ; l'interface le traduit par `actions.<id>`. */
+  label: string
+  key: string | null
+  destructive: boolean
+  enabled: boolean
+  /** Toujours présent quand `enabled` est faux. */
+  reason: string | null
+}
+
+export interface ActionContext {
+  /** `null` : machine non rapprochée d'une instance chez l'hébergeur. */
+  power: { can_start: boolean; can_stop: boolean; can_reboot: boolean } | null
+  has_roles: boolean
+  has_playbooks: boolean
+  findings: number
+  can_remove: boolean
+  can_purge: boolean
+  marked: number
+}

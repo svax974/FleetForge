@@ -26,6 +26,8 @@ function App() {
   const [selectedInventory, setSelectedInv] = useState('')
   const [configMissing, setConfigMissing] = useState(false)
   const [activeDeployments, setActiveDeployments] = useState<RunHandle[]>([])
+  /** Hôte dont on affiche les services : le cran « hôte » du fil d'Ariane. */
+  const [servicesHost, setServicesHost] = useState<string | null>(null)
 
   const loadInventories = useCallback(async (): Promise<void> => {
     try {
@@ -59,7 +61,15 @@ function App() {
   }
 
   const handleViewChange = (view: View): void => {
+    // Un clic dans la barre latérale ouvre la vue entière : le cran d'hôte ne
+    // doit pas la laisser filtrée sans qu'on sache pourquoi.
+    if (view === 'services') setServicesHost(null)
     setCurrentView(view)
+  }
+
+  const openServicesOf = (host: string): void => {
+    setServicesHost(host)
+    setCurrentView('services')
   }
 
   useEffect(() => {
@@ -157,7 +167,7 @@ function App() {
         activeDeployments={activeDeployments}
       />
       <main className="flex-1 overflow-auto">
-        {currentView === 'servers' && <ServersView selectedInventory={selectedInventory} configMissing={configMissing} onLaunchPlaybook={launchPlaybook} />}
+        {currentView === 'servers' && <ServersView selectedInventory={selectedInventory} configMissing={configMissing} onLaunchPlaybook={launchPlaybook} onLaunchDeploy={launchDeploy} onOpenServices={openServicesOf} />}
         {currentView === 'diagnostics' && <DiagnosticsView selectedInventory={selectedInventory} configMissing={configMissing} />}
         {currentView === 'providers' && <ProvidersView selectedInventory={selectedInventory} />}
         {currentView === 'dashboard' && <DashboardView onNavigate={setCurrentView} />}
@@ -167,7 +177,7 @@ function App() {
         {currentView === 'playbooks' && <PlaybooksView configMissing={configMissing} onLaunchPlaybook={launchPlaybook} />}
         {currentView === 'ansible-runs' && <AnsibleRunsView />}
         {currentView === 'group-vars' && <GroupVarsView configMissing={configMissing} />}
-        {currentView === 'services' && <ServicesView onNavigate={setCurrentView} onLaunchDeploy={launchDeploy} />}
+        {currentView === 'services' && <ServicesView onNavigate={setCurrentView} onLaunchDeploy={launchDeploy} selectedInventory={selectedInventory} hostFilter={servicesHost} onClearHostFilter={() => setServicesHost(null)} />}
         {currentView === 'monitoring' && <MonitoringView onNavigate={setCurrentView} />}
         {currentView === 'inventory' && <InventoryView selectedInventory={selectedInventory} configMissing={configMissing} />}
         {currentView === 'deployments' && <DeploymentsView deployments={activeDeployments} onDismiss={dismissDeployment} />}

@@ -13,15 +13,17 @@
     "inventory": "Inventaire",
     "roles": "Rôles",
     "group_vars": "Variables de Groupe",
-    "ansible_runs": "Déploiements Ansible",
+    "ansible_runs": "Historique des runs",
     "playbooks": "Playbooks",
     "models": "Modèles",
     "services": "Services installés",
     "monitoring": "Monitoring",
-    "deployments": "Déploiements",
+    "deployments": "Runs en cours",
     "servers": "Serveurs",
     "diagnostics": "Diagnostics",
-    "providers": "Hébergeurs"
+    "providers": "Hébergeurs",
+    "parc": "Parc",
+    "providers_section": "Hébergeurs & réglages"
   },
   "sidebar": {
     "select_inventory": "Sélectionner un parc",
@@ -411,5 +413,25 @@
     "ambiguous_hint": "revendiquées par plusieurs comptes — le rapprochement a tranché par ordre alphabétique, ce qui n'a aucune raison d'être juste",
     "session_done": "Session : {msg}",
     "session_browser": "Un navigateur va s'ouvrir — terminez la connexion, puis revenez ici."
+  },
+  "actions": {
+    "title": "Actions",
+    "no_result": "Aucun résultat",
+    "pick_role": "Déployer un rôle sur…",
+    "pick_playbook": "Lancer un playbook sur…",
+    "all_hosts": "tous les hôtes",
+    "start": "Démarrer",
+    "stop": "Arrêter",
+    "reboot": "Redémarrer",
+    "deploy_role": "Déployer un rôle…",
+    "run_playbook": "Lancer un playbook…",
+    "exempt_alert": "Exemptions d'alertes…",
+    "view_hosts": "Voir les hôtes",
+    "view_services": "Voir les services",
+    "view_findings": "Voir les constats",
+    "remove": "Retirer (binaire + service)",
+    "purge": "Purger (données + configuration)",
+    "deploy_on": "Déployer sur…",
+    "run": "Lancer"
   }
 }

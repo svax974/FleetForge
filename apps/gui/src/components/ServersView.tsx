@@ -16,15 +16,27 @@
 import { useState, useEffect, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Server as ServerIcon, RefreshCw, AlertCircle, Search } from 'lucide-react'
-import { getFleet, getDiagnostics, machineControls, listAlertRules } from '../lib/api'
-import { Fleet, Server, Health, Finding, AnsibleHost, MachineControl, AlertRule, PlaybookLaunchConfig } from '../types'
+import {
+  getFleet, getDiagnostics, machineControls, listAlertRules, listAnsibleRoles, listAnsiblePlaybooks,
+} from '../lib/api'
+import {
+  Fleet, Server, Health, Finding, AnsibleHost, MachineControl, AlertRule, PlaybookLaunchConfig,
+  AnsibleRole, AnsiblePlaybook, DeployLaunchConfig, ActionContext, ActionId,
+} from '../types'
 import { MachinePower } from './MachinePower'
 import { AlertExclusions } from './AlertExclusions'
+import { ActionsMenu } from './ActionsMenu'
+import PickerModal, { PickItem } from './PickerModal'
+import AnsibleDeployModal from './AnsibleDeployModal'
+import PlaybookRunModal from './PlaybookRunModal'
 
 interface ServersViewProps {
   selectedInventory: string
   configMissing: boolean
   onLaunchPlaybook: (config: PlaybookLaunchConfig) => void
+  onLaunchDeploy: (config: DeployLaunchConfig) => void
+  /** Descendre d'un cran : les services d'un hôte (même geste que `↵` dans le TUI). */
+  onOpenServices: (host: string) => void
 }
 
 /** Jetons de statut. Mêmes états, mêmes couleurs que le TUI — c'est ce qui
@@ -37,7 +49,7 @@ const HEALTH_STYLE: Record<Health, { dot: string; text: string; ring: string; la
   unknown:  { dot: 'bg-gray-600',   text: 'text-gray-500',   ring: 'ring-gray-700/40',   label: 'health_unknown' },
 }
 
-function machineLabel(server: Server): string {
+export function machineLabel(server: Server): string {
   // Le port n'est montré que lorsqu'il distingue réellement deux machines
   // derrière une même adresse — sinon il alourdit tout un parc pour rien.
   return server.key.svcprobe_port === 9110
@@ -126,7 +138,7 @@ function ServerCard({
   )
 }
 
-function ServerDetail({ server, fleet, findings, control, onPowered, inventoryPath, rules, onLaunchPlaybook, t }: {
+function ServerDetail({ server, fleet, findings, control, onPowered, inventoryPath, rules, onLaunchPlaybook, contextFor, onAction, onOpenServices, t }: {
   server: Server
   fleet: Fleet
   findings: Finding[]
@@ -138,6 +150,10 @@ function ServerDetail({ server, fleet, findings, control, onPowered, inventoryPa
   inventoryPath: string
   rules: AlertRule[]
   onLaunchPlaybook: (config: PlaybookLaunchConfig) => void
+  /** Contexte d'actions pour ces hôtes : les faits que le cœur ne peut pas lire seul. */
+  contextFor: (hosts: string[], findings: number) => ActionContext
+  onAction: (id: ActionId, hosts: string[]) => void
+  onOpenServices: (host: string) => void
   t: (k: string) => string
 }) {
   const label = machineLabel(server)
@@ -154,7 +170,17 @@ function ServerDetail({ server, fleet, findings, control, onPowered, inventoryPa
   return (
     <div className="space-y-5">
       <div>
-        <h3 className="font-mono text-lg text-gray-100">{label}</h3>
+        {/* Fil d'Ariane : le même chemin que dans l'en-tête du TUI. */}
+        <p className="text-xs text-gray-600 mb-1">{fleet.organization} › {t('servers.title')}</p>
+        <div className="flex items-start justify-between gap-3">
+          <h3 className="font-mono text-lg text-gray-100">{label}</h3>
+          <ActionsMenu
+            subject="machine"
+            context={contextFor(server.hosts, related.length)}
+            hidePower={control !== undefined}
+            onAction={(id: ActionId) => onAction(id, server.hosts)}
+          />
+        </div>
         <p className={`text-sm mt-1 ${style.text}`}>{t(`servers.${style.label}`)}</p>
       </div>
 
@@ -183,7 +209,7 @@ function ServerDetail({ server, fleet, findings, control, onPowered, inventoryPa
         )}
       </dl>
 
-      <div>
+      <div id="server-hosts">
         <h4 className="text-xs uppercase tracking-wide text-gray-500 mb-2">
           {t('servers.hosted')} ({server.hosts.length})
         </h4>
@@ -191,29 +217,43 @@ function ServerDetail({ server, fleet, findings, control, onPowered, inventoryPa
           {server.hosts.map((name: string) => {
             const host: AnsibleHost | undefined = fleet.hosts.find((h) => h.name === name)
             return (
-              <div key={name} className="flex items-baseline gap-3 text-sm">
-                <span className="font-mono text-gray-200 w-36 shrink-0 truncate">{name}</span>
-                <span className="text-xs text-primary-400 truncate">
+              <div key={name} className="flex items-center gap-3 text-sm">
+                <button
+                  onClick={() => onOpenServices(name)}
+                  title={t('actions.view_services')}
+                  className="font-mono text-gray-200 w-36 shrink-0 truncate text-left hover:text-primary-300"
+                >
+                  {name}
+                </button>
+                <span className="text-xs text-primary-400 truncate flex-1">
                   {host && host.ansible_roles.length > 0
                     ? host.ansible_roles.join(' ')
                     : <span className="text-gray-600">{t('servers.base_only')}</span>}
                 </span>
+                <ActionsMenu
+                  subject="host"
+                  context={contextFor([name], findings.filter((f) => f.subject.kind === 'host' && f.subject.id === name).length)}
+                  hidePower={control !== undefined}
+                  onAction={(id: ActionId) => onAction(id, [name])}
+                />
               </div>
             )
           })}
         </div>
       </div>
 
-      <AlertExclusions
-        inventoryPath={inventoryPath}
-        hosts={hosted}
-        rules={rules}
-        onSaved={onPowered}
-        onLaunchPlaybook={onLaunchPlaybook}
-      />
+      <div id="alert-exclusions">
+        <AlertExclusions
+          inventoryPath={inventoryPath}
+          hosts={hosted}
+          rules={rules}
+          onSaved={onPowered}
+          onLaunchPlaybook={onLaunchPlaybook}
+        />
+      </div>
 
       {related.length > 0 && (
-        <div>
+        <div id="server-findings">
           <h4 className="text-xs uppercase tracking-wide text-gray-500 mb-2">
             {t('servers.findings')} ({related.length})
           </h4>
@@ -238,12 +278,18 @@ function ServerDetail({ server, fleet, findings, control, onPowered, inventoryPa
   )
 }
 
-export default function ServersView({ selectedInventory, configMissing, onLaunchPlaybook }: ServersViewProps) {
+export default function ServersView({ selectedInventory, configMissing, onLaunchPlaybook, onLaunchDeploy, onOpenServices }: ServersViewProps) {
   const { t } = useTranslation()
   const [fleet, setFleet] = useState<Fleet | null>(null)
   const [findings, setFindings] = useState<Finding[]>([])
   const [controls, setControls] = useState<MachineControl[]>([])
   const [rules, setRules] = useState<AlertRule[]>([])
+  const [roles, setRoles] = useState<AnsibleRole[]>([])
+  const [playbooks, setPlaybooks] = useState<AnsiblePlaybook[]>([])
+  /** Choix en cours (rôle ou playbook), puis la modale de lancement qui suit. */
+  const [picker, setPicker] = useState<{ kind: 'role' | 'playbook'; hosts: string[] } | null>(null)
+  const [deploy, setDeploy] = useState<{ role: AnsibleRole; hosts: string[] } | null>(null)
+  const [run, setRun] = useState<{ playbook: AnsiblePlaybook; hosts: string[] } | null>(null)
   const [selected, setSelected] = useState<string | null>(null)
   const [query, setQuery] = useState('')
   const [loading, setLoading] = useState(false)
@@ -266,6 +312,8 @@ export default function ServersView({ selectedInventory, configMissing, onLaunch
       // qui s'affiche très bien sans.
       setControls(await machineControls(selectedInventory).catch(() => []))
       setRules(await listAlertRules(selectedInventory).catch(() => []))
+      setRoles(await listAnsibleRoles().catch(() => []))
+      setPlaybooks(await listAnsiblePlaybooks().catch(() => []))
     } catch (err: unknown) {
       setError(String(err))
     } finally {
@@ -274,6 +322,55 @@ export default function ServersView({ selectedInventory, configMissing, onLaunch
   }
 
   useEffect(() => { load() }, [selectedInventory])
+
+  const contextFor = (hosts: string[], findingCount: number): ActionContext => {
+    const caps = currentControl?.capabilities
+    return {
+      power: currentControl && caps
+        ? {
+            can_start: caps.start && currentControl.state !== 'running',
+            can_stop: (caps.stop || caps.stop_graceful) && currentControl.state !== 'stopped',
+            can_reboot: caps.reboot || caps.reboot_graceful,
+          }
+        : null,
+      has_roles: roles.length > 0,
+      has_playbooks: playbooks.length > 0,
+      findings: findingCount,
+      can_remove: false,
+      can_purge: false,
+      marked: hosts.length,
+    }
+  }
+
+  const scrollTo = (id: string): void => {
+    document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
+
+  const handleAction = (id: ActionId, hosts: string[]): void => {
+    switch (id) {
+      case 'deploy_role': setPicker({ kind: 'role', hosts }); break
+      case 'run_playbook': setPicker({ kind: 'playbook', hosts }); break
+      case 'exempt_alert': scrollTo('alert-exclusions'); break
+      case 'view_findings': scrollTo('server-findings'); break
+      case 'view_hosts': scrollTo('server-hosts'); break
+      case 'view_services': if (hosts[0]) onOpenServices(hosts[0]); break
+      // L'alimentation a ses propres boutons quand la machine est pilotable.
+      default: break
+    }
+  }
+
+  /** Rôles de la famille de l'hôte en tête : ce sont eux qu'on vient chercher. */
+  const roleItems = (hosts: string[]): PickItem[] => {
+    const families = new Set(
+      hosts.flatMap((h: string) => fleet?.hosts.find((x: AnsibleHost) => x.name === h)?.ansible_roles ?? []),
+    )
+    const relevant = (name: string): boolean => [...families].some((f: string) => name.startsWith(`${f}-`))
+    return roles
+      .map((r: AnsibleRole): PickItem => ({
+        value: r.name, label: r.name, detail: r.category, highlight: relevant(r.name),
+      }))
+      .sort((a: PickItem, b: PickItem) => Number(b.highlight) - Number(a.highlight))
+  }
 
   const servers = useMemo((): Server[] => {
     if (!fleet) return []
@@ -380,11 +477,55 @@ export default function ServersView({ selectedInventory, configMissing, onLaunch
                 inventoryPath={selectedInventory}
                 rules={rules}
                 onLaunchPlaybook={onLaunchPlaybook}
+                contextFor={contextFor}
+                onAction={handleAction}
+                onOpenServices={onOpenServices}
                 t={t}
               />
             : <p className="text-sm text-gray-600">{t('servers.select_one')}</p>}
         </aside>
       </div>
+
+      {picker?.kind === 'role' && (
+        <PickerModal
+          title={t('actions.pick_role')}
+          items={roleItems(picker.hosts)}
+          onClose={() => setPicker(null)}
+          onPick={(name: string) => {
+            const role = roles.find((r: AnsibleRole) => r.name === name)
+            if (role) setDeploy({ role, hosts: picker.hosts })
+            setPicker(null)
+          }}
+        />
+      )}
+      {picker?.kind === 'playbook' && (
+        <PickerModal
+          title={t('actions.pick_playbook')}
+          items={playbooks.map((p: AnsiblePlaybook): PickItem => ({ value: p.path, label: p.label, detail: p.name }))}
+          onClose={() => setPicker(null)}
+          onPick={(path: string) => {
+            const playbook = playbooks.find((p: AnsiblePlaybook) => p.path === path)
+            if (playbook) setRun({ playbook, hosts: picker.hosts })
+            setPicker(null)
+          }}
+        />
+      )}
+      {deploy && (
+        <AnsibleDeployModal
+          role={deploy.role}
+          initialHosts={deploy.hosts}
+          onClose={() => setDeploy(null)}
+          onLaunch={onLaunchDeploy}
+        />
+      )}
+      {run && (
+        <PlaybookRunModal
+          playbook={run.playbook}
+          initialHosts={run.hosts}
+          onClose={() => setRun(null)}
+          onLaunch={onLaunchPlaybook}
+        />
+      )}
     </div>
   )
 }

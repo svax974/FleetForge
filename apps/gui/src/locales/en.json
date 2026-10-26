@@ -13,15 +13,17 @@
     "inventory": "Inventory",
     "roles": "Roles",
     "group_vars": "Group Variables",
-    "ansible_runs": "Ansible Deployments",
+    "ansible_runs": "Run history",
     "playbooks": "Playbooks",
     "models": "Models",
     "services": "Installed Services",
     "monitoring": "Monitoring",
-    "deployments": "Deployments",
+    "deployments": "Running jobs",
     "servers": "Servers",
     "diagnostics": "Diagnostics",
-    "providers": "Providers"
+    "providers": "Providers",
+    "parc": "Fleet",
+    "providers_section": "Providers & settings"
   },
   "sidebar": {
     "select_inventory": "Select a fleet",
@@ -409,5 +411,25 @@
     "ambiguous_hint": "claimed by several accounts — reconciliation picked the first alphabetically, which has no reason to be right",
     "session_done": "Session: {msg}",
     "session_browser": "A browser will open — complete the sign-in, then come back here."
+  },
+  "actions": {
+    "title": "Actions",
+    "no_result": "No result",
+    "pick_role": "Deploy a role on…",
+    "pick_playbook": "Run a playbook on…",
+    "all_hosts": "all hosts",
+    "start": "Start",
+    "stop": "Stop",
+    "reboot": "Reboot",
+    "deploy_role": "Deploy a role…",
+    "run_playbook": "Run a playbook…",
+    "exempt_alert": "Alert exemptions…",
+    "view_hosts": "View hosts",
+    "view_services": "View services",
+    "view_findings": "View findings",
+    "remove": "Remove (binary + service)",
+    "purge": "Purge (data + configuration)",
+    "deploy_on": "Deploy on…",
+    "run": "Run"
   }
 }

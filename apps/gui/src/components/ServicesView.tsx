@@ -9,17 +9,22 @@ import { useState, useEffect, useMemo, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Package, Server, RefreshCw, ExternalLink, Plus, X, AlertCircle, Trash2, ShieldAlert } from 'lucide-react'
 import {
-  getServerServices, getServerCurrentServices,
+  getServerServices, getFleetServices, getFleet,
   addManualService, getSelectedInventory, getInventoryGroups,
   getAvailableServiceNames, getUninstallRoles,
 } from '../lib/api'
-import { ServerService, ServerServiceState, AnsibleHost, AnsibleGroup, AnsibleRole, DeployLaunchConfig } from '../types'
+import { ServerService, ServerServiceState, AnsibleHost, AnsibleGroup, AnsibleRole, DeployLaunchConfig, Fleet } from '../types'
 import { View } from '../App'
 import AnsibleDeployModal from './AnsibleDeployModal'
+import { machineLabel } from './ServersView'
 
 interface ServicesViewProps {
   onNavigate?: (view: View, runId?: number) => void
   onLaunchDeploy: (config: DeployLaunchConfig) => void
+  selectedInventory: string
+  /** Hôte d'où l'on est descendu (Serveurs › hôte). `null` : tout le parc. */
+  hostFilter: string | null
+  onClearHostFilter: () => void
 }
 
 type Tab = 'current' | 'audit'
@@ -141,7 +146,7 @@ function ServiceCombobox({ value, onChange, suggestions, placeholder }: {
   )
 }
 
-export default function ServicesView({ onNavigate, onLaunchDeploy }: ServicesViewProps) {
+export default function ServicesView({ onNavigate, onLaunchDeploy, selectedInventory, hostFilter, onClearHostFilter }: ServicesViewProps) {
   const { t } = useTranslation()
   const [tab, setTab] = useState<Tab>('current')
   const [currentServices, setCurrentServices] = useState<ServerServiceState[]>([])
@@ -156,7 +161,9 @@ export default function ServicesView({ onNavigate, onLaunchDeploy }: ServicesVie
   const [uninstallRole, setUninstallRole] = useState<AnsibleRole | null>(null)
   const [uninstallHost, setUninstallHost] = useState<string>('')
 
-  const [filterServerName, setFilterServerName] = useState<string>('')
+  const [filterServerName, setFilterServerName] = useState<string>(hostFilter ?? '')
+  /** Le parc courant : borne l'audit et donne la machine du fil d'Ariane. */
+  const [fleet, setFleet] = useState<Fleet | null>(null)
   const [filterService, setFilterService] = useState('')
   const [filterStatus, setFilterStatus] = useState<'all' | 'success' | 'failed'>('all')
 
@@ -198,10 +205,17 @@ export default function ServicesView({ onNavigate, onLaunchDeploy }: ServicesVie
   const load = async (): Promise<void> => {
     setLoading(true)
     try {
-      const [svcStates, audits] = await Promise.all([
-        getServerCurrentServices(),
+      // Les services du PARC COURANT : le journal les indexe par nom d'hôte,
+      // et `proxy1` ou `mail` existent dans plusieurs parcs.
+      const [svcStates, allAudits, currentFleet] = await Promise.all([
+        selectedInventory ? getFleetServices(selectedInventory) : Promise.resolve([] as ServerServiceState[]),
         getServerServices(),
+        selectedInventory ? getFleet(selectedInventory).catch(() => null) : Promise.resolve(null),
       ])
+      const audits = currentFleet
+        ? allAudits.filter((a: ServerService) => currentFleet.hosts.some((h: AnsibleHost) => h.name === a.server_name))
+        : allAudits
+      setFleet(currentFleet)
       setCurrentServices(svcStates)
       setAuditServices(audits)
 
@@ -242,7 +256,8 @@ export default function ServicesView({ onNavigate, onLaunchDeploy }: ServicesVie
     }
   }
 
-  useEffect(() => { load() }, [])
+  useEffect(() => { load() }, [selectedInventory])
+  useEffect(() => { setFilterServerName(hostFilter ?? '') }, [hostFilter])
 
   // La résolution vient du cœur, qui connaît la table de désambiguïsation et
   // ses alias : « nginx-proxy » + remove → `proxy-remove`, qu'aucune
@@ -281,6 +296,29 @@ export default function ServicesView({ onNavigate, onLaunchDeploy }: ServicesVie
 
   return (
     <div className="p-6 space-y-6">
+      {/* Fil d'Ariane : d'où l'on vient. Le même chemin que dans le TUI,
+          `parc › machine › hôte › Services`, et `⎋` y est un clic. */}
+      {hostFilter && (
+        <p className="text-xs text-gray-500 -mb-3">
+          {fleet?.organization}
+          <span className="mx-1.5 text-gray-700">›</span>
+          <button onClick={() => onNavigate?.('servers')} className="hover:text-primary-300">{t('servers.title')}</button>
+          {fleet?.servers.find((sv) => sv.hosts.includes(hostFilter)) && (
+            <>
+              <span className="mx-1.5 text-gray-700">›</span>
+              <button onClick={() => onNavigate?.('servers')} className="font-mono hover:text-primary-300">
+                {machineLabel(fleet.servers.find((sv) => sv.hosts.includes(hostFilter))!)}
+              </button>
+            </>
+          )}
+          <span className="mx-1.5 text-gray-700">›</span>
+          <span className="font-mono text-gray-300">{hostFilter}</span>
+          <button onClick={onClearHostFilter} className="ml-3 text-gray-600 hover:text-gray-300 underline">
+            {t('actions.all_hosts')}
+          </button>
+        </p>
+      )}
+
       {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">

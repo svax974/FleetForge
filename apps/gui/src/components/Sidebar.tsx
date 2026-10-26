@@ -36,28 +36,35 @@ export default function Sidebar({ currentView, onViewChange, inventories, select
 
   const runningCount = activeDeployments.filter((d) => d.status === 'running').length
 
+  // Trois idées, pas une liste de quatorze : le PARC (ce qu'on a), ANSIBLE
+  // (ce qu'on y fait) et le reste. Même découpage que les sections du TUI.
   const sections: Section[] = [
     {
-      label: t('nav.infrastructure'),
+      label: t('nav.parc'),
       items: [
         { id: 'servers', label: t('nav.servers'), icon: Server },
-        { id: 'dashboard', label: t('nav.dashboard'), icon: LayoutDashboard },
-        { id: 'diagnostics', label: t('nav.diagnostics'), icon: ShieldCheck },
-        { id: 'providers', label: t('nav.providers'), icon: Cloud },
-        { id: 'configuration', label: t('nav.configuration'), icon: Settings },
+        { id: 'inventory', label: t('nav.inventory'), icon: List },
         { id: 'services', label: t('nav.services'), icon: Package },
+        { id: 'diagnostics', label: t('nav.diagnostics'), icon: ShieldCheck },
         { id: 'monitoring', label: t('nav.monitoring'), icon: Activity },
-        { id: 'deployments', label: t('nav.deployments'), icon: Rocket },
+        { id: 'dashboard', label: t('nav.dashboard'), icon: LayoutDashboard },
       ],
     },
     {
       label: t('nav.ansible'),
       items: [
-        { id: 'inventory', label: t('nav.inventory'), icon: List },
         { id: 'roles', label: t('nav.roles'), icon: Cog },
         { id: 'playbooks', label: t('nav.playbooks'), icon: BookOpen },
-        { id: 'group-vars', label: t('nav.group_vars'), icon: FileEdit },
+        { id: 'deployments', label: t('nav.deployments'), icon: Rocket },
         { id: 'ansible-runs', label: t('nav.ansible_runs'), icon: Play },
+        { id: 'group-vars', label: t('nav.group_vars'), icon: FileEdit },
+      ],
+    },
+    {
+      label: t('nav.providers_section'),
+      items: [
+        { id: 'providers', label: t('nav.providers'), icon: Cloud },
+        { id: 'configuration', label: t('nav.configuration'), icon: Settings },
       ],
     },
     {
