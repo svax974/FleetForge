@@ -139,6 +139,21 @@
   notify: restart fleetforge
   tags: [code]
 
+# rsync ne crée que le DERNIER composant du chemin de destination : sans
+# `apps/gui`, les deux synchronisations ci-dessous échouent sur un `mkdir` (la
+# machine n'avait jamais reçu ce répertoire). Créé sous le compte de service,
+# pour que les répertoires intermédiaires ne soient pas à root.
+- name: Create the directory holding the desktop facade and the built frontend
+  ansible.builtin.file:
+    path: "{{ ff_dir }}/apps/gui"
+    state: directory
+    owner: "{{ ff_user }}"
+    group: "{{ ff_user }}"
+    mode: '0750'
+  become: true
+  become_user: "{{ ff_user }}"
+  tags: [code]
+
 # `apps/gui/src-tauri` fait partie du workspace : sans lui, `cargo build`
 # échoue sur un membre introuvable avant même de compiler quoi que ce soit.
 # Ses sources sont légères ; c'est le paquetage de bureau qu'on ne construit
