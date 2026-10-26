@@ -135,6 +135,7 @@ fn handle_credentials(
                 form.error = Some(format!("champ(s) requis : {}", missing.join(", ")));
             } else if let Some((_, credentials)) = form.credentials() {
                 let account = form.account_id();
+                let renamed_from = form.original_id().filter(|from| *from != account);
                 let hub = app.hub.clone();
                 let tx = tx.clone();
                 // Un profil Oracle absent est créé par la connexion : le navigateur
@@ -145,7 +146,20 @@ fn handle_credentials(
                     format!("connexion à {account}…")
                 };
 
+                if renamed_from.is_some() {
+                    // La liste des comptes va changer : le focus désignait l'ancien nom.
+                    app.reset_focus();
+                }
+
                 tokio::spawn(async move {
+                    // Renommer d'abord : les identifiants suivent, puis la
+                    // connexion s'ouvre sous le nouveau nom avec les valeurs saisies.
+                    if let Some(from) = renamed_from {
+                        if let Err(e) = hub.rename(&from, &account.name).await {
+                            let _ = tx.send(Msg::Error(e.to_string()));
+                            return;
+                        }
+                    }
                     connect_and_list(hub, account, Some(credentials), tx).await;
                 });
 

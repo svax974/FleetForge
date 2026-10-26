@@ -1665,9 +1665,10 @@ fn draw_credentials(frame: &mut Frame, form: &CredentialsForm) {
         lines.push(Line::from(""));
     }
 
-    // Nom du compte, en premier et seulement à la création : c'est lui qui
-    // distingue « ajouter une tenancy » de « corriger celle-ci ».
-    if !form.account_locked {
+    // Nom du compte, en premier : à la création il distingue « ajouter une
+    // tenancy » de « corriger celle-ci » ; sur un compte existant, le changer
+    // le renomme.
+    {
         let here = form.on_account_field();
         lines.push(Line::from(vec![
             Span::styled(
@@ -1682,12 +1683,16 @@ fn draw_credentials(frame: &mut Frame, form: &CredentialsForm) {
             Span::styled(if here { "▁" } else { "" }.to_string(), tone_style(Tone::Info)),
         ]));
         lines.push(Line::from(Span::styled(
-            "     court et stable : acme, perso, client-x. Vide = default.".to_string(),
+            if form.original.is_some() {
+                "     modifier le nom renomme le compte (identifiants et session suivent).".to_string()
+            } else {
+                "     court et stable : acme, perso, client-x. Vide = default.".to_string()
+            },
             dim_style(),
         )));
     }
 
-    let offset = usize::from(!form.account_locked);
+    let offset = 1;
     for (index, field) in method.fields.iter().enumerate() {
         let here = index + offset == form.field;
         // Un secret n'est jamais rendu en clair, même pendant la frappe : le
@@ -1742,7 +1747,7 @@ fn draw_credentials(frame: &mut Frame, form: &CredentialsForm) {
     )));
 
     // Le titre dit LEQUEL des deux gestes est en cours.
-    let title = if form.account_locked {
+    let title = if form.original.is_some() {
         format!(" Identifiants · {} · {} ", form.provider_label, form.account)
     } else {
         format!(" Nouveau compte · {} ", form.provider_label)

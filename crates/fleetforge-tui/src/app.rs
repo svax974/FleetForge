@@ -370,10 +370,10 @@ pub struct CredentialsForm {
     /// Nom du compte. Éditable comme les autres champs — c'est ainsi qu'on
     /// ajoute une seconde tenancy : même formulaire, autre nom.
     pub account: String,
-    /// Le compte existe déjà : son nom n'est plus modifiable. Le changer
-    /// n'aurait pas renommé le compte, il en aurait créé un second en laissant
-    /// le premier derrière, avec ses identifiants.
-    pub account_locked: bool,
+    /// Nom du compte à l'ouverture, quand il existe déjà. Le modifier dans le
+    /// formulaire RENOMME le compte (identifiants et session suivent) au lieu
+    /// d'en créer un second.
+    pub original: Option<String>,
     pub methods: Vec<FormMethod>,
     /// Méthode retenue. Présélectionnée sur celle que le cœur détecte.
     pub method: usize,
@@ -447,35 +447,43 @@ impl CredentialsForm {
             kind: info.kind,
             provider_label: info.label.clone(),
             account: account.to_string(),
-            account_locked: !account.is_empty(),
+            original: (!account.is_empty()).then(|| account.to_string()),
             methods,
             method,
-            field: 0,
+            // Un compte existant s'ouvre sur ses identifiants : c'est eux qu'on
+            // vient corriger, le nom est une ligne au-dessus.
+            field: usize::from(!account.is_empty()),
             error: None,
         }
     }
 
     /// Le nom du compte est-il le champ qui a le focus ?
     ///
-    /// Il précède les champs d'identifiants et n'apparaît qu'à la création :
-    /// `field == 0` y désigne le nom, et les champs sont décalés d'un rang.
+    /// Il précède les champs d'identifiants : `field == 0` désigne le nom, et
+    /// les champs sont décalés d'un rang.
     pub fn on_account_field(&self) -> bool {
-        !self.account_locked && self.field == 0
+        self.field == 0
+    }
+
+    /// Compte d'origine, quand le formulaire en modifie un.
+    pub fn original_id(&self) -> Option<AccountId> {
+        self.original.as_deref().map(|n| AccountId::new(self.kind, n))
+    }
+
+    /// Le nom saisi n'est plus celui du compte ouvert.
+    pub fn is_rename(&self) -> bool {
+        self.original_id().is_some_and(|from| from != self.account_id())
     }
 
     /// Index du champ d'identifiants visé, le nom du compte déduit.
     fn credential_index(&self) -> Option<usize> {
-        if self.account_locked {
-            Some(self.field)
-        } else {
-            self.field.checked_sub(1)
-        }
+        self.field.checked_sub(1)
     }
 
     /// Nombre de lignes navigables : les champs, plus le nom à la création.
     fn row_count(&self) -> usize {
         let fields = self.current().map_or(0, |m| m.fields.len());
-        fields + usize::from(!self.account_locked)
+        fields + 1
     }
 
     pub fn current(&self) -> Option<&FormMethod> {
@@ -1398,7 +1406,7 @@ mod tests {
         );
 
         for index in 0..form.current().unwrap().fields.len() {
-            form.field = index;
+            form.field = index + 1;
             if !form.current_field().unwrap().optional {
                 for c in "x".chars() {
                     form.push(c);
@@ -1414,7 +1422,7 @@ mod tests {
         // masquerait ensuite le défaut de l'hébergeur.
         let mut form = form_for(ProviderKind::Ovh, None);
         for index in 0..form.current().unwrap().fields.len() {
-            form.field = index;
+            form.field = index + 1;
             if !form.current_field().unwrap().optional {
                 form.push('x');
             }
@@ -1461,7 +1469,7 @@ mod tests {
         // Sans ce champ, configurer un hébergeur ne pouvait que REMPLACER le
         // compte existant : il n'y avait aucun moyen d'en déclarer un second.
         let mut form = new_account_form(ProviderKind::Oracle);
-        assert!(!form.account_locked);
+        assert!(form.original.is_none());
         assert!(form.on_account_field(), "le focus démarre sur le nom");
 
         for c in "Acme Prod".chars() {
@@ -1474,13 +1482,19 @@ mod tests {
     }
 
     #[test]
-    fn an_existing_account_cannot_be_renamed_by_the_form() {
-        // Changer le nom n'aurait pas renommé le compte : il en aurait créé un
-        // second, en laissant le premier derrière avec ses identifiants.
-        let form = form_for(ProviderKind::Oracle, None);
-        assert!(form.account_locked);
-        assert!(!form.on_account_field());
+    fn an_existing_account_opens_on_its_credentials_and_can_be_renamed() {
+        let mut form = form_for(ProviderKind::Oracle, None);
+        assert!(!form.on_account_field(), "le focus démarre sur les identifiants");
         assert_eq!(form.account_id().name, "default");
+        assert!(!form.is_rename());
+
+        form.move_field(-1);
+        assert!(form.on_account_field());
+        for c in "-bis".chars() {
+            form.push(c);
+        }
+        assert!(form.is_rename());
+        assert_eq!(form.original_id().unwrap().name, "default");
     }
 
     #[test]
