@@ -48,3 +48,30 @@
   remote_user: "{{ remote_username }}"
   roles:
     - openclaw-monitoring
+
+# ── Vhost sur les proxies ──────────────────────────────────────────────────
+# Sans lui le nom public (CNAME garanti par le rôle d'installation) ne répond pas.
+# Pousse SEULEMENT sites-enabled/openclaw.conf : reload si le fichier a changé, jamais les
+# autres vhosts (même motif que deploy-agenthub.yml / deploy-fleetforge.yml). Un parc
+# dont le dossier nginx ne le porte pas est simplement ignoré. Pas de `--limit` : il
+# exclurait les proxies.
+- name: Vhost OpenClaw sur les proxies
+  hosts: proxies
+  remote_user: "{{ remote_username }}"
+  become: true
+  tags: [proxy-conf]
+  tasks:
+    - name: Look for the OpenClaw vhost of this parc
+      ansible.builtin.set_fact:
+        vhost_wanted: >-
+          {{ (query('ansible.builtin.fileglob',
+                    playbook_dir ~ '/../parcs/' ~ parc_name ~ '/nginx/sites-enabled/openclaw.conf') | length > 0)
+             and ('openclaw' in groups['all']) }}
+
+    - name: Deploy just the OpenClaw vhost
+      ansible.builtin.include_role:
+        name: proxy-update
+        tasks_from: deploy-one-site
+      vars:
+        site: openclaw.conf
+      when: vhost_wanted | bool

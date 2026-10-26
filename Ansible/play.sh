@@ -81,6 +81,17 @@ args=()
 for f in "${inventories[@]}"; do args+=(-i "$f"); done
 echo "play.sh: ${inventories[*]} → playbooks/$playbook" >&2
 
+# Cache de faits PAR PARC. Il est indexé par nom d'hôte d'inventaire, et des noms
+# se répètent d'un parc à l'autre (`openclaw`, `lamacpp`, `infra1`, `proxy1`…) : le
+# cache partagé servait à l'hôte d'un parc l'interpréteur Python découvert pour
+# l'homonyme d'un autre (« /usr/bin/python3.12 not found » sur une machine en 3.14),
+# et ce dès le « Gathering Facts ». Le parc est celui du premier argument, ou à
+# défaut le préfixe du premier inventaire (`web3c_inventory.yml` → web3c).
+if [ -z "${parc:-}" ]; then
+  parc="$(basename "${inventories[0]}" .yml)"; parc="${parc%%_*}"
+fi
+export ANSIBLE_CACHE_PLUGIN_CONNECTION="${ANSIBLE_CACHE_PLUGIN_CONNECTION:-$HOME/.ansible/facts}/$parc"
+
 # macOS : sans cette variable, les forks d'Ansible meurent sur l'initialisation
 # Objective-C (« objc[…]: +[__NSCFConstantString initialize] … »).
 export OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES

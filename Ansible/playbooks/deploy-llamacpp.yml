@@ -7,9 +7,9 @@
 #
 # Vise l'entrée dédiée `lamacpp` (machine hub, CLAUDE.md § 2).
 #
-# Publié par les proxies en MODE PRIVÉ : CNAME lamacpp.web3c.cc posé par
-# llamacpp-install, vhost llamacpp.conf par `./play.sh web3c update-proxy.yml`
-# (à rejouer après le premier déploiement). Le routeur doit rediriger
+# Publié par les proxies en MODE PRIVÉ : CNAME lamacpp.<domaine> posé par
+# llamacpp-install, vhost llamacpp.conf par le play « Vhost » de ce playbook
+# (tag proxy-conf, en fin de fichier). Le routeur doit rediriger
 # `app_port` vers hub (hors Ansible) : sans redirection, le vhost
 # répond 502 et la cible node-llamacpp reste `down`.
 #
@@ -94,3 +94,30 @@
   roles:
     - llamacpp-model-install
     - llamacpp-monitoring
+
+# ── Vhost sur les proxies ──────────────────────────────────────────────────
+# Sans lui le nom public (CNAME garanti par le rôle d'installation) ne répond pas.
+# Pousse SEULEMENT sites-enabled/llamacpp.conf : reload si le fichier a changé, jamais les
+# autres vhosts (même motif que deploy-agenthub.yml / deploy-fleetforge.yml). Un parc
+# dont le dossier nginx ne le porte pas est simplement ignoré. Pas de `--limit` : il
+# exclurait les proxies.
+- name: Vhost llama.cpp sur les proxies
+  hosts: proxies
+  remote_user: "{{ remote_username }}"
+  become: true
+  tags: [proxy-conf]
+  tasks:
+    - name: Look for the llama.cpp vhost of this parc
+      ansible.builtin.set_fact:
+        vhost_wanted: >-
+          {{ (query('ansible.builtin.fileglob',
+                    playbook_dir ~ '/../parcs/' ~ parc_name ~ '/nginx/sites-enabled/llamacpp.conf') | length > 0)
+             and ('lamacpp' in groups['all']) }}
+
+    - name: Deploy just the llama.cpp vhost
+      ansible.builtin.include_role:
+        name: proxy-update
+        tasks_from: deploy-one-site
+      vars:
+        site: llamacpp.conf
+      when: vhost_wanted | bool
