@@ -1317,8 +1317,13 @@ impl App {
             Msg::Status(s) => self.status = s,
             Msg::Error(e) => {
                 self.loading = false;
-                self.status = format!("⚠ {e}");
-                if e.chars().count() > LONG_ERROR {
+                // Une erreur longue s'affiche dans la fenêtre, et là seulement :
+                // la répéter en bas la tronquait sans rien apprendre de plus.
+                // Sans fenêtre possible (saisie en cours), la ligne d'état la garde.
+                let short = e.chars().count() <= LONG_ERROR;
+                if short {
+                    self.status = format!("⚠ {e}");
+                } else {
                     match &mut self.overlay {
                         // Plusieurs échecs d'affilée (un compte par échec) :
                         // ils s'empilent dans la même fenêtre plutôt que de
@@ -1326,12 +1331,16 @@ impl App {
                         Some(Overlay::Message(text)) => {
                             text.push_str("\n\n");
                             text.push_str(&e);
+                            self.status.clear();
                         }
                         // Jamais par-dessus une saisie en cours : un formulaire
                         // ou un sélecteur ouvert ne doit pas disparaître sous
                         // une erreur arrivée de l'arrière-plan.
-                        None => self.overlay = Some(Overlay::Message(e)),
-                        Some(_) => {}
+                        None => {
+                            self.overlay = Some(Overlay::Message(e));
+                            self.status.clear();
+                        }
+                        Some(_) => self.status = format!("⚠ {e}"),
                     }
                 }
             }
