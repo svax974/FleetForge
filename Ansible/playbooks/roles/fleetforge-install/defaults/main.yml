@@ -59,7 +59,8 @@ ff_web_user: "{{ remote_username }}"
 # chiffré dans playbooks/group_vars/<parc>.yml, comme `ff_web_password` ; la
 # machine n'en reçoit que l'empreinte argon2. À relire pour le saisir dans
 # AgentHub (connecteur FleetForge) :
-#   ansible -i inventories/<parc>_inventory.yml -m debug -a 'var=ff_api_password' infra1
+#   ansible -i inventories/<parc>_inventory.yml -e @playbooks/group_vars/<parc>.yml -m debug -a 'var=ff_api_password' infra1
+# (le `-e @…` est requis : une commande ad hoc ne charge pas playbooks/group_vars/)
 ff_api_user: ""
 
 # ── Diagnostic lecture seule (`ssh_diagnose`) — FACULTATIF ────────────────

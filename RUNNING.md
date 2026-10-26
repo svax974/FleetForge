@@ -119,8 +119,9 @@ binaire sur la **machine** (cargo, 10 à 20 min la première fois).
 | Code, compilation, Ansible (pipx), unité systemd, mot de passe (empreinte argon2) | machine | `fleetforge-install` |
 | Nom public : CNAME vers le front des proxies | Cloudflare | `fleetforge-install` (tag `dns`), `update-cloudflare-dns.yml` |
 | Ouverture du port applicatif (whitelist, proxies) et retrait des règles périmées | ufw de la machine | `fleetforge-security`, `update-ufw-all.yml` |
-| Cible Prometheus, ouverture du scrape, groupe d'alertes `fleetforge` | machine + supervision | `fleetforge-monitoring`, `update-prometheus-alerts.yml` |
-| Vhost (mode d'accès de l'entrée) | proxies | `update-proxy.yml` — **pas** joué par le déploiement |
+| Cible Prometheus, ouverture du scrape | machine + supervision | `fleetforge-monitoring` |
+| Règles d'alerte (groupe `fleetforge`, à lister dans `prom_alert_groups`) | supervision | play « Règles d'alerte » (`prometheus-alerts-update`, tag `alerts`) |
+| Vhost (mode d'accès de l'entrée), reload nginx | proxies | play « Vhost » (`proxy-update`, `deploy-one-site`, tag `proxy-conf`) |
 | Clé SSH dédiée, mot de passe du vault (si `ff_deploy_secrets`) | machine + poste + parc | `fleetforge-install`, play `authorize` |
 
 #### Prérequis
@@ -160,15 +161,17 @@ binaire sur la **machine** (cargo, 10 à 20 min la première fois).
 cd apps/gui && npm run build
 cd ../../Ansible
 ./play.sh web3c deploy-fleetforge.yml                       # lecture seule : le parc est visible, rien ne se lance
-./play.sh web3c update-proxy.yml --check --diff             # puis sans --check : publie le vhost
-./play.sh web3c update-prometheus-alerts.yml                # groupe `fleetforge` (à lister dans `prom_alert_groups`)
 ```
+
+Un seul passage pose tout : machine, DNS, pare-feu, cible Prometheus, **vhost** sur
+les proxies et **règles d'alerte**. N'ajouter aucun `--limit` : il exclurait les
+proxies et la supervision, donc le vhost et les alertes.
 
 Au premier passage, le mot de passe d'accès (et celui du compte d'automatisation
 s'il est demandé) est tiré, chiffré dans `playbooks/group_vars/<parc>.yml` et la
 machine n'en reçoit que l'empreinte : **committer ce fichier**, sinon un autre
 clone en tirera d'autres et l'accès posé par le premier deviendra invalide. Pour
-le relire : `ansible -i inventories/<parc>_inventory.yml -m debug -a 'var=ff_web_password' infra1`.
+le relire (depuis `Ansible/`) : `ansible -i inventories/<parc>_inventory.yml -e @playbooks/group_vars/<parc>.yml -m debug -a 'var=ff_web_password' infra1` — le `-e @…` est nécessaire : une commande ad hoc ne charge pas `playbooks/group_vars/`, et la variable sort « undefined ».
 
 Le CNAME est publié par le déploiement ; `update-cloudflare-dns.yml` le
 resynchronise avec l'inventaire à la demande.
@@ -222,7 +225,8 @@ sudo -u <service> SSH_AUTH_SOCK=/run/fleetforge/agent.sock ssh-add -l   # ff_dep
 | CNAME seul | `--tags dns` |
 | Clé dédiée sur le parc | `-e ff_deploy_secrets=true --tags authorize` |
 | Whitelist ou proxies modifiés | `update-ufw-all.yml --limit infra1` (retire aussi les règles périmées, sans `ufw reset`) |
-| Vhost, mode d'accès, `access_linked` | `update-proxy.yml` |
+| Vhost, mode d'accès, `access_linked` | `deploy-fleetforge.yml --tags proxy-conf` (reload de ce seul vhost ; `update-proxy.yml` resynchronise tout) |
+| Règles d'alerte | `deploy-fleetforge.yml --tags alerts` (ou `update-prometheus-alerts.yml`) |
 
 #### Retrait
 
@@ -252,7 +256,7 @@ reçoit que l'empreinte (`FLEETFORGE_API_USER` / `FLEETFORGE_API_PASSWORD_HASH`)
 Le relire pour le saisir dans AgentHub :
 
 ```sh
-ansible -i inventories/web3c_inventory.yml -m debug -a 'var=ff_api_password' infra1
+ansible -i inventories/web3c_inventory.yml -e @playbooks/group_vars/web3c.yml -m debug -a 'var=ff_api_password' infra1
 ```
 
 À la main (autre machine) : tirer un mot de passe, en produire l'empreinte par
@@ -264,7 +268,7 @@ printf '%s' "$MOT_DE_PASSE" | fleetforge-web hash-password   # -> $argon2id$…
 
 **Réseau** — le vhost `infra.<domaine>` est en mode privé (vpns, supervision,
 `whitelist`) : la machine d'AgentHub doit être nommée dans `access_linked` de
-l'entrée `infra1`, puis `update-proxy.yml`, en HTTPS. Jamais le port 9750 en direct depuis une autre machine :
+l'entrée `infra1`, puis `deploy-fleetforge.yml --tags proxy-conf`, en HTTPS. Jamais le port 9750 en direct depuis une autre machine :
 l'authentification basique y circulerait en clair.
 
 **Ce que ce compte ne peut pas faire, par construction :**

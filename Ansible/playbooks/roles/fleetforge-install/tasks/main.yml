@@ -52,7 +52,7 @@
 # Placé AVANT la compilation : un jeton Cloudflare absent doit échouer ici et
 # non après vingt minutes de build. Garantit le CNAME dès le premier
 # déploiement sans attendre `update-cloudflare-dns.yml` (même mécanisme
-# qu'agenthub-install). Le vhost, lui, se pose par `update-proxy.yml`.
+# qu'agenthub-install). Le vhost, lui, se pose par le play `proxy-conf` du playbook.
 - name: Fail when the entry declares no public name
   ansible.builtin.assert:
     that:
@@ -439,7 +439,8 @@
       FleetForge écoute sur {{ ansible_host }}:{{ ff_port }} —
       utilisateur « {{ ff_web_user }} ». Le mot de passe se lit dans le vault du
       parc :
-      `ansible -i inventories/<parc>.yml -m debug -a 'var=ff_web_password' {{ inventory_hostname }}`.
+      `ansible -i inventories/<parc>_inventory.yml -e @playbooks/group_vars/{{ parc_name }}.yml -m debug -a 'var=ff_web_password' {{ inventory_hostname }}`
+      (depuis Ansible/ ; sans le `-e @…` la variable sort « undefined »).
       Il n'existe nulle part sur la machine, qui n'en détient que l'empreinte.
       Accès par le proxy : https://infra.{{ domain_name }} (mode privé).
   tags: [config]
@@ -449,9 +450,10 @@
     msg: >-
       Compte d'automatisation « {{ ff_api_user }} » (AgentHub) : API
       d'automatisation seule. Mot de passe dans le vault du parc :
-      `ansible -i inventories/<parc>_inventory.yml -m debug -a 'var=ff_api_password' {{ inventory_hostname }}`,
+      `ansible -i inventories/<parc>_inventory.yml -e @playbooks/group_vars/{{ parc_name }}.yml -m debug -a 'var=ff_api_password' {{ inventory_hostname }}`,
       à saisir dans le connecteur FleetForge d'AgentHub. L'adresse d'AgentHub
       doit être admise par le vhost : la déclarer dans `access_linked` de
-      l'entrée {{ inventory_hostname }} (mode privé), puis `update-proxy.yml`.
+      l'entrée {{ inventory_hostname }} (mode privé), puis
+      `deploy-fleetforge.yml --tags proxy-conf`.
   when: ff_api_user | length > 0
   tags: [config]

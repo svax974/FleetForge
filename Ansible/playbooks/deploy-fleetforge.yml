@@ -34,8 +34,10 @@
 # à COMMITTER, faute de quoi un autre clone tirera d'autres secrets.
 #
 # Le vhost (infra.<domaine>, mode privé : vpns, supervision, whitelist, serveurs
-# liés) appartient au proxy :
-#   ./play.sh web3c update-proxy.yml   /   ./play.sh papanglabs update-proxy.yml
+# liés) et les règles d'alerte sont posés par ce playbook (tags `proxy-conf` et
+# `alerts`) ; `update-proxy.yml` reste la resynchronisation complète des proxies :
+#   ./play.sh web3c deploy-fleetforge.yml --tags proxy-conf   # vhost seul
+#   ./play.sh web3c deploy-fleetforge.yml --tags alerts       # règles d'alerte seules
 # Son nom public est un CNAME vers le front des proxies, garanti par le rôle
 # d'installation (`proxy_hostname` sur l'entrée, tag `dns`) ; le `hostname` de
 # l'entrée (infra-priv.<domaine>) reste l'identité machine.
@@ -75,6 +77,63 @@
   remote_user: "{{ remote_username }}"
   roles:
     - fleetforge-security
+
+# ── Vhost sur les proxies ──────────────────────────────────────────────────
+# Sans lui le nom public ne répond pas (le CNAME pointe sur le front des proxies,
+# qui n'a aucun vhost pour lui) et AgentHub ne peut pas joindre l'application.
+# Pousse SEULEMENT sites-enabled/fleetforge.conf : reload si le fichier a changé,
+# ni restart ni resynchronisation des autres vhosts (même motif que
+# deploy-agenthub.yml). Mode d'accès, serveurs liés : l'entrée dédiée, via
+# `_access.inc`. Un parc dont le dossier nginx ne porte pas ce vhost (le gabarit
+# est rangé dans `unused/`) est simplement ignoré.
+# Pas de `--limit` : il exclurait les proxies, et le vhost ne serait pas posé.
+- name: Vhost FleetForge sur les proxies
+  hosts: proxies
+  remote_user: "{{ remote_username }}"
+  become: true
+  tags: [proxy-conf]
+  tasks:
+    - name: Look for the FleetForge vhost of this parc
+      ansible.builtin.set_fact:
+        ff_vhost_wanted: >-
+          {{ (query('ansible.builtin.fileglob',
+                    playbook_dir ~ '/../parcs/' ~ parc_name ~ '/nginx/sites-enabled/fleetforge.conf') | length > 0)
+             and (groups['infras'] | default([]) | length > 0) }}
+
+    - name: Deploy just the FleetForge vhost
+      ansible.builtin.include_role:
+        name: proxy-update
+        tasks_from: deploy-one-site
+      vars:
+        site: fleetforge.conf
+      when: ff_vhost_wanted | bool
+
+# ── Règles d'alerte ────────────────────────────────────────────────────────
+# `fleetforge_ansible_available` et `fleetforge_inventories` n'alertent que si le
+# groupe `fleetforge` est chargé sur ce parc : une règle jamais chargée est
+# indiscernable d'une règle qui veille. Le rôle charge TOUS les groupes de
+# `prom_alert_groups` (source unique, partagée avec update-prometheus-alerts.yml) ;
+# le play échoue si `fleetforge` n'y figure pas plutôt que de réussir sans alerte.
+# Motif d'hôte en dur : un `hosts:` est résolu avant les group_vars (CLAUDE.md).
+- name: Règles d'alerte FleetForge
+  hosts: prometheus1:monitor
+  remote_user: "{{ remote_username }}"
+  become: true
+  tags: [alerts, monitoring]
+  pre_tasks:
+    - name: Nothing to arm without a FleetForge host
+      ansible.builtin.meta: end_play
+      when: groups['infras'] | default([]) | length == 0
+
+    - name: Fail when the alert group is not enabled for this parc
+      ansible.builtin.assert:
+        that: "'fleetforge' in prom_alert_groups"
+        fail_msg: >-
+          `fleetforge` absent de `prom_alert_groups` (group_vars du parc) : les
+          règles FleetForgeAnsibleUnavailable et FleetForgeFleetEmpty ne seraient
+          PAS chargées, et l'état dégradé de l'application n'alerterait jamais.
+  roles:
+    - prometheus-alerts-update
 
 # ── Autorisation de la clé dédiée sur le parc ──────────────────────────────
 # Ne s'exécute qu'avec `ff_deploy_secrets=true`. C'est ce play qui donne sa
