@@ -135,7 +135,13 @@ fn handle_credentials(
                 let account = form.account_id();
                 let hub = app.hub.clone();
                 let tx = tx.clone();
-                app.status = format!("connexion à {account}…");
+                // Un profil Oracle absent est créé par la connexion : le navigateur
+                // s'ouvre et la commande attend qu'on s'y soit connecté.
+                app.status = if form.kind == fleetforge_core::model::ProviderKind::Oracle {
+                    format!("connexion à {account}… (le navigateur peut s'ouvrir pour créer le profil)")
+                } else {
+                    format!("connexion à {account}…")
+                };
 
                 tokio::spawn(async move {
                     connect_and_list(hub, account, Some(credentials), tx).await;

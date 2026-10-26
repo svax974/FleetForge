@@ -787,6 +787,57 @@ fn oci_profile_key(profile: &str, key: &str) -> Option<String> {
     None
 }
 
+/// Le profil a-t-il une section dans `~/.oci/config` ?
+fn profile_section_exists(config: &str, profile: &str) -> bool {
+    let wanted = if profile.trim().is_empty() { "DEFAULT" } else { profile.trim() };
+    config.lines().any(|line| {
+        line.trim()
+            .strip_prefix('[')
+            .and_then(|l| l.strip_suffix(']'))
+            .is_some_and(|name| name.trim() == wanted)
+    })
+}
+
+fn oci_profile_exists(profile: &str) -> bool {
+    std::fs::read_to_string(dirs_home().join(".oci/config"))
+        .map(|text| profile_section_exists(&text, profile))
+        .unwrap_or(false)
+}
+
+/// Région où créer un profil neuf : celle saisie, sinon celle de `DEFAULT`.
+/// `oci session authenticate` l'exige, et un second compte est presque toujours
+/// dans la même région que le premier.
+fn creation_region(typed: Option<&str>, default_profile: Option<String>) -> Option<String> {
+    typed
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+        .map(String::from)
+        .or(default_profile)
+}
+
+/// Ouvre une session — et, si le profil n'existe pas, le CRÉE : c'est
+/// `oci session authenticate` qui écrit la section dans `~/.oci/config`.
+///
+/// Sur un fil dédié : la commande attend que l'opérateur se connecte dans son
+/// navigateur, ce qui prend le temps qu'il faut. La laisser sur l'exécuteur
+/// asynchrone y bloquerait un fil et figerait l'interface.
+async fn oci_session_login(profile: String, region: String) -> Result<String> {
+    fleetforge_core::logging::info(
+        "oci",
+        format!("ouverture d'une session pour le profil [{profile}] ({region})"),
+    );
+    tokio::task::spawn_blocking(move || {
+        run_text(
+            "oci",
+            &["session", "authenticate", "--region", &region, "--profile-name", &profile],
+            OCI_INSTALL,
+        )
+        .map(|_| "session ouverte".to_string())
+    })
+    .await
+    .map_err(|e| ProviderError::Api(format!("authentification interrompue : {e}")))?
+}
+
 impl OracleProvider {
     pub fn new() -> Self {
         Self::default()
@@ -835,26 +886,7 @@ impl OracleProvider {
             ))
         })?;
 
-        // Sur un fil dédié : la commande attend que l'opérateur se connecte
-        // dans son navigateur, ce qui prend le temps qu'il faut. La laisser sur
-        // l'exécuteur asynchrone y bloquerait un fil et figerait l'interface.
-        tokio::task::spawn_blocking(move || {
-            run_text(
-                "oci",
-                &[
-                    "session",
-                    "authenticate",
-                    "--region",
-                    &region,
-                    "--profile-name",
-                    &profile,
-                ],
-                OCI_INSTALL,
-            )
-            .map(|_| "session ouverte".to_string())
-        })
-        .await
-        .map_err(|e| ProviderError::Api(format!("authentification interrompue : {e}")))?
+        oci_session_login(profile, region).await
     }
 
     /// Arguments communs à tout appel `oci` : le profil demandé et, pour une
@@ -958,7 +990,7 @@ fn oci_tenancy_mismatch(
     Some(ProviderError::Auth(format!(
         "le profil [{profile}] est authentifié sur la tenancy …{} mais ce compte vise …{} : \
          une session ne vaut que pour une tenancy. Donner à ce compte son propre profil \
-         (champ « Profil ») : `oci session authenticate --profile-name <profil> --region <région>`.",
+         (champ « Profil ») : s'il n'existe pas, il est créé et le navigateur s'ouvre.",
         ocid_tail(tenancy),
         ocid_tail(compartment),
     )))
@@ -1029,7 +1061,10 @@ impl Provider for OracleProvider {
             detected: which("oci") && home.join(".oci/config").exists(),
             fields: vec![
                 AuthField::new("OCI_PROFILE", "Profil")
-                    .hint("Une section de ~/.oci/config. Vide = DEFAULT.")
+                    .hint("Une section de ~/.oci/config. Vide = DEFAULT. Un profil qui n'existe pas est CRÉÉ : le navigateur s'ouvre pour se connecter à la tenancy du compte.")
+                    .optional(),
+                AuthField::new("OCI_REGION", "Région (création du profil)")
+                    .hint("eu-paris-1… Utilisée seulement pour créer un profil absent. Vide = région du profil DEFAULT.")
                     .optional(),
                 AuthField::new("OCI_COMPARTMENT", "Compartiment (OCID)")
                     .hint("ocid1.compartment.oc1..… — Console → Identité → Compartiments. Sans lui, seules les instances de la racine de la tenancy seraient listées."),
@@ -1064,6 +1099,29 @@ impl Provider for OracleProvider {
             .get("OCI_PROFILE")
             .map(str::to_string)
             .or_else(|| std::env::var("OCI_PROFILE").ok().filter(|v| !v.is_empty()));
+
+        // Un profil absent n'a rien à quoi se connecter : plutôt que d'échouer
+        // sur « config invalide » et de renvoyer vers un terminal, on le crée.
+        // Même chemin à l'ajout d'un compte et à la modification de son profil.
+        let wanted = self.profile_name().to_string();
+        if !oci_profile_exists(&wanted) {
+            let region = creation_region(
+                credentials.get("OCI_REGION"),
+                oci_profile_key("DEFAULT", "region"),
+            )
+            .ok_or_else(|| {
+                ProviderError::Auth(format!(
+                    "le profil [{wanted}] n'existe pas et sa région est inconnue : renseigner \
+                     « Région » (ex. eu-paris-1) pour que l'application le crée"
+                ))
+            })?;
+            oci_session_login(wanted.clone(), region).await?;
+            if !oci_profile_exists(&wanted) {
+                return Err(ProviderError::Auth(format!(
+                    "le profil [{wanted}] n'a pas été créé : la connexion dans le navigateur n'a pas abouti"
+                )));
+            }
+        }
 
         self.session = oci_profile_uses_session(self.profile.as_deref().unwrap_or("DEFAULT"));
 
@@ -1342,6 +1400,25 @@ mod tests {
         assert!(text.contains("ocid1.compartment.oc1..aaa"), "{text}");
         assert!(text.contains("IAM"), "{text}");
         assert!(!text.contains("ServiceError"), "{text}");
+    }
+
+    #[test]
+    fn a_profile_is_found_by_its_section_only() {
+        let config = "[DEFAULT]\nregion=eu-paris-1\n\n[ extra ]\ntenancy=x\n";
+        assert!(profile_section_exists(config, "DEFAULT"));
+        assert!(profile_section_exists(config, "extra"));
+        assert!(profile_section_exists(config, ""), "vide = DEFAULT");
+        assert!(!profile_section_exists(config, "autre"));
+        // Un nom présent comme VALEUR n'est pas une section.
+        assert!(!profile_section_exists("[DEFAULT]\nprofile=autre\n", "autre"));
+    }
+
+    #[test]
+    fn a_new_profile_takes_the_typed_region_then_the_default_one() {
+        assert_eq!(creation_region(Some(" us-ashburn-1 "), Some("eu-paris-1".into())).as_deref(), Some("us-ashburn-1"));
+        assert_eq!(creation_region(Some(""), Some("eu-paris-1".into())).as_deref(), Some("eu-paris-1"));
+        assert_eq!(creation_region(None, Some("eu-paris-1".into())).as_deref(), Some("eu-paris-1"));
+        assert_eq!(creation_region(None, None), None);
     }
 
     #[test]
