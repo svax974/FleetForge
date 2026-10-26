@@ -12,8 +12,8 @@
 //! l'équivalent clavier du survol dans le GUI.
 
 use crate::app::{
-    ActionMenu, App, CredentialsForm, Overlay, Picker, ProviderFocus, Screen, Scope, Section,
-    SessionMenu,
+    ActionMenu, App, CredentialsForm, Overlay, Picker, ProviderFocus, RenameForm, Screen, Scope,
+    Section, SessionMenu,
 };
 use crate::theme::*;
 use fleetforge_core::model::Health;
@@ -46,6 +46,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Some(Overlay::Picker(picker)) => draw_picker(frame, picker),
         Some(Overlay::Actions(menu)) => draw_actions(frame, menu),
         Some(Overlay::Message(text)) => draw_message(frame, text),
+        Some(Overlay::Rename(form)) => draw_rename(frame, form),
         None => {}
     }
 }
@@ -318,6 +319,7 @@ pub const KEYS: &[(&str, KeyScope)] = &[
     ("c", KeyScope::On(&[Screen::Providers])),
     ("C", KeyScope::On(&[Screen::Providers])),
     ("a", KeyScope::On(&[Screen::Providers])),
+    ("n", KeyScope::On(&[Screen::Providers])),
     ("x", KeyScope::On(&[Screen::Services, Screen::Providers])),
     ("X", KeyScope::On(&[Screen::Services, Screen::Providers])),
     ("s", KeyScope::On(&[Screen::Providers])),
@@ -551,6 +553,7 @@ pub fn screen_hints(
                     add("C", "identifiants");
                     if ctx.account_saved {
                         add("s", "session");
+                        add("n", "renommer");
                     }
                     if ctx.account_connected {
                         add("x", "déconnecter");
@@ -589,6 +592,7 @@ pub fn screen_hints(
                 add("C", "identifiants");
                 if ctx.account_saved {
                     add("s", "session");
+                    add("n", "renommer");
                 }
                 if ctx.account_connected {
                     add("x", "déconnecter");
@@ -1385,7 +1389,7 @@ const HELP: &[(&str, &str)] = &[
     ("↵", "descendre d'un niveau, ou exécuter ce que l'écran propose"),
     ("c x", "connecter / déconnecter un provider ; x retire un service"),
     ("C", "saisir les identifiants du compte désigné"),
-    ("a X", "ajouter / oublier un compte ; X purge un service"),
+    ("a X n", "ajouter / oublier / renommer un compte ; X purge un service"),
     ("s", "commande de session du compte (renouveler un jeton)"),
     ("S A R", "démarrer / arrêter / redémarrer la machine désignée"),
     ("r", "recharger"),
@@ -1444,6 +1448,27 @@ fn draw_session_menu(frame: &mut Frame, menu: &SessionMenu) {
                     )),
             )
             .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn draw_rename(frame: &mut Frame, form: &RenameForm) {
+    let area = centered_rows(frame.area(), 56, 6.min(frame.area().height));
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(vec![
+                Span::styled("  nom ", tone_style(Tone::Info)),
+                Span::styled(form.input.clone(), text_style()),
+                Span::styled("▏", tone_style(Tone::Info)),
+            ]),
+            Line::from(""),
+            Line::from(Span::styled(
+                "  ↵ valider   ⎋ annuler   (minuscules et tirets)",
+                dim_style(),
+            )),
+        ])
+        .block(overlay_block(&format!("Renommer {}", form.account))),
         area,
     );
 }

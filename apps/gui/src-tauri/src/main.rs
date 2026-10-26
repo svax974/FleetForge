@@ -528,6 +528,21 @@ async fn forget_provider(
     hub.forget(&id).await.map_err(|e| e.to_string())
 }
 
+/// Renomme un compte sans le recréer : identifiants et session suivent.
+#[tauri::command]
+async fn rename_provider(
+    hub: State<'_, ProviderHub>,
+    provider: String,
+    account: Option<String>,
+    new_name: String,
+) -> Result<String, String> {
+    let id = account_of(&provider, account)?;
+    hub.rename(&id, &new_name)
+        .await
+        .map(|renamed| renamed.name)
+        .map_err(|e| e.to_string())
+}
+
 /// Sans `account`, les instances de TOUS les comptes connectés de cet
 /// hébergeur : n'en montrer qu'un ferait passer les machines des autres pour
 /// absentes.
@@ -689,6 +704,7 @@ fn main() {
             reconnect_provider,
             disconnect_provider,
             forget_provider,
+            rename_provider,
             reconnect_provider_accounts,
             run_session_action,
             list_instances,

@@ -410,7 +410,9 @@
     "ambiguous": "Ambiguous addresses",
     "ambiguous_hint": "claimed by several accounts — reconciliation picked the first alphabetically, which has no reason to be right",
     "session_done": "Session: {msg}",
-    "session_browser": "A browser will open — complete the sign-in, then come back here."
+    "session_browser": "A browser will open — complete the sign-in, then come back here.",
+    "rename": "Rename account",
+    "rename_confirm": "Confirm the new name"
   },
   "actions": {
     "title": "Actions",

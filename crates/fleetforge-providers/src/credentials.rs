@@ -155,6 +155,26 @@ impl CredentialStore {
         self.index_remove(account)
     }
 
+    /// Renomme un compte : ses identifiants passent sous le nouveau nom, puis
+    /// l'ancien est oublié.
+    ///
+    /// L'ordre compte : écrire d'abord, effacer ensuite. Une coupure entre les
+    /// deux laisse deux comptes identiques — un doublon qu'on supprime — et non
+    /// un compte perdu avec ses secrets.
+    pub fn rename(&self, from: &AccountId, to: &AccountId) -> Result<()> {
+        if from == to {
+            anyhow::bail!("le compte s'appelle déjà « {} »", to.name);
+        }
+        if self.has(to) {
+            anyhow::bail!("un compte « {} » existe déjà chez {}", to.name, to.provider);
+        }
+        let credentials = self
+            .load(from)
+            .ok_or_else(|| anyhow::anyhow!("aucun identifiant enregistré pour {from} : rien à renommer"))?;
+        self.save(to, &credentials)?;
+        self.forget(from)
+    }
+
     /// Identifiants rangés par une version antérieure, sous le seul hébergeur.
     fn load_legacy(&self, provider: ProviderKind) -> Option<Credentials> {
         let key = provider.as_str();
@@ -395,6 +415,52 @@ mod tests {
             method: "oauth2".into(),
             fields,
         }
+    }
+
+    #[test]
+    fn renaming_moves_the_credentials_and_leaves_nothing_behind() {
+        let dir = std::env::temp_dir().join(format!("im-rename-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = store_at(&dir);
+        let old = account(ProviderKind::Contabo, "ancien");
+        let new = account(ProviderKind::Contabo, "Nouveau Nom");
+        store.save(&old, &creds("abc")).unwrap();
+
+        store.rename(&old, &new).unwrap();
+
+        assert_eq!(store.load(&new).unwrap().fields, creds("abc").fields);
+        assert!(!store.has(&old), "l'ancien nom subsiste");
+        assert!(store.load(&old).is_none(), "les secrets restent sous l'ancien nom");
+        assert_eq!(store.accounts(ProviderKind::Contabo), vec![new]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn renaming_onto_an_existing_account_changes_nothing() {
+        let dir = std::env::temp_dir().join(format!("im-rename-clash-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = store_at(&dir);
+        let a = account(ProviderKind::Contabo, "a");
+        let b = account(ProviderKind::Contabo, "b");
+        store.save(&a, &creds("secret-a")).unwrap();
+        store.save(&b, &creds("secret-b")).unwrap();
+
+        assert!(store.rename(&a, &b).is_err());
+        assert_eq!(store.load(&a).unwrap().fields, creds("secret-a").fields);
+        assert_eq!(store.load(&b).unwrap().fields, creds("secret-b").fields, "écrasé");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn renaming_an_account_without_credentials_or_to_itself_is_refused() {
+        let dir = std::env::temp_dir().join(format!("im-rename-none-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = store_at(&dir);
+        let a = account(ProviderKind::Contabo, "a");
+        assert!(store.rename(&a, &account(ProviderKind::Contabo, "b")).is_err());
+        store.save(&a, &creds("x")).unwrap();
+        assert!(store.rename(&a, &a).is_err());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

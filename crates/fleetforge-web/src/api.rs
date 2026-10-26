@@ -364,6 +364,11 @@ pub async fn dispatch(
             let account = account_id(&p)?;
             ok(hub.forget(&account).await?)
         }
+        "rename_provider" => {
+            let account = account_id(&p)?;
+            let renamed = hub.rename(&account, &p.get::<String>("newName")?).await?;
+            ok(renamed.name)
+        }
         "list_instances" => {
             let kind = provider_kind(&p.get::<String>("provider")?)?;
             // Sans `account`, les instances de TOUS les comptes connectés de
@@ -548,6 +553,7 @@ pub const COMMANDS: &[&str] = &[
     "reconnect_provider",
     "disconnect_provider",
     "forget_provider",
+    "rename_provider",
     "reconnect_provider_accounts",
     "run_session_action",
     "list_instances",

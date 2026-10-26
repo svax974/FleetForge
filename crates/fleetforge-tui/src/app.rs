@@ -172,6 +172,17 @@ pub enum Overlay {
     Actions(Box<ActionMenu>),
     /// Erreur trop longue pour la barre d'état : lue en entier, puis fermée.
     Message(String),
+    /// Nouveau nom d'un compte d'hébergeur.
+    Rename(RenameForm),
+}
+
+/// Saisie du nouveau nom d'un compte. Le nom est normalisé (minuscules,
+/// tirets) par le cœur au moment d'en faire une clé, pas à la frappe :
+/// corriger une faute deviendrait sinon impossible.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenameForm {
+    pub account: AccountId,
+    pub input: String,
 }
 
 /// Au-delà, une erreur ne tient pas sur la ligne d'état — qui la tronque — et

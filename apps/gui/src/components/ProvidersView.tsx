@@ -15,11 +15,11 @@
 
 import { useState, useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Cloud, RefreshCw, Power, RotateCw, Square, Link2, Unlink, Settings, Plus, Trash2, Globe, X } from 'lucide-react'
+import { Cloud, RefreshCw, Power, RotateCw, Square, Link2, Unlink, Settings, Plus, Trash2, Globe, X, Pencil, Check } from 'lucide-react'
 import {
   listProviders, reconnectProvider, reconnectProviderAccounts, disconnectProvider,
   forgetProvider, connectProvider, listInstances, powerInstance, reconcileFleet,
-  runSessionAction,
+  runSessionAction, renameProvider,
 } from '../lib/api'
 import {
   ProviderStatus, AccountStatus, SessionAction, Instance, Reconciliation, PowerState,
@@ -82,7 +82,8 @@ function CredentialsForm({ provider, methods, initial, account, onDone, onCancel
 
   /** Un compte existant ne se renomme pas ici : changer le nom n'aurait pas
    *  renommé le compte, il en aurait créé un second en laissant le premier
-   *  derrière, avec ses identifiants. */
+   *  derrière, avec ses identifiants. Le renommage a son propre bouton (crayon),
+   *  sur la ligne du compte. */
   const locked = account !== null
 
   // Un champ obligatoire vide part quand même chez l'hébergeur, qui répond par
@@ -231,6 +232,8 @@ export default function ProvidersView({ selectedInventory }: ProvidersViewProps)
   const [authMethod, setAuthMethod] = useState<AuthMethod | null>(null)
   /** Compte visé par le formulaire ouvert. `null` = création. */
   const [formAccount, setFormAccount] = useState<string | null>(null)
+  /** Compte en cours de renommage, et le nom saisi. */
+  const [renaming, setRenaming] = useState<{ from: string; value: string } | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
@@ -316,6 +319,25 @@ export default function ProvidersView({ selectedInventory }: ProvidersViewProps)
       if (action === 'disconnect') await disconnectProvider(current.kind, name)
       if (action === 'forget') await forgetProvider(current.kind, name)
       await load()
+      await loadInstances(current.kind)
+    } catch (err: unknown) {
+      setError(String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /** Renomme un compte : identifiants et session le suivent, rien n'est recréé
+   *  (changer le nom dans le formulaire de configuration en créerait un second). */
+  const handleRename = async (): Promise<void> => {
+    if (!current || !renaming) return
+    setBusy(true)
+    setError(null)
+    try {
+      await renameProvider(current.kind, renaming.from, renaming.value)
+      setRenaming(null)
+      await load()
+      // Les instances déjà listées portent l'ancien nom de compte.
       await loadInstances(current.kind)
     } catch (err: unknown) {
       setError(String(err))
@@ -506,9 +528,23 @@ export default function ProvidersView({ selectedInventory }: ProvidersViewProps)
                             : account.has_saved_credentials ? 'bg-amber-400' : 'bg-gray-700'
                         }`}
                       />
-                      <span className="text-sm text-gray-200 font-mono w-32 truncate">
-                        {account.name}
-                      </span>
+                      {renaming?.from === account.name ? (
+                        <input
+                          autoFocus
+                          value={renaming.value}
+                          onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                            setRenaming({ from: account.name, value: e.target.value })}
+                          onKeyDown={(e: React.KeyboardEvent) => {
+                            if (e.key === 'Enter') handleRename()
+                            if (e.key === 'Escape') setRenaming(null)
+                          }}
+                          className="w-32 px-2 py-0.5 bg-gray-950 border border-gray-600 rounded text-sm text-gray-200 font-mono"
+                        />
+                      ) : (
+                        <span className="text-sm text-gray-200 font-mono w-32 truncate">
+                          {account.name}
+                        </span>
+                      )}
                       <span className="text-xs text-gray-500 flex-1">
                         {account.connected
                           ? `${instances.filter((i) => i.reference.account === account.name).length} ${t('providers.instances').toLowerCase()}`
@@ -551,6 +587,36 @@ export default function ProvidersView({ selectedInventory }: ProvidersViewProps)
                           >
                             <Unlink size={13} />
                           </button>
+                        )}
+                        {account.has_saved_credentials && (
+                          renaming?.from === account.name ? (
+                            <>
+                              <button
+                                onClick={handleRename}
+                                disabled={busy}
+                                title={t('providers.rename_confirm')}
+                                className="p-1.5 rounded border border-gray-700 text-gray-400 hover:text-green-300 disabled:opacity-25"
+                              >
+                                <Check size={13} />
+                              </button>
+                              <button
+                                onClick={() => setRenaming(null)}
+                                title={t('common.cancel')}
+                                className="p-1.5 rounded border border-gray-700 text-gray-400 hover:text-gray-200"
+                              >
+                                <X size={13} />
+                              </button>
+                            </>
+                          ) : (
+                            <button
+                              onClick={() => setRenaming({ from: account.name, value: account.name })}
+                              disabled={busy}
+                              title={t('providers.rename')}
+                              className="p-1.5 rounded border border-gray-700 text-gray-400 hover:text-gray-200 disabled:opacity-25"
+                            >
+                              <Pencil size={13} />
+                            </button>
+                          )
                         )}
                         <button
                           onClick={() => openForm(current, account.name)}

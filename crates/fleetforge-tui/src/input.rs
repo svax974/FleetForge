@@ -13,7 +13,8 @@
 
 use crate::app::{
     ActionMenu, ActionTarget, App, Confirm, ConfirmedAction, CredentialsForm, MenuEntry, Msg,
-    Overlay, PickItem, PickPurpose, Picker, ProviderFocus, Screen, Section, SessionMenu,
+    Overlay, PickItem, PickPurpose, Picker, ProviderFocus, RenameForm, Screen, Section,
+    SessionMenu,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use fleetforge_core::actions::{actions_for, ActionContext, ActionId, Subject};
@@ -43,6 +44,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent, tx: &UnboundedSender<Msg>) {
         Some(Overlay::Credentials(form)) => handle_credentials(app, key, *form, tx),
         Some(Overlay::SessionMenu(menu)) => handle_session_menu(app, key, menu, tx),
         Some(Overlay::Picker(picker)) => handle_picker(app, key, *picker, tx),
+        Some(Overlay::Rename(form)) => handle_rename(app, key, form, tx),
         Some(Overlay::Actions(menu)) => handle_actions(app, key, *menu),
         // Fermée par une touche voulue, pas par n'importe laquelle : une
         // frappe en cours quand l'erreur arrive la ferait disparaître sans
@@ -301,6 +303,7 @@ fn handle_normal(app: &mut App, key: KeyEvent, tx: &UnboundedSender<Msg>) {
         KeyCode::Char('c') => connect_provider(app, tx),
         KeyCode::Char('C') => configure_provider(app),
         KeyCode::Char('a') => add_account(app),
+        KeyCode::Char('n') => request_rename(app),
         // Sur Services, `x`/`X` retirent / purgent le service ; sur Providers,
         // ils ferment la session / effacent les identifiants. Même gravité
         // croissante, même confirmation.
@@ -1055,6 +1058,69 @@ fn configure_provider(app: &mut App) {
         .saved_credentials(&fleetforge_providers::AccountId::new(info.kind, &name));
     let form = CredentialsForm::new(&info, &name, saved.as_ref());
     app.overlay = Some(Overlay::Credentials(Box::new(form)));
+}
+
+/// `n` : renommer le compte désigné. Ses identifiants et sa session le suivent ;
+/// rien n'est recréé, contrairement à un nom changé dans le formulaire.
+fn request_rename(app: &mut App) {
+    if app.screen != Screen::Providers {
+        return;
+    }
+    let Some(account) = app.selected_account_id() else {
+        app.status = "aucun compte désigné — ↵ pour descendre dans la liste".into();
+        return;
+    };
+    if !app.hub.has_credentials(&account) {
+        app.status = format!("{account} : aucun identifiant enregistré, rien à renommer");
+        return;
+    }
+    app.overlay = Some(Overlay::Rename(RenameForm {
+        input: account.name.clone(),
+        account,
+    }));
+}
+
+fn handle_rename(app: &mut App, key: KeyEvent, mut form: RenameForm, tx: &UnboundedSender<Msg>) {
+    match key.code {
+        KeyCode::Esc => {
+            app.overlay = None;
+            return;
+        }
+        KeyCode::Backspace => {
+            form.input.pop();
+        }
+        KeyCode::Char(c) => form.input.push(c),
+        KeyCode::Enter => {
+            let hub = app.hub.clone();
+            let tx = tx.clone();
+            let account = form.account.clone();
+            let wanted = form.input.clone();
+            let kind = account.provider;
+            app.status = format!("renommage de {account}…");
+            // La liste des comptes va changer : le focus désignait l'ancien nom.
+            app.reset_focus();
+            app.overlay = None;
+
+            tokio::spawn(async move {
+                match hub.rename(&account, &wanted).await {
+                    Ok(renamed) => {
+                        let _ = tx.send(Msg::Status(format!("{account} renommé en {}", renamed.name)));
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Msg::Error(e.to_string()));
+                    }
+                }
+                let _ = tx.send(Msg::ProvidersLoaded(hub.statuses().await));
+                // Les instances déjà listées portent l'ancien nom de compte.
+                let (instances, _) = hub.list_instances_everywhere(kind).await;
+                let _ = tx.send(Msg::InstancesLoaded(kind, instances));
+                let _ = tx.send(Msg::ReloadControls);
+            });
+            return;
+        }
+        _ => {}
+    }
+    app.overlay = Some(Overlay::Rename(form));
 }
 
 /// Ouvre le formulaire pour un compte NEUF : le nom est à saisir.

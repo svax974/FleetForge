@@ -215,6 +215,13 @@ export const forgetProvider = async (
   account: string,
 ): Promise<void> => call('forget_provider', { provider, account })
 
+/** Renomme un compte : identifiants et session suivent, rien n'est recréé. */
+export const renameProvider = async (
+  provider: ServerProvider,
+  account: string,
+  newName: string,
+): Promise<string> => call('rename_provider', { provider, account, newName })
+
 /** Sans `account`, les instances de TOUS les comptes connectés : n'en montrer
  *  qu'un ferait passer les machines des autres pour absentes. */
 export const listInstances = async (

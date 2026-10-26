@@ -254,6 +254,29 @@ impl ProviderHub {
         self.store.forget(account)
     }
 
+    /// Renomme un compte, sa connexion ouverte comprise.
+    ///
+    /// Le nom est l'identifiant du compte (clé du trousseau, table des
+    /// connexions, rapprochement des instances) : le changer dans un formulaire
+    /// en créait un second. Ici les identifiants sont déplacés, pas copiés, et
+    /// la session déjà ouverte suit le compte sans se rouvrir.
+    ///
+    /// Les `InstanceRef` déjà listés portent l'ancien nom : à relister.
+    pub async fn rename(&self, from: &AccountId, new_name: &str) -> anyhow::Result<AccountId> {
+        let to = AccountId::new(from.provider, new_name);
+        if to.name.is_empty() {
+            anyhow::bail!("le nouveau nom est vide");
+        }
+        self.store.rename(from, &to)?;
+
+        let mut live = self.providers.lock().await;
+        if let Some(provider) = live.remove(from) {
+            live.insert(to.clone(), provider);
+        }
+        fleetforge_core::logging::info("providers", format!("{from} renommé en {to}"));
+        Ok(to)
+    }
+
     pub async fn is_connected(&self, account: &AccountId) -> bool {
         self.providers
             .lock()

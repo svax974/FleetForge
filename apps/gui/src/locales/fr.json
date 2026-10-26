@@ -412,7 +412,9 @@
     "ambiguous": "Adresses ambiguës",
     "ambiguous_hint": "revendiquées par plusieurs comptes — le rapprochement a tranché par ordre alphabétique, ce qui n'a aucune raison d'être juste",
     "session_done": "Session : {msg}",
-    "session_browser": "Un navigateur va s'ouvrir — terminez la connexion, puis revenez ici."
+    "session_browser": "Un navigateur va s'ouvrir — terminez la connexion, puis revenez ici.",
+    "rename": "Renommer le compte",
+    "rename_confirm": "Valider le nouveau nom"
   },
   "actions": {
     "title": "Actions",
