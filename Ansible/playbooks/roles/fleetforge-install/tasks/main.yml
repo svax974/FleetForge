@@ -240,15 +240,38 @@
   when: ff_install_ansible | bool
   tags: [ansible]
 
+# La commande `pipx` et non le module `community.general.pipx` : il exige pipx
+# >= 1.7.0 alors que le paquet de la distribution est en 1.4.3 (« The pipx tool
+# must be at least at version 1.7.0 »). `creates:` donne l'idempotence — pipx ne
+# met pas à jour de lui-même, la mise à jour d'ansible reste un acte volontaire
+# (`pipx upgrade ansible` sous le compte de service).
 - name: Install ansible for the application user
-  community.general.pipx:
-    name: ansible
-    state: present
+  ansible.builtin.command:
+    cmd: pipx install ansible
+    creates: "/home/{{ ff_user }}/.local/bin/ansible-playbook"
   become: true
   become_user: "{{ ff_user }}"
   environment:
     PIPX_HOME: "/home/{{ ff_user }}/.local/pipx"
     PIPX_BIN_DIR: "/home/{{ ff_user }}/.local/bin"
+  when: ff_install_ansible | bool
+  tags: [ansible]
+
+# `fleetforge_ansible_available` le dirait aussi, mais seulement une fois le
+# service démarré : autant constater ici ce que pipx a réellement posé.
+- name: Check the ansible the application will run
+  ansible.builtin.command:
+    cmd: "/home/{{ ff_user }}/.local/bin/ansible-playbook --version"
+  become: true
+  become_user: "{{ ff_user }}"
+  register: ff_ansible_version
+  changed_when: false
+  when: ff_install_ansible | bool
+  tags: [ansible]
+
+- name: Report the ansible version
+  ansible.builtin.debug:
+    msg: "{{ ff_ansible_version.stdout_lines | first }}"
   when: ff_install_ansible | bool
   tags: [ansible]
 
