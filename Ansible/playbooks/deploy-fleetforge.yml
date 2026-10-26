@@ -103,7 +103,7 @@
   tasks:
     - name: Skip unless the driving secrets were requested
       ansible.builtin.meta: end_play
-      when: not (ff_deploy_secrets | default(false))
+      when: not (ff_deploy_secrets | default(false) | bool)
 
     - name: Authorize the parc keys for srvc, the dedicated one included
       ansible.builtin.include_role:

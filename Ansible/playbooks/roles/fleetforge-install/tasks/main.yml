@@ -222,7 +222,7 @@
     state: present
     update_cache: true
   become: true
-  when: ff_install_ansible
+  when: ff_install_ansible | bool
   tags: [ansible]
 
 - name: Install ansible for the application user
@@ -234,7 +234,7 @@
   environment:
     PIPX_HOME: "/home/{{ ff_user }}/.local/pipx"
     PIPX_BIN_DIR: "/home/{{ ff_user }}/.local/bin"
-  when: ff_install_ansible
+  when: ff_install_ansible | bool
   tags: [ansible]
 
 # ── Authentification du service ────────────────────────────────────────────
@@ -280,7 +280,7 @@
 # ── Secrets de pilotage ────────────────────────────────────────────────────
 - name: Set up the dedicated key and its agent
   ansible.builtin.include_tasks: agent.yml
-  when: ff_deploy_secrets
+  when: ff_deploy_secrets | bool
   tags: [secrets]
 
 - name: Create the vault password directory
@@ -291,7 +291,7 @@
     group: "{{ ff_user }}"
     mode: '0700'
   become: true
-  when: ff_deploy_secrets
+  when: ff_deploy_secrets | bool
   tags: [secrets]
 
 # Sans lui, AUCUN playbook ne s'exécute : `ansible_become_hash` est chiffré
@@ -304,7 +304,7 @@
     group: "{{ ff_user }}"
     mode: '0600'
   become: true
-  when: ff_deploy_secrets
+  when: ff_deploy_secrets | bool
   tags: [secrets]
 
 - name: Warn when the application is deployed without its driving secrets
@@ -315,7 +315,7 @@
       playbook échouera — ni clé SSH ni mot de passe de vault sur cette
       machine. Pour l'activer en connaissance de cause :
       `./play.sh web3c deploy-fleetforge.yml -e ff_deploy_secrets=true`.
-  when: not ff_deploy_secrets
+  when: not (ff_deploy_secrets | bool)
   tags: [secrets]
 
 # ── Service ────────────────────────────────────────────────────────────────
