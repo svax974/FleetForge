@@ -5,7 +5,8 @@
  * SPDX-License-Identifier: MIT — see LICENSE
  */
 
-//! API d'automatisation (AgentHub), de bout en bout.
+//! API d'automatisation (AgentHub), de bout en bout — par REST
+//! (`POST /api/<commande>`) et par le serveur MCP (`/mcp`).
 //!
 //! Le VRAI binaire `fleetforge-web` est lancé contre un parc factice : un
 //! inventaire, des playbooks vides, un `ansible-playbook` et un `ssh` de
@@ -546,6 +547,214 @@ async fn the_automation_api_end_to_end() {
     assert_eq!(status, StatusCode::OK, "{run}");
     assert_eq!((run["status"].clone(), run["run_id"].clone()), (json!("success"), json!("gui-1")));
     assert!(run["output"].as_str().unwrap().contains("hunter2"), "l'opérateur voit la sortie brute");
+}
+
+/// Version du protocole MCP annoncée par les appels après `initialize`.
+const MCP_VERSION: &str = "2025-11-25";
+
+impl Api<'_> {
+    /// Message JSON-RPC sur `/mcp` : (statut HTTP, corps JSON ou `Null`).
+    async fn mcp_raw(
+        &self,
+        who: Option<(&str, &str)>,
+        headers: &[(&str, &str)],
+        body: Value,
+    ) -> (StatusCode, Value) {
+        let mut request = self
+            .http
+            .post(format!("{}/mcp", self.server.base))
+            .header("Accept", "application/json, text/event-stream")
+            .json(&body);
+        if let Some((user, password)) = who {
+            request = request.basic_auth(user, Some(password));
+        }
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        let r = request.send().await.unwrap();
+        let status = r.status();
+        let text = r.text().await.unwrap();
+        (status, serde_json::from_str(&text).unwrap_or(Value::Null))
+    }
+
+    async fn rpc(&self, who: (&str, &str), method: &str, params: Value) -> Value {
+        let (status, body) = self
+            .mcp_raw(
+                Some(who),
+                &[("MCP-Protocol-Version", MCP_VERSION)],
+                json!({ "jsonrpc": "2.0", "id": 7, "method": method, "params": params }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{method} → {body}");
+        assert_eq!(body["id"], 7, "{body}");
+        body
+    }
+
+    /// `tools/call` : (erreur d'outil ?, texte de la réponse lu en JSON).
+    async fn tool(&self, who: (&str, &str), name: &str, arguments: Value) -> (bool, Value) {
+        let body = self.rpc(who, "tools/call", json!({ "name": name, "arguments": arguments })).await;
+        let result = &body["result"];
+        assert!(result.is_object(), "{name} → {body}");
+        let text = result["content"][0]["text"].as_str().unwrap_or_else(|| panic!("{name} → {body}"));
+        (result["isError"] == json!(true), serde_json::from_str(text).unwrap())
+    }
+
+    /// Attend la fin d'un run par l'outil `run_status`.
+    async fn wait_run_mcp(&self, who: (&str, &str), run_id: &str) -> Value {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let (failed, status) = self.tool(who, "run_status", json!({ "run_id": run_id })).await;
+            assert!(!failed, "{status}");
+            if status["state"] != "running" {
+                return status;
+            }
+            assert!(Instant::now() < deadline, "run {run_id} interminable");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_mcp_server_end_to_end() {
+    let (am_port, _) = fake_alertmanager().await;
+    let server = start(am_port).await;
+    let api = Api { http: Client::new(), server: &server };
+
+    // ── Authentification : la même que l'API ──────────────────────────────
+    let ping = json!({ "jsonrpc": "2.0", "id": 1, "method": "ping" });
+    let (status, _) = api.mcp_raw(None, &[], ping.clone()).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _) = api.mcp_raw(Some((AGENTHUB.0, "mauvais")), &[], ping).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // ── Cycle de vie : initialize, initialized, ping ──────────────────────
+    let initialize = |version: &str| {
+        json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {
+                "protocolVersion": version, "capabilities": {},
+                "clientInfo": { "name": "test", "version": "1.0" }
+            }
+        })
+    };
+    let (status, init) = api.mcp_raw(Some(AGENTHUB), &[], initialize("2025-06-18")).await;
+    assert_eq!(status, StatusCode::OK, "{init}");
+    let result = &init["result"];
+    assert_eq!(result["protocolVersion"], "2025-06-18", "version du client retenue : {init}");
+    assert_eq!(result["serverInfo"]["name"], "fleetforge");
+    assert!(result["capabilities"]["tools"].is_object(), "{init}");
+    assert!(result["instructions"].as_str().unwrap().contains("check_required"));
+    // Version inconnue : repli sur la plus récente qui connaît `initialize`.
+    let (_, init) = api.mcp_raw(Some(AGENTHUB), &[], initialize("2099-01-01")).await;
+    assert_eq!(init["result"]["protocolVersion"], "2025-11-25", "{init}");
+
+    let (status, _) = api
+        .mcp_raw(
+            Some(AGENTHUB),
+            &[("MCP-Protocol-Version", MCP_VERSION)],
+            json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(api.rpc(AGENTHUB, "ping", json!({})).await["result"], json!({}));
+
+    // ── tools/list : les commandes d'automatisation, une par une ─────────
+    let listed = api.rpc(AGENTHUB, "tools/list", json!({})).await;
+    let names: Vec<&str> = listed["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        ["list_hosts", "list_playbooks", "alertmanager_alerts", "query_prometheus", "ssh_diagnose", "run_ansible_playbook", "run_status"]
+    );
+    for tool in listed["result"]["tools"].as_array().unwrap() {
+        assert_eq!(tool["inputSchema"]["type"], "object", "{tool}");
+    }
+
+    // ── Mêmes réponses que l'API REST ─────────────────────────────────────
+    let (failed, hosts) = api.tool(AGENTHUB, "list_hosts", json!({ "parc": "web3c" })).await;
+    assert!(!failed, "{hosts}");
+    assert_eq!(hosts, api.agent("list_hosts", json!({ "parc": "web3c" })).await.1);
+    let (failed, alerts) = api.tool(AGENTHUB, "alertmanager_alerts", json!({ "parc": "web3c" })).await;
+    assert!(!failed && alerts[0]["labels"]["alertname"] == "TargetDown", "{alerts}");
+
+    // ── Refus = erreurs d'outil, avec le code de l'API ────────────────────
+    for (name, arguments, expected) in [
+        ("list_hosts", json!({ "parc": "papanglabs" }), "unknown_parc"),
+        ("list_hosts", json!({}), "invalid_argument"),
+        ("ssh_diagnose", json!({ "host": "proxy1", "verb": "rm", "args": ["-rf", "/"] }), "invalid_argument"),
+        ("ssh_diagnose", json!({ "host": "ghost", "verb": "system" }), "unknown_host"),
+        ("query_prometheus", json!({ "parc": "web3c", "query": "up" }), "not_configured"),
+        ("run_status", json!({ "run_id": "nope" }), "unknown_run"),
+        ("run_ansible_playbook", json!({ "parc": "web3c", "playbook": "deploy-demo.yml" }), "check_required"),
+    ] {
+        let (failed, error) = api.tool(AGENTHUB, name, arguments.clone()).await;
+        assert!(failed, "{name} {arguments} → {error}");
+        assert_eq!(error["code"], expected, "{name} {arguments} → {error}");
+        assert!(error["error"].as_str().is_some_and(|m| !m.is_empty()), "{error}");
+    }
+    // Le compte opérateur n'ouvre pas la forme permissive du frontal par MCP.
+    let (failed, error) = api.tool(OPERATOR, "query_prometheus", json!({ "query": "up" })).await;
+    assert!(failed && error["code"] == "invalid_argument", "{error}");
+    let (failed, error) = api
+        .tool(OPERATOR, "run_ansible_playbook", json!({ "parc": "web3c", "playbook": "deploy-demo.yml" }))
+        .await;
+    assert!(failed && error["code"] == "check_required", "{error}");
+
+    // Outil inconnu : erreur de protocole (-32602), pas d'outil.
+    let unknown = api.rpc(AGENTHUB, "tools/call", json!({ "name": "rm_rf", "arguments": {} })).await;
+    assert_eq!(unknown["error"]["code"], -32602, "{unknown}");
+
+    // ── --check, détaché par défaut, puis run réel ────────────────────────
+    let launch = json!({ "parc": "web3c", "playbook": "deploy-demo.yml", "limit": ["proxy1"], "check": true });
+    let (failed, started) = api.tool(AGENTHUB, "run_ansible_playbook", launch).await;
+    assert!(!failed, "{started}");
+    assert_eq!((started["state"].clone(), started["check"].clone()), (json!("running"), json!(true)));
+    let done = api.wait_run_mcp(AGENTHUB, started["run_id"].as_str().unwrap()).await;
+    assert_eq!(done["state"], "success", "{done}");
+    let tail = done["output_tail"].as_str().unwrap();
+    assert!(tail.contains("smtp_auth_password: [REDACTED]") && !tail.contains("hunter2"), "{tail}");
+
+    let (failed, real) = api
+        .tool(AGENTHUB, "run_ansible_playbook", json!({ "parc": "web3c", "playbook": "deploy-demo.yml", "limit": ["proxy1"] }))
+        .await;
+    assert!(!failed, "le check fait par MCP autorise le run réel : {real}");
+    assert_eq!(api.wait_run_mcp(AGENTHUB, real["run_id"].as_str().unwrap()).await["state"], "success");
+
+    // ── Protocole 2026-07-28 : sans `initialize`, métadonnées par requête ─
+    let meta = json!({
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientInfo": { "name": "test", "version": "1.0" },
+        "io.modelcontextprotocol/clientCapabilities": {}
+    });
+    let (status, discovered) = api
+        .mcp_raw(
+            Some(AGENTHUB),
+            &[("MCP-Protocol-Version", "2026-07-28"), ("Mcp-Method", "server/discover")],
+            json!({ "jsonrpc": "2.0", "id": 2, "method": "server/discover", "params": { "_meta": meta } }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{discovered}");
+    let versions = discovered["result"]["supportedVersions"].as_array().unwrap();
+    for version in ["2025-06-18", "2025-11-25", "2026-07-28"] {
+        assert!(versions.contains(&json!(version)), "{discovered}");
+    }
+    let (status, called) = api
+        .mcp_raw(
+            Some(AGENTHUB),
+            &[("MCP-Protocol-Version", "2026-07-28"), ("Mcp-Method", "tools/call"), ("Mcp-Name", "list_playbooks")],
+            json!({
+                "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                "params": { "name": "list_playbooks", "arguments": {}, "_meta": meta }
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{called}");
+    assert_eq!(called["result"]["isError"], json!(false), "{called}");
+    assert!(called["result"]["content"][0]["text"].as_str().unwrap().contains("deploy-demo.yml"));
 }
 
 #[test]

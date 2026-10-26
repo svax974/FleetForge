@@ -17,6 +17,7 @@ mod auth;
 mod automation;
 mod config;
 mod events;
+mod mcp;
 mod metrics;
 mod state;
 mod stream;
@@ -117,10 +118,14 @@ async fn main() -> Result<()> {
         );
     }
     let statics = ServeDir::new(&config.static_dir).fallback(ServeFile::new(&index));
+    let mcp = mcp::service(state.clone(), !config.accounts.is_empty());
 
     let app = Router::new()
         .route("/api/{command}", post(api::dispatch))
         .route("/api/events/{run_id}", get(stream::sse))
+        // Serveur MCP : les commandes d'automatisation en outils, derrière la
+        // même authentification que le reste (`auth::middleware`).
+        .nest_service("/mcp", mcp)
         .route("/metrics", get(metrics::handler))
         .route("/healthz", get(|| async { "ok" }))
         .fallback_service(statics)

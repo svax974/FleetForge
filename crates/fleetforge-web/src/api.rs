@@ -42,6 +42,16 @@ pub struct ApiError {
 }
 
 impl ApiError {
+    /// Code stable de l'erreur (`invalid_argument`, `forbidden`…) — celui que
+    /// le serveur MCP reporte dans ses erreurs d'outil.
+    pub fn code(&self) -> &'static str {
+        self.code
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
     /// Refus métier non qualifié. 400 et non 500 : la quasi-totalité de ces
     /// erreurs sont des refus (rôle sans hôte, inventaire absent, hébergeur
     /// inconnu), pas des pannes du serveur.
@@ -49,7 +59,7 @@ impl ApiError {
         Self { status: StatusCode::BAD_REQUEST, code: "failed", message }
     }
 
-    fn invalid(message: String) -> Self {
+    pub(crate) fn invalid(message: String) -> Self {
         Self::from_fault(&Fault::invalid(message))
     }
 
@@ -111,6 +121,11 @@ pub type ApiResult = Result<Json<Value>, ApiError>;
 pub struct Params(Value);
 
 impl Params {
+    /// Arguments reçus par une autre voie que le corps HTTP (outil MCP).
+    pub fn new(value: Value) -> Self {
+        Self(value)
+    }
+
     pub fn get<T: DeserializeOwned>(&self, key: &str) -> Result<T, ApiError> {
         self.opt(key)?
             .ok_or_else(|| ApiError::invalid(format!("argument manquant : {key}")))
@@ -284,7 +299,7 @@ pub async fn dispatch(
 
         // === Supervision ===
         // Avec `parc` : supervision de ce parc (forme de l'automatisation).
-        "query_prometheus" => automation::query_prometheus(&state, role, &p).await,
+        "query_prometheus" => automation::serve(&state, role, &command, &p).await,
         "get_probes" => {
             let scope = match p.opt::<String>("scope")?.unwrap_or_default().as_str() {
                 "system" => ProbeScope::System,
@@ -316,7 +331,7 @@ pub async fn dispatch(
         }
         // `check`, `diff`, `detach` ; validation stricte et `--check` exigé
         // pour le compte d'automatisation (voir `automation.rs`).
-        "run_ansible_playbook" => automation::run_playbook(&state, role, &p).await,
+        "run_ansible_playbook" => automation::serve(&state, role, &command, &p).await,
         "get_active_runs" => ok(core.runs().active()),
         "get_run_handle" => ok(core.runs().get(&p.get::<String>("runId")?)),
         "clear_finished_runs" => ok(core.runs().clear_finished()),
@@ -449,11 +464,14 @@ pub async fn dispatch(
         }
 
         // === API d'automatisation (AgentHub) — web seulement ===
-        "list_hosts" => automation::list_hosts(&state, &p).await,
-        "list_playbooks" => automation::list_playbooks(&state),
-        "alertmanager_alerts" => automation::alertmanager_alerts(&state, &p).await,
-        "ssh_diagnose" => automation::ssh_diagnose(&state, role, &p).await,
-        "run_status" => automation::run_status(&state, role, &p),
+        // Servies par `automation::serve`, que le serveur MCP appelle aussi :
+        // validation, garde-fous et caviardage sont donc les mêmes par les
+        // deux voies.
+        "list_hosts" => automation::serve(&state, role, &command, &p).await,
+        "list_playbooks" => automation::serve(&state, role, &command, &p).await,
+        "alertmanager_alerts" => automation::serve(&state, role, &command, &p).await,
+        "ssh_diagnose" => automation::serve(&state, role, &command, &p).await,
+        "run_status" => automation::serve(&state, role, &command, &p).await,
 
         other => Err(ApiError::invalid(format!("commande inconnue : {other}"))),
     }

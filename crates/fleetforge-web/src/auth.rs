@@ -54,9 +54,18 @@ fn is_public(path: &str) -> bool {
     path == "/metrics" || path == "/healthz"
 }
 
+/// Le serveur MCP. Ses outils sont les commandes de la liste : le tri se fait
+/// outil par outil, dans `mcp.rs`, pas à l'entrée.
+pub fn is_mcp(path: &str) -> bool {
+    path == "/mcp" || path.starts_with("/mcp/")
+}
+
 /// Ce que le compte d'automatisation peut atteindre : une commande de la
-/// liste, ou le flux SSE d'un run.
+/// liste, le flux SSE d'un run, ou le serveur MCP.
 fn automation_may(method: &Method, path: &str) -> bool {
+    if is_mcp(path) {
+        return true;
+    }
     if method == Method::POST {
         if let Some(command) = path.strip_prefix("/api/") {
             return AUTOMATION_COMMANDS.contains(&command);

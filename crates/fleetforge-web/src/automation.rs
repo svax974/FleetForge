@@ -8,9 +8,10 @@
 //! Commandes de l'API d'automatisation (AgentHub, poste « Infrastructure
 //! Manager ») et lancement des runs de playbook.
 //!
-//! Servies par le même `POST /api/{commande}` que le frontal, à cette
-//! différence près que le compte d'automatisation ([`Role::Automation`]) y est
-//! tenu plus court que l'opérateur :
+//! Servies par le même `POST /api/{commande}` que le frontal, et en outils par
+//! le serveur MCP (`/mcp`, toujours sous les règles de l'automatisation), à
+//! cette différence près que le compte d'automatisation ([`Role::Automation`])
+//! y est tenu plus court que l'opérateur :
 //!   • un parc se désigne par son NOM, jamais par un chemin de fichier ;
 //!   • aucune variable `ansible_*`, aucun gabarit Jinja dans une valeur ;
 //!   • un run réel exige le `--check` du même lancement (`state::CheckLedger`) ;
@@ -36,18 +37,36 @@ use crate::state::AppState;
 const DEFAULT_TAIL_LINES: usize = 50;
 const MAX_TAIL_LINES: usize = 500;
 
-pub async fn list_hosts(state: &AppState, p: &Params) -> ApiResult {
+/// Une commande de l'API d'automatisation (`auth::AUTOMATION_COMMANDS`).
+///
+/// Seule porte vers ces commandes, pour `POST /api/{commande}` comme pour les
+/// outils du serveur MCP (`mcp.rs`) : ce qui est validé, refusé ou caviardé
+/// l'est à l'identique par les deux voies.
+pub async fn serve(state: &AppState, role: Role, command: &str, p: &Params) -> ApiResult {
+    match command {
+        "list_hosts" => list_hosts(state, p).await,
+        "list_playbooks" => list_playbooks(state),
+        "alertmanager_alerts" => alertmanager_alerts(state, p).await,
+        "query_prometheus" => query_prometheus(state, role, p).await,
+        "ssh_diagnose" => ssh_diagnose(state, role, p).await,
+        "run_ansible_playbook" => run_playbook(state, role, p).await,
+        "run_status" => run_status(state, role, p),
+        other => Err(ApiError::invalid(format!("commande inconnue : {other}"))),
+    }
+}
+
+async fn list_hosts(state: &AppState, p: &Params) -> ApiResult {
     let parc: String = p.get("parc")?;
     let core = state.core.clone();
     // `ansible-inventory` est un sous-processus : hors du fil asynchrone.
     ok(tokio::task::spawn_blocking(move || core.list_hosts(&parc)).await??)
 }
 
-pub fn list_playbooks(state: &AppState) -> ApiResult {
+fn list_playbooks(state: &AppState) -> ApiResult {
     ok(state.core.list_playbook_summaries()?)
 }
 
-pub async fn alertmanager_alerts(state: &AppState, p: &Params) -> ApiResult {
+async fn alertmanager_alerts(state: &AppState, p: &Params) -> ApiResult {
     let parc: String = p.get("parc")?;
     ok(state.core.alertmanager_alerts(&parc).await?)
 }
@@ -56,7 +75,7 @@ pub async fn alertmanager_alerts(state: &AppState, p: &Params) -> ApiResult {
 ///   • `{ query }` (frontal) : supervision du parc SÉLECTIONNÉ, liste de séries ;
 ///   • `{ parc, query, time? }` : supervision du parc nommé, réponse
 ///     `{ parc, result, truncated }`. Seule forme admise pour l'automatisation.
-pub async fn query_prometheus(state: &AppState, role: Role, p: &Params) -> ApiResult {
+async fn query_prometheus(state: &AppState, role: Role, p: &Params) -> ApiResult {
     let query: String = p.get("query")?;
     let Some(parc) = p.opt::<String>("parc")? else {
         if role == Role::Automation {
@@ -77,7 +96,7 @@ pub async fn query_prometheus(state: &AppState, role: Role, p: &Params) -> ApiRe
 /// `{ host, verb, args?, parc? }`. Sans `args`, `verb` peut porter la demande
 /// entière (« logs docker searxng 1h ») : elle est découpée sur les espaces,
 /// puis validée comme le reste.
-pub async fn ssh_diagnose(state: &AppState, role: Role, p: &Params) -> ApiResult {
+async fn ssh_diagnose(state: &AppState, role: Role, p: &Params) -> ApiResult {
     let host: String = p.get("host")?;
     let parc: Option<String> = p.opt("parc")?;
     let raw_verb: String = p.get("verb")?;
@@ -107,7 +126,7 @@ pub async fn ssh_diagnose(state: &AppState, role: Role, p: &Params) -> ApiResult
 }
 
 /// `{ run_id }` (ou `runId`) → état d'un run du registre.
-pub fn run_status(state: &AppState, role: Role, p: &Params) -> ApiResult {
+fn run_status(state: &AppState, role: Role, p: &Params) -> ApiResult {
     let id: String = p.first(&["run_id", "runId"])?;
     validate_run_id(&id)?;
     let run = state
@@ -165,7 +184,7 @@ fn fingerprint(parc: &str, playbook: &str, limit: &Option<Vec<String>>, extra: &
 /// `detach: true` rend la main dès le run inscrit (`{ run_id, state }`) ; sans
 /// lui, la réponse attend la fin du run (comportement du frontal). Dans les
 /// deux cas le run se termine et se clôt même si le client se déconnecte.
-pub async fn run_playbook(state: &AppState, role: Role, p: &Params) -> ApiResult {
+async fn run_playbook(state: &AppState, role: Role, p: &Params) -> ApiResult {
     let strict = role == Role::Automation;
     let playbook: String = p.first(&["playbookPath", "playbook"])?;
     let inventory: String = p.first(&["inventoryPath", "parc"])?;

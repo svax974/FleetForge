@@ -362,6 +362,29 @@ Détails :
   Prometheus. Sans `parc`, la forme du frontal (supervision du parc
   sélectionné, liste nue) reste réservée à l'opérateur.
 
+**Serveur MCP (`/mcp`)** — les mêmes sept commandes, en outils MCP de même
+nom (`list_hosts`, `list_playbooks`, `alertmanager_alerts`,
+`query_prometheus`, `ssh_diagnose`, `run_ansible_playbook`, `run_status`),
+schémas d'entrée JSON et descriptions en anglais. Transport Streamable HTTP
+sans session, réponses JSON ; versions du protocole 2024-11-05 à 2026-07-28
+(SDK `rmcp`, `initialize` négocié jusqu'à 2025-11-25, au-delà métadonnées par
+requête et `server/discover`). Même authentification basique, mêmes comptes ;
+un appel d'outil passe par la même porte que `POST /api/<commande>`
+(validation, `check_required`, `run_busy`, caviardage), et TOUJOURS sous les
+règles de l'automatisation, compte opérateur compris. `run_ansible_playbook`
+y est détaché par défaut (`detach: true`), à suivre par `run_status`. Un
+refus est une erreur d'outil (`isError: true`) dont le texte est le corps
+d'erreur de l'API, `{ "error", "code" }` ; un outil inconnu, une erreur de
+protocole (-32602). L'en-tête `Host` n'est contrôlé (boucle locale seule) que
+sans authentification. Adresse, par le vhost : `https://infra.<domaine>/mcp`.
+
+```sh
+curl -su "$USER_API:$MOT_DE_PASSE" https://infra.<domaine>/mcp \
+  -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+  -H 'MCP-Protocol-Version: 2025-11-25' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+```
+
 **Webhook d'Alertmanager vers le poste** — `alertmanager_agenthub_webhook_url`
 (vault du parc, forme `https://<hub>/api/v1/agenthub/hooks/<postId>/<secret>`)
 puis `./play.sh <parc> deploy-alertmanager.yml` : chaque alerte part par
