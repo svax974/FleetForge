@@ -33,6 +33,15 @@
   become: false
   run_once: true
 
+# FRONT D'UN SERVICE — `proxy.<zone>` (tourniquet de tous les proxies), sauf pour
+# une entrée qui DÉCLARE `access_mode: private` : `proxy-private.<zone>`, les
+# seuls proxies qui n'ont pas l'adresse d'un serveur VPN (tasks/proxy-front.yml).
+# Un client VPN joint l'adresse publique de son serveur hors du tunnel : un proxy
+# qui la partage lui répond 403. Seule la déclaration EXPLICITE compte : le défaut
+# d'`_access.inc` est `private`, mais appliquer ce défaut au DNS déplacerait en
+# silence les vhosts écrits à la main (publics) qui ne déclarent pas encore leur
+# mode.
+#
 # Garantit le front AVANT les CNAME : sans ça, un premier déploiement
 # publierait des CNAME vers un nom sans AUCUN A record — injoignables tant que
 # personne n'a pensé à jouer la synchronisation générique séparément.
@@ -52,7 +61,12 @@
       {{ (cfdns_cnames | default([])) + [{
            'host': item,
            'record': hostvars[item].proxy_hostname,
-           'proxied': hostvars[item].proxy_hostname_proxied | default(false) | bool
+           'proxied': hostvars[item].proxy_hostname_proxied | default(false) | bool,
+           'front': ('proxy-private.' ~ cfdns_zone)
+                    if (hostvars[item].access_mode | default('') == 'private'
+                        and cfdns_publish_private_front | bool
+                        and cfdns_private_proxies | length > 0)
+                    else ('proxy.' ~ cfdns_zone)
          }] }}
   loop: "{{ cfdns_cname_scope | default(groups[cfdns_group] | default([]) | sort) }}"
   when:
@@ -92,10 +106,10 @@
   ansible.builtin.assert:
     that:
       - (cfdns_cnames | default([]) | map(attribute='record') | list | unique | length)
-        == (cfdns_cnames | default([]) | map('community.general.json_query', '[record, proxied]') | map('join', '|') | list | unique | length)
+        == (cfdns_cnames | default([]) | map('community.general.json_query', '[record, proxied, front]') | map('join', '|') | list | unique | length)
     fail_msg: >-
       Un même nom CNAME est déclaré avec des valeurs `proxy_hostname_proxied`
-      différentes selon l'hôte : {{ cfdns_cnames | default([]) | map(attribute='record') | list | join(', ') }}.
+      ou des modes d'accès (`private` / autre) différents selon l'hôte : {{ cfdns_cnames | default([]) | map(attribute='record') | list | join(', ') }}.
   delegate_to: localhost
   become: false
   run_once: true
@@ -150,7 +164,7 @@
     zone: "{{ cfdns_zone }}"
     record: "{{ item.record }}"
     type: CNAME
-    value: "proxy.{{ cfdns_zone }}"
+    value: "{{ item.front }}"
     ttl: "{{ cfdns_ttl }}"
     # Reflète l'état RÉEL de la zone, déclaré par entrée d'inventaire
     # (`proxy_hostname_proxied: true` = nuage orange). Écrire `false` en dur
@@ -163,7 +177,7 @@
     state: present
   loop: "{{ cfdns_cnames | default([]) }}"
   loop_control:
-    label: "{{ item.record }} → proxy.{{ cfdns_zone }} ({{ item.host }}{{ ', proxifié' if item.proxied else '' }})"
+    label: "{{ item.record }} → {{ item.front }} ({{ item.host }}{{ ', proxifié' if item.proxied else '' }})"
   delegate_to: localhost
   become: false
   run_once: true

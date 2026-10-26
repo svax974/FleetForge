@@ -117,7 +117,7 @@ binaire sur la **machine** (cargo, 10 à 20 min la première fois).
 | Élément | Où | Rôle / playbook |
 |---|---|---|
 | Code, compilation, Ansible (pipx), unité systemd, mot de passe (empreinte argon2) | machine | `fleetforge-install` |
-| Nom public : CNAME vers le front des proxies | Cloudflare | `fleetforge-install` (tag `dns`), `update-cloudflare-dns.yml` |
+| Nom public : CNAME vers `proxy-private.<zone>` (mode privé : les seuls proxies sans adresse de serveur VPN) | Cloudflare | `fleetforge-install` (tag `dns`), `update-cloudflare-dns.yml` |
 | Ouverture du port applicatif (whitelist, proxies) et retrait des règles périmées | ufw de la machine | `fleetforge-security`, `update-ufw-all.yml` |
 | Cible Prometheus, ouverture du scrape | machine + supervision | `fleetforge-monitoring` |
 | Règles d'alerte (groupe `fleetforge`, à lister dans `prom_alert_groups`) | supervision | play « Règles d'alerte » (`prometheus-alerts-update`, tag `alerts`) |

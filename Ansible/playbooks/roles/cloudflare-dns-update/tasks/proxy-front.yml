@@ -65,3 +65,63 @@
   delegate_to: localhost
   become: false
   run_once: true
+
+# ── Front PRIVÉ ────────────────────────────────────────────────────────────
+# `proxy-private.<zone>` : les proxies dont l'adresse n'est celle d'AUCUN serveur
+# VPN du parc (défaut `cfdns_publish_private_front`, voir defaults). Dérivé de
+# l'inventaire — groupes `proxies` et `vpns` —, jamais d'une liste recopiée :
+# ajouter un proxy ou déplacer un VPN le met à jour au passage suivant.
+#
+# Aucun proxy éligible (papanglabs : chaque proxy est aussi un serveur VPN) : le
+# nom n'est pas publié et les services privés restent sur `proxy.<zone>` (voir
+# tasks/cnames.yml, qui s'appuie sur `cfdns_private_proxies`), avec un
+# avertissement — mieux vaut un nom qui répond une fois sur deux qu'un CNAME qui
+# ne mène nulle part.
+#
+# Ne purge pas un proxy devenu inéligible : son A record resterait dans le
+# tourniquet jusqu'à un nettoyage manuel (même limite que le front public).
+- name: Work out the proxies that can serve private services
+  ansible.builtin.set_fact:
+    cfdns_private_proxies: >-
+      {%- set vpn_addrs = groups['vpns'] | default([]) | map('extract', hostvars, 'ansible_host') | list -%}
+      {%- set ns = namespace(out=[]) -%}
+      {%- for p in groups['proxies'] | default([]) -%}
+      {%- if hostvars[p].ansible_host not in vpn_addrs -%}
+      {%- set ns.out = ns.out + [p] -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {{ ns.out }}
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Publish the round-robin A records for the private proxy front
+  community.general.cloudflare_dns:
+    api_token: "{{ cfdns_token }}"
+    zone: "{{ cfdns_zone }}"
+    record: "proxy-private.{{ cfdns_zone }}"
+    type: A
+    value: "{{ hostvars[item].ansible_host }}"
+    ttl: "{{ cfdns_ttl }}"
+    proxied: false
+    solo: false
+    state: present
+  loop: "{{ cfdns_private_proxies }}"
+  loop_control:
+    label: "proxy-private.{{ cfdns_zone }} → {{ hostvars[item].ansible_host }} ({{ item }})"
+  when: cfdns_publish_private_front | bool
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Report the private proxy front
+  ansible.builtin.debug:
+    msg: >-
+      {{ ('proxy-private.' ~ cfdns_zone ~ ' : ' ~ (cfdns_private_proxies | join(', ')) ~ ' (sans adresse de serveur VPN).')
+         if cfdns_private_proxies | length > 0 else
+         ('AUCUN proxy sans adresse de serveur VPN : les services en `access_mode: private` restent sur proxy.'
+          ~ cfdns_zone ~ ' et un client VPN y sera refusé une fois sur deux. Déplacer un proxy ou un VPN.') }}
+  delegate_to: localhost
+  become: false
+  run_once: true
+  when: cfdns_publish_private_front | bool

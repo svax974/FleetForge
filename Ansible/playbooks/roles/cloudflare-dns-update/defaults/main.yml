@@ -43,3 +43,13 @@ cfdns_ttl: 1
 # Publier les A records en tourniquet sous `proxy.<zone>` (tasks/proxy-front.yml).
 # `false` quand ce nom est tenu par un Load Balancer Cloudflare.
 cfdns_publish_proxy_front: true
+
+# Front PRIVÉ (tasks/proxy-front.yml) : `proxy-private.<zone>`, qui ne compose que
+# les proxies n'ayant PAS l'adresse d'un serveur VPN. Les services en
+# `access_mode: private` y pointent leur CNAME. Pourquoi : un client VPN joint
+# l'adresse publique de son serveur HORS du tunnel (sinon le tunnel se bouclerait
+# sur lui-même) et y arrive avec sa vraie adresse, non autorisée — un proxy qui
+# partage l'adresse de `vpn1` répondait 403 aux opérateurs connectés, une fois sur
+# deux selon le tourniquet DNS (constat du 26/10/2026). `false` : tout reste sur
+# `proxy.<zone>`.
+cfdns_publish_private_front: true
