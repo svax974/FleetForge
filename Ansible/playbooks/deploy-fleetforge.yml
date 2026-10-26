@@ -33,8 +33,17 @@
 # rejeu réutilise ce que le vault contient déjà. Le fichier de parc modifié est
 # à COMMITTER, faute de quoi un autre clone tirera d'autres secrets.
 #
-# Le vhost (infra.<domaine>, restreint à la whitelist) appartient au proxy :
+# Le vhost (infra.<domaine>, mode privé : vpns, supervision, whitelist, serveurs
+# liés) appartient au proxy :
 #   ./play.sh web3c update-proxy.yml   /   ./play.sh papanglabs update-proxy.yml
+# Son nom public est un CNAME vers le front des proxies, garanti par le rôle
+# d'installation (`proxy_hostname` sur l'entrée, tag `dns`) ; le `hostname` de
+# l'entrée (infra-priv.<domaine>) reste l'identité machine.
+#
+# Pare-feu : `fleetforge-security` pose les ouvertures et RETIRE celles dont la
+# source n'est plus voulue, sans `ufw reset`. À rejouer sans redéployer quand la
+# whitelist ou les proxies changent :
+#   ./play.sh web3c update-ufw-all.yml --limit infra1
 #
 # Facultatif, pour AgentHub (poste « Infrastructure Manager », RUNNING.md,
 # « API d'automatisation ») :
@@ -73,6 +82,12 @@
 # depuis ailleurs, donc révocable et sans portée hors de cette machine — ce
 # qu'une clé personnelle recopiée n'offre pas.
 #
+# La clé est d'abord déposée dans keys/<parc>/control/ (rôle d'installation),
+# puis les authorized_keys de `srvc` sont reposés depuis le dossier des clés du
+# parc (security-ssh, `exclusive: true`) : la clé dédiée y est DANS la liste
+# voulue, donc un `setup-server.yml` ultérieur ne la retire pas, et une rotation
+# retire l'ancienne. Le dossier keys/ est à COMMITTER dans le dépôt privé.
+#
 # `ignore_unreachable` est assumé : le parc contient des entrées volontairement
 # injoignables (docker-repo en xxx.xxx.xxx.xxx). Mais le résultat est RAPPORTÉ
 # hôte par hôte : une autorisation à moitié posée ne doit pas passer pour une
@@ -90,14 +105,12 @@
       ansible.builtin.meta: end_play
       when: not (ff_deploy_secrets | default(false))
 
-    - name: Authorize the dedicated key, restricted to the FleetForge machine
-      ansible.posix.authorized_key:
-        user: "{{ remote_username }}"
-        state: present
-        key: "{{ hostvars['infra1'].ff_public_key }}"
-        key_options: >-
-          from="{{ hostvars['infra1'].ansible_host }}",no-agent-forwarding,no-port-forwarding,no-X11-forwarding
-      register: ff_authorized
+    - name: Authorize the parc keys for srvc, the dedicated one included
+      ansible.builtin.include_role:
+        name: security-ssh
+        tasks_from: authorized_keys
+      vars:
+        ak_user: "{{ remote_username }}"
 
     # Les hôtes injoignables sortent du play : ils n'atteignent pas cette
     # tâche. Le décompte final ci-dessous est donc le SEUL endroit qui les

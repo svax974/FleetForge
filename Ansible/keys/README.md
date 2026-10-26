@@ -21,6 +21,14 @@ révoque. `id_openclaw.pub` y est déposée par `openclaw-install`,
 `id_fleetforge_ro.pub` par `fleetforge-install` (`ff_ro_diagnostics`, pour
 `ssh_diagnose`) et retirée par `fleetforge-remove`.
 
+Sous-dossier `keys/<parc_name>/control/*.pub` : clés d'une MACHINE qui pilote le
+parc (FleetForge), posées sur l'utilisateur de service uniquement — jamais sur
+root. Le fichier contient la ligne `authorized_keys` COMPLÈTE avec ses options
+(`from="<adresse>",no-agent-forwarding,…`). `security-ssh` l'ajoute à la liste
+exclusive : sans lui, `setup-server.yml` retirerait la clé. Déposé par
+`fleetforge-install` (`ff_deploy_secrets`), retiré par `fleetforge-remove` ; la
+révocation atteint les machines au passage suivant de `setup-server.yml`.
+
 Origine restreinte : une clé nommée dans `readonly_key_from`
 (`readonly-user-install/defaults`) reçoit `from="<adresses>"` — celle de
 FleetForge, les adresses des machines `infras`. Sans adresse IP résolue, elle

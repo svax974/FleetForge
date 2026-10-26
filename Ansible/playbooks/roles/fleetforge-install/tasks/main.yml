@@ -42,6 +42,40 @@
   when: not ff_ansible_src.stat.exists
   tags: [code]
 
+# ── DNS : alias CNAME vers le front des proxies ─────────────────────────────
+# Le nom public (`proxy_hostname`, déclaré sur l'entrée d'inventaire) est un
+# CNAME vers le front round-robin des proxies, jamais un A vers l'IP de cette
+# machine : il reste correct si l'application change de machine. Le `hostname`
+# de l'entrée (`infra-priv.<domaine>`) reste l'identité machine, publiée en A
+# par la synchronisation générique.
+#
+# Placé AVANT la compilation : un jeton Cloudflare absent doit échouer ici et
+# non après vingt minutes de build. Garantit le CNAME dès le premier
+# déploiement sans attendre `update-cloudflare-dns.yml` (même mécanisme
+# qu'agenthub-install). Le vhost, lui, se pose par `update-proxy.yml`.
+- name: Fail when the entry declares no public name
+  ansible.builtin.assert:
+    that:
+      - proxy_hostname is defined
+      - proxy_hostname is search('\.' ~ domain_name ~ '$')
+      - proxy_hostname != 'proxy.' ~ domain_name
+    fail_msg: >-
+      {{ inventory_hostname }} ne déclare pas de `proxy_hostname` propre : sans
+      lui aucun CNAME n'est publié et le vhost du proxy n'a pas de nom. Déclarer
+      `proxy_hostname: infra.{{ domain_name }}` sur l'entrée (et passer son
+      `hostname` en `infra-priv.{{ domain_name }}`, un A et un CNAME ne pouvant
+      pas coexister sur le même nom).
+  tags: [dns]
+
+- name: Ensure the service CNAME to the canonical proxy front
+  ansible.builtin.include_role:
+    name: cloudflare-dns-update
+    tasks_from: cnames
+  vars:
+    cfdns_cname_scope:
+      - "{{ inventory_hostname }}"
+  tags: [dns]
+
 # ── Secrets ────────────────────────────────────────────────────────────────
 # Avant tout le reste : tirage, mise au vault et création de la clé dédiée se
 # font sur le POSTE, et rien de ce qui suit n'a de sens sans eux.
@@ -362,7 +396,7 @@
       parc :
       `ansible -i inventories/<parc>.yml -m debug -a 'var=ff_web_password' {{ inventory_hostname }}`.
       Il n'existe nulle part sur la machine, qui n'en détient que l'empreinte.
-      Accès par le proxy : https://infra.{{ domain_name }} (whitelist).
+      Accès par le proxy : https://infra.{{ domain_name }} (mode privé).
   tags: [config]
 
 - name: Report the automation account
@@ -372,7 +406,7 @@
       d'automatisation seule. Mot de passe dans le vault du parc :
       `ansible -i inventories/<parc>_inventory.yml -m debug -a 'var=ff_api_password' {{ inventory_hostname }}`,
       à saisir dans le connecteur FleetForge d'AgentHub. L'adresse d'AgentHub
-      doit être admise par le vhost infra.{{ domain_name }} (whitelist seule
-      par défaut).
+      doit être admise par le vhost : la déclarer dans `access_linked` de
+      l'entrée {{ inventory_hostname }} (mode privé), puis `update-proxy.yml`.
   when: ff_api_user | length > 0
   tags: [config]

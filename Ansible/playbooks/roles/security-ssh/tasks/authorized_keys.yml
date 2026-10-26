@@ -3,6 +3,13 @@
 # dossier fait foi. `exclusive: true` : toute clé absente du dossier est
 # RETIRÉE du compte, c'est ce qui rend une révocation effective.
 #
+# Sous-dossier `keys/<parc>/control/*.pub` : clés d'une MACHINE qui pilote le parc
+# (FleetForge), posées sur `remote_username` UNIQUEMENT — jamais sur root. Chaque
+# fichier porte la ligne authorized_keys COMPLÈTE, options comprises
+# (`from="<adresse>",…`), que le module lit dans la ligne même. Sans ce dossier,
+# le `exclusive: true` ci-dessous retirerait cette clé au prochain
+# `setup-server.yml`. Même règle : le dossier fait foi, un fichier supprimé révoque.
+#
 # Appelé par security-ssh (root) et security-create-user (remote_username) :
 # `include_role: security-ssh, tasks_from: authorized_keys` avec `ak_user`.
 # `parc_name` vient de group_vars/<parc>.yml, sans défaut : un parc qui ne le
@@ -26,6 +33,9 @@
     user: "{{ ak_user }}"
     state: present
     exclusive: true
-    key: "{{ query('ansible.builtin.file', *ak_files) | map('trim') | join('\n') }}"
+    key: "{{ query('ansible.builtin.file', *(ak_files + ak_control_files)) | map('trim') | join('\n') }}"
   vars:
     ak_files: "{{ query('ansible.builtin.fileglob', playbook_dir ~ '/../keys/' ~ parc_name ~ '/*.pub') | sort }}"
+    ak_control_files: >-
+      {{ (query('ansible.builtin.fileglob', playbook_dir ~ '/../keys/' ~ parc_name ~ '/control/*.pub') | sort)
+         if ak_user == remote_username else [] }}

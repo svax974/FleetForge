@@ -112,6 +112,10 @@ ff_key_path: "{{ lookup('ansible.builtin.env', 'HOME') }}/.ssh/id_fleetforge_{{ 
 # mais pas la même clé — et celle-ci n'est autorisée que depuis cette machine.
 ff_remote_key_name: "{{ ssh_key | default('id_fleetforge') }}"
 
+# Où la clé publique dédiée est déposée sur le poste, avec son `from=` :
+# keys/<parc>/control/ fait foi pour security-ssh (compte de service, pas root).
+ff_control_key_name: id_fleetforge.pub
+
 ff_passphrase_file: "{{ ff_dir }}/.key-passphrase"
 ff_agent_socket: "/run/fleetforge/agent.sock"
 

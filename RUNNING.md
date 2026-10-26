@@ -106,39 +106,134 @@ printf '%s' 'motdepasse' | cargo run -p fleetforge-web -- hash-password
 
 ### Déploiement sur serveur
 
-Construire le frontal sur le **poste** (npm), le binaire sur la **machine**
-(cargo) — le rôle s'en charge :
+Le service est un binaire natif (`fleetforge-web`) sous systemd, sur une machine
+du parc qui devient un **nœud de contrôle Ansible**. Playbook :
+`deploy-fleetforge.yml` (retrait : `remove-fleetforge.yml`, purge :
+`purge-fleetforge.yml`). Le frontal est construit sur le **poste** (npm), le
+binaire sur la **machine** (cargo, 10 à 20 min la première fois).
+
+#### Ce que le déploiement pose
+
+| Élément | Où | Rôle / playbook |
+|---|---|---|
+| Code, compilation, Ansible (pipx), unité systemd, mot de passe (empreinte argon2) | machine | `fleetforge-install` |
+| Nom public : CNAME vers le front des proxies | Cloudflare | `fleetforge-install` (tag `dns`), `update-cloudflare-dns.yml` |
+| Ouverture du port applicatif (whitelist, proxies) et retrait des règles périmées | ufw de la machine | `fleetforge-security`, `update-ufw-all.yml` |
+| Cible Prometheus, ouverture du scrape, groupe d'alertes `fleetforge` | machine + supervision | `fleetforge-monitoring`, `update-prometheus-alerts.yml` |
+| Vhost (mode d'accès de l'entrée) | proxies | `update-proxy.yml` — **pas** joué par le déploiement |
+| Clé SSH dédiée, mot de passe du vault (si `ff_deploy_secrets`) | machine + poste + parc | `fleetforge-install`, play `authorize` |
+
+#### Prérequis
+
+1. **Inventaire** — une entrée dédiée à FleetForge (plusieurs entrées peuvent
+   partager une machine) :
+
+   ```yaml
+   infras:
+     hosts:
+       infra1:
+         hostname: infra-priv.{{ domain_name }}     # identité machine (enregistrement A)
+         proxy_hostname: infra.{{ domain_name }}    # nom public (CNAME vers les proxies)
+         ansible_host: <adresse IP>                 # une IP : elle devient le `from=` de la clé dédiée
+         provider: <hébergeur>
+         server_type: misc
+         app_port: 9750
+         access_mode: private                       # vhost : vpns, supervision, whitelist, serveurs liés
+         access_linked: [<entrée cliente>]          # facultatif : AgentHub, voir plus bas
+         ansible_roles: [fleetforge]
+   ```
+
+   `hostname` ne doit pas valoir le nom public : un A et un CNAME ne coexistent
+   pas, et le déploiement refuse sans `proxy_hostname` propre.
+2. **Supervision** du parc en place (`prometheus_host` dans l'inventaire,
+   `host-preflight` y veille) avec le job `fleetforge` — sinon `fleetforge-monitoring`
+   échoue plutôt que de poser une cible que personne ne lit.
+3. **Cloudflare** : `cloudflare_token` au vault du parc ; certificat wildcard du
+   domaine déjà émis (le nom public n'en demande pas d'autre).
+4. **Vhost** `fleetforge.conf` dans `parcs/<parc>/nginx/sites-enabled/`.
+5. **Poste** : frontal construit, mot de passe du vault dans
+   `~/.config/fleetforge/vault-pass`.
+
+#### Premier déploiement
 
 ```sh
 cd apps/gui && npm run build
 cd ../../Ansible
-./play.sh web3c deploy-fleetforge.yml            # lecture seule : pas de pilotage
-./play.sh web3c deploy-fleetforge.yml --tags code        # relivrer le code seul
-./play.sh web3c deploy-fleetforge.yml --tags monitoring  # réarmer la supervision
+./play.sh web3c deploy-fleetforge.yml                       # lecture seule : le parc est visible, rien ne se lance
+./play.sh web3c update-proxy.yml --check --diff             # puis sans --check : publie le vhost
+./play.sh web3c update-prometheus-alerts.yml                # groupe `fleetforge` (à lister dans `prom_alert_groups`)
 ```
 
-Pilotage réel du parc (clé SSH dédiée + mot de passe du vault sur la machine) —
-décision explicite, pas un réglage :
+Au premier passage, le mot de passe d'accès (et celui du compte d'automatisation
+s'il est demandé) est tiré, chiffré dans `playbooks/group_vars/<parc>.yml` et la
+machine n'en reçoit que l'empreinte : **committer ce fichier**, sinon un autre
+clone en tirera d'autres et l'accès posé par le premier deviendra invalide. Pour
+le relire : `ansible -i inventories/<parc>_inventory.yml -m debug -a 'var=ff_web_password' infra1`.
+
+Le CNAME est publié par le déploiement ; `update-cloudflare-dns.yml` le
+resynchronise avec l'inventaire à la demande.
+
+#### Pilotage réel du parc (décision explicite)
 
 ```sh
 ./play.sh web3c deploy-fleetforge.yml -e ff_deploy_secrets=true
 ```
 
-Au premier passage, les secrets tirés sont chiffrés dans
-`playbooks/group_vars/<parc>.yml` : **à committer**, sinon un autre clone en
-tirera d'autres et l'accès posé par le premier deviendra invalide.
+Crée une clé SSH **dédiée** sur le poste (passphrase au vault, jamais
+régénérée), la charge dans un `ssh-agent` systemd sur la machine, y livre le mot
+de passe du vault, puis l'autorise sur le parc :
 
-Le vhost appartient au proxy : `./play.sh web3c update-proxy.yml` /
-`./play.sh papanglabs update-proxy.yml`.
+- la clé publique est déposée dans `keys/<parc>/control/` avec
+  `from="<adresse de la machine>"` ; `security-ssh` la pose sur le compte de
+  service (jamais root) avec le reste des clés du parc. **Committer `keys/`** ;
+- le dossier fait foi : un `setup-server.yml` ultérieur ne la retire pas, une
+  rotation retire l'ancienne, supprimer le fichier révoque ;
+- le play `authorize` rapporte hôte par hôte les machines injoignables — une
+  autorisation à moitié posée ne doit pas passer pour posée. Pour le rejouer
+  seul : `--tags authorize`. Essayer d'abord `--check --diff --limit <un hôte>` :
+  `exclusive: true` s'applique au compte de service de CHAQUE machine.
 
-Sur la machine, le service est un binaire natif sous systemd (donc les règles
-ufw d'`fleetforge-security` s'appliquent réellement) :
+#### Vérifier
 
 ```sh
-systemctl status fleetforge
-journalctl -u fleetforge -f
-curl -s localhost:9750/healthz          # -> ok
+systemctl status fleetforge ; journalctl -u fleetforge -f   # sur la machine
+curl -s localhost:9750/healthz                              # -> ok
+curl -s localhost:9750/metrics | grep -E '^fleetforge_(ansible_available|inventories|roles) '
+sudo ufw show added | grep 9750                             # whitelist + proxies + Prometheus
+sudo -u <service> SSH_AUTH_SOCK=/run/fleetforge/agent.sock ssh-add -l   # ff_deploy_secrets : 1 identité
 ```
+
+- `fleetforge_ansible_available` doit valoir 1 et `fleetforge_inventories`,
+  `fleetforge_roles` ne pas être nuls — sinon l'application répond mais ne voit
+  rien (arbre Ansible absent) ou ne peut rien lancer (ansible hors du PATH).
+- Dans Prometheus : `count(fleetforge_ansible_available)` doit valoir 1 (une
+  alerte sans série est décorative) et `up{job="fleetforge"}` 1.
+- Depuis une machine **non** autorisée, `https://<nom public>` doit répondre 403
+  et le port applicatif expirer : une IP de la whitelist ne prouve rien.
+
+#### Rejouer sans tout redéployer
+
+| Besoin | Commande |
+|---|---|
+| Relivrer le code (rsync + build) | `deploy-fleetforge.yml --tags code` |
+| Arbre Ansible seul | `--tags ansible` |
+| Fichier d'environnement, unité | `--tags config` |
+| Réarmer la supervision | `--tags monitoring` |
+| CNAME seul | `--tags dns` |
+| Clé dédiée sur le parc | `-e ff_deploy_secrets=true --tags authorize` |
+| Whitelist ou proxies modifiés | `update-ufw-all.yml --limit infra1` (retire aussi les règles périmées, sans `ufw reset`) |
+| Vhost, mode d'accès, `access_linked` | `update-proxy.yml` |
+
+#### Retrait
+
+`remove-fleetforge.yml` arrête le service, retire binaire, clés dédiées, cible
+Prometheus et **toutes** les règles ufw du service ; il conserve le code livré,
+l'arbre Ansible et la base. `purge-fleetforge.yml` supprime aussi ces données
+(destructif ; Rust, Ansible et les valeurs chiffrées du vault restent). La clé
+publique quitte `keys/<parc>/control/` ; elle reste sur les machines, limitée par
+son `from=`, jusqu'au prochain `setup-server.yml`. Le vhost, lui, sort du parc en
+retirant son fichier de `parcs/<parc>/nginx/` puis `update-proxy.yml` ; les
+enregistrements Cloudflare ne sont jamais supprimés par les playbooks.
 
 ### API d'automatisation (AgentHub)
 
@@ -167,9 +262,9 @@ l'entrée standard, ne poser que l'empreinte dans l'environnement du service :
 printf '%s' "$MOT_DE_PASSE" | fleetforge-web hash-password   # -> $argon2id$…
 ```
 
-**Réseau** — le vhost `infra.<domaine>` n'admet que la `whitelist` : l'adresse
-de sortie d'AgentHub doit y être ajoutée (gabarit `fleetforge.conf` du dépôt de
-parc), en HTTPS. Jamais le port 9750 en direct depuis une autre machine :
+**Réseau** — le vhost `infra.<domaine>` est en mode privé (vpns, supervision,
+`whitelist`) : la machine d'AgentHub doit être nommée dans `access_linked` de
+l'entrée `infra1`, puis `update-proxy.yml`, en HTTPS. Jamais le port 9750 en direct depuis une autre machine :
 l'authentification basique y circulerait en clair.
 
 **Ce que ce compte ne peut pas faire, par construction :**

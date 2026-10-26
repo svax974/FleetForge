@@ -223,6 +223,27 @@
   roles:
     - mailrelay-security
 
+# FleetForge : binaire natif, donc ufw (et non DOCKER-USER). Dépend de la
+# whitelist et des proxies — c'est cette application qui lance des playbooks
+# sur tout le parc, une IP sortie de la whitelist ne doit pas y garder l'accès.
+# Les deux rôles retirent aussi les règles périmées (voir la note ci-dessous).
+# L'entrée est absente de l'inventaire papanglabs, le play y est ignoré.
+- name: FleetForge host
+  hosts: infras
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - fleetforge-security
+  tasks:
+    # Ouverture du scrape de Prometheus : sa règle vit dans fleetforge-monitoring
+    # pour pouvoir être rejouée avec `--tags monitoring`, comme celle de
+    # node_exporter ci-dessus.
+    - name: Re-apply the Prometheus scrape rules
+      ansible.builtin.include_role:
+        name: fleetforge-monitoring
+        tasks_from: firewall
+      when: prometheus_host is defined
+
 # ── Note : retrait d'une autorisation ──────────────────────────────────────
 # Ce playbook AJOUTE les règles correspondant à la configuration courante.
 # Pour qu'une IP sortie de la whitelist perde réellement son accès, il faut
@@ -230,5 +251,7 @@
 # donnée :
 #     sudo ufw status numbered
 #     sudo ufw delete <n>
-# `timescaledb-security` fait exception : il révoque explicitement les sources
-# DOCKER-USER qui ne sont plus dans la liste autorisée.
+# Font exception : `timescaledb-security`, qui révoque explicitement les
+# sources DOCKER-USER qui ne sont plus dans la liste autorisée, et
+# `fleetforge-security` / `fleetforge-monitoring`, qui retirent les règles ufw
+# de leur service dont la source n'est plus voulue (sans `ufw reset`).

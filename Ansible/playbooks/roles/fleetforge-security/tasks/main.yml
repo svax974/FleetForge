@@ -1,7 +1,8 @@
 ---
 # Le port n'est ouvert qu'aux postes d'exploitation et aux proxies. L'ouverture
 # du scrape, elle, vit dans `fleetforge-monitoring` : elle doit pouvoir être
-# rejouée avec `--tags monitoring` sans redéployer le service.
+# rejouée avec `--tags monitoring` sans redéployer le service. Rien d'autre n'a
+# de raison d'accéder à ce port : cette application pilote le parc.
 
 - name: Allow the application port from the whitelist
   community.general.ufw:
@@ -26,10 +27,22 @@
   loop: "{{ groups['proxies'] | default([]) }}"
   become: true
 
-# Rien d'autre n'a de raison d'y accéder : cette application pilote le parc.
+# ── Retrait des ouvertures périmées ────────────────────────────────────────
+# Les ALLOW ci-dessus sont additifs : une IP sortie de `whitelist`, ou un proxy
+# retiré de l'inventaire, garderait sinon son accès à une application qui pilote
+# tout le parc. Les règles de ce service qui ne correspondent plus à la
+# configuration sont donc retirées une à une — jamais de `ufw reset`, qui
+# emporterait SSH et les règles des autres services de la machine.
+#
 # La règle finale n'est pas posée ici — la politique par défaut d'ufw est déjà
 # `deny incoming` (rôle firewall-security), et empiler un DENY explicite
 # donnerait l'illusion que c'est LUI qui protège.
+- name: Prune the openings that are no longer wanted
+  ansible.builtin.include_tasks: prune.yml
+  vars:
+    ff_prune_owner: "{{ ff_ufw_owner_service }}"
+    ff_prune_keep: "{{ (whitelist | default([])) + (groups['proxies'] | default([]) | map('extract', hostvars, 'ansible_host') | list) }}"
+
 - name: Report the effective rules
   ansible.builtin.shell: "ufw status numbered | grep -F '{{ ff_port }}' || true"
   become: true

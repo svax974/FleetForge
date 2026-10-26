@@ -1,0 +1,66 @@
+---
+# Retire les règles ufw de ce service qui ne correspondent plus à la
+# configuration courante — SANS `ufw reset` : les règles des autres services de
+# la machine (SSH, node_exporter, ports d'autres rôles) ne sont jamais touchées.
+#
+# Appelé par fleetforge-security (sources du port), fleetforge-monitoring
+# (sources du scrape) et fleetforge-remove (`ff_prune_keep: []`, tout part).
+#
+# Entrées :
+#   ff_prune_owner  regex des COMMENTAIRES que ce rôle pose : seules les règles
+#                   qui les portent sont candidates. Une règle sans commentaire,
+#                   ou d'un autre service, n'est jamais supprimée ici.
+#   ff_prune_keep   sources à CONSERVER ; toute autre source est retirée.
+#
+# Le critère est la source, pas le commentaire : après le renommage du projet
+# (infra-manager → fleetforge), une règle identique à celle qu'on veut poser
+# garde son ancien commentaire — ufw ignore la nouvelle comme doublon. La purger
+# sur le seul motif de son commentaire retirerait une autorisation voulue.
+#
+# `ufw show added` et non `ufw status` : il rend les règles sous forme de
+# commandes, commentaire compris, et fonctionne ufw inactif.
+- name: Read the user rules ufw holds
+  ansible.builtin.command: ufw show added
+  become: true
+  register: ff_ufw_added
+  changed_when: false
+  check_mode: false
+
+- name: Work out the rules this service no longer wants
+  ansible.builtin.set_fact:
+    ff_ufw_stale: >-
+      {{ ff_ufw_added.stdout_lines
+         | select('match', '^ufw allow from [^ ]+ to any port ' ~ ff_port ~ ' .*comment .(' ~ ff_prune_owner ~ ')')
+         | map('split', ' ')
+         | map(attribute='3')
+         | reject('in', ff_prune_keep | map('regex_replace', '/32$', '') | list)
+         | unique | list }}
+
+- name: Remove the stale rules on the application port
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ item }}"
+    port: "{{ ff_port }}"
+    delete: true
+  loop: "{{ ff_ufw_stale }}"
+  become: true
+
+# Une règle qui ouvre ce port sans être de ce service (ouverture générale posée
+# à la main, ancien rôle) peut rendre tout le filtrage décoratif. Elle n'est pas
+# supprimée — elle n'est pas à nous — mais elle est NOMMÉE.
+- name: Look for rules on the port that this service does not own
+  ansible.builtin.set_fact:
+    ff_ufw_foreign: >-
+      {{ ff_ufw_added.stdout_lines
+         | select('search', '(port |allow |deny )' ~ ff_port ~ '(/| |$)')
+         | reject('search', 'comment .(' ~ ff_ufw_owner_service ~ '|' ~ ff_ufw_owner_scrape ~ ')')
+         | list }}
+
+- name: Report the rules left on the port that are not ours
+  ansible.builtin.debug:
+    msg: >-
+      Règles ufw sur le port {{ ff_port }} que ce service ne gère pas, laissées
+      en place — à examiner, une ouverture générale annulerait le filtrage :
+      {{ ff_ufw_foreign }}
+  when: ff_ufw_foreign | length > 0

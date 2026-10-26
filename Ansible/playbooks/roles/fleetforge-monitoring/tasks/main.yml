@@ -17,32 +17,13 @@
   tags: [monitoring]
 
 # ── Pare-feu ───────────────────────────────────────────────────────────────
-# Sans cette ouverture, la cible apparaît dans Prometheus et reste `down` — ce
-# qui ressemble à une panne du service, pas à une règle manquante.
-- name: Allow Prometheus to scrape the application
-  community.general.ufw:
-    rule: allow
-    proto: tcp
-    from_ip: "{{ hostvars[prometheus_host]['ansible_host'] }}"
-    port: "{{ ff_port }}"
-    comment: "Prometheus scrape - fleetforge"
-  become: true
-  when: ansible_host != hostvars[prometheus_host]['ansible_host']
-  tags: [monitoring]
-
-# Prometheus co-localisé : il tourne en conteneur, ses scrapes arrivent donc
-# par le bridge Docker et non par l'adresse publique de la machine. Le test
-# porte sur l'IP et non sur le nom d'hôte — plusieurs entrées d'inventaire
-# décrivent la même machine.
-- name: Allow the Prometheus Docker bridge to scrape (monitor is local)
-  community.general.ufw:
-    rule: allow
-    proto: tcp
-    from_ip: "172.17.0.0/16"
-    port: "{{ ff_port }}"
-    comment: "Prometheus Docker scrape - fleetforge"
-  become: true
-  when: ansible_host == hostvars[prometheus_host]['ansible_host']
+# tasks/firewall.yml : ouverture du scrape, et retrait de celle qui ne
+# s'applique plus. Rejouable seul par `update-ufw-all.yml`.
+- name: Open the scrape port to Prometheus
+  ansible.builtin.include_tasks:
+    file: firewall.yml
+    apply:
+      tags: [monitoring]
   tags: [monitoring]
 
 # ── Cible Prometheus ───────────────────────────────────────────────────────

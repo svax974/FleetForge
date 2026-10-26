@@ -1,0 +1,53 @@
+---
+# Ouverture ufw du scrape de Prometheus sur le port applicatif.
+#
+# Extraite de main.yml pour être rejouable seule, comme celle de node_exporter :
+#     - ansible.builtin.include_role:
+#         name: fleetforge-monitoring
+#         tasks_from: firewall
+# `update-ufw-all.yml` s'en sert pour reposer la règle après un changement
+# d'adresse du serveur Prometheus.
+
+# Sans cette ouverture, la cible apparaît dans Prometheus et reste `down` — ce
+# qui ressemble à une panne du service, pas à une règle manquante.
+- name: Allow Prometheus to scrape the application
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ hostvars[prometheus_host]['ansible_host'] }}"
+    port: "{{ ff_port }}"
+    comment: "Prometheus scrape - fleetforge"
+  become: true
+  when: ansible_host != hostvars[prometheus_host]['ansible_host']
+  tags: [monitoring]
+
+# Prometheus co-localisé : il tourne en conteneur, ses scrapes arrivent donc
+# par le bridge Docker et non par l'adresse publique de la machine. Le test
+# porte sur l'IP et non sur le nom d'hôte — plusieurs entrées d'inventaire
+# décrivent la même machine.
+- name: Allow the Prometheus Docker bridge to scrape (monitor is local)
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "172.17.0.0/16"
+    port: "{{ ff_port }}"
+    comment: "Prometheus Docker scrape - fleetforge"
+  become: true
+  when: ansible_host == hostvars[prometheus_host]['ansible_host']
+  tags: [monitoring]
+
+# Une seule des deux règles ci-dessus est voulue. Déplacer Prometheus d'une
+# machine à l'autre laisserait sinon l'ancienne ouverte — vers une adresse qui
+# n'est plus la supervision.
+- name: Prune the scrape openings that no longer apply
+  ansible.builtin.include_role:
+    name: fleetforge-security
+    tasks_from: prune
+    apply:
+      tags: [monitoring]
+  vars:
+    ff_prune_owner: "{{ ff_ufw_owner_scrape }}"
+    ff_prune_keep: >-
+      {{ ['172.17.0.0/16'] if ansible_host == hostvars[prometheus_host]['ansible_host']
+         else [hostvars[prometheus_host]['ansible_host']] }}
+  tags: [monitoring]

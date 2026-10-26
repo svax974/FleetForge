@@ -882,6 +882,50 @@ groups:
             partagée et la rétention des sauvegardes.
 
 {% endif %}
+{% if 'fleetforge' in prom_alert_groups %}
+
+  # ── FleetForge : états dégradés propres à l'application ─────────────────────
+  # `up == 0` relève de `TargetDown`. Ces règles couvrent ce que la sonde
+  # binaire ne voit pas : l'application répond (`up` à 1) mais ne peut plus
+  # rien déployer, ou ne voit plus le parc. Séries natives de /metrics (job
+  # `fleetforge`, rôle `fleetforge-monitoring`).
+  # Contrôle après déploiement : `count(fleetforge_ansible_available)` doit
+  # valoir 1, sinon ces règles sont décoratives.
+  - name: fleetforge
+    rules:
+      # Ansible sorti du PATH du service (pipx cassé, mise à jour de Python) :
+      # l'interface s'affiche normalement, chaque lancement de playbook échoue.
+      - alert: FleetForgeAnsibleUnavailable
+        expr: fleetforge_ansible_available{job="fleetforge"} == 0
+        for: 10m
+        keep_firing_for: {{ prom_alert_flap_grace }}
+        labels:
+          severity: warning
+        annotations:
+          summary: "FleetForge ne peut plus lancer de playbook sur {{ '{{' }} $labels.instance {{ '}}' }}"
+          description: >-
+            ansible-playbook n'est plus exécutable pour le service. L'application
+            répond mais aucun déploiement ne partira. Vérifier
+            `pipx list` pour srvc et le PATH de l'unité fleetforge.
+
+      # Arbre Ansible absent ou mal pointé (`FLEETFORGE_ANSIBLE_DIR`) : le parc
+      # paraît vide, ce qui ne se distingue pas d'un parc réellement vide.
+      - alert: FleetForgeFleetEmpty
+        expr: >-
+          fleetforge_inventories{job="fleetforge"} == 0
+          or fleetforge_roles{job="fleetforge"} == 0
+        for: 10m
+        keep_firing_for: {{ prom_alert_flap_grace }}
+        labels:
+          severity: warning
+        annotations:
+          summary: "FleetForge ne voit plus d'inventaire ou de rôle sur {{ '{{' }} $labels.instance {{ '}}' }}"
+          description: >-
+            L'arbre Ansible livré est absent ou son chemin est faux. Vérifier
+            `FLEETFORGE_ANSIBLE_DIR` dans fleetforge.env et la synchronisation
+            de l'arbre (`deploy-fleetforge.yml --tags ansible`).
+
+{% endif %}
 {% if 'services' in prom_alert_groups %}
 
   # ── Sondes de service (svcprobe) ───────────────────────────────────────────

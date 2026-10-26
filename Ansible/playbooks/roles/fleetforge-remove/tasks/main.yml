@@ -23,10 +23,11 @@
 # machine qui ne porte plus l'application, c'est laisser de quoi administrer
 # tout le parc sur un serveur que plus personne ne surveille.
 #
-# La contrepartie côté parc n'est PAS automatique : la clé publique reste dans
-# les `authorized_keys` de chaque hôte. Elle y est inoffensive — le `from="…"`
-# la limite à cette machine, qui n'a plus la privée — mais la retirer relève
-# d'un passage explicite sur le parc.
+# La contrepartie côté parc n'est PAS immédiate : la clé publique reste dans
+# les `authorized_keys` de chaque hôte jusqu'au prochain passage de
+# security-ssh (`setup-server.yml`, `exclusive: true`), qui lit le dossier
+# keys/<parc>/control/ — vidé ci-dessous. Elle y est inoffensive entre-temps :
+# le `from="…"` la limite à cette machine, qui n'a plus la privée.
 - name: Remove the dedicated key and its passphrase
   ansible.builtin.file:
     path: "{{ item }}"
@@ -38,6 +39,14 @@
     - "{{ ff_dir }}/askpass.sh"
     - "{{ ff_dir }}/agent-load-key.sh"
   become: true
+
+- name: Withdraw the dedicated public key from the parc control keys
+  ansible.builtin.file:
+    path: "{{ playbook_dir }}/../keys/{{ parc_name }}/control/{{ ff_control_key_name }}"
+    state: absent
+  delegate_to: localhost
+  become: false
+  when: parc_name is defined
 
 - name: Remove the vault password
   ansible.builtin.file:
@@ -89,15 +98,23 @@
   become: true
   when: prometheus_host is defined and prometheus_host in hostvars
 
+# Toutes les règles de ce service partent, quelles que soient leurs sources : le
+# retrait ne se fie pas à l'inventaire COURANT (whitelist, proxies, Prometheus),
+# qui peut avoir changé depuis le déploiement — une IP déjà sortie de la
+# whitelist serait sinon restée ouverte. Ouverture du scrape comprise, y compris
+# celle du bridge Docker quand Prometheus est co-localisé.
 - name: Close the application port
-  community.general.ufw:
-    rule: allow
-    proto: tcp
-    from_ip: "{{ item }}"
-    port: "{{ ff_port }}"
-    delete: true
-  loop: "{{ (whitelist | default([]))
-            + (groups['proxies'] | default([]) | map('extract', hostvars, 'ansible_host') | list)
-            + ([hostvars[prometheus_host]['ansible_host']] if prometheus_host is defined and prometheus_host in hostvars else []) }}"
-  become: true
-  failed_when: false
+  ansible.builtin.include_role:
+    name: fleetforge-security
+    tasks_from: prune
+  vars:
+    ff_prune_owner: "{{ ff_ufw_owner_service }}"
+    ff_prune_keep: []
+
+- name: Close the Prometheus scrape
+  ansible.builtin.include_role:
+    name: fleetforge-security
+    tasks_from: prune
+  vars:
+    ff_prune_owner: "{{ ff_ufw_owner_scrape }}"
+    ff_prune_keep: []

@@ -7,3 +7,10 @@
 # poser dans DOCKER-USER. C'est la différence qui a rendu décoratives quinze
 # règles ufw sur 9090/9093 ; elle mérite d'être dite plutôt que supposée.
 ff_port: "{{ app_port | default(9750) }}"
+
+# Commentaires des règles ufw de ce service, ancien nom du projet compris
+# (infra-manager). Ils délimitent ce que tasks/prune.yml a le droit de retirer :
+# - `service` : ouvertures du port applicatif (whitelist, proxies), posées ici ;
+# - `scrape`  : ouverture de Prometheus, posée par fleetforge-monitoring.
+ff_ufw_owner_service: "(fleetforge|infra-manager) - [^']*"
+ff_ufw_owner_scrape: "Prometheus (Docker )?scrape - (fleetforge|infra-manager)"
