@@ -173,6 +173,57 @@ fn run_ok(tool: &str, args: &[&str], install: &str) -> Result<()> {
 /// produit rien sur stdout : le passer à `run_json` échouerait sur « sortie
 /// illisible » alors que la commande a parfaitement fonctionné.
 fn run_text(tool: &str, args: &[&str], install: &str) -> Result<String> {
+    run_text_within(tool, args, install, None)
+}
+
+/// PID de la connexion `oci session authenticate` que CETTE application a
+/// lancée, 0 si aucune : de quoi l'arrêter à la fermeture.
+static LOGIN_PID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Attend la fin de `child` au plus `limit`, puis le tue. `None` = a expiré.
+fn wait_within(child: std::process::Child, limit: std::time::Duration) -> std::io::Result<Option<std::process::Output>> {
+    use std::io::Read;
+    let mut child = child;
+    let (mut out, mut err) = (child.stdout.take(), child.stderr.take());
+    // Lire en parallèle : un tube plein bloquerait le processus avant la fin.
+    let read = |pipe: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut p) = pipe {
+                let _ = p.read_to_end(&mut buf);
+            }
+            buf
+        })
+    };
+    let out_t = read(out.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
+    let err_t = read(err.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
+
+    let start = std::time::Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break Some(status);
+        }
+        if start.elapsed() >= limit {
+            let _ = child.kill();
+            let _ = child.wait();
+            break None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    };
+    let stdout = out_t.join().unwrap_or_default();
+    let stderr = err_t.join().unwrap_or_default();
+    Ok(status.map(|status| std::process::Output { status, stdout, stderr }))
+}
+
+/// `run_text` avec une durée maximale. Une commande qui attend une personne
+/// (connexion par navigateur) ne doit pas survivre à l'abandon de celle-ci :
+/// elle garderait son port indéfiniment.
+fn run_text_within(
+    tool: &str,
+    args: &[&str],
+    install: &str,
+    limit: Option<std::time::Duration>,
+) -> Result<String> {
     if !which(tool) {
         return Err(ProviderError::MissingCli {
             tool: tool.to_string(),
@@ -180,12 +231,29 @@ fn run_text(tool: &str, args: &[&str], install: &str) -> Result<String> {
         });
     }
 
-    let out = Command::new(tool)
-        .args(args)
-        .stdin(Stdio::null())
-        .env("PYTHONWARNINGS", "ignore")
-        .output()
-        .map_err(|e| ProviderError::Api(format!("{tool} : {e}")))?;
+    let mut cmd = Command::new(tool);
+    cmd.args(args).stdin(Stdio::null()).env("PYTHONWARNINGS", "ignore");
+    let io_err = |e: std::io::Error| ProviderError::Api(format!("{tool} : {e}"));
+    let out = match limit {
+        None => cmd.output().map_err(io_err)?,
+        Some(limit) => {
+            let child = cmd
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(io_err)?;
+            let pid = child.id();
+            LOGIN_PID.store(pid, std::sync::atomic::Ordering::SeqCst);
+            let done = wait_within(child, limit).map_err(io_err);
+            let _ = LOGIN_PID.compare_exchange(pid, 0, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst);
+            done?.ok_or_else(|| {
+                ProviderError::Auth(format!(
+                    "{tool} : aucune connexion reçue en {} min, commande arrêtée",
+                    limit.as_secs() / 60
+                ))
+            })?
+        }
+    };
 
     let stderr = String::from_utf8_lossy(&out.stderr);
     if !out.status.success() {
@@ -840,15 +908,69 @@ fn port_in_use(port: u16) -> bool {
     .is_ok()
 }
 
+/// Attente maximale d'une connexion par navigateur.
+const OCI_LOGIN_LIMIT: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Arrête la connexion lancée par cette application, s'il en reste une.
+/// À appeler à la fermeture : le processus Python survivrait au parent.
+pub fn stop_login() {
+    let pid = LOGIN_PID.swap(0, std::sync::atomic::Ordering::SeqCst);
+    if pid != 0 {
+        kill_pid(pid);
+    }
+}
+
+fn kill_pid(pid: u32) {
+    let _ = Command::new("kill").arg(pid.to_string()).output();
+}
+
+/// Qui écoute sur le port de connexion : PID et ligne de commande.
+fn login_port_holder() -> Option<(u32, String)> {
+    let out = Command::new("lsof")
+        .args(["-nP", &format!("-iTCP:{OCI_LOGIN_PORT}"), "-sTCP:LISTEN", "-t"])
+        .output()
+        .ok()?;
+    let pid: u32 = String::from_utf8_lossy(&out.stdout).lines().next()?.trim().parse().ok()?;
+    let cmd = Command::new("ps").args(["-o", "command=", "-p", &pid.to_string()]).output().ok()?;
+    Some((pid, String::from_utf8_lossy(&cmd.stdout).trim().to_string()))
+}
+
+/// Une connexion `oci session authenticate`, et rien d'autre : on n'arrête
+/// jamais un processus qu'on ne sait pas nommer.
+fn is_oci_login(command: &str) -> bool {
+    command.contains("oci") && command.contains("session") && command.contains("authenticate")
+}
+
+/// Libère le port de connexion si c'est une connexion `oci` en attente.
+fn free_login_port() -> Result<String> {
+    match login_port_holder() {
+        None => Ok("le port est déjà libre".to_string()),
+        Some((pid, cmd)) if is_oci_login(&cmd) => {
+            kill_pid(pid);
+            fleetforge_core::logging::info("oci", format!("connexion en attente arrêtée (pid {pid})"));
+            Ok(format!("connexion en attente arrêtée (pid {pid})"))
+        }
+        Some((pid, _)) => Err(ProviderError::Auth(format!(
+            "le port {OCI_LOGIN_PORT} est tenu par le processus {pid}, qui n'est pas une connexion oci :              je n'y touche pas"
+        ))),
+    }
+}
+
 async fn oci_session_login(profile: String, region: String) -> Result<String> {
     // Une autre connexion en attente (lancée dans un terminal, ou restée là
     // après un navigateur fermé) tient le port : la nouvelle échoue en une
     // fraction de seconde, SANS message — indiscernable d'une panne d'Oracle.
     if port_in_use(OCI_LOGIN_PORT) {
+        let who = match login_port_holder() {
+            Some((pid, cmd)) if is_oci_login(&cmd) => format!(
+                "une `oci session authenticate` (pid {pid}) attend sa connexion. L'arrêter \
+                 (menu session › « Libérer le port »), ou Ctrl-C dans son terminal"
+            ),
+            Some((pid, _)) => format!("le processus {pid} l'occupe (ce n'est pas une connexion oci)"),
+            None => "un processus l'occupe".to_string(),
+        };
         return Err(ProviderError::Auth(format!(
-            "le port {OCI_LOGIN_PORT} est déjà utilisé : une autre `oci session authenticate` \
-             attend sa connexion (terminal ouvert ?). La terminer ou l'interrompre (Ctrl-C), \
-             puis recommencer."
+            "le port {OCI_LOGIN_PORT} est déjà utilisé : {who}, puis recommencer."
         )));
     }
     fleetforge_core::logging::info(
@@ -856,10 +978,11 @@ async fn oci_session_login(profile: String, region: String) -> Result<String> {
         format!("ouverture d'une session pour le profil [{profile}] ({region})"),
     );
     tokio::task::spawn_blocking(move || {
-        run_text(
+        run_text_within(
             "oci",
             &["session", "authenticate", "--region", &region, "--profile-name", &profile],
             OCI_INSTALL,
+            Some(OCI_LOGIN_LIMIT),
         )
         .map(|_| "session ouverte".to_string())
     })
@@ -1243,7 +1366,7 @@ impl Provider for OracleProvider {
         if !self.session {
             return Vec::new();
         }
-        vec![
+        let mut actions = vec![
             SessionAction::new(
                 "refresh",
                 "Renouveler la session",
@@ -1255,13 +1378,24 @@ impl Provider for OracleProvider {
                 "Ouvre le navigateur sur la page de connexion Oracle. À utiliser quand le renouvellement n'est plus possible.",
             )
             .needing_browser(),
-        ]
+        ];
+        // Proposée seulement quand elle sert : une entrée permanente laisserait
+        // croire qu'on peut tuer n'importe quoi.
+        if login_port_holder().is_some_and(|(_, cmd)| is_oci_login(&cmd)) {
+            actions.push(SessionAction::new(
+                "free_port",
+                "Libérer le port 8181",
+                "Arrête la connexion `oci session authenticate` restée en attente et qui bloque une nouvelle ouverture.",
+            ));
+        }
+        actions
     }
 
     async fn run_session_action(&self, name: &str) -> Result<String> {
         match name {
             "refresh" => self.oci_refresh(),
             "authenticate" => self.oci_authenticate().await,
+            "free_port" => free_login_port(),
             other => Err(ProviderError::Api(format!(
                 "commande de session inconnue : {other}"
             ))),
@@ -1304,6 +1438,28 @@ fn dirs_home() -> std::path::PathBuf {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_an_oci_login_may_be_stopped() {
+        assert!(is_oci_login("/usr/bin/python3 /opt/bin/oci session authenticate --region eu-paris-1"));
+        assert!(!is_oci_login("node server.js --port 8181"));
+        assert!(!is_oci_login("oci compute instance list"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_waiting_command_is_stopped_at_the_limit() {
+        let child = Command::new("sleep")
+            .arg("30")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let started = std::time::Instant::now();
+        let done = wait_within(child, std::time::Duration::from_millis(300)).unwrap();
+        assert!(done.is_none());
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
     use super::*;
     use serde_json::json;
 

@@ -734,6 +734,13 @@ fn main() {
             update_model,
             delete_model,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_, event| {
+            // Une connexion Oracle en attente survivrait à l'application et
+            // garderait le port 8181.
+            if let tauri::RunEvent::Exit = event {
+                fleetforge_providers::cli::stop_login();
+            }
+        });
 }

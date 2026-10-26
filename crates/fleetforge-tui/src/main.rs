@@ -200,6 +200,7 @@ async fn run(terminal: &mut Term, core: Arc<Core>, hub: Arc<ProviderHub>) -> Res
         }
 
         if app.should_quit {
+            fleetforge_providers::cli::stop_login();
             return Ok(());
         }
     }
