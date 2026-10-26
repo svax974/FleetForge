@@ -245,9 +245,16 @@
 # must be at least at version 1.7.0 »). `creates:` donne l'idempotence — pipx ne
 # met pas à jour de lui-même, la mise à jour d'ansible reste un acte volontaire
 # (`pipx upgrade ansible` sous le compte de service).
+#
+# `--include-deps` est INDISPENSABLE : le paquet `ansible` ne fournit que
+# `ansible-community`, les exécutables (`ansible-playbook`, `ansible-inventory`,
+# `ansible-vault`) viennent de sa dépendance `ansible-core`, que pipx n'expose
+# pas sans lui — l'installation « réussissait » sans poser un seul des binaires
+# dont l'application a besoin. `--force` reprend une installation déjà faite sans
+# cette option ; il ne joue que si `ansible-playbook` manque (`creates`).
 - name: Install ansible for the application user
   ansible.builtin.command:
-    cmd: pipx install ansible
+    cmd: pipx install --include-deps --force ansible
     creates: "/home/{{ ff_user }}/.local/bin/ansible-playbook"
   become: true
   become_user: "{{ ff_user }}"
