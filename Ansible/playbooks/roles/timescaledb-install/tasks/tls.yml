@@ -114,9 +114,10 @@
   ansible.builtin.assert:
     that:
       - tsdb_repl_pass | length >= 24
-      # `:` et `\` sont des séparateurs du format .pgpass.
-      - "':' not in tsdb_repl_pass and '\\' not in tsdb_repl_pass"
-    fail_msg: "papangmetrics_repl_pass : 24 caractères minimum, sans ':' ni '\\' (format de .pgpass)."
+      # Liste blanche : `:` et `\` sont des séparateurs du format .pgpass, et tout caractère spécial compliquerait
+      # le conninfo de primary_conninfo.
+      - tsdb_repl_pass is match('^[A-Za-z0-9_.-]+$')
+    fail_msg: "papangmetrics_repl_pass : 24 caractères minimum, uniquement [A-Za-z0-9_.-]."
     quiet: true
   no_log: true
   when: tsdb_replication_enabled | bool
