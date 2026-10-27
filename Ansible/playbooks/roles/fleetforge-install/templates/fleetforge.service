@@ -4,6 +4,14 @@ Documentation=file://{{ ff_dir }}
 After=network-online.target fleetforge-agent.service
 Wants=network-online.target
 
+# Garde-fou anti-boucle de crash : la fenêtre reste supérieure à
+# RestartSec × burst (5 s × 5 = 25 s), sinon la limite ne se déclenche jamais.
+# En `failed`, l'unité devient détectable (alerte SystemdUnitFailed).
+# Ces clés sont de la section [Unit] : sous [Service], systemd ignore
+# StartLimitIntervalSec (« Unknown key name ») et la limite n'agit pas.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
 [Service]
 Type=simple
 User={{ ff_user }}
@@ -26,12 +34,6 @@ Environment=SSH_AUTH_SOCK={{ ff_agent_socket }}
 ExecStart={{ ff_dir }}/target/{{ ff_cargo_profile }}/fleetforge-web
 Restart=on-failure
 RestartSec=5
-
-# Garde-fou anti-boucle de crash : la fenêtre reste supérieure à
-# RestartSec × burst (5 s × 5 = 25 s), sinon la limite ne se déclenche jamais.
-# En `failed`, l'unité devient détectable (alerte SystemdUnitFailed).
-StartLimitIntervalSec=300
-StartLimitBurst=5
 
 # Durcissement. Volontairement MOINS strict que pour les autres services du
 # parc : ce processus lance `ansible-playbook`, qui écrit dans son répertoire de
