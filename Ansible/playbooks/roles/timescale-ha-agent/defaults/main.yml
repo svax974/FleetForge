@@ -1,0 +1,36 @@
+---
+# Arbitre et routage de la paire TimescaleDB, sur le CLIENT de la base (papangmetrics1 = brk1).
+# Voir files/tsha.py pour le principe et les conditions d'une promotion automatique.
+
+tsha_user: "{{ remote_username }}"
+tsha_dir: "/home/{{ remote_username }}/timescale-ha"
+# Socket d'administration de HAProxy et sockets de multiplexage SSH : dans le répertoire de l'agent (0700),
+# pas dans /run (à recréer à chaque démarrage, et créé en root par Docker s'il manque).
+tsha_run_dir: "{{ tsha_dir }}/run"
+tsha_ssh_key: "{{ tsha_dir }}/id_ed25519_tsha"
+tsha_known_hosts: "{{ tsha_dir }}/known_hosts"
+
+# La paire : mêmes noms que `tsdb_cluster` (timescaledb-install).
+tsha_servers: "{{ tsdb_cluster }}"
+
+# HAProxy local : le client se connecte ICI (METRICS_DB_HOST=127.0.0.1) et HAProxy l'envoie au primaire.
+# TLS de bout en bout (HAProxy en mode tcp, rien déchiffré) : le certificat de chaque serveur porte
+# 127.0.0.1 dans son SAN, donc la vérification du client (verify-full) reste valable.
+tsha_haproxy_image: "haproxy:3.0-alpine"
+tsha_haproxy_container: timescale-ha-haproxy
+tsha_bind: "127.0.0.1"
+tsha_haproxy_port: "{{ papangmetrics_db_port | default(5432) }}"
+
+# Alertmanager : l'agent lit son API (sortant), il n'expose aucun point d'entrée.
+tsha_alertmanager_host: alertmanager1
+tsha_alertmanager_port: 9093
+tsha_alertmanager_url: "http://{{ hostvars[tsha_alertmanager_host].ansible_host }}:{{ tsha_alertmanager_port }}"
+tsha_alert_name: TimescaleServerDown
+
+# Sondes consécutives (une toutes les `tsha_poll_s` s) avant d'envisager une promotion.
+tsha_fail_confirmations: 3
+tsha_poll_s: 5
+# Délai de répit après une bascule : pas de bascules en boucle sur un réseau instable.
+tsha_cooldown_s: 1800
+
+tsha_metrics_file: "{{ node_exporter_textfile_dir }}/timescale_ha.prom"

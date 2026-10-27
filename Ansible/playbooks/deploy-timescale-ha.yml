@@ -1,0 +1,25 @@
+---
+# Arbitre et routage automatiques de la paire TimescaleDB, sur le client de la base (papangmetrics1).
+#
+#   ./play.sh papanglabs deploy-timescale-ha.yml
+#
+# Prérequis, dans cet ordre :
+#   1. la paire déployée : deploy-timescaledb.yml -e tsdb_target=timescale1, puis timescale2 ;
+#   2. l'accès d'`brk1` à l'API d'Alertmanager (9093) : host_vars de prometheus1, puis
+#      deploy-alertmanager.yml ; et les règles : deploy-prometheus.yml avec prom_alert_timescale_pair: true.
+#
+# Ce playbook NE REPOINTE PAS PapangMetrics : tant que tsdb_ha_proxy_enabled est faux, l'ETL et l'API
+# continuent de viser le nom de service. Le basculement vers HAProxy (METRICS_DB_HOST=127.0.0.1) est un
+# second temps, volontaire : voir papangmetrics-deploy.
+- name: Contrôle préalable
+  hosts: papangmetrics1
+  remote_user: "{{ remote_username }}"
+  roles:
+    - role: host-preflight
+      preflight_require_docker: true
+
+- name: Arbitre et routage TimescaleDB
+  hosts: papangmetrics1
+  remote_user: "{{ remote_username }}"
+  roles:
+    - timescale-ha-agent

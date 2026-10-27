@@ -1,0 +1,17 @@
+# Géré par Ansible (timescale-ha-agent) — ne pas éditer.
+[Unit]
+Description=TimescaleDB pair arbiter and router (timescale-ha)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+User={{ tsha_user }}
+ExecStart=/usr/bin/python3 {{ tsha_dir }}/tsha.py --config {{ tsha_dir }}/config.json watch
+# Le routage en dépend : jamais arrêté plus de quelques secondes.
+Restart=always
+RestartSec=3
+# Pas de limite de redémarrage : mieux vaut une boucle visible dans le journal qu'un arbitre à l'arrêt.
+StartLimitIntervalSec=0
+
+[Install]
+WantedBy=multi-user.target

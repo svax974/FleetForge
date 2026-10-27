@@ -1,0 +1,12 @@
+---
+- name: restart timescale-ha haproxy
+  community.docker.docker_container:
+    name: "{{ tsha_haproxy_container }}"
+    restart: true
+
+- name: restart timescale-ha
+  ansible.builtin.systemd:
+    name: timescale-ha
+    state: restarted
+    daemon_reload: true
+  become: true

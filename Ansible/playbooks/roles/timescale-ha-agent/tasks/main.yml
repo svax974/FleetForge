@@ -1,0 +1,184 @@
+---
+# Arbitre + routage de la paire TimescaleDB, joué sur le client de la base (papangmetrics1).
+# Prérequis : la paire est déployée (deploy-timescaledb.yml sur les deux serveurs), car le script d'entrée
+# SSH restreint (timescaledb-ha-remote.sh) vient du rôle timescaledb-install.
+
+- name: Check that the pair is declared
+  ansible.builtin.assert:
+    that: tsha_servers | length == 2
+    fail_msg: "tsdb_cluster doit nommer exactement deux serveurs (paire primaire/réplica) : {{ tsha_servers }}."
+    quiet: true
+
+# Le primaire courant (serveur réellement inscriptible) : HAProxy démarre en l'envoyant déjà vers lui.
+- name: Elect the current primary of the pair
+  ansible.builtin.include_role:
+    name: timescaledb-install
+    tasks_from: discover
+
+- name: Check that a writable primary exists before routing to it
+  ansible.builtin.assert:
+    that: tsdb_writable | length == 1
+    fail_msg: >-
+      Aucun serveur inscriptible parmi {{ tsha_servers }} : le routage n'a rien vers quoi pointer. Déployer d'abord la
+      paire (deploy-timescaledb.yml).
+    quiet: true
+
+- name: Create the agent directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ tsha_user }}"
+    mode: '0700'
+  loop: ["{{ tsha_dir }}", "{{ tsha_run_dir }}"]
+  become: true
+
+# ── Accès SSH de l'arbitre aux deux serveurs ──────────────────────────────────────────────────────
+- name: Generate the arbiter SSH key
+  community.crypto.openssh_keypair:
+    path: "{{ tsha_ssh_key }}"
+    type: ed25519
+    comment: "{{ inventory_hostname }}-timescale-ha"
+  register: tsha_key
+
+# La clé n'ouvre QUE le script de commandes restreintes (liste blanche) : `restrict` coupe pty,
+# redirections et agent, `command=` impose le script quel que soit ce que le client demande.
+- name: Authorize the key on each server, restricted to the arbiter commands
+  ansible.posix.authorized_key:
+    user: "{{ remote_username }}"
+    state: present
+    key: "{{ tsha_key.public_key }}"
+    comment: "{{ inventory_hostname }}-timescale-ha"
+    key_options: 'restrict,command="/home/{{ remote_username }}/papangmetrics-db/timescaledb-ha-remote.sh"'
+  delegate_to: "{{ item }}"
+  loop: "{{ tsha_servers }}"
+  become: true
+
+- name: Open SSH on each server for this host
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ ansible_host }}"
+    port: "{{ ssh_custom_port }}"
+    comment: "timescale-ha arbiter {{ inventory_hostname }} - ssh"
+  delegate_to: "{{ item }}"
+  loop: "{{ tsha_servers }}"
+  become: true
+
+# sshd est lié à libwrap : sans cette ligne la connexion est coupée avant l'authentification même avec ufw
+# ouvert (voir timescaledb-backup-install). Ligne `sshd:` distincte de celle de ssh-security-update.
+- name: Allow this host through tcpwrappers on each server (sshd)
+  ansible.builtin.lineinfile:
+    path: /etc/hosts.allow
+    line: "sshd: {{ ansible_host }}"
+    regexp: "^sshd: {{ ansible_host | regex_escape }}$"
+    create: true
+    owner: root
+    group: root
+    mode: '0644'
+  delegate_to: "{{ item }}"
+  loop: "{{ tsha_servers }}"
+  become: true
+
+- name: Pin each server's SSH host key
+  ansible.builtin.known_hosts:
+    path: "{{ tsha_known_hosts }}"
+    name: "[{{ hostvars[item].ansible_host }}]:{{ ssh_custom_port }}"
+    key: "{{ lookup('pipe', 'ssh-keyscan -p ' ~ ssh_custom_port ~ ' -t ed25519 ' ~ hostvars[item].ansible_host ~ ' 2>/dev/null | grep -v \"^#\"') }}"
+    state: present
+  loop: "{{ tsha_servers }}"
+
+# ── Routage : HAProxy local ───────────────────────────────────────────────────────────────────────
+- name: Deploy the HAProxy configuration
+  ansible.builtin.template:
+    src: haproxy.cfg.j2
+    dest: "{{ tsha_dir }}/haproxy.cfg"
+    mode: '0644'
+  notify: restart timescale-ha haproxy
+
+- name: Run HAProxy
+  community.docker.docker_container:
+    name: "{{ tsha_haproxy_container }}"
+    image: "{{ tsha_haproxy_image }}"
+    state: started
+    restart_policy: unless-stopped
+    network_mode: host
+    volumes:
+      - "{{ tsha_dir }}/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro"
+      - "{{ tsha_run_dir }}:/run/tsha"
+
+# ── L'arbitre ─────────────────────────────────────────────────────────────────────────────────────
+- name: Build the agent configuration
+  ansible.builtin.set_fact:
+    tsha_config:
+      servers: >-
+        {%- set ns = namespace(d={}) -%}
+        {%- for s in tsha_servers -%}
+        {%- set _ = ns.d.update({s: {'host': hostvars[s].ansible_host, 'ssh_port': ssh_custom_port | int, 'user': remote_username}}) -%}
+        {%- endfor -%}
+        {{ ns.d }}
+      preferred: "{{ tsdb_primary }}"
+      ssh_key: "{{ tsha_ssh_key }}"
+      known_hosts: "{{ tsha_known_hosts }}"
+      run_dir: "{{ tsha_run_dir }}"
+      haproxy_socket: "{{ tsha_run_dir }}/haproxy.sock"
+      alertmanager_url: "{{ tsha_alertmanager_url }}"
+      alert_name: "{{ tsha_alert_name }}"
+      fail_confirmations: "{{ tsha_fail_confirmations | int }}"
+      cooldown_s: "{{ tsha_cooldown_s | int }}"
+      poll_s: "{{ tsha_poll_s | int }}"
+      state_file: "{{ tsha_dir }}/state.json"
+      metrics_file: "{{ tsha_metrics_file }}"
+
+- name: Deploy the agent configuration
+  ansible.builtin.copy:
+    content: "{{ tsha_config | to_nice_json }}\n"
+    dest: "{{ tsha_dir }}/config.json"
+    owner: "{{ tsha_user }}"
+    mode: '0640'
+  notify: restart timescale-ha
+  become: true
+
+- name: Deploy the agent
+  ansible.builtin.copy:
+    src: tsha.py
+    dest: "{{ tsha_dir }}/tsha.py"
+    owner: "{{ tsha_user }}"
+    mode: '0750'
+  notify: restart timescale-ha
+  become: true
+
+- name: Deploy the agent systemd unit
+  ansible.builtin.template:
+    src: timescale-ha.service.j2
+    dest: /etc/systemd/system/timescale-ha.service
+    owner: root
+    group: root
+    mode: '0644'
+  notify: restart timescale-ha
+  become: true
+
+- name: Enable the agent
+  ansible.builtin.systemd:
+    name: timescale-ha
+    enabled: true
+    state: started
+    daemon_reload: true
+  become: true
+
+# Contrôle immédiat : l'arbitre voit-il bien les deux serveurs, et d'où vient son information ?
+- name: Flush handlers before checking
+  ansible.builtin.meta: flush_handlers
+
+- name: Arbiter status
+  ansible.builtin.command:
+    cmd: "/usr/bin/python3 {{ tsha_dir }}/tsha.py --config {{ tsha_dir }}/config.json status"
+  register: tsha_status
+  changed_when: false
+  check_mode: false
+  retries: 6
+  delay: 5
+  until: tsha_status.rc == 0
+
+- name: Report the arbiter status
+  ansible.builtin.debug:
+    msg: "{{ tsha_status.stdout.split('\n') }}"

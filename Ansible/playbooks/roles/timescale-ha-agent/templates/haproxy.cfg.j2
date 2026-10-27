@@ -1,0 +1,25 @@
+# Généré par Ansible (timescale-ha-agent) — NE PAS ÉDITER SUR L'HÔTE.
+#
+# Aucun health-check : l'état de chaque serveur est piloté par l'agent (tsha.py) par la socket
+# d'administration, seule source de vérité du routage. `disabled` = hors service au démarrage ; l'agent
+# remet le serveur inscriptible en service dans les secondes qui suivent.
+global
+    stats socket /run/tsha/haproxy.sock mode 666 level admin
+    log stdout format raw local0 info
+
+defaults
+    mode tcp
+    log global
+    option tcplog
+    timeout connect 5s
+    # Les connexions du client sont des sessions de pool longues : pas de coupure sur inactivité courte.
+    timeout client 1h
+    timeout server 1h
+    # Un serveur retiré du routage coupe ses sessions : le client se reconnecte au nouveau primaire.
+    default-server on-marked-down shutdown-sessions
+
+listen timescale
+    bind {{ tsha_bind }}:{{ tsha_haproxy_port }}
+{% for s in tsha_servers %}
+    server {{ s }} {{ hostvars[s].ansible_host }}:{{ tsdb_port | default(5432) }}{{ '' if s == tsdb_primary else ' disabled' }}
+{% endfor %}

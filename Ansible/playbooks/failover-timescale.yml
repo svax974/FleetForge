@@ -1,0 +1,87 @@
+---
+# Bascule PLANIFIÉE de la base d'indicateurs vers le réplica (maintenance du primaire, migration de
+# fournisseur…). Les bascules sur INCIDENT n'ont pas besoin de ce playbook : elles sont automatiques.
+#
+#   ./play.sh papanglabs failover-timescale.yml                                  # état de la paire, lecture seule
+#   ./play.sh papanglabs failover-timescale.yml -e to=timescale2 -e confirm=yes  # bascule planifiée
+#
+# ── Fonctionnement d'ensemble ────────────────────────────────────────────────────────────────────
+# L'arbitre `timescale-ha` (sur brk1, le seul client de la base) :
+#   • route le client vers le serveur réellement inscriptible, par un HAProxy local (127.0.0.1) ;
+#   • sur incident, promeut le réplica SANS intervention. Alertmanager DÉCLENCHE (alerte
+#     TimescaleServerDown) ; l'arbitre revérifie avant d'agir : primaire injoignable depuis brk1 pendant
+#     plusieurs sondes ET du réplica, réplica sain, délai de répit écoulé. Voir roles/timescale-ha-agent/files/tsha.py.
+# Après une bascule, RIEN n'est à faire :
+#   • l'ancien primaire se reconstruit seul en réplica dès son retour (timescaledb-reconcile sur chaque
+#     serveur : timeline plus récente de l'autre + inscriptible = on se remplace par une copie) ;
+#   • les dumps suivent le primaire courant (le script de dump décide à chaque exécution) ;
+#   • le primaire est élu à l'exécution par tous les playbooks : aucun inventaire à mettre à jour.
+#
+# ── Suspendre la bascule automatique (maintenance) ───────────────────────────────────────────────
+# Poser un SILENCE Alertmanager sur l'alerte TimescaleServerDown : l'arbitre le respecte et ne promeut pas.
+#
+# ── Planifiée ────────────────────────────────────────────────────────────────────────────────────
+# Le primaire s'arrête PROPREMENT (tout le WAL part vers le réplica avant la fin de l'arrêt : aucune écriture
+# perdue), le réplica est promu, le routage suit. Les sessions du client en cours sont coupées et reprises
+# sur le nouveau primaire. Si l'arrêt propre échoue, le routage revient à l'ancien primaire (rien n'a changé).
+#
+# ── Si une bascule échoue ────────────────────────────────────────────────────────────────────────
+# L'arbitre réessaie tant que les conditions persistent (journal : `journalctl -u timescale-ha` sur brk1) ;
+# `tsha.py status` y montre l'état vu de brk1.
+
+- name: Bascule de la base d'indicateurs
+  hosts: papangmetrics1
+  remote_user: "{{ remote_username }}"
+  gather_facts: false
+  vars:
+    tsha_cmd: "/usr/bin/python3 /home/{{ remote_username }}/timescale-ha/tsha.py --config /home/{{ remote_username }}/timescale-ha/config.json"
+  tasks:
+    - name: État de la paire, vu de brk1
+      ansible.builtin.command:
+        cmd: "{{ tsha_cmd }} status"
+      register: fo_status
+      changed_when: false
+      check_mode: false
+
+    - name: Afficher l'état
+      ansible.builtin.debug:
+        msg: "{{ fo_status.stdout.split('\n') }}"
+
+    - name: Rappel — confirmation requise
+      ansible.builtin.debug:
+        msg: "Lecture seule. Pour basculer : -e to=<hôte> -e confirm=yes"
+      when: (confirm | default('')) != 'yes'
+
+    - name: Bascule planifiée
+      when: (confirm | default('')) == 'yes'
+      block:
+        - name: Paramètre
+          ansible.builtin.assert:
+            that:
+              - to is defined
+              - to in tsdb_cluster
+            fail_msg: "-e to=<hôte> requis, l'un de {{ tsdb_cluster }} : le réplica qui deviendra primaire."
+            quiet: true
+
+        # L'arrêt propre peut durer jusqu'à 5 min sur un primaire chargé : asynchrone, sondage espacé.
+        - name: Basculer vers {{ to }}
+          ansible.builtin.command:
+            cmd: "{{ tsha_cmd }} switchover --to {{ to }}"
+          register: fo_switch
+          async: 900
+          poll: 10
+          changed_when: true
+
+        - name: Journal de la bascule
+          ansible.builtin.debug:
+            msg: "{{ fo_switch.stdout.split('\n') }}"
+
+        - name: État après la bascule
+          ansible.builtin.command:
+            cmd: "{{ tsha_cmd }} status"
+          register: fo_after
+          changed_when: false
+
+        - name: Afficher l'état
+          ansible.builtin.debug:
+            msg: "{{ fo_after.stdout.split('\n') }}"

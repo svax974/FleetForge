@@ -13,7 +13,11 @@ pm_src: "/Users/steph/Dev/Projects/PapangLabs/PapangMetrics/"
 # redéployer PapangMetrics. Le nom doit figurer dans le SAN du certificat du serveur ciblé
 # (timescaledb-install : tsdb_service_hostname) — le client vérifie la chaîne ET le nom.
 # Le DNS est mis en cache par le processus : redémarrer l'ETL et l'API après avoir déplacé le CNAME.
-pm_db_host: "{{ timescale_service_hostname | default('timescale.' ~ domain_name) }}"
+# Repointé vers le HAProxy local (127.0.0.1) quand `tsdb_ha_proxy_enabled` est vrai : l'arbitre
+# (timescale-ha) y route les connexions vers le primaire courant, sans DNS ni redémarrage. Le certificat de
+# chaque serveur porte 127.0.0.1 dans son SAN, la vérification TLS reste donc valable. À passer à vrai dans
+# les group_vars SEULEMENT une fois deploy-timescale-ha.yml joué : avant, 127.0.0.1 ne répond pas.
+pm_db_host: "{{ '127.0.0.1' if (tsdb_ha_proxy_enabled | default(false) | bool) else (timescale_service_hostname | default('timescale.' ~ domain_name)) }}"
 pm_db_port: "{{ papangmetrics_db_port | default(5432) }}"
 pm_db_name: "{{ papangmetrics_db | default('papangmetrics') }}"
 pm_db_user: "{{ papangmetrics_user | default('papangmetrics') }}"
