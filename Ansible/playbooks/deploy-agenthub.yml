@@ -1,9 +1,10 @@
 ---
 # AgentHub — hub d'orchestration d'agents CLI (Claude Code, Codex, ...).
 # Front React/nginx + back NestJS + Postgres (Docker Compose, AppTemplate) sur
-# l'entrée d'inventaire `agenthub`, MACHINE PARTAGÉE (ctdapi,
-# rotki, xbot, docker-repo, dev, registry) : rien ici ne doit toucher aux
-# autres conteneurs/nginx hôte/packages de cette machine — voir
+# l'entrée d'inventaire `agenthub`, machine DÉDIÉE depuis le 27/10/2026 (elle
+# était partagée avec ctdapi, rotki, xbot… ; l'ancienne se retire par
+# remove-/purge-agenthub.yml --limit agenthub-old). Machine neuve :
+# `setup-server.yml --limit agenthub` d'abord. Voir
 # docs/plans/2026-09-24-agenthub/09-implementation-plan.md Phase 7 pour les
 # règles déjà appliquées côté runner (T7.1), reprises ici côté hub.
 #
@@ -15,8 +16,8 @@
 #      (cert déjà couvert par le wildcard *.web3c.cc, rien à émettre)
 #   3. vhost sur les proxies : sites-enabled/agenthub.conf (WebSocket,
 #      timeout 1h, buffering off sur /api/v1/agenthub/ws/)
-#   4. agenthub-security (joué sur `ctdapi`, hôte canonique de la machine) :
-#      filtre les ports 4700/4701 dans DOCKER-USER (proxies + whitelist + VPN)
+#   4. agenthub-security : filtre les ports 4700/4701 dans DOCKER-USER
+#      (proxies + whitelist + VPN), règles de host_vars/agenthub.yml
 #   5. silence Alertmanager sur service="agenthub" (alertmanager-update)
 #   6. agenthub-deploy   : build+push+démarrage de l'app (scripts du dépôt
 #      app, PAS un docker_container/docker_compose Ansible — voir
@@ -78,12 +79,11 @@
         site: agenthub.conf
 
 # Le filtrage vit dans DOCKER-USER et non dans ufw : le port est publié par
-# Docker, qui insère ses DNAT en amont de tout ce que gère ufw. Joué sur
-# `ctdapi` — hôte CANONIQUE de la machine partagée, où vit
-# `docker_ports_rules` (host_vars/ctdapi.yml) — PAS sur `agenthub`, qui n'a
-# pas son propre host_vars (voir deploy-rotki.yml pour ce même motif).
+# Docker, qui insère ses DNAT en amont de tout ce que gère ufw.
+# `docker_ports_rules` est dans host_vars/agenthub.yml (entrée canonique de la
+# machine).
 - name: Filter the AgentHub ports in DOCKER-USER
-  hosts: ctdapi
+  hosts: agenthub
   remote_user: "{{ remote_username }}"
   become: true
   roles:

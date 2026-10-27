@@ -2,10 +2,9 @@
 # Restriction réseau du hub AgentHub. Les deux ports (front, back-lb) sont
 # PUBLIÉS PAR DOCKER (scripts/docker-compose.yml du template) : invisibles
 # pour ufw (CLAUDE.md, docker-ports-security/defaults). Les règles vivent dans
-# `docker_ports_rules` (host_vars/ctdapi.yml — hôte CANONIQUE de la machine
-# partagée `ctdapi`, pas `agenthub` lui-même, une liste par MACHINE) et
-# sont appliquées en jouant ce rôle sur `ctdapi` (voir deploy-agenthub.yml) —
-# jouées sur `agenthub`, elles seraient un no-op silencieux.
+# `docker_ports_rules` (host_vars/agenthub.yml — entrée CANONIQUE de la
+# machine, une liste par MACHINE) et sont appliquées en jouant ce rôle sur
+# `agenthub` (voir deploy-agenthub.yml).
 
 agenthub_front_port: "{{ hostvars['agenthub'].app_port | default(4700) }}"
 agenthub_back_port: "{{ hostvars['agenthub'].back_port | default(4701) }}"

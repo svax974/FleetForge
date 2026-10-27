@@ -5,8 +5,9 @@
 # retirés automatiquement — voir le message d'agenthub-remove.
 #
 #   ./play.sh web3c remove-agenthub.yml
+#   ./play.sh web3c remove-agenthub.yml --limit agenthub-old   # ancienne machine, après un déplacement
 - name: Remove the AgentHub app
-  hosts: agenthub
+  hosts: agenthub:agenthub-old
   remote_user: "{{ remote_username }}"
   become: true
   roles:

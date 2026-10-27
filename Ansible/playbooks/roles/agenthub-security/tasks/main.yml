@@ -1,12 +1,11 @@
 ---
-# Joué sur `ctdapi` (hôte canonique de la machine partagée), pas sur `agenthub` —
-# voir defaults/main.yml.
+# Joué sur `agenthub`, entrée canonique de la machine — voir defaults/main.yml.
 
 - name: Apply the machine's Docker port rules
   ansible.builtin.include_role:
     name: docker-ports-security
 
-# Une machine dont host_vars/ctdapi.yml ignorerait ces deux ports les
+# Une machine dont host_vars/agenthub.yml ignorerait ces deux ports les
 # publierait sur 0.0.0.0 sans aucun filtre, et `ufw status` afficherait
 # néanmoins des DENY rassurants (constat du 06/08/2026 sur `prometheus1`,
 # reproduit ici en garde-fou plutôt qu'en commentaire).
@@ -18,7 +17,7 @@
       Le port {{ item }} (AgentHub) est publié par Docker mais absent de
       `docker_ports_rules` : il serait joignable depuis Internet sans filtre,
       et ufw n'y peut rien. Ajouter une entrée dans
-      playbooks/host_vars/ctdapi.yml (rôle docker-ports-security), avec
+      playbooks/host_vars/agenthub.yml (rôle docker-ports-security), avec
       `sources` limité aux IP des proxies + `allow_whitelist`/`allow_vpns`.
     success_msg: "Port {{ item }} déclaré dans docker_ports_rules."
   loop:

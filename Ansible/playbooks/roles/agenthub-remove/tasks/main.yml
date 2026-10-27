@@ -38,7 +38,12 @@
   become: false
   register: agenthub_clean_remote
   changed_when: true
-  when: agenthub_remove_env_stat.stat.exists
+  # clean-remote.sh vise REMOTE_HOST de back/.env, donc la machine EN SERVICE :
+  # sur une ancienne machine (`agenthub-old`, après un déplacement) il
+  # nettoierait la nouvelle. Celle-ci passe par le balayage par nom ci-dessous.
+  when:
+    - agenthub_remove_env_stat.stat.exists
+    - hostvars['agenthub'].ansible_host == ansible_host
   failed_when: false
 
 - name: Warn when clean-remote.sh could not run
@@ -48,7 +53,7 @@
       scripts/clean-remote.sh (lit ce fichier pour REMOTE_HOST/REMOTE_USER/
       SSH_KEY_FILE/PROJECT_NAME) n'a pas pu être lancé. Retirer les conteneurs
       `<PROJECT_NAME>_front`/`_back`/`_postgres` à la main sur
-      {{ hostvars['agenthub'].ansible_host }} si nécessaire (la passe suivante
+      {{ ansible_host }} si nécessaire (la passe suivante
       retire quand même les conteneurs des projets compose
       {{ agenthub_project_name }}-back-*/-front-*).
   when: not agenthub_remove_env_stat.stat.exists
@@ -75,6 +80,24 @@
   become: true
   register: agenthub_sweep
   changed_when: "'removed' in agenthub_sweep.stdout"
+
+# Conteneurs nommés `<PROJECT_NAME>_front`, `_back_lb`, `_vmagent`… : ceux que
+# clean-remote.sh retire, mais que celui-ci ne vise que sur la machine en
+# service (voir plus haut). Balayage par NOM EXACT, sur l'hôte lui-même : le
+# préfixe `<PROJECT_NAME>_` n'appartient qu'à cette application.
+- name: Remove the AgentHub containers named after the project
+  ansible.builtin.shell: |
+    set -euo pipefail
+    ids=$(docker ps -aq --filter "name=^{{ agenthub_project_name }}_(front|back|back_lb|postgres|redis|vmagent)$")
+    if [ -n "${ids}" ]; then
+      docker rm -f ${ids} >/dev/null
+      echo "removed ${ids}"
+    fi
+  args:
+    executable: /bin/bash
+  become: true
+  register: agenthub_named_sweep
+  changed_when: "'removed' in agenthub_named_sweep.stdout"
 
 - name: Stop and disable the AgentHub runner (keep it installed)
   ansible.builtin.systemd:

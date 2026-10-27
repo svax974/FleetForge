@@ -4,9 +4,23 @@
 # `agr-*` et leurs dossiers) et l'accès du hub à ce serveur. Destructif, non
 # reconstructible sans sauvegarde de la base applicative.
 #
-#   ./play.sh web3c purge-agenthub.yml -e confirm=yes
+#   ./play.sh web3c purge-agenthub.yml -e confirm=yes --limit agenthub-old
+#
+# `--limit` OBLIGATOIRE : `agenthub-old` est l'ancienne machine, dont la purge
+# suit le déplacement du 27/10/2026 ; sans lui le motif viserait aussi
+# `agenthub`, la machine en service. Le motif nomme `agenthub-old` en dur, un
+# nom absent de l'inventaire y est simplement ignoré. La purge retire le CNAME
+# public : à republier ensuite par deploy-agenthub.yml (agenthub-install).
 - name: Purge AgentHub
-  hosts: agenthub
+  hosts: agenthub:agenthub-old
+  pre_tasks:
+    - name: Refuse to purge without an explicit --limit
+      ansible.builtin.assert:
+        that: ansible_limit is defined
+        fail_msg: >-
+          Purge sans --limit : elle viserait aussi `agenthub`, la machine en
+          service. Ajouter --limit <hôte> (agenthub-old après un déplacement).
+      run_once: true
   remote_user: "{{ remote_username }}"
   become: true
   roles:
