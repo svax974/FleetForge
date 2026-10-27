@@ -13,9 +13,15 @@
 #   ./play.sh web3c setup-server.yml --limit small3 -e ansible_user=ubuntu
 #
 # Le compte d'image est DÉDUIT du `provider` (`bootstrap_users` ci-dessous) :
-# ovh et oracle interdisent root, ils se connectent en `ubuntu` sans `-e`. Le
-# `-e ansible_user=…` reste prioritaire (image atypique, compte `debian`). Ne
-# vaut que pour ce playbook : les `deploy-*` se connectent en `srvc`.
+# ovh et oracle interdisent root, ils se connectent en `ubuntu` sans `-e`, les
+# autres (contabo…) en root. Posé en VARIABLE de play (`ansible_user`) et non en
+# mot-clé `remote_user` : les group_vars du parc posent `ansible_user:
+# {{ remote_username }}`, et une variable de connexion l'emporte sur le
+# mot-clé — la connexion partait en `srvc`, qui n'existe pas encore (constat du
+# 27/10/2026 sur une machine contabo neuve). Une variable de play l'emporte sur
+# group_vars et host_vars. Le `-e ansible_user=…` reste prioritaire (image
+# atypique, compte `debian`). Ne vaut que pour ce playbook : les `deploy-*` se
+# connectent en `srvc`.
 #
 # Ne pas figer ce compte dans l'inventaire : il ne vaut QUE pour le tout premier
 # passage. Une fois `security-create-user` joué, la machine se pilote comme les
@@ -40,18 +46,17 @@
 
 - name: Common server setup
   hosts: all
-  remote_user: "{{ bootstrap_users[provider | default('')] | default('root') }}"
   gather_facts: false
 
   vars:
+    ansible_user: "{{ bootstrap_users[provider | default('')] | default('root') }}"
     # Fournisseurs dont l'image interdit le login root : compte sudoer d'origine.
     bootstrap_users:
       ovh: ubuntu
       oracle: ubuntu
 
-  # `become` est porté par les RÔLES, pas par le play : `remote_user: root` ne
-  # décide de rien (une variable de connexion l'emporte sur un mot-clé de play,
-  # et les group_vars posent `ansible_user: {{ remote_username }}`), et surtout
+  # `become` est porté par les RÔLES, pas par le play : se connecter en root ne
+  # décide de rien (le compte d'image peut être `ubuntu`), et surtout
   # une image cloud peut interdire le login root — le bootstrap arrive alors
   # avec un compte sudoer ordinaire. Sans become, la première tâche qui touche
   # à systemd part en polkit et meurt sur un timeout D-Bus de 25 s, dont le
@@ -59,6 +64,14 @@
   # Connection timed out ». Quand la connexion se fait en root, become est un
   # no-op — le comportement des machines déjà en parc est inchangé.
   pre_tasks:
+    # Le cache de faits (ansible.cfg, 2 h) est indexé par NOM d'inventaire : une
+    # entrée déplacée sur une machine neuve hérite de l'interpréteur Python
+    # découvert sur l'ancienne (`/usr/bin/python3.12: not found`, constaté le
+    # 27/10/2026 sur agenthub). Un bootstrap ne se fie à rien de ce qui a été
+    # mémorisé sur ce nom.
+    - name: Forget the cached facts of this host
+      ansible.builtin.meta: clear_facts
+
     # `host-preflight` ne tourne que sur les `deploy-*` : une machine qui ne
     # reçoit que le socle n'y passerait jamais, et son inventaire ne serait donc
     # jamais contrôlé. L'assert est local, il n'exige aucune connexion.
