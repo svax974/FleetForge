@@ -60,5 +60,13 @@ tsdb_backup_legacy_dir: "{{ tsdb_dir }}/backups"
 # copie. Les dumps de tous les serveurs portent le même nom (`<base>-<horodatage>`)
 # dans le même dossier de destination, avec une rotation sur les `tsdb_backup_keep`
 # plus récents : une copie qui planifierait son dump y ferait tourner les bons dumps
-# de la source. Repasser à true sur le serveur devenu source, et false sur l'ancien.
+# de la source.
+# Sur une paire primaire/réplica, le cron est posé sur LES DEUX serveurs : c'est le script qui décide, à
+# chaque exécution, s'il est sur le primaire courant (voir `tsdb_backup_pair_guard`). Une bascule ne
+# déplace donc aucun cron — rien à faire ni à rejouer.
 tsdb_backup_enabled: true
+
+# Paire (tsdb_cluster, voir timescaledb-install) : le script ne dumpe que si CE serveur est le primaire
+# courant, c'est-à-dire si PostgreSQL y est inscriptible. Un réplica ne dumpe pas : son dump porterait le
+# même nom que celui du primaire dans le même dossier, et la rotation ferait tourner les bons dumps.
+tsdb_backup_pair_guard: "{{ ((tsdb_cluster | default([])) | length) > 1 }}"

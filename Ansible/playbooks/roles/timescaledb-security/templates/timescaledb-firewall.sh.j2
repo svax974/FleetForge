@@ -12,7 +12,7 @@
 set -euo pipefail
 
 PORT={{ tsdb_port }}
-ALLOWED=({{ (tsdb_allowed_ips + tsdb_extra_allowed_cidrs) | unique | join(' ') }})
+ALLOWED=({{ (tsdb_allowed_ips + tsdb_extra_allowed_cidrs + tsdb_peer_ips) | unique | join(' ') }})
 
 # Purge des règles existantes pour ce port — rend le script idempotent et
 # élimine les doublons laissés par les ajouts manuels antérieurs.

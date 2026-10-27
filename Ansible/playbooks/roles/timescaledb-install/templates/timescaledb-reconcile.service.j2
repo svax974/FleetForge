@@ -1,0 +1,12 @@
+# Géré par Ansible (timescaledb-install) — ne pas éditer.
+[Unit]
+Description=TimescaleDB pair reconciler (rebuilds a stale former primary as a replica)
+After=docker.service network-online.target
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/timescaledb-reconcile.sh
+# Une copie de la base peut durer plusieurs minutes ; le timer ne relance pas tant qu'elle tourne.
+TimeoutStartSec=2h

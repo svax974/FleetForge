@@ -21,6 +21,15 @@ if (( FREE_GB >= THRESHOLD_GB )); then
   exit 0
 fi
 
+# Un réplica est en lecture seule : compress_chunk y échouerait, et son disque suit celui du
+# primaire (le WAL rejoué). Alerter ici ne servirait à rien : c'est la supervision qui prévient.
+IN_RECOVERY=$(docker exec papangmetrics-timescaledb psql -U "{{ tsdb_user }}" -d "{{ tsdb_db }}" \
+  -tAc "SELECT pg_is_in_recovery();" 2>/dev/null || echo "f")
+if [ "${IN_RECOVERY}" = "t" ]; then
+  echo "$(date -Iseconds) [WARN] Free disk ${FREE_GB}GB < ${THRESHOLD_GB}GB on a replica — no compression possible" | tee -a "$LOG"
+  exit 0
+fi
+
 echo "$(date -Iseconds) [WARN] Free disk ${FREE_GB}GB < ${THRESHOLD_GB}GB — compressing chunks" | tee -a "$LOG"
 
 COMPRESSED=$(docker exec papangmetrics-timescaledb psql -U "{{ tsdb_user }}" -d "{{ tsdb_db }}" \

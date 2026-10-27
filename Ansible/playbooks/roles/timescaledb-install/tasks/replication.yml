@@ -1,0 +1,65 @@
+---
+# Côté serveur EN MARCHE : compte de réplication, slots, et contrôle de cohérence entre ce que
+# l'inventaire déclare (`tsdb_primary`) et ce que PostgreSQL est réellement. Inclus par
+# tasks/main.yml une fois le conteneur démarré.
+
+- name: Wait for PostgreSQL to accept connections
+  ansible.builtin.command:
+    cmd: docker exec papangmetrics-timescaledb pg_isready -U {{ tsdb_user }} -d {{ tsdb_db }}
+  register: tsdb_ready
+  until: tsdb_ready.rc == 0
+  retries: 60
+  delay: 5
+  changed_when: false
+
+- name: Read the recovery state
+  ansible.builtin.command:
+    cmd: docker exec papangmetrics-timescaledb psql -U {{ tsdb_user }} -d {{ tsdb_db }} -tAc "SELECT pg_is_in_recovery()"
+  register: tsdb_recovery
+  changed_when: false
+
+# Le garde-fou contre le split-brain. Un serveur INSCRIPTIBLE que l'inventaire ne désigne pas comme
+# primaire est l'ancien primaire d'une bascule : sa base a divergé, il ne doit surtout pas
+# être joint par un client (le nom de service ne pointe plus sur lui, mais un processus peut avoir
+# gardé sa résolution DNS). On s'arrête ici, sans rien lui faire de plus.
+- name: Check that the declared role matches the actual state
+  vars:
+    tsdb_is_replica: "{{ tsdb_recovery.stdout | trim == 't' }}"
+  ansible.builtin.assert:
+    that: (tsdb_is_replica | bool) != (tsdb_is_primary | bool)
+    fail_msg: >-
+      {{ inventory_hostname }} {{ 'est un réplica (en recovery)' if tsdb_is_replica | bool else 'est INSCRIPTIBLE' }},
+      mais tsdb_primary vaut « {{ tsdb_primary }} ».
+      {{ 'Promotion non faite : jouer failover-timescale.yml.' if tsdb_is_replica | bool else
+      "Possible ancien primaire après une bascule (base divergée) : l'arrêter, puis le reconstruire avec rebuild-timescale-replica.yml. NE PAS le laisser servir." }}
+    quiet: true
+
+- name: Replication role and slots (writable primary only)
+  when: tsdb_recovery.stdout | trim == 'f'
+  block:
+    - name: Check the replication secret
+      ansible.builtin.assert:
+        that: tsdb_repl_pass | length >= 24
+        fail_msg: "papangmetrics_repl_pass absent ou trop court (24 caractères minimum)."
+        quiet: true
+      no_log: true
+
+    # CREATE si absent, puis ALTER dans tous les cas : le mot de passe suit le vault. Le SQL passe
+    # par stdin, jamais par la ligne de commande (visible dans `ps`).
+    - name: Create or update the replication role
+      ansible.builtin.command:
+        argv: [docker, exec, -i, papangmetrics-timescaledb, psql, -U, "{{ tsdb_user }}", -d, "{{ tsdb_db }}", -v, ON_ERROR_STOP=1]
+        stdin: |
+          DO $do$ BEGIN
+            IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{{ tsdb_repl_user }}') THEN
+              CREATE ROLE {{ tsdb_repl_user }} WITH REPLICATION LOGIN;
+            END IF;
+          END $do$;
+          ALTER ROLE {{ tsdb_repl_user }} WITH REPLICATION LOGIN PASSWORD '{{ tsdb_repl_pass }}';
+      changed_when: false
+      no_log: true
+
+    - name: Create the physical replication slot of each peer
+      ansible.builtin.include_tasks: slot.yml
+      vars:
+        tsdb_slots: "{{ tsdb_peer_hosts }}"

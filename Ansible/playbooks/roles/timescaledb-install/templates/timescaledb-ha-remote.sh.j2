@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# Commandes distantes de l'arbitre de la paire (timescale-ha, sur le client brk1) — généré par Ansible
+# (timescaledb-install), NE PAS ÉDITER SUR L'HÔTE.
+#
+# Seul point d'entrée de la clé SSH de l'arbitre : elle est autorisée avec `command="…"`, donc quoi que le
+# client demande, c'est CE script qui s'exécute, avec le verbe en $SSH_ORIGINAL_COMMAND. Liste blanche :
+#   state       rôle et santé de PostgreSQL ici (JSON)
+#   peer-probe  l'AUTRE serveur est-il joignable d'ICI ? (corroboration d'une panne : primary|standby|down)
+#   promote     promeut ce réplica (refusé si ce serveur n'est pas en recovery)
+#   fence       coupe ce serveur : plus d'écriture possible, et pas de redémarrage automatique
+#   stop-clean  arrêt propre (bascule planifiée : tout le WAL part vers le réplica avant la fin)
+# Tout autre verbe est refusé.
+set -uo pipefail
+
+CONTAINER="papangmetrics-timescaledb"
+DB_USER="{{ tsdb_user }}"
+DB="{{ tsdb_db }}"
+IMAGE="{{ tsdb_image }}"
+DIR="{{ tsdb_dir }}"
+PEER_FQDN="{{ hostvars[tsdb_peer_hosts[0]].hostname | default(tsdb_peer_ips[0]) }}"
+PORT="{{ tsdb_port }}"
+REPL_USER="{{ tsdb_repl_user }}"
+
+sql() { timeout "${2:-5}" docker exec "${CONTAINER}" psql -U "${DB_USER}" -d "${DB}" -Atc "$1" 2>/dev/null; }
+
+case "${SSH_ORIGINAL_COMMAND:-}" in
+  state)
+    REC="$(sql 'SELECT pg_is_in_recovery()')" || REC=""
+    if [ "${REC}" = "t" ]; then
+      echo '{"recovery":true,"writable":false}'
+    elif [ "${REC}" = "f" ]; then
+      # Une transaction qui ÉCRIT (attribution d'un xid) : détecte un primaire qui répond mais n'écrit plus
+      # (disque plein, système de fichiers en lecture seule), qu'un simple SELECT 1 laisserait passer.
+      if sql 'SELECT txid_current()' >/dev/null; then
+        echo '{"recovery":false,"writable":true}'
+      else
+        echo '{"recovery":false,"writable":false}'
+      fi
+    else
+      echo '{"recovery":null,"writable":false}'
+    fi
+    ;;
+  peer-probe)
+    OUT="$(timeout 10 docker run --rm --user 70 -v "${DIR}/conf:/etc/postgresql/conf:ro" --entrypoint psql "${IMAGE}" \
+      "host=${PEER_FQDN} port=${PORT} dbname=${DB} user=${REPL_USER} sslmode=verify-full sslrootcert=/etc/postgresql/conf/tls/ca.crt passfile=/etc/postgresql/conf/.pgpass connect_timeout=5" \
+      -Atc 'SELECT pg_is_in_recovery()' 2>/dev/null)"
+    case "${OUT}" in f) echo primary ;; t) echo standby ;; *) echo down ;; esac
+    ;;
+  promote)
+    [ "$(sql 'SELECT pg_is_in_recovery()')" = "t" ] || { echo "refusé : ce serveur n'est pas un réplica" >&2; exit 3; }
+    sql 'SELECT pg_promote(true, 60)' 90
+    ;;
+  fence)
+    docker update --restart=no "${CONTAINER}" >/dev/null 2>&1
+    timeout 40 docker stop -t 30 "${CONTAINER}" >/dev/null 2>&1
+    echo ok
+    ;;
+  stop-clean)
+    docker update --restart=no "${CONTAINER}" >/dev/null 2>&1
+    docker stop -t 300 "${CONTAINER}" >/dev/null 2>&1
+    CODE="$(docker inspect --format '{% raw %}{{.State.ExitCode}}{% endraw %}' "${CONTAINER}" 2>/dev/null)"
+    [ "${CODE}" = "0" ] && echo ok || echo "fail(${CODE})"
+    ;;
+  *)
+    echo "verbe refusé" >&2
+    exit 2
+    ;;
+esac

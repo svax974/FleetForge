@@ -96,6 +96,41 @@
   no_log: true
   notify: reload timescaledb
 
+# Le certificat de l'AC (public) : un réplica vérifie celui du primaire (sslmode=verify-full,
+# `sslrootcert` de primary_conninfo). Jamais ca.key.
+- name: Deploy the CA certificate (replication client verification)
+  ansible.builtin.copy:
+    src: "{{ tsdb_tls_pki_dir }}/ca.crt"
+    dest: "{{ tsdb_dir }}/conf/tls/ca.crt"
+    owner: 70
+    mode: '0644'
+  become: true
+  when: tsdb_replication_enabled | bool
+
+# Le secret de réplication, sur les DEUX serveurs : un réplica s'en sert pour suivre le primaire, et un
+# ancien primaire pour se reconstruire (réconciliateur) sans qu'on repasse par Ansible. Lu par libpq
+# (`passfile`) : il n'apparaît ni en ligne de commande, ni dans postgresql.auto.conf.
+- name: Check the replication secret
+  ansible.builtin.assert:
+    that:
+      - tsdb_repl_pass | length >= 24
+      # `:` et `\` sont des séparateurs du format .pgpass.
+      - "':' not in tsdb_repl_pass and '\\' not in tsdb_repl_pass"
+    fail_msg: "papangmetrics_repl_pass : 24 caractères minimum, sans ':' ni '\\' (format de .pgpass)."
+    quiet: true
+  no_log: true
+  when: tsdb_replication_enabled | bool
+
+- name: Deploy the replication password file
+  ansible.builtin.copy:
+    content: "*:*:*:{{ tsdb_repl_user }}:{{ tsdb_repl_pass }}\n"
+    dest: "{{ tsdb_dir }}/conf/.pgpass"
+    owner: 70
+    mode: '0600'
+  become: true
+  no_log: true
+  when: tsdb_replication_enabled | bool
+
 - name: Deploy pg_hba.conf
   ansible.builtin.template:
     src: pg_hba.conf.j2

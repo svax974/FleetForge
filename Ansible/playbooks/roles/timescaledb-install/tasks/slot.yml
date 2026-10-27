@@ -1,0 +1,15 @@
+---
+# Crée, sur le serveur où ces tâches s'exécutent (le PRIMAIRE), un slot physique par nom de
+# `tsdb_slots` — un slot par réplica, nommé comme lui. Idempotent. Partagé par replication.yml
+# (slots des pairs au déploiement) et rebuild-timescale-replica.yml (slot du serveur reconstruit,
+# exécuté en délégation sur le primaire).
+- name: Create the physical replication slots
+  ansible.builtin.command:
+    cmd: >-
+      docker exec papangmetrics-timescaledb psql -U {{ tsdb_user }} -d {{ tsdb_db }} -tAc
+      "SELECT pg_create_physical_replication_slot('{{ item }}') WHERE NOT EXISTS
+      (SELECT 1 FROM pg_replication_slots WHERE slot_name = '{{ item }}')"
+  loop: "{{ tsdb_slots }}"
+  register: tsdb_slots_result
+  # Une ligne n'est rendue que si le slot vient d'être créé.
+  changed_when: tsdb_slots_result.stdout | trim | length > 0

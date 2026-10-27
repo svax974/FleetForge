@@ -67,9 +67,15 @@ fi
 # ── Réplication ────────────────────────────────────────────────────────────
 IS_REPLICA="$(q "SELECT pg_is_in_recovery();")"
 if [ "${IS_REPLICA}" = "t" ]; then
+  # 0 quand tout ce qui a été reçu est rejeu : sans cela, le délai depuis la dernière
+  # transaction rejouée croît sur un primaire inactif alors que rien n'est en retard.
   emit "${PREFIX}_replication_lag_seconds" \
-       "$(q "SELECT COALESCE(EXTRACT(EPOCH FROM now() - pg_last_xact_replay_timestamp()), 0)::bigint;")" \
+       "$(q "SELECT CASE WHEN pg_last_wal_receive_lsn() = pg_last_wal_replay_lsn() THEN 0 ELSE COALESCE(EXTRACT(EPOCH FROM now() - pg_last_xact_replay_timestamp()), 0)::bigint END;")" \
        "Retard de rejeu du réplica."
+  # Vu du réplica : le flux avec le primaire est-il établi ? (vu du primaire : connected_replicas)
+  emit "${PREFIX}_replication_receiver_up" \
+       "$(q "SELECT count(*) FROM pg_stat_wal_receiver WHERE status = 'streaming';")" \
+       "1 si le réplica reçoit le flux de réplication du primaire."
   emit "${PREFIX}_is_replica" 1 "1 si l'instance est un réplica."
 else
   emit "${PREFIX}_is_replica" 0 "1 si l'instance est un réplica."
@@ -78,4 +84,17 @@ else
   emit "${PREFIX}_inactive_replication_slots" \
        "$(q "SELECT count(*) FROM pg_replication_slots WHERE NOT active;")" \
        "Slots de réplication inactifs (rétention de WAL)."
+  emit "${PREFIX}_replication_connected_replicas" \
+       "$(q "SELECT count(*) FROM pg_stat_replication WHERE state = 'streaming';")" \
+       "Réplicas connectés en streaming."
+  # En octets de WAL, pas en secondes : fiable même sans écriture. Rien n'est émis quand
+  # il n'y a aucun réplica (max() vaut NULL) — un 0 passerait pour « à jour ».
+  emit "${PREFIX}_replication_replay_lag_bytes" \
+       "$(q "SELECT max(pg_wal_lsn_diff(pg_current_wal_lsn(), replay_lsn))::bigint FROM pg_stat_replication;")" \
+       "Octets de WAL produits que le réplica le plus en retard n'a pas encore rejoués."
+  # Le plafond max_slot_wal_keep_size invalide le slot (et impose de reconstruire le réplica) :
+  # le voir monter permet d'agir avant.
+  emit "${PREFIX}_replication_slot_retained_bytes" \
+       "$(q "SELECT max(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn))::bigint FROM pg_replication_slots WHERE restart_lsn IS NOT NULL;")" \
+       "Octets de WAL retenus par le slot de réplication le plus en retard."
 fi

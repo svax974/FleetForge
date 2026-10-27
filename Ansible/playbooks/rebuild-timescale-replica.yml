@@ -1,0 +1,126 @@
+---
+# Reconstruit un serveur TimescaleDB en réplica du primaire courant : l'ancien primaire après une
+# bascule (sa base a divergé, elle ne se « rattrape » pas), ou un réplica dont le slot a été
+# invalidé (WAL retenu au plafond max_slot_wal_keep_size) ou qui a été corrompu.
+#
+#   ./play.sh papanglabs rebuild-timescale-replica.yml -e replica=timescale1               # contrôle, lecture seule
+#   ./play.sh papanglabs rebuild-timescale-replica.yml -e replica=timescale1 -e confirm=yes
+#   ./play.sh papanglabs rebuild-timescale-replica.yml -e replica=timescale1 -e confirm=yes -e purge_old=yes
+#
+# Le primaire est élu à l'exécution (le serveur réellement inscriptible) : rien à tenir à jour dans
+# l'inventaire. `replica` ne peut pas être ce primaire.
+#
+# Normalement INUTILE après une bascule : le réconciliateur (timescaledb-reconcile) reconstruit seul
+# un ancien primaire dépassé. Ce playbook sert à forcer la reconstruction d'un réplica dont le slot a été
+# invalidé (WAL retenu au plafond max_slot_wal_keep_size) ou qui est corrompu.
+#
+# Ce que fait ce playbook : arrête le conteneur du serveur, met son répertoire de données de côté
+# (`data.diverged-<horodatage>`, supprimé seulement avec purge_old=yes : sur un ancien primaire, c'est
+# la seule trace des écritures qui n'ont pas été répliquées), puis rejoue le rôle timescaledb-install,
+# qui — répertoire vide — copie le primaire par pg_basebackup. Une dizaine de Go : quelques minutes.
+#
+# NE TOUCHE PAS au primaire, sauf pour y créer le slot de ce réplica (idempotent).
+
+- name: Contrôle et reconstruction
+  hosts: timescale1:timescale2
+  remote_user: "{{ remote_username }}"
+  gather_facts: false
+  vars:
+    rb_user: "{{ papangmetrics_user | default('papangmetrics') }}"
+    rb_db: "{{ papangmetrics_db | default('papangmetrics') }}"
+  tasks:
+    - name: Élire le primaire courant
+      ansible.builtin.include_role:
+        name: timescaledb-install
+        tasks_from: discover
+
+    - name: Paramètres
+      ansible.builtin.assert:
+        that:
+          - replica is defined
+          - replica in tsdb_cluster
+          - replica != tsdb_primary
+        fail_msg: >-
+          -e replica=<hôte> requis, et ≠ du primaire courant ({{ tsdb_primary }}, le serveur inscriptible).
+        quiet: true
+      run_once: true
+
+    # Le primaire doit être là, inscriptible : sinon il n'y a rien à copier, et détruire le seul
+    # exemplaire de la base serait irréversible.
+    - name: Le primaire courant est en marche et inscriptible
+      ansible.builtin.command:
+        cmd: >-
+          docker exec papangmetrics-timescaledb psql -U {{ rb_user }} -d {{ rb_db }} -Atc
+          "SELECT pg_is_in_recovery()"
+      delegate_to: "{{ tsdb_primary }}"
+      run_once: true
+      register: rb_primary
+      changed_when: false
+      failed_when: rb_primary.stdout | trim != 'f'
+      check_mode: false
+
+    - name: Rappel — confirmation requise
+      ansible.builtin.debug:
+        msg: >-
+          Lecture seule : {{ replica }} sera reconstruit en réplica de {{ tsdb_primary }}.
+          Son répertoire de données sera mis de côté. Pour exécuter : -e confirm=yes
+      run_once: true
+      when: (confirm | default('')) != 'yes'
+
+    - name: Reconstruction
+      when:
+        - (confirm | default('')) == 'yes'
+        - inventory_hostname == replica
+      block:
+        # Le slot doit exister AVANT la copie (il retient le WAL produit pendant celle-ci).
+        # Exécuté SUR LE PRIMAIRE (import statique dans un bloc délégué : la délégation s'applique
+        # à toutes les tâches du rôle importé).
+        - name: Slot de réplication sur le primaire
+          delegate_to: "{{ tsdb_primary }}"
+          block:
+            - ansible.builtin.import_role:
+                name: timescaledb-install
+                tasks_from: slot
+              vars:
+                tsdb_slots: ["{{ replica }}"]
+
+        - name: Arrêter et retirer le conteneur
+          community.docker.docker_compose_v2:
+            project_src: "/home/{{ remote_username }}/papangmetrics-db"
+            state: absent
+          failed_when: false
+
+        - name: Horodatage
+          ansible.builtin.command:
+            cmd: date +%Y%m%dT%H%M%S
+          register: rb_ts
+          changed_when: false
+
+        - name: Mettre le répertoire de données de côté
+          ansible.builtin.command:
+            cmd: >-
+              mv /home/{{ remote_username }}/papangmetrics-db/data
+              /home/{{ remote_username }}/papangmetrics-db/data.diverged-{{ rb_ts.stdout }}
+            removes: "/home/{{ remote_username }}/papangmetrics-db/data"
+          become: true
+
+        - name: Supprimer l'ancien répertoire (purge_old=yes)
+          ansible.builtin.file:
+            path: "/home/{{ remote_username }}/papangmetrics-db/data.diverged-{{ rb_ts.stdout }}"
+            state: absent
+          become: true
+          when: (purge_old | default('no')) == 'yes'
+
+        # Répertoire de données vide : le rôle détecte l'absence de PG_VERSION et copie le primaire
+        # (replica.yml), puis redémarre avec `restart: always` (compose rendu à nouveau).
+        - name: Reconstruire en réplica
+          ansible.builtin.include_role:
+            name: timescaledb-install
+
+    - name: Reste à faire
+      ansible.builtin.debug:
+        msg:
+          - "{{ replica }} est reconstruit. Vérifier : le retard retombe (timescaledb_replication_replay_lag_bytes)."
+          - "L'ancien répertoire est dans /home/{{ remote_username }}/papangmetrics-db/data.diverged-*, à supprimer à la main quand il ne sert plus."
+      run_once: true
+      when: (confirm | default('')) == 'yes'

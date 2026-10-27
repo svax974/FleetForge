@@ -4,6 +4,14 @@
 #   ./play.sh papanglabs restore-timescale.yml                    # état des dumps seul
 #   ./play.sh papanglabs restore-timescale.yml -e confirm=yes     # restaure le plus récent
 #   ./play.sh papanglabs restore-timescale.yml -e confirm=yes -e dump=papangmetrics-2026-08-09T042500.sql.gz
+#   ./play.sh papanglabs restore-timescale.yml -e tsdb_target=<hôte> -e confirm=yes   # un AUTRE serveur
+#
+# Cible : par défaut le PRIMAIRE courant de la paire, élu à l'exécution (le serveur réellement inscriptible,
+# timescaledb-install/tasks/discover.yml) — aucune valeur d'inventaire à tenir à jour après une bascule.
+# `-e tsdb_target=<hôte>` vise n'importe quel serveur de l'inventaire. Un réplica est refusé : en lecture
+# seule, il ne peut rien recevoir. Sur le primaire, la restauration se réplique d'elle-même vers le réplica
+# (le DROP DATABASE et le rechargement passent par le WAL) ; restaurer sur un hôte HORS paire ne déplace pas
+# le routage de PapangMetrics.
 #
 # Contrairement à la restauration BRK, celle-ci ARRÊTE L'ETL ET L'API sur papangmetrics1
 # avant l'opération et les relance après. Ce n'est pas un excès de prudence :
@@ -27,44 +35,74 @@
       when: (confirm | default('')) == 'yes'
 
 - name: Restauration de la base d'indicateurs
-  hosts: timescale1
+  # `-e tsdb_target` : seul cas où une variable est admise dans `hosts:` (les -e existent avant les group_vars).
+  hosts: "{{ tsdb_target | default('timescale1:timescale2') }}"
   remote_user: "{{ remote_username }}"
+  vars:
+    tsdb_user: "{{ papangmetrics_user | default('papangmetrics') }}"
+    tsdb_db: "{{ papangmetrics_db | default('papangmetrics') }}"
   tasks:
-    - name: État des dumps disponibles
-      ansible.builtin.command: "{{ ansible_env.HOME }}/papangmetrics-db/timescaledb-restore.sh --check"
-      changed_when: false
-      register: tsdb_restore_check
+    - name: Élire le primaire courant
+      ansible.builtin.include_role:
+        name: timescaledb-install
+        tasks_from: discover
+      when: tsdb_target is not defined
 
-    - name: Afficher l'état
-      ansible.builtin.debug:
-        var: tsdb_restore_check.stdout_lines
+    - name: Serveur à restaurer
+      ansible.builtin.set_fact:
+        restore_host: "{{ tsdb_target | default(tsdb_primary) }}"
 
-    - name: Rappel — confirmation requise
-      ansible.builtin.debug:
-        msg: >-
-          Lecture seule. Pour restaurer réellement :
-          ./play.sh papanglabs restore-timescale.yml -e confirm=yes
-      when: (confirm | default('')) != 'yes'
+    - name: Restaurer sur le serveur désigné
+      when: inventory_hostname == restore_host
+      block:
+        - name: Refuser un réplica
+          ansible.builtin.command:
+            cmd: >-
+              docker exec papangmetrics-timescaledb psql -U {{ tsdb_user }} -d {{ tsdb_db }} -Atc
+              "SELECT pg_is_in_recovery()"
+          register: restore_recovery
+          changed_when: false
+          check_mode: false
+          failed_when: restore_recovery.stdout | trim == 't'
 
-    # Synchrone, contrairement à la restauration BRK : le chargement dure
-    # certes des heures, mais l'ETL et l'API sont arrêtés pendant ce temps et
-    # doivent être relancés par le play suivant. Lancer en tâche de fond les
-    # relancerait sur une base en cours de reconstruction.
-    #
-    # Prévoir un `tmux` côté poste, ou augmenter le délai SSH : une coupure de
-    # la connexion Ansible ici laisse les services arrêtés.
-    - name: Restaurer
-      ansible.builtin.command: >-
-        {{ ansible_env.HOME }}/papangmetrics-db/timescaledb-restore.sh --yes
-        {{ ('--file ' ~ dump) if dump is defined else '' }}
-      changed_when: true
-      register: tsdb_restore
-      when: (confirm | default('')) == 'yes'
+    - name: Restauration proprement dite
+      when: inventory_hostname == restore_host
+      block:
+        - name: État des dumps disponibles
+          ansible.builtin.command: "{{ ansible_env.HOME }}/papangmetrics-db/timescaledb-restore.sh --check"
+          changed_when: false
+          register: tsdb_restore_check
 
-    - name: Journal de restauration
-      ansible.builtin.debug:
-        var: tsdb_restore.stdout_lines
-      when: (confirm | default('')) == 'yes'
+        - name: Afficher l'état
+          ansible.builtin.debug:
+            var: tsdb_restore_check.stdout_lines
+
+        - name: Rappel — confirmation requise
+          ansible.builtin.debug:
+            msg: >-
+              Lecture seule. Pour restaurer réellement :
+              ./play.sh papanglabs restore-timescale.yml -e confirm=yes
+          when: (confirm | default('')) != 'yes'
+
+        # Synchrone, contrairement à la restauration BRK : le chargement dure
+        # certes des heures, mais l'ETL et l'API sont arrêtés pendant ce temps et
+        # doivent être relancés par le play suivant. Lancer en tâche de fond les
+        # relancerait sur une base en cours de reconstruction.
+        #
+        # Prévoir un `tmux` côté poste, ou augmenter le délai SSH : une coupure de
+        # la connexion Ansible ici laisse les services arrêtés.
+        - name: Restaurer
+          ansible.builtin.command: >-
+            {{ ansible_env.HOME }}/papangmetrics-db/timescaledb-restore.sh --yes
+            {{ ('--file ' ~ dump) if dump is defined else '' }}
+          changed_when: true
+          register: tsdb_restore
+          when: (confirm | default('')) == 'yes'
+
+        - name: Journal de restauration
+          ansible.builtin.debug:
+            var: tsdb_restore.stdout_lines
+          when: (confirm | default('')) == 'yes'
 
 - name: Reprise de l'ETL et de l'API
   hosts: papangmetrics1

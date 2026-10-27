@@ -134,6 +134,17 @@ prom_alert_db_connections_pct: 80
 # le réplica voit des données significativement périmées.
 prom_alert_db_replication_lag_seconds: 300
 
+# Paire TimescaleDB primaire + réplica (timescaledb-install : tsdb_cluster). À passer à true
+# dans les group_vars UNE FOIS le réplica déployé : avant, « aucun réplica connecté » est l'état
+# normal du primaire seul, et l'alerte sonnerait en permanence.
+prom_alert_timescale_pair: false
+# Retard en WAL au-delà duquel un réplica est jugé en retard. Un backfill ou un balayage ETL
+# produit des Go de WAL en quelques minutes ; 2 Gio tenus 15 min ne sont plus un pic.
+prom_alert_timescale_lag_bytes: 2147483648
+# WAL retenu par le slot : la moitié du plafond max_slot_wal_keep_size (40 Go,
+# timescaledb-install). Au plafond, le slot est invalidé et le réplica doit être reconstruit.
+prom_alert_timescale_slot_retained_bytes: 21474836480
+
 # Durée tolérée pour la plus ancienne transaction ouverte. Au-delà, elle
 # bloque le VACUUM et fait gonfler la base sans qu'aucun autre symptôme ne
 # le signale — voir le commentaire de longest_transaction_seconds dans

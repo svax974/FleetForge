@@ -15,6 +15,16 @@ hostnossl   all       all   all            reject
 {% for ip in tsdb_tls_clients %}
 hostssl     all       all   {{ ip }}/32    scram-sha-256
 {% endfor %}
+{% if tsdb_replication_enabled | bool %}
+# Réplication : le mot-clé `all` ne couvre PAS `replication`, d'où des lignes dédiées. Le pair
+# n'a accès qu'au flux de réplication, jamais aux bases, et seulement en TLS.
+{% for ip in tsdb_peer_ips %}
+hostssl     replication  {{ tsdb_repl_user }}  {{ ip }}/32  scram-sha-256
+# Le même compte, sur la base : le réconciliateur du pair y lit `pg_is_in_recovery()` (ce serveur
+# est-il inscriptible ?). Sans autre droit que ceux de PUBLIC : aucune table ne lui est accordée.
+hostssl     {{ tsdb_db }}  {{ tsdb_repl_user }}  {{ ip }}/32  scram-sha-256
+{% endfor %}
+{% endif %}
 {% if tsdb_tls_required | bool %}
 host        all       all   all            reject
 {% else %}

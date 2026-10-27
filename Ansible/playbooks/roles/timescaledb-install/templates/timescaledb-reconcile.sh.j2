@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+# Réconciliateur de la paire TimescaleDB — généré par Ansible (timescaledb-install), NE PAS ÉDITER SUR L'HÔTE.
+#
+# Rejoué chaque minute (timescaledb-reconcile.timer) sur LES DEUX serveurs. Une seule situation le
+# fait agir : ce serveur est un ancien primaire dont l'autre a été promu depuis (panne, ou bascule
+# planifiée). Sa base a alors DIVERGÉ : il ne la rattrape pas, il la remplace par une copie du nouveau
+# primaire. Aucun opérateur n'a à intervenir.
+#
+# Le critère est celui de PostgreSQL lui-même, pas un état d'inventaire ni le DNS : la promotion d'un
+# réplica incrémente la TIMELINE. Ce serveur se reconstruit si, et seulement si,
+#   1. il a une base, qui n'est pas déjà celle d'un réplica (pas de standby.signal) ;
+#   2. l'autre serveur répond, est INSCRIPTIBLE ;
+#   3. et sa timeline est STRICTEMENT plus récente que la mienne ;
+#   4. ce constat se répète {{ tsdb_reconcile_confirmations }} minutes de suite.
+# Une panne sans promotion laisse les timelines égales : rien ne se passe. Si l'autre serveur ne
+# répond pas, rien ne se passe non plus : on ne détruit jamais la seule copie inscriptible.
+#
+# L'ancien répertoire est mis de côté (data.diverged-<horodatage>) : sur un ancien primaire c'est la seule
+# trace des écritures non répliquées. Seul le plus récent est conservé.
+set -uo pipefail
+
+DIR="{{ tsdb_dir }}"
+CONTAINER="papangmetrics-timescaledb"
+IMAGE="{{ tsdb_image }}"
+ME="{{ inventory_hostname }}"
+PEER_FQDN="{{ hostvars[tsdb_peer_hosts[0]].hostname | default(tsdb_peer_ips[0]) }}"
+PORT="{{ tsdb_port }}"
+DB="{{ tsdb_db }}"
+REPL_USER="{{ tsdb_repl_user }}"
+CONFIRMATIONS="{{ tsdb_reconcile_confirmations }}"
+STATE_DIR="{{ tsdb_reconcile_state_dir }}"
+
+log() { echo "$*"; logger -t timescaledb-reconcile -- "$*" 2>/dev/null || true; }
+reset() { rm -f "${STATE_DIR}/count"; exit 0; }
+
+mkdir -p "${STATE_DIR}"
+exec 9>"${STATE_DIR}/lock"
+flock -n 9 || exit 0
+
+# Conteneur éphémère de l'image du serveur : mêmes binaires, même version, rien à installer sur l'hôte.
+# conf/ porte le CA, le .pgpass (secret de réplication) et pg_hba.conf.
+run_tool() {
+  local tool="$1"; shift
+  docker run --rm --user 70 -v "${DIR}/conf:/etc/postgresql/conf:ro" --entrypoint "${tool}" "${IMAGE}" "$@"
+}
+peer_conninfo="host=${PEER_FQDN} port=${PORT} user=${REPL_USER} sslmode=verify-full sslrootcert=/etc/postgresql/conf/tls/ca.crt passfile=/etc/postgresql/conf/.pgpass connect_timeout=5"
+
+# 1. Ce serveur a une base, qui n'est pas déjà celle d'un réplica.
+[ -f "${DIR}/data/PG_VERSION" ] || reset
+[ -f "${DIR}/data/standby.signal" ] && reset
+
+# 2. L'autre serveur est joignable et inscriptible.
+[ "$(run_tool psql "${peer_conninfo} dbname=${DB}" -Atc 'SELECT pg_is_in_recovery()' 2>/dev/null)" = "f" ] || reset
+
+# 3. Sa timeline est plus récente que la mienne. IDENTIFY_SYSTEM (protocole de réplication) donne celle
+# de l'autre ; pg_controldata lit la mienne dans le fichier de contrôle, serveur arrêté ou non.
+PEER_TL="$(run_tool psql "${peer_conninfo} replication=true" -At -c 'IDENTIFY_SYSTEM' 2>/dev/null | cut -d'|' -f2)"
+MY_TL="$(docker run --rm --user 70 -v "${DIR}/data:/var/lib/postgresql/data:ro" --entrypoint pg_controldata "${IMAGE}" \
+          /var/lib/postgresql/data 2>/dev/null | awk -F: "/Latest checkpoint's TimeLineID/ {gsub(/ /,\"\",\$2); print \$2}")"
+[[ "${PEER_TL}" =~ ^[0-9]+$ && "${MY_TL}" =~ ^[0-9]+$ ]] || reset
+[ "${PEER_TL}" -gt "${MY_TL}" ] || reset
+
+# 4. Constat répété : un serveur qui vient d'être promu, ou une coupure réseau d'une minute, ne suffisent pas.
+N=$(( $(cat "${STATE_DIR}/count" 2>/dev/null || echo 0) + 1 ))
+echo "${N}" > "${STATE_DIR}/count"
+if [ "${N}" -lt "${CONFIRMATIONS}" ]; then
+  log "Ancien primaire probable (timeline ${MY_TL} < ${PEER_TL} sur ${PEER_FQDN}) : constat ${N}/${CONFIRMATIONS}."
+  exit 0
+fi
+
+log "DÉCLASSEMENT : ${ME} (timeline ${MY_TL}) est dépassé par ${PEER_FQDN} (timeline ${PEER_TL}) — reconstruction en réplica."
+
+# Fencing d'abord : plus aucune écriture possible ici, quoi qu'il arrive ensuite.
+docker update --restart=no "${CONTAINER}" >/dev/null 2>&1 || true
+docker stop -t 120 "${CONTAINER}" >/dev/null 2>&1 || true
+docker rm "${CONTAINER}" >/dev/null 2>&1 || true
+
+OLD="${DIR}/data.diverged-$(date +%Y%m%dT%H%M%S)"
+mv "${DIR}/data" "${OLD}" || { log "ERREUR : impossible de mettre ${DIR}/data de côté."; exit 1; }
+install -d -o 70 -m 0750 "${DIR}/data"
+
+# `-C -S` crée le slot du réplica sur le nouveau primaire ; s'il existe déjà (bascule planifiée : il a été
+# créé à la promotion), on recommence sans `-C`. `-R` écrit standby.signal et primary_conninfo.
+basebackup() {
+  docker run --rm --user 70 -v "${DIR}/data:/var/lib/postgresql/data" -v "${DIR}/conf:/etc/postgresql/conf:ro" \
+    --entrypoint pg_basebackup "${IMAGE}" \
+    -d "host=${PEER_FQDN} port=${PORT} user=${REPL_USER} sslmode=verify-full sslrootcert=/etc/postgresql/conf/tls/ca.crt passfile=/etc/postgresql/conf/.pgpass application_name=${ME}" \
+    -D /var/lib/postgresql/data -R -X stream -S "${ME}" --checkpoint=fast -w ${1:-} 2>&1
+}
+OUT="$(basebackup --create-slot)"; RC=$?
+if [ "${RC}" -ne 0 ] && grep -q "already exists" <<<"${OUT}"; then
+  find "${DIR}/data" -mindepth 1 -delete
+  OUT="$(basebackup)"; RC=$?
+fi
+if [ "${RC}" -ne 0 ]; then
+  log "ERREUR pg_basebackup : ${OUT}"
+  # La copie a échoué : on rend sa base à ce serveur (il reste ARRÊTÉ, donc inoffensif) et on réessaiera.
+  find "${DIR}/data" -mindepth 1 -delete 2>/dev/null; rmdir "${DIR}/data" 2>/dev/null
+  mv "${OLD}" "${DIR}/data"
+  exit 1
+fi
+
+docker compose --project-directory "${DIR}" up -d >/dev/null 2>&1 \
+  || { log "ERREUR : le conteneur ne redémarre pas (docker compose up)."; exit 1; }
+
+log "Reconstruction terminée : ${ME} suit ${PEER_FQDN} (ancien répertoire : ${OLD})."
+rm -f "${STATE_DIR}/count"
+# Un seul répertoire divergent conservé : pas d'accumulation sur le disque.
+ls -1d "${DIR}"/data.diverged-* 2>/dev/null | sort | sed '$d' | while read -r OLD_DIR; do rm -rf "${OLD_DIR}"; done || true

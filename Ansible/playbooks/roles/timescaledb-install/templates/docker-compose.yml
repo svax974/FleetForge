@@ -29,6 +29,17 @@ services:
       - "autovacuum_max_workers={{ tsdb_autovacuum_max_workers }}"
       - "-c"
       - "timescaledb.telemetry_level=off"
+{% if tsdb_replication_enabled | bool %}
+      # Réplication (tasks/replication.yml) : wal_level=replica et 10 émetteurs/slots sont les
+      # défauts de PG17. Posés ICI sur les deux serveurs : le jour d'une bascule, le réplica
+      # promu doit déjà borner le WAL retenu pour son propre pair. Les paramètres qu'un
+      # réplica exige >= au primaire (max_connections, max_locks_per_transaction,
+      # max_worker_processes) sont identiques par construction : mêmes valeurs dans les host_vars.
+      - "-c"
+      - "hot_standby=on"
+      - "-c"
+      - "max_slot_wal_keep_size={{ tsdb_slot_wal_keep_size }}"
+{% endif %}
 {% if tsdb_tls_enabled | bool %}
       # TLS (tasks/tls.yml) : certificat de l'AC privée, pg_hba.conf géré par Ansible.
       - "-c"

@@ -36,3 +36,12 @@ tsdb_extra_db_hosts: []
 
 # IP/CIDR bruts à autoriser en plus (dépannage, prestataire…). À garder vide.
 tsdb_extra_allowed_cidrs: []
+
+# Serveurs de la paire de réplication (voir timescaledb-install : tsdb_cluster). Ils doivent
+# joindre le 5432 de l'autre — le primaire pour le flux de réplication, le futur primaire pour la
+# reconstruction. Admis ici, mais PAS dans `tsdb_allowed_ips` : le pair n'est pas un client de la
+# base, `pg_hba.conf` ne lui ouvre que le flux de réplication. Même dérivation que le rôle
+# d'installation (les defaults d'un rôle ne sont pas garantis visibles d'un autre).
+tsdb_peer_ips: >-
+  {{ (tsdb_cluster | default([]) | difference([inventory_hostname]))
+     | map('extract', hostvars, 'ansible_host') | list }}

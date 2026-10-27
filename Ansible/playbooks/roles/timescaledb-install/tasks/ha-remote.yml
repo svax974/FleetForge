@@ -1,0 +1,8 @@
+---
+# Point d'entrée SSH restreint de l'arbitre (voir templates/timescaledb-ha-remote.sh.j2). La clé qui s'y
+# connecte est posée par le rôle timescale-ha-agent, avec `command=` vers ce script.
+- name: Deploy the arbiter's remote commands script
+  ansible.builtin.template:
+    src: timescaledb-ha-remote.sh.j2
+    dest: "{{ tsdb_dir }}/timescaledb-ha-remote.sh"
+    mode: '0750'

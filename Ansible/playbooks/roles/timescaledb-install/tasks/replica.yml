@@ -1,0 +1,95 @@
+---
+# Construit CE serveur en réplica en streaming du primaire courant (`tsdb_primary`).
+# Inclus par tasks/main.yml AVANT le démarrage du conteneur, seulement sur un serveur qui n'est
+# pas le primaire.
+#
+# Une seule fois : si le répertoire de données contient déjà une base (PG_VERSION), RIEN n'est
+# touché — un réplica en marche ne se reconstruit pas par accident. Pour reconstruire un serveur
+# (l'ancien primaire après une bascule), vider le répertoire de données d'abord :
+# rebuild-timescale-replica.yml le fait, après arrêt du conteneur.
+
+- name: Refuse a replica without TLS
+  ansible.builtin.assert:
+    that: tsdb_tls_enabled | bool
+    fail_msg: >-
+      La réplication n'est prise en charge qu'avec TLS (timescaledb_tls_enabled) : le flux de
+      réplication transporte toute la base, et `pg_hba.conf` n'a de ligne `replication` qu'en hostssl.
+    quiet: true
+
+# Le nom du slot est celui du réplica ; PostgreSQL n'accepte que minuscules, chiffres et `_`.
+- name: Check the slot name
+  ansible.builtin.assert:
+    that: inventory_hostname is match('^[a-z0-9_]+$')
+    fail_msg: "{{ inventory_hostname }} ne peut pas nommer un slot de réplication (minuscules, chiffres, _)."
+    quiet: true
+
+- name: Look for an existing database in the data directory
+  ansible.builtin.stat:
+    path: "{{ tsdb_dir }}/data/PG_VERSION"
+  become: true
+  register: tsdb_existing_data
+
+- name: Build the replica
+  when: not tsdb_existing_data.stat.exists
+  block:
+    # Le slot doit exister AVANT la copie : il retient le WAL produit pendant le basebackup. Créé
+    # par replication.yml sur le primaire, qui doit donc avoir été déployé en premier.
+    - name: Check that the primary holds this replica's slot
+      ansible.builtin.command:
+        cmd: >-
+          docker exec papangmetrics-timescaledb psql -U {{ tsdb_user }} -d {{ tsdb_db }} -tAc
+          "SELECT count(*) FROM pg_replication_slots WHERE slot_name = '{{ inventory_hostname }}'"
+      delegate_to: "{{ tsdb_primary }}"
+      register: tsdb_slot_check
+      changed_when: false
+      failed_when: tsdb_slot_check.stdout | trim != '1'
+
+    - name: Check that the primary is reachable from here
+      ansible.builtin.wait_for:
+        host: "{{ hostvars[tsdb_primary].ansible_host }}"
+        port: "{{ tsdb_port }}"
+        timeout: 15
+
+    # `-R` écrit standby.signal et primary_conninfo (= la chaîne -d ci-dessous, dont les chemins sont
+    # ceux du conteneur réel : conf/ est monté au même endroit). verify-full : chaîne ET nom du
+    # primaire (`tsdb_primary_fqdn` est dans son SAN). Une copie de ~10 Go sur un lien de 25 ms.
+    - name: Copy the primary's data (pg_basebackup)
+      ansible.builtin.command:
+        argv:
+          - docker
+          - run
+          - --rm
+          - --user
+          - "70"
+          - -v
+          - "{{ tsdb_dir }}/data:/var/lib/postgresql/data"
+          - -v
+          - "{{ tsdb_dir }}/conf:/etc/postgresql/conf:ro"
+          - --entrypoint
+          - pg_basebackup
+          - "{{ tsdb_image }}"
+          - -d
+          - >-
+            host={{ tsdb_primary_fqdn }} port={{ tsdb_port }} user={{ tsdb_repl_user }}
+            sslmode=verify-full sslrootcert=/etc/postgresql/conf/tls/ca.crt
+            passfile=/etc/postgresql/conf/.pgpass application_name={{ inventory_hostname }}
+          - -D
+          - /var/lib/postgresql/data
+          - -R
+          - -X
+          - stream
+          - -S
+          - "{{ inventory_hostname }}"
+          - --checkpoint=fast
+          - -w
+      become: true
+      async: 7200
+      poll: 30
+      register: tsdb_basebackup
+
+    - name: Check that the copy is a standby
+      ansible.builtin.stat:
+        path: "{{ tsdb_dir }}/data/standby.signal"
+      become: true
+      register: tsdb_standby_signal
+      failed_when: not tsdb_standby_signal.stat.exists

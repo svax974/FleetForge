@@ -1,0 +1,45 @@
+---
+# Élit le primaire COURANT de la paire : le serveur dont PostgreSQL est réellement inscriptible. Pose le
+# fait `tsdb_primary` (priorité supérieure aux group_vars) pour le reste du run, de sorte qu'une bascule
+# n'exige JAMAIS de modifier l'inventaire : la valeur des group_vars n'est qu'un repli, utilisé quand
+# aucun serveur ne répond (premier déploiement de la paire).
+#
+# Lecture seule, jouée aussi sous --check. Un serveur injoignable ou sans PostgreSQL n'est simplement
+# pas candidat : c'est le cas normal de l'ancien primaire après une panne.
+
+- name: Probe each server of the pair
+  ansible.builtin.command:
+    cmd: >-
+      docker exec papangmetrics-timescaledb psql -U {{ tsdb_user }} -d {{ tsdb_db }} -Atc
+      "SELECT pg_is_in_recovery()"
+  delegate_to: "{{ item }}"
+  loop: "{{ tsdb_cluster }}"
+  register: tsdb_probe
+  changed_when: false
+  failed_when: false
+  ignore_unreachable: true
+  check_mode: false
+
+- name: Elect the writable server
+  ansible.builtin.set_fact:
+    tsdb_writable: >-
+      {{ tsdb_probe.results
+         | selectattr('stdout', 'defined')
+         | selectattr('stdout', 'equalto', 'f')
+         | map(attribute='item') | list }}
+
+# Deux serveurs inscriptibles : un ancien primaire est revenu sans avoir été reconstruit. Aucun playbook
+# ne doit alors trancher à sa place — le réconciliateur (timescaledb-reconcile) le reconstruit seul ; on
+# attend simplement qu'il ait fini.
+- name: Refuse a split-brain
+  ansible.builtin.assert:
+    that: tsdb_writable | length <= 1
+    fail_msg: >-
+      Deux serveurs TimescaleDB sont inscriptibles ({{ tsdb_writable | join(', ') }}) : l'un est un ancien primaire
+      en cours de reconstruction automatique (timescaledb-reconcile, `journalctl -t timescaledb-reconcile`).
+      Rejouer quand il est redevenu réplica.
+    quiet: true
+
+- name: Set the current primary
+  ansible.builtin.set_fact:
+    tsdb_primary: "{{ tsdb_writable[0] if (tsdb_writable | length) == 1 else tsdb_primary }}"

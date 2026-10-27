@@ -1,6 +1,16 @@
 ---
 # Deploy self-hosted TimescaleDB (Docker) for PapangMetrics indicators.
 
+# Paire primaire/réplica : élit d'abord le primaire courant (le serveur réellement inscriptible), pour que
+# rien ne dépende d'une valeur d'inventaire qu'une bascule rendrait fausse.
+- name: Elect the current primary of the pair
+  ansible.builtin.include_tasks:
+    file: discover.yml
+    apply:
+      tags: [always]
+  when: tsdb_replication_enabled | bool
+  tags: [always]
+
 # A « DNS seul » vers l'ansible_host de cette machine (`hostname` de l'entrée,
 # ex. timescale1.<zone>), publié dès le premier déploiement sans attendre
 # update-cloudflare-dns.yml — jamais proxifié par Cloudflare : le 5432 n'y passerait
@@ -42,6 +52,18 @@
   when: tsdb_tls_enabled | bool
   tags: [config, tls]
 
+# Réplica : le répertoire de données vient d'un pg_basebackup du primaire, pas d'un initdb. Doit
+# précéder le démarrage du conteneur (qui, sinon, initialiserait une base VIDE indépendante).
+- name: Build this server as a streaming replica of the primary
+  ansible.builtin.include_tasks:
+    file: replica.yml
+    apply:
+      tags: [config, replication]
+  when:
+    - tsdb_replication_enabled | bool
+    - not (tsdb_is_primary | bool)
+  tags: [config, replication]
+
 # Tagué `config` pour pouvoir ne rejouer que les paramètres du moteur, sans
 # repasser par le bootstrap de la machine (phase 1 du playbook) :
 #   ./play.sh papanglabs deploy-timescaledb-standalone.yml --tags config
@@ -75,6 +97,30 @@
   retries: 30
   delay: 5
   tags: [config]
+
+- name: Replication role, slots and role/state consistency check
+  ansible.builtin.include_tasks:
+    file: replication.yml
+    apply:
+      tags: [config, replication]
+  when: tsdb_replication_enabled | bool
+  tags: [config, replication]
+
+- name: Pair reconciler (rebuilds a stale former primary by itself)
+  ansible.builtin.include_tasks:
+    file: reconcile.yml
+    apply:
+      tags: [config, replication]
+  when: tsdb_replication_enabled | bool
+  tags: [config, replication]
+
+- name: Arbiter remote commands (restricted SSH entry point)
+  ansible.builtin.include_tasks:
+    file: ha-remote.yml
+    apply:
+      tags: [config, replication]
+  when: tsdb_replication_enabled | bool
+  tags: [config, replication]
 
 # La sauvegarde N'EST PLUS ICI : elle appartient au rôle
 # `timescaledb-backup-install`, joué juste après par

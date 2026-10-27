@@ -255,6 +255,110 @@ groups:
           summary: "Transaction PostgreSQL longue sur {{ '{{' }} $labels.instance {{ '}}' }}"
           description: "Une transaction ouverte depuis plus de {{ prom_alert_db_long_transaction_seconds }} s bloque le VACUUM et fait gonfler la base."
 
+{% if prom_alert_timescale_pair | bool %}
+      # ── Paire TimescaleDB (primaire + réplica en streaming, bascule manuelle) ──
+      # Série `timescaledb_*` seulement : db et dbfront n'ont pas de réplica.
+      # Réplica déconnecté vu des DEUX côtés : le primaire (aucun réplica en streaming) ou le
+      # réplica (flux absent) suffit — si le primaire est tombé, seul le second voit le trou.
+      - alert: TimescaleReplicaNotStreaming
+        expr: |
+          (timescaledb_replication_connected_replicas == 0)
+          or (timescaledb_replication_receiver_up == 0)
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Le réplica TimescaleDB ne reçoit plus le flux de réplication ({{ '{{' }} $labels.instance {{ '}}' }})"
+          description: "Plus de bascule possible sans perte : le réplica prend du retard tant qu'il est déconnecté. Le slot retient le WAL sur le primaire pendant ce temps. Réplica à reconstruire : en-tête de rebuild-timescale-replica.yml ; primaire perdu : en-tête de failover-timescale.yml."
+
+      - alert: TimescaleReplicaBehind
+        expr: timescaledb_replication_replay_lag_bytes > {{ prom_alert_timescale_lag_bytes }}
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Réplica TimescaleDB en retard de plus de {{ (prom_alert_timescale_lag_bytes | int / 1073741824) | round(1) }} Gio de WAL ({{ '{{' }} $labels.instance {{ '}}' }})"
+          description: "Une bascule maintenant perdrait ce volume d'écritures. Vérifier le lien OVH ↔ Contabo et la charge du réplica."
+
+      - alert: TimescaleSlotRetainedWalHigh
+        expr: timescaledb_replication_slot_retained_bytes > {{ prom_alert_timescale_slot_retained_bytes }}
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Slot de réplication TimescaleDB : {{ (prom_alert_timescale_slot_retained_bytes | int / 1073741824) | round(0) | int }} Gio de WAL retenus ({{ '{{' }} $labels.instance {{ '}}' }})"
+          description: "Au plafond max_slot_wal_keep_size le slot est invalidé et le réplica doit être reconstruit (rebuild-timescale-replica.yml). Le disque du primaire porte ce WAL."
+
+      # Le garde-fou contre le split-brain : deux serveurs inscriptibles en même temps, c'est
+      # un ancien primaire revenu sans avoir été reconstruit. Les écritures divergent.
+      - alert: TimescaleTwoWritablePrimaries
+        expr: count(timescaledb_is_replica == 0) > 1
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Deux serveurs TimescaleDB inscriptibles à la fois"
+          description: "Un seul doit l'être. Le réconciliateur de l'ancien primaire (timescaledb-reconcile) le reconstruit seul en quelques minutes ; s'il n'y parvient pas : `journalctl -t timescaledb-reconcile` sur ce serveur, puis rebuild-timescale-replica.yml."
+
+{% endif %}
+{% if prom_alert_timescale_pair | bool %}
+
+  # ── Bascule automatique (timescale-ha, sur brk1) ───────────────────────────────────────────────
+  # Cadence de 15 s : `TimescaleServerDown` DÉCLENCHE l'arbitre, qui lit l'API d'Alertmanager. Il revérifie
+  # avant de promouvoir (voir roles/timescale-ha-agent/files/tsha.py) : cette règle seule ne promeut rien. Un
+  # silence Alertmanager sur cette alerte SUSPEND la bascule automatique (maintenance).
+  - name: timescale-ha
+    interval: 15s
+    rules:
+      - alert: TimescaleServerDown
+        expr: |
+          (service_up{service="timescaledb", instance=~".*timescale[12].*"} == 0)
+          or (up{job="svcprobe", instance=~".*timescale[12].*"} == 0)
+        for: 15s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Serveur TimescaleDB en panne : {{ '{{' }} $labels.instance {{ '}}' }}"
+          description: "S'il portait le primaire, l'arbitre (timescale-ha) promeut le réplica après vérification. Pour suspendre la bascule automatique : poser un silence sur cette alerte."
+
+      - alert: TimescaleHaAgentDown
+        expr: |
+          (time() - timescale_ha_heartbeat_timestamp_seconds > 120)
+          or absent(timescale_ha_heartbeat_timestamp_seconds)
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "L'arbitre de bascule TimescaleDB ne répond plus (timescale-ha sur brk1)"
+          description: "Plus de bascule automatique, et le routage du client n'est plus suivi. `systemctl status timescale-ha` et `journalctl -u timescale-ha` sur brk1."
+
+      - alert: TimescaleHaAlertmanagerUnreachable
+        expr: timescale_ha_alertmanager_up == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "L'arbitre de bascule ne joint plus Alertmanager"
+          description: "Aucune bascule automatique tant que c'est le cas (c'est Alertmanager qui déclenche). Vérifier prometheus1 / alertmanager1 et le pare-feu du port 9093 pour brk1."
+
+      - alert: TimescaleNoPrimary
+        expr: timescale_ha_primary_available == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Aucun serveur TimescaleDB inscriptible"
+          description: "Vu de brk1 : ni timescale1 ni timescale2 n'accepte d'écriture. Le client n'a plus de base. Voir `tsha.py status` sur brk1."
+
+      - alert: TimescaleFailoverHappened
+        expr: increase(timescale_ha_failovers_total[15m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Bascule TimescaleDB effectuée"
+          description: "Le primaire a changé. L'ancien serveur se reconstruit seul en réplica à son retour (aucune action requise) ; vérifier que TimescaleReplicaNotStreaming se résout."
+
+{% endif %}
 {% endif %}
 {% if 'papangmetrics' in prom_alert_groups %}
 

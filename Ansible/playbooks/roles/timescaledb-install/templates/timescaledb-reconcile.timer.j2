@@ -1,0 +1,11 @@
+# Géré par Ansible (timescaledb-install) — ne pas éditer.
+[Unit]
+Description=Run the TimescaleDB pair reconciler every minute
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=60s
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

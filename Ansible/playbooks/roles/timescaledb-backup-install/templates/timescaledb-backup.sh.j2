@@ -84,6 +84,21 @@ fi
 
 START=$(date +%s)
 
+{% if tsdb_backup_pair_guard | bool %}
+# ── Paire primaire/réplica : seul le primaire dumpe ────────────────────────
+# Décidé à chaque exécution, sur l'état RÉEL de PostgreSQL : après une bascule, personne n'a rien à
+# déplacer. En cas de doute (PostgreSQL ne répond pas) on ne saute pas : le dump échouera de lui-même
+# et le dira, au lieu de se taire.
+IN_RECOVERY="$(docker exec "${CONTAINER}" psql -U "${DB_USER}" -d "${DB}" -Atc 'SELECT pg_is_in_recovery()' 2>/dev/null || true)"
+if [ "${IN_RECOVERY}" = "t" ]; then
+  log "Ignoré : ce serveur est un réplica (le primaire courant dumpe)."
+  # La série s'éteint avec le rôle : un fichier de métriques figé ferait sonner l'alerte de fraîcheur
+  # du dump sur un serveur qui n'a plus à dumper.
+  rm -f "${METRIC_FILE}"
+  exit 0
+fi
+{% endif %}
+
 # ── Auto-limitation ────────────────────────────────────────────────────────
 LAST_TS="$(last_success_ts)"
 LAST_TS="${LAST_TS:-0}"
@@ -91,6 +106,9 @@ if [ "${LAST_TS}" != "0" ]; then
   AGE_DAYS=$(( (START - LAST_TS) / 86400 ))
   if [ "${AGE_DAYS}" -lt "${INTERVAL_DAYS}" ]; then
     log "Ignoré : dernière sauvegarde vieille de ${AGE_DAYS} j (< ${INTERVAL_DAYS})."
+    # Serveur devenu primaire depuis le dernier dump (bascule) : sans fichier de métriques, la fraîcheur
+    # du dump ne serait plus surveillée jusqu'au prochain. On le recrée depuis la date du dernier succès.
+    [ -f "${METRIC_FILE}" ] || write_metrics 1 0 0 "${LAST_TS}"
     exit 0
   fi
 fi

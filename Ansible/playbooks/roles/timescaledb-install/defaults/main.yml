@@ -86,3 +86,36 @@ tsdb_tls_clients: "{{ tsdb_allowed_ips | default([]) }}"
 # Le certificat déployé doit encore valoir au moins ce nombre de jours, sinon
 # le déploiement échoue avec la commande de renouvellement.
 tsdb_tls_min_days_left: 30
+
+# ── Réplication en streaming (primaire + réplica, bascule MANUELLE) ──────────
+# Deux faits :
+#   tsdb_cluster  noms d'inventaire des serveurs de la paire (vide = serveur seul, rien ne change) ;
+#   tsdb_primary  le primaire. Dans les group_vars, ce n'est qu'un REPLI (premier déploiement, aucun
+#                 serveur ne répond) : tasks/discover.yml élit à chaque run le serveur réellement
+#                 inscriptible et pose `tsdb_primary` en fait. Une bascule ne demande donc AUCUNE
+#                 modification d'inventaire.
+# Déclaration symétrique : chaque serveur autorise l'autre (hba, pare-feu), si bien que reconstruire
+# l'ancien primaire en réplica rejoue exactement les mêmes tâches.
+tsdb_cluster: []
+tsdb_primary: "{{ inventory_hostname }}"
+tsdb_is_primary: "{{ inventory_hostname == tsdb_primary }}"
+tsdb_peer_hosts: "{{ tsdb_cluster | difference([inventory_hostname]) }}"
+tsdb_peer_ips: "{{ tsdb_peer_hosts | map('extract', hostvars, 'ansible_host') | list }}"
+tsdb_replication_enabled: "{{ (tsdb_peer_hosts | length) > 0 }}"
+# Nom d'hôte (dans le SAN du certificat) sous lequel un réplica joint le primaire courant :
+# jamais le nom de service, que la bascule déplace.
+tsdb_primary_fqdn: "{{ hostvars[tsdb_primary].hostname | default(hostvars[tsdb_primary].ansible_host) }}"
+
+# Rôle de réplication : un compte dédié, REPLICATION LOGIN et rien d'autre.
+tsdb_repl_user: replicator
+tsdb_repl_pass: "{{ papangmetrics_repl_pass }}"
+# Un slot physique PAR RÉPLICA, nommé comme le réplica (inventory_hostname) : le primaire garde
+# le WAL dont un réplica déconnecté a encore besoin. Plafonné, pour qu'un réplica arrêté ne
+# remplisse pas le disque du primaire (au-delà, le slot est invalidé et le réplica se reconstruit).
+tsdb_slot_wal_keep_size: "40GB"
+
+# Réconciliateur (tasks/reconcile.yml) : après combien de constats consécutifs (un par minute) un
+# serveur inscriptible, dont le nom de service désigne l'AUTRE serveur, se reconstruit en réplica.
+# Doit dépasser le TTL du CNAME (120 s) : un DNS qui vient de bouger ne suffit pas à agir.
+tsdb_reconcile_confirmations: 3
+tsdb_reconcile_state_dir: /run/timescaledb-reconcile

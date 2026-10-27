@@ -1,0 +1,37 @@
+---
+# Pose le réconciliateur de la paire (voir templates/timescaledb-reconcile.sh.j2) : un timer systemd
+# par serveur, chaque minute. C'est lui qui, SANS intervention, reconstruit en réplica un ancien primaire
+# dépassé — après une bascule planifiée comme après une panne, qu'il revienne une minute ou une semaine
+# plus tard.
+- name: Check that the pair has exactly one peer
+  ansible.builtin.assert:
+    that: tsdb_peer_hosts | length == 1
+    fail_msg: "Le réconciliateur gère une paire (un seul pair) ; tsdb_cluster = {{ tsdb_cluster }}."
+    quiet: true
+
+- name: Deploy the reconciler script
+  ansible.builtin.template:
+    src: timescaledb-reconcile.sh.j2
+    dest: /usr/local/sbin/timescaledb-reconcile.sh
+    owner: root
+    group: root
+    mode: '0750'
+  become: true
+
+- name: Deploy the reconciler systemd units
+  ansible.builtin.template:
+    src: "timescaledb-reconcile.{{ item }}.j2"
+    dest: "/etc/systemd/system/timescaledb-reconcile.{{ item }}"
+    owner: root
+    group: root
+    mode: '0644'
+  loop: [service, timer]
+  become: true
+
+- name: Enable the reconciler timer
+  ansible.builtin.systemd:
+    name: timescaledb-reconcile.timer
+    enabled: true
+    state: started
+    daemon_reload: true
+  become: true
