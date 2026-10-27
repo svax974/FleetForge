@@ -506,9 +506,20 @@ impl ProviderHub {
             // Masquer le bouton ne suffit pas : l'appel reste atteignable par
             // l'API HTTP, et une commande qui ouvre un navigateur sur le
             // serveur y resterait en attente sans que personne ne le voie.
-            if !filter_session_actions(provider.session_actions())
+            //
+            // Seule une commande qui EXIGE le navigateur est refusée ici. Une
+            // commande absente de la liste (proposée selon l'état du moment,
+            // comme « Libérer le port », ou inconnue) revient au fournisseur,
+            // qui la traite ou la refuse avec son propre message : l'annoncer
+            // comme « exige un navigateur » était faux.
+            let needs_browser = provider
+                .session_actions()
                 .iter()
-                .any(|a| a.name == name)
+                .any(|a| a.name == name && a.needs_local_browser);
+            if needs_browser
+                && !filter_session_actions(provider.session_actions())
+                    .iter()
+                    .any(|a| a.name == name)
             {
                 return Err(ProviderError::Api(format!(
                     "« {name} » n'est pas disponible ici : elle exige un navigateur \
