@@ -138,6 +138,9 @@ prom_alert_db_replication_lag_seconds: 300
 # dans les group_vars UNE FOIS le réplica déployé : avant, « aucun réplica connecté » est l'état
 # normal du primaire seul, et l'alerte sonnerait en permanence.
 prom_alert_timescale_pair: false
+# Alertes de l'arbitre de bascule automatique (groupe `timescale-ha`). À passer à true UNIQUEMENT une fois
+# deploy-timescale-ha.yml joué : TimescaleHaAgentDown sonne tant que l'arbitre n'émet pas son heartbeat.
+prom_alert_timescale_ha: false
 # Retard en WAL au-delà duquel un réplica est jugé en retard. Un backfill ou un balayage ETL
 # produit des Go de WAL en quelques minutes ; 2 Gio tenus 15 min ne sont plus un pic.
 prom_alert_timescale_lag_bytes: 2147483648

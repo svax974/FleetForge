@@ -301,7 +301,7 @@ groups:
           description: "Un seul doit l'être. Le réconciliateur de l'ancien primaire (timescaledb-reconcile) le reconstruit seul en quelques minutes ; s'il n'y parvient pas : `journalctl -t timescaledb-reconcile` sur ce serveur, puis rebuild-timescale-replica.yml."
 
 {% endif %}
-{% if prom_alert_timescale_pair | bool %}
+{% if prom_alert_timescale_ha | bool %}
 
   # ── Bascule automatique (timescale-ha, sur brk1) ───────────────────────────────────────────────
   # Cadence de 15 s : `TimescaleServerDown` DÉCLENCHE l'arbitre, qui lit l'API d'Alertmanager. Il revérifie
