@@ -669,23 +669,12 @@
   changed_when: true
   when: openclaw_heartbeat_to | string | length > 0
 
-- name: Register the fleet-watch automation
-  ansible.builtin.command:
-    cmd: >-
-      {{ openclaw_binary }} automations add --name fleet-watch
-      --declaration-key fleet-watch --every {{ openclaw_fleetwatch_every }}
-      --command "python3 {{ openclaw_home }}/.openclaw/bin/fleet-watch.py {{ openclaw_home }}/.openclaw/bin/fleet-watch.json"
-      --timeout-seconds {{ openclaw_fleetwatch_timeout + 120 }} --no-deliver
-  become: true
-  become_user: "{{ openclaw_user }}"
-  environment:
-    HOME: "{{ openclaw_home }}"
-  changed_when: true
-  when: openclaw_heartbeat_to | string | length > 0 and openclaw_fleetwatch_enabled | bool
-
-# `openclaw_fleetwatch_enabled` (defaults) : l'automation est activée ou
-# désactivée, jamais supprimée. `enable`/`disable` veulent l'id du job, lu par
-# sa clé de déclaration.
+# Interrupteur À CHAUD : l'automation est créée UNE fois, puis son état
+# (actif/en pause, fréquence comprise) appartient à l'opérateur — panneau
+# Automations d'OpenClaw ou `openclaw automations enable|disable <id>`. Ce rôle
+# ne la réaligne plus jamais sur `openclaw_fleetwatch_enabled`, qui ne fixe que
+# l'état INITIAL : un déploiement ne doit pas rallumer ce qu'un opérateur a
+# mis en pause, ni couper une veille qu'il vient d'activer.
 - name: List the automations
   ansible.builtin.command:
     cmd: "{{ openclaw_binary }} automations list --json"
@@ -697,20 +686,24 @@
   changed_when: false
   when: openclaw_heartbeat_to | string | length > 0
 
-- name: Enable or disable the fleet-watch automation
+- name: Create the fleet-watch automation (once, paused unless openclaw_fleetwatch_enabled)
   ansible.builtin.command:
-    cmd: "{{ openclaw_binary }} automations {{ 'enable' if openclaw_fleetwatch_enabled | bool else 'disable' }} {{ item.id }}"
+    cmd: >-
+      {{ openclaw_binary }} automations add --name fleet-watch
+      --declaration-key fleet-watch --every {{ openclaw_fleetwatch_every }}
+      --command "python3 {{ openclaw_home }}/.openclaw/bin/fleet-watch.py {{ openclaw_home }}/.openclaw/bin/fleet-watch.json"
+      --timeout-seconds {{ openclaw_fleetwatch_timeout + 120 }} --no-deliver
+      {{ '' if openclaw_fleetwatch_enabled | bool else '--disabled' }}
   become: true
   become_user: "{{ openclaw_user }}"
   environment:
     HOME: "{{ openclaw_home }}"
-  loop: >-
-    {{ (openclaw_automations.stdout | from_json).jobs | default([])
-       | selectattr('declarationKey', 'equalto', 'fleet-watch')
-       | rejectattr('enabled', 'equalto', openclaw_fleetwatch_enabled | bool) | list }}
-  loop_control:
-    label: "{{ item.name }} ({{ item.id }})"
-  when: openclaw_heartbeat_to | string | length > 0
+  changed_when: true
+  when:
+    - openclaw_heartbeat_to | string | length > 0
+    - >-
+      'fleet-watch' not in ((openclaw_automations.stdout | from_json).jobs | default([])
+      | map(attribute='declarationKey', default='') | list)
 
 # Écrit l'unité systemd --user (~/.config/systemd/user/openclaw-gateway.service),
 # PAS une unité système : srvc n'a pas de droits root permanents, et c'est le
