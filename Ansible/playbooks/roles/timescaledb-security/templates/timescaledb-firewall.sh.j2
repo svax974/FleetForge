@@ -12,6 +12,7 @@
 set -euo pipefail
 
 PORT={{ tsdb_port }}
+INTERNAL="{{ tsdb_docker_internal_cidr }}"
 ALLOWED=({{ (tsdb_allowed_ips + tsdb_extra_allowed_cidrs + tsdb_peer_ips) | unique | join(' ') }})
 
 # Purge des règles existantes pour ce port — rend le script idempotent et
@@ -32,6 +33,11 @@ for SRC in "${ALLOWED[@]}"; do
   iptables -A DOCKER-USER -s "${SRC}" -p tcp --dport "${PORT}" \
     -m comment --comment "TimescaleDB - allowed source" -j RETURN
 done
+
+# Trafic issu des conteneurs de CETTE machine : le réplica joint son primaire, les outils (réconciliateur,
+# arbitre) joignent le pair. Une source externe n'a jamais une adresse de ce réseau privé.
+iptables -A DOCKER-USER -s "${INTERNAL}" -p tcp --dport "${PORT}" \
+  -m comment --comment "TimescaleDB - local containers" -j RETURN
 
 iptables -A DOCKER-USER -p tcp --dport "${PORT}" \
   -m comment --comment "TimescaleDB - deny external" -j DROP

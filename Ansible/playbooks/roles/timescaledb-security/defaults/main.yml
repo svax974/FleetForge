@@ -34,6 +34,12 @@ tsdb_allowed_ips: >-
 # Hôtes d'inventaire supplémentaires ayant besoin de la base.
 tsdb_extra_db_hosts: []
 
+# Réseaux des conteneurs DE CETTE MACHINE (même plage que docker-ports-security). Le filtre ci-dessous porte
+# sur le port 5432 quel que soit le sens : sans cette plage il jetait aussi la connexion SORTANTE du
+# réplica (dans son conteneur) vers le primaire, et les outils éphémères du réconciliateur et de l'arbitre
+# (constaté sur timescale2 le 27/10/2026 : le flux de réplication, démarré à 11:05, s'est figé à 11:08).
+tsdb_docker_internal_cidr: "172.16.0.0/12"
+
 # IP/CIDR bruts à autoriser en plus (dépannage, prestataire…). À garder vide.
 tsdb_extra_allowed_cidrs: []
 
