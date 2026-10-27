@@ -868,6 +868,12 @@ pub fn oci_profile_tenancy(profile: &str) -> Option<String> {
     oci_profile_key(profile, "tenancy")
 }
 
+/// Région actuelle du profil dans `~/.oci/config`, pour l'AFFICHER : le champ
+/// « Région » du formulaire est un ordre, il ne montre pas ce que le fichier dit.
+pub fn oci_profile_region(profile: &str) -> Option<String> {
+    oci_profile_key(profile, "region")
+}
+
 /// Le profil a-t-il une section dans `~/.oci/config` ?
 fn profile_section_exists(config: &str, profile: &str) -> bool {
     let wanted = if profile.trim().is_empty() { "DEFAULT" } else { profile.trim() };
@@ -1324,6 +1330,14 @@ impl Provider for OracleProvider {
         // Même chemin à l'ajout d'un compte et à la modification de son profil.
         let wanted = self.profile_name().to_string();
         if !oci_profile_exists(&wanted) {
+            // Créer le profil, c'est ouvrir le navigateur : un lancement
+            // d'application n'a pas à en ouvrir un de lui-même.
+            if credentials.forbids_browser() {
+                return Err(ProviderError::Auth(format!(
+                    "le profil [{wanted}] n'existe pas : le créer ouvre le navigateur, \
+                     non fait au lancement (menu session, ou C pour le créer)"
+                )));
+            }
             let region = creation_region(
                 credentials.get("OCI_REGION"),
                 oci_profile_key("DEFAULT", "region"),
@@ -1546,6 +1560,57 @@ fn dirs_home() -> std::path::PathBuf {
 
 #[cfg(test)]
 mod tests {
+    /// `connect` écrit la région saisie dans ~/.oci/config, qu'il aboutisse ou non.
+    /// Joue le vrai `connect` avec un faux `oci` et un HOME jetable ; l'environnement
+    /// étant global au processus, un verrou sérialise ce seul test.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn typed_region_reaches_the_config_file_whatever_the_outcome() {
+        use std::os::unix::fs::PermissionsExt;
+        static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = ENV.lock().unwrap_or_else(|e| e.into_inner());
+
+        let dir = std::env::temp_dir().join(format!("ff-oci-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".oci")).unwrap();
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        let fake = dir.join("bin/oci");
+        // Succès pour la région, refus pour tout le reste : le compartiment est
+        // rejeté, la connexion échoue APRÈS l'écriture de la région.
+        std::fs::write(&fake, "#!/bin/sh\ncase \"$*\" in *\"region list\"*) echo '{\"data\":[]}';; *) echo 'NotAuthorizedOrNotFound' >&2; exit 1;; esac\n").unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let config = dir.join(".oci/config");
+        std::fs::write(
+            &config,
+            "[DEFAULT]\nregion=eu-paris-1\n\n[acme]\ntenancy=ocid1.tenancy.oc1..aaaaexample1\nregion=us-ashburn-1\nsecurity_token_file=/x/token\n",
+        )
+        .unwrap();
+
+        let (old_home, old_path) = (std::env::var("HOME"), std::env::var("PATH"));
+        std::env::set_var("HOME", &dir);
+        std::env::set_var("PATH", format!("{}:{}", dir.join("bin").display(), old_path.clone().unwrap_or_default()));
+
+        let mut creds = Credentials { method: "config".into(), ..Default::default() };
+        for (k, v) in [
+            ("OCI_PROFILE", "acme"),
+            ("OCI_REGION", "eu-frankfurt-1"),
+            ("OCI_COMPARTMENT", "ocid1.tenancy.oc1..aaaaexample1"),
+        ] {
+            creds.fields.insert(k.into(), v.into());
+        }
+        let mut provider = OracleProvider::new();
+        let outcome = provider.connect(&creds).await;
+        let written = std::fs::read_to_string(&config).unwrap();
+
+        match old_home { Ok(v) => std::env::set_var("HOME", v), Err(_) => std::env::remove_var("HOME") }
+        match old_path { Ok(v) => std::env::set_var("PATH", v), Err(_) => std::env::remove_var("PATH") }
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(outcome.is_err(), "le faux compartiment est refusé");
+        assert!(written.contains("[acme]\ntenancy=ocid1.tenancy.oc1..aaaaexample1\nregion=eu-frankfurt-1"), "{written}");
+        assert!(written.contains("[DEFAULT]\nregion=eu-paris-1"), "DEFAULT intact : {written}");
+    }
+
     #[test]
     fn vnic_addresses_keep_public_and_private_without_duplicates() {
         let body: Value = serde_json::json!({"data": [

@@ -725,6 +725,21 @@ fn elide(spans: Vec<Span<'static>>, room: usize) -> Vec<Span<'static>> {
 
 // === Lignes par écran ===
 
+/// Pastille d'une machine : sa santé selon les sondes, sauf quand l'hébergeur dit
+/// qu'elle est ARRÊTÉE — aucune sonde ne répond alors, ce qui se lirait comme une
+/// panne là où la machine est éteinte, parfois volontairement.
+fn status_dot(app: &App, health: Health, hosts: &[String]) -> Span<'static> {
+    let state = app
+        .controls
+        .iter()
+        .find(|c| c.hosts.iter().any(|h| hosts.contains(h)))
+        .map(|c| c.state);
+    match state {
+        Some(PowerState::Stopped) => Span::styled("■".to_string(), tone_style(Tone::Unknown)),
+        _ => Span::styled(health_glyph(health).to_string(), health_style(health)),
+    }
+}
+
 fn servers_rows(app: &App) -> Vec<ListItem<'static>> {
     app.visible_servers()
         .into_iter()
@@ -735,7 +750,7 @@ fn servers_rows(app: &App) -> Vec<ListItem<'static>> {
 
             ListItem::new(Line::from(vec![
                 Span::raw(if marked { " ▪ " } else { "   " }),
-                Span::styled(health_glyph(s.health).to_string(), health_style(s.health)),
+                status_dot(app, s.health, &s.hosts),
                 Span::raw(" "),
                 Span::styled(format!("{:<24}", s.key.to_string()), text_style()),
                 Span::styled(format!("{provider:<9}"), dim_style()),
@@ -764,8 +779,18 @@ fn hosts_rows(app: &App) -> Vec<ListItem<'static>> {
                 None => ("provider ?".to_string(), tone_style(Tone::Danger)),
             };
 
+            // Santé de la MACHINE qui porte l'hôte : les sondes se rattachent à
+            // l'adresse, pas à l'entrée d'inventaire.
+            let health = app
+                .fleet
+                .as_ref()
+                .and_then(|f| f.servers.iter().find(|s| s.hosts.contains(&h.name)))
+                .map_or(Health::Unknown, |s| s.health);
+
             ListItem::new(Line::from(vec![
                 Span::raw(if marked { " ▪ " } else { "   " }),
+                status_dot(app, health, std::slice::from_ref(&h.name)),
+                Span::raw(" "),
                 Span::styled(format!("{:<22}", h.name), text_style()),
                 Span::styled(format!("{:<17}", h.ansible_host), dim_style()),
                 Span::styled(format!("{provider:<10}"), provider_style),
@@ -1751,7 +1776,13 @@ fn draw_credentials(frame: &mut Frame, form: &CredentialsForm) {
                     Span::styled(format!("   {t}"), text_style()),
                     Span::styled(if same { "  = racine" } else { "" }.to_string(), tone_style(Tone::Ok)),
                 ]));
-                tenancy_rows = 2;
+                let region = fleetforge_providers::cli::oci_profile_region(profile)
+                    .unwrap_or_else(|| "non définie".to_string());
+                lines.push(Line::from(vec![
+                    Span::styled(format!("   {:<26}", "Région du profil"), dim_style()),
+                    Span::styled(region, text_style()),
+                ]));
+                tenancy_rows = 3;
             }
             None => {
                 lines.push(Line::from(Span::styled(

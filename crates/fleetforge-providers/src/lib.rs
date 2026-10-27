@@ -266,7 +266,13 @@ impl ProviderHub {
                 if self.is_connected(&account).await {
                     continue;
                 }
-                let result = self.reconnect(&account).await;
+                // Sans navigateur : si la session ne se rouvre pas d'elle-même
+                // (le CLI tente déjà le renouvellement du jeton), le compte reste
+                // non connecté plutôt que d'ouvrir une page au lancement.
+                let result = match self.store.load(&account) {
+                    Some(c) => self.connect(&account, &persistent(&c).without_browser()).await,
+                    None => continue,
+                };
                 out.push((account, result));
             }
         }
@@ -672,6 +678,7 @@ impl ProviderHub {
 fn persistent(credentials: &Credentials) -> Credentials {
     let mut kept = credentials.clone();
     kept.fields.remove("OCI_REGION");
+    kept.fields.remove(provider::NO_BROWSER);
     kept
 }
 
@@ -823,6 +830,13 @@ pub fn reconcile(fleet: &Fleet, kind: ProviderKind, instances: &[Instance]) -> R
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_no_browser_marker_is_never_stored() {
+        let c = Credentials::default().without_browser();
+        assert!(c.forbids_browser());
+        assert!(!persistent(&c).forbids_browser());
+    }
+
     #[test]
     fn the_region_order_is_not_remembered() {
         let mut c = Credentials::default();

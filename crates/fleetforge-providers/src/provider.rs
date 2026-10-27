@@ -316,7 +316,22 @@ pub struct Credentials {
     pub fields: HashMap<String, String>,
 }
 
+/// Champ posé par une reconnexion AUTOMATIQUE (lancement d'une façade) : la
+/// tentative ne doit jamais ouvrir de navigateur. Jamais enregistré.
+pub const NO_BROWSER: &str = "FLEETFORGE_NO_BROWSER";
+
 impl Credentials {
+    /// Ces identifiants servent à une reconnexion silencieuse : un fournisseur
+    /// qui devrait ouvrir un navigateur pour aboutir renonce à la place.
+    pub fn without_browser(mut self) -> Credentials {
+        self.fields.insert(NO_BROWSER.to_string(), "1".to_string());
+        self
+    }
+
+    pub fn forbids_browser(&self) -> bool {
+        self.fields.contains_key(NO_BROWSER)
+    }
+
     pub fn get(&self, key: &str) -> Option<&str> {
         self.fields.get(key).map(String::as_str).filter(|s| !s.is_empty())
     }
