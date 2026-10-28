@@ -11,6 +11,17 @@ prometheus_home: "/home/{{ remote_username }}/prometheus"
 prometheus_scrape_interval: "60s"
 prometheus_evaluation_interval: "60s"
 
+# Instances scrutées plus souvent que les autres (valeur du label `instance` des fichiers de service
+# discovery). Pour chacune, les jobs de `prometheus_fast_scrape_jobs` passent à
+# `prometheus_fast_scrape_interval` ; les jobs d'origine les écartent, sans quoi chaque série serait
+# doublée. Le label `job` reste celui d'origine : les règles d'alerte n'ont rien à savoir de cette scission.
+# Le délai (`prometheus_fast_scrape_timeout`) doit rester sous l'intervalle ; un scrape plus long que lui
+# fait tomber `up` à 0.
+prometheus_fast_scrape_instances: []
+prometheus_fast_scrape_interval: "10s"
+prometheus_fast_scrape_timeout: "8s"
+prometheus_fast_scrape_jobs: [exporter, svcprobe]
+
 # Répertoires de service discovery (un par job). Les rôles `exporter-*` y
 # déposent un JSON par hôte via `delegate_to: {{ prometheus_host }}`.
 prometheus_sd_jobs:

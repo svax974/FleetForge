@@ -28,6 +28,29 @@ scrape_configs:
     file_sd_configs:
       - files:
           - 'prometheus-configs/exporter/*.json'
+{% if prometheus_fast_scrape_instances | length > 0 %}
+    relabel_configs:
+      - source_labels: [instance]
+        regex: '{{ prometheus_fast_scrape_instances | map('regex_escape') | join('|') }}'
+        action: drop
+{% endif %}
+{% if prometheus_fast_scrape_instances | length > 0 %}
+
+  # Même cible que `exporter`, à cadence rapide, pour les seules instances de `prometheus_fast_scrape_instances`.
+  - job_name: 'exporter-fast'
+    scrape_interval: {{ prometheus_fast_scrape_interval }}
+    scrape_timeout: {{ prometheus_fast_scrape_timeout }}
+    metrics_path: /metrics
+    file_sd_configs:
+      - files:
+          - 'prometheus-configs/exporter/*.json'
+    relabel_configs:
+      - source_labels: [instance]
+        regex: '{{ prometheus_fast_scrape_instances | map('regex_escape') | join('|') }}'
+        action: keep
+      - target_label: job
+        replacement: 'exporter'
+{% endif %}
 
   - job_name: 'node-btc'
     metrics_path: /metrics
@@ -105,6 +128,29 @@ scrape_configs:
     file_sd_configs:
       - files:
           - 'prometheus-configs/svcprobe/*.json'
+{% if prometheus_fast_scrape_instances | length > 0 %}
+    relabel_configs:
+      - source_labels: [instance]
+        regex: '{{ prometheus_fast_scrape_instances | map('regex_escape') | join('|') }}'
+        action: drop
+{% endif %}
+{% if prometheus_fast_scrape_instances | length > 0 %}
+
+  # Même cible que `svcprobe`, à cadence rapide, pour les seules instances de `prometheus_fast_scrape_instances`.
+  - job_name: 'svcprobe-fast'
+    scrape_interval: {{ prometheus_fast_scrape_interval }}
+    scrape_timeout: {{ prometheus_fast_scrape_timeout }}
+    metrics_path: /metrics
+    file_sd_configs:
+      - files:
+          - 'prometheus-configs/svcprobe/*.json'
+    relabel_configs:
+      - source_labels: [instance]
+        regex: '{{ prometheus_fast_scrape_instances | map('regex_escape') | join('|') }}'
+        action: keep
+      - target_label: job
+        replacement: 'svcprobe'
+{% endif %}
 
   # Alertmanager — /metrics natif. Cible déposée par `alertmanager-monitoring` dans
   # prometheus-configs/alertmanager/ ; sans ce job le fichier restait là sans jamais être lu, et ni
