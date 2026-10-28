@@ -106,6 +106,12 @@ def resolve_machine(instance: str) -> str | None:
 
 
 def main() -> int:
+    if not CONF["to"]:
+        # Automation installée avant la route Telegram : rien à interroger ni à
+        # analyser, et l'état n'est pas touché — au premier passage avec une
+        # route, les alertes ouvertes sont notifiées comme nouvelles.
+        print("fleet-watch : aucune route de notification (openclaw_heartbeat_to vide), passage ignoré")
+        return 0
     state = load_state()
     now = time.time()
     try:

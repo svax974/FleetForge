@@ -167,15 +167,17 @@ openclaw_prometheus_monitor_enabled: true
 # modèle) lit Alertmanager toutes les `openclaw_fleetwatch_every`, retire les
 # hôtes `monitor: off` et n'écrit au modèle que si l'ensemble des alertes
 # change ou persiste plus de `openclaw_fleetwatch_renotify_hours`. Le modèle
-# analyse alors et PROPOSE des solutions, sans rien appliquer. Active si
-# `openclaw_heartbeat_to` est renseigné (même route Telegram).
+# analyse alors et PROPOSE des solutions, sans rien appliquer. Toujours
+# installée (script, configuration, automation), même sans route Telegram : sans
+# `openclaw_heartbeat_to` (même route que le heartbeat), elle n'envoie rien et
+# ne consomme rien ; seul le heartbeat natif reste alors en place.
 # Veille de CE parc par fleet-watch (le parc du play : `parc_name`).
 # INTERRUPTEUR À CHAUD : cette variable ne fixe que l'état INITIAL, à la
 # création de l'automation (`false` : créée en pause, `true` : active). Ensuite
 # l'état — et la fréquence — se règlent dans OpenClaw (panneau Automations,
 # interrupteur Actif/En pause) ou par `openclaw automations enable|disable
 # <id>` : un déploiement ne la réaligne jamais, il ne la recrée que si elle a
-# disparu. Sans effet tant que `openclaw_heartbeat_to` est vide. Pour un parc
+# disparu. Pour un parc
 # dont la veille est reprise par le poste « Infrastructure Manager » d'AgentHub
 # (webhook d'Alertmanager vers le poste, `alertmanager_agenthub_webhook_url`) :
 # web3c depuis le 26/10/2026 — la mettre en pause dans OpenClaw.

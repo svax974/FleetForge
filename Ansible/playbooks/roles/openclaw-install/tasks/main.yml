@@ -646,7 +646,6 @@
     group: "{{ openclaw_user }}"
     mode: '0750'
   become: true
-  when: openclaw_heartbeat_to | string | length > 0
 
 - name: Render the fleet-watch configuration
   ansible.builtin.copy:
@@ -656,7 +655,6 @@
     mode: '0640'
     content: "{{ lookup('ansible.builtin.template', 'fleet-watch.json.j2') }}"
   become: true
-  when: openclaw_heartbeat_to | string | length > 0
 
 - name: Disable the native LLM heartbeat
   ansible.builtin.command:
@@ -684,7 +682,7 @@
     HOME: "{{ openclaw_home }}"
   register: openclaw_automations
   changed_when: false
-  when: openclaw_heartbeat_to | string | length > 0
+  check_mode: false
 
 - name: Create the fleet-watch automation (once, paused unless openclaw_fleetwatch_enabled)
   ansible.builtin.command:
@@ -699,10 +697,8 @@
   environment:
     HOME: "{{ openclaw_home }}"
   changed_when: true
-  when:
-    - openclaw_heartbeat_to | string | length > 0
-    - >-
-      'fleet-watch' not in ((openclaw_automations.stdout | from_json).jobs | default([])
+  when: >-
+    'fleet-watch' not in ((openclaw_automations.stdout | from_json).jobs | default([])
       | map(attribute='declarationKey', default='') | list)
 
 # Écrit l'unité systemd --user (~/.config/systemd/user/openclaw-gateway.service),
