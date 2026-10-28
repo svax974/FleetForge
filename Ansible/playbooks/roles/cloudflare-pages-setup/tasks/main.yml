@@ -130,7 +130,8 @@
   become: false
   when: cfpages_domain not in (cfpages_domains.json.result | map(attribute='name') | list)
 
-# ── DNS : créé s'il est absent, jamais modifié ───────────────────────────────
+# ── DNS : créé s'il est absent ; seul un CNAME vers un AUTRE *.pages.dev (projet supprimé ou
+# renommé) est repointé, tout autre enregistrement existant reste intact ───────────────────────────────
 - name: Find the DNS zone
   ansible.builtin.uri:
     url: "{{ cfpages_api }}/zones?name={{ cfpages_zone }}"
@@ -178,6 +179,29 @@
     - cfpages_record is not skipped
     - cfpages_record.json.result | length == 0
 
+- name: Repoint a CNAME left on another Pages project
+  ansible.builtin.uri:
+    url: "{{ cfpages_api }}/zones/{{ cfpages_zone_lookup.json.result[0].id }}/dns_records/{{ cfpages_record.json.result[0].id }}"
+    method: PATCH
+    headers:
+      Authorization: "Bearer {{ cfpages_dns_token }}"
+    body_format: json
+    body:
+      content: "{{ cfpages_target }}"
+      proxied: true
+    status_code: [200]
+  no_log: true
+  changed_when: true
+  delegate_to: localhost
+  become: false
+  register: cfpages_repointed
+  when:
+    - cfpages_record is not skipped
+    - cfpages_record.json.result | length > 0
+    - cfpages_record.json.result[0].type == 'CNAME'
+    - cfpages_record.json.result[0].content.endswith('.pages.dev')
+    - cfpages_record.json.result[0].content != cfpages_target
+
 - name: Warn about a DNS record that points elsewhere
   ansible.builtin.debug:
     msg: >-
@@ -188,6 +212,7 @@
     - cfpages_record is not skipped
     - cfpages_record.json.result | length > 0
     - cfpages_record.json.result[0].content != cfpages_target
+    - cfpages_repointed is skipped
 
 - name: Warn that the DNS record was not handled
   ansible.builtin.debug:
