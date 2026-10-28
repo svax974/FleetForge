@@ -95,10 +95,21 @@
     mode: '0644'
   notify: restart timescale-ha haproxy
 
+# Le répertoire de la socket (0700) appartient à l'utilisateur de l'arbitre : le conteneur tourne sous ce
+# même UID, sans quoi HAProxy (utilisateur `haproxy` de l'image) ne peut pas y créer sa socket.
+- name: Read the arbiter user's uid and gid
+  ansible.builtin.command:
+    cmd: "id {{ item }} {{ tsha_user }}"
+  loop: ["-u", "-g"]
+  register: tsha_ids
+  changed_when: false
+  check_mode: false
+
 - name: Run HAProxy
   community.docker.docker_container:
     name: "{{ tsha_haproxy_container }}"
     image: "{{ tsha_haproxy_image }}"
+    user: "{{ tsha_ids.results[0].stdout }}:{{ tsha_ids.results[1].stdout }}"
     state: started
     restart_policy: unless-stopped
     network_mode: host

@@ -33,4 +33,5 @@ tsha_poll_s: 5
 # Délai de répit après une bascule : pas de bascules en boucle sur un réseau instable.
 tsha_cooldown_s: 1800
 
+node_exporter_textfile_dir: /var/lib/node_exporter/textfile_collector
 tsha_metrics_file: "{{ node_exporter_textfile_dir }}/timescale_ha.prom"
