@@ -64,7 +64,7 @@
             quiet: true
 
         # L'arrêt propre peut durer jusqu'à 5 min sur un primaire chargé : asynchrone, sondage espacé.
-        - name: Basculer vers {{ to }}
+        - name: Basculer vers le réplica choisi
           ansible.builtin.command:
             cmd: "{{ tsha_cmd }} switchover --to {{ to }}"
           register: fo_switch
