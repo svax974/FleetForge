@@ -1,3 +1,10 @@
+{% if hostvars['agenthub'].cloudflare_front | default(false) | bool %}
+{# Front sur Cloudflare Pages : aucun conteneur front sur l'hôte, seule l'API fait foi. #}
+{
+  "service": "agenthub",
+  "up": {"kind": "http", "url": "{{ agenthub_svcprobe_back_health_url }}", "status": [200], "timeout": 10}
+}
+{% else %}
 {
   "service": "agenthub",
   "up": {"kind": "http", "url": "{{ agenthub_svcprobe_front_url }}", "status": [200, 301, 302], "timeout": 10},
@@ -5,3 +12,4 @@
     {"name": "back_health", "kind": "http", "url": "{{ agenthub_svcprobe_back_health_url }}", "status": [200], "timeout": 10}
   ]
 }
+{% endif %}

@@ -20,9 +20,7 @@
       playbooks/host_vars/agenthub.yml (rôle docker-ports-security), avec
       `sources` limité aux IP des proxies + `allow_whitelist`/`allow_vpns`.
     success_msg: "Port {{ item }} déclaré dans docker_ports_rules."
-  loop:
-    - "{{ agenthub_front_port }}"
-    - "{{ agenthub_back_port }}"
+  loop: "{{ agenthub_published_ports }}"
 
 # Le script/unité changés n'ont notifié qu'un HANDLER, qui ne tournerait qu'en
 # fin de play — or le contrôle ci-dessous tourne AVANT. `docker-ports-security`
@@ -59,9 +57,7 @@
     success_msg: >-
       Port {{ item }} filtré dans DOCKER-USER (DROP par défaut, ALLOW explicite
       pour les proxies/whitelist/VPN déclarés).
-  loop:
-    - "{{ agenthub_front_port }}"
-    - "{{ agenthub_back_port }}"
+  loop: "{{ agenthub_published_ports }}"
   # En simulation (--check), la tâche d'application des règles est sautée par
   # docker-ports-security : la chaîne n'a pas encore les règles et ce contrôle
   # échouerait sur un hôte parfaitement sain.
@@ -95,9 +91,7 @@
     success_msg: >-
       Port {{ item }} filtré aussi en IPv6 (DROP par défaut, ALLOW explicite
       pour les sources déclarées).
-  loop:
-    - "{{ agenthub_front_port }}"
-    - "{{ agenthub_back_port }}"
+  loop: "{{ agenthub_published_ports }}"
   when:
     - not ansible_check_mode
     # `ip6tables` absent ou chaîne non posée : rc != 0, rien à contrôler.
@@ -106,9 +100,9 @@
 - name: Report the exposure
   ansible.builtin.debug:
     msg: >-
-      Ports {{ agenthub_front_port }} (front) et {{ agenthub_back_port }}
-      (back-lb) filtrés dans DOCKER-USER sur {{ ansible_host }}, autorisés
+      Ports {{ agenthub_published_ports | join(' et ') }}
+      ({{ 'back-lb seul, front sur Cloudflare Pages' if agenthub_published_ports | length == 1 else 'front, back-lb' }}) filtrés dans DOCKER-USER sur {{ ansible_host }}, autorisés
       pour les deux proxies + whitelist + VPN. Contrôle depuis une machine
       tierce (hors de ces trois listes) :
-      `nc -z {{ hostvars['agenthub'].ansible_host }} {{ agenthub_front_port }}`
+      `nc -z {{ hostvars['agenthub'].ansible_host }} {{ agenthub_published_ports | first }}`
       doit échouer.

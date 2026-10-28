@@ -43,7 +43,8 @@
     msg: >-
       La sonde répond mais annonce `service_up{service="agenthub"} 0` alors
       que le déploiement vient de réussir : la sonde est mal écrite, ou
-      {{ agenthub_svcprobe_front_url }} / {{ agenthub_svcprobe_back_health_url }}
+      {{ agenthub_svcprobe_back_health_url }}
+      {{ '' if hostvars['agenthub'].cloudflare_front | default(false) | bool else '/ ' ~ agenthub_svcprobe_front_url }}
       ne répond(ent) pas.
   when: >-
     'service_up{service="agenthub"} 0' in (agenthub_probe.content | default(''))

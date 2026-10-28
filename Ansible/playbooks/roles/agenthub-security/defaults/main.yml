@@ -8,3 +8,10 @@
 
 agenthub_front_port: "{{ hostvars['agenthub'].app_port | default(4700) }}"
 agenthub_back_port: "{{ hostvars['agenthub'].back_port | default(4701) }}"
+
+# Ports réellement publiés par Docker : avec `cloudflare_front: true`, le front
+# est sur Cloudflare Pages et aucun conteneur front n'écoute sur l'hôte.
+agenthub_published_ports: >-
+  {{ [agenthub_back_port]
+     if hostvars['agenthub'].cloudflare_front | default(false) | bool
+     else [agenthub_front_port, agenthub_back_port] }}
