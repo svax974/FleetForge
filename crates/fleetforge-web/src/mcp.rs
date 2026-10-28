@@ -233,8 +233,11 @@ static TOOLS: LazyLock<Vec<Tool>> = LazyLock::new(|| {
             "ssh_diagnose",
             "Read-only diagnostic on a host through its ro-gate gateway (forced command, closed verbs, \
              redacted output). Verbs: logs journal [DURATION] [all] | logs unit NAME [DURATION] [all] | \
-             logs docker NAME [DURATION] [all], status UNIT, containers, stats, firewall, system, ports, \
-             http PORT [PATH]. Without args, verb may carry the whole request (\"logs docker searxng \
+             logs docker NAME [DURATION] [all], status UNIT, containers, stats, firewall, system, disk \
+             (what fills the disks and what is reclaimable, in bytes: filesystems, Docker images, build \
+             cache, stopped containers, unused volumes, journal, apt cache, old kernels, /var/log, \
+             disabled snaps, biggest directories of the fullest filesystem; reads only, ~40 s at most), \
+             ports, http PORT [PATH]. Without args, verb may carry the whole request (\"logs docker searxng \
              1h\"). Without parc the host is searched in every parc of the account, refused when \
              ambiguous.",
             schema(json!({
