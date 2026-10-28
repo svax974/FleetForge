@@ -13,6 +13,13 @@
 # group_vars), et `value: "{{ proxy_hostname }}"` évalué dans son contexte
 # publierait un CNAME bouclé sur le service lui-même.
 #
+# `cloudflare_front: true` sur l'entrée : le nom public est servi par l'edge
+# Cloudflare. Il est déclaré (le vhost en a besoin) mais son enregistrement vit
+# chez Cloudflare, à la main : aucun CNAME n'est publié ni modifié, et le nom
+# est listé plus bas (jamais tu). Le vhost, lui, lit l'IP cliente dans
+# CF-Connecting-IP (proxy-update/templates/_cloudflare_front.inc). Le `hostname`
+# de l'entrée reste synchronisé en A. Modèle : `agenthub`.
+#
 # Fichier séparé pour être inclus des DEUX côtés (même motif que
 # proxy-front.yml) : synchronisation générique (tasks/main.yml, tous les hôtes
 # du parc) et rôles `-install` (portée réduite à leur seul hôte via
@@ -72,6 +79,7 @@
   when:
     - hostvars[item].proxy_hostname is defined
     - hostvars[item].proxy_hostname is search('\.' ~ cfdns_zone ~ '$')
+    - not (hostvars[item].cloudflare_front | default(false) | bool)
     # Le global du parc (group_vars) vaut le front lui-même : un hôte sans attribut
     # d'inventaire le HÉRITE. Ce n'est pas un nom public — le publier ferait
     # revendiquer `proxy.<zone>` par tous les hôtes (CNAME bouclé).
@@ -194,3 +202,14 @@
   delegate_to: localhost
   become: false
   run_once: true
+
+- name: Report the CNAMEs managed outside Ansible
+  ansible.builtin.debug:
+    msg: >-
+      CNAME non géré : {{ hostvars[item].proxy_hostname }} ({{ item }},
+      `cloudflare_front: true`) — l'enregistrement DNS n'est ni publié
+      ni modifié ici.
+  loop: "{{ cfdns_cname_scope | default(groups[cfdns_group] | default([]) | sort) }}"
+  when:
+    - hostvars[item].proxy_hostname is defined
+    - hostvars[item].cloudflare_front | default(false) | bool

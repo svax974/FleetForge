@@ -172,7 +172,7 @@
   become: true
   when: agenthub_hosts_allow.stat.exists
 
-# ── DNS : retirer le CNAME public ───────────────────────────────────────────
+# ── DNS : retirer le CNAME public (sauf `cloudflare_front: true`) ────
 - name: Remove the AgentHub CNAME
   community.general.cloudflare_dns:
     api_token: "{{ cloudflare_token }}"
@@ -183,7 +183,10 @@
   delegate_to: localhost
   become: false
   run_once: true
-  when: cloudflare_token | default('') | length > 0
+  when:
+    - cloudflare_token | default('') | length > 0
+    # Enregistrement géré à la main chez Cloudflare : jamais retiré d'ici.
+    - not (hostvars['agenthub'].cloudflare_front | default(false) | bool)
 
 - name: Remind the operator about the vhost and the firewall rules
   ansible.builtin.debug:

@@ -12,8 +12,9 @@
 #
 # Ordre exact des effets de ce playbook :
 #   1. host-preflight (Docker requis)
-#   2. agenthub-install  : publie le CNAME agenthub.web3c.cc → proxy.web3c.cc
-#      (cert déjà couvert par le wildcard *.web3c.cc, rien à émettre)
+#   2. agenthub-install  : NE touche PAS au DNS d'agenthub (<domaine>) (géré chez
+#      Cloudflare, `cloudflare_front: true` sur l'entrée) ; cert déjà
+#      couvert par le wildcard *.<domaine>, rien à émettre
 #   3. vhost sur les proxies : sites-enabled/agenthub.conf (WebSocket,
 #      timeout 1h, buffering off sur /api/v1/agenthub/ws/)
 #   4. agenthub-security : filtre les ports 4700/4701 dans DOCKER-USER
@@ -55,8 +56,8 @@
     - role: host-preflight
       preflight_require_docker: true
 
-# ── DNS ──────────────────────────────────────────────────────────────────
-- name: Publish the AgentHub CNAME
+# ── DNS (nom public géré hors Ansible : agenthub-install ne publie rien) ──
+- name: Check the AgentHub DNS record is left alone
   hosts: agenthub
   remote_user: "{{ remote_username }}"
   roles:

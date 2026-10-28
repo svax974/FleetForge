@@ -13,6 +13,39 @@
   become: false
   register: agenthub_env_vault_dir
 
+# `restore` remplace un .env local qui DIFFÈRE du coffre : une correction faite
+# dans le dépôt app sans `./app-env.sh save` était donc défaite à chaque
+# déploiement (constat du 28/10/2026 : BACK_HOSTS remis sur l'ancienne machine,
+# front Cloudflare remplacé par l'ancien, deux passages sur la mauvaise cible).
+# Un écart arrête le déploiement : c'est à l'opérateur de dire quel côté fait foi.
+# `status` compare le contenu déchiffré en mémoire et n'affiche aucune valeur.
+- name: Compare the local prod env files with the vault
+  ansible.builtin.command:
+    cmd: ./app-env.sh status {{ agenthub_app_env_id }}
+    chdir: "{{ playbook_dir }}/.."
+  delegate_to: localhost
+  become: false
+  register: agenthub_env_status
+  changed_when: false
+  when: agenthub_env_vault_dir.stat.isdir | default(false)
+
+- name: Fail when a local env file differs from the vault
+  vars:
+    agenthub_env_differing: >-
+      {{ agenthub_env_status.stdout_lines
+         | select('search', '\s+differs\s*$') | map('split') | map(attribute=1) | list }}
+  ansible.builtin.fail:
+    msg: >-
+      Le .env {{ agenthub_env_differing | join(' et ') }} de {{ agenthub_src }} diffère de la copie du
+      coffre : le restaurer écraserait le fichier local. Si le fichier local fait foi :
+      `./app-env.sh save {{ agenthub_app_env_id }}` (depuis Ansible/), puis relancer. Si c'est le
+      coffre : `./app-env.sh restore {{ agenthub_app_env_id }}` (garde le local en
+      .env.bak-<date>). Passer outre : `-e agenthub_env_overwrite_local=true`.
+  when:
+    - agenthub_env_vault_dir.stat.isdir | default(false)
+    - agenthub_env_differing | length > 0
+    - not (agenthub_env_overwrite_local | bool)
+
 - name: Restore the AgentHub prod env files from the vault
   ansible.builtin.command:
     cmd: ./app-env.sh restore {{ agenthub_app_env_id }}
@@ -74,6 +107,57 @@
   when:
     - agenthub_runner_autoprovision | default(true)
     - agenthub_env_switches.rc != 0
+
+# Cibles du déploiement : `run.sh` ignore l'inventaire et vise les hôtes nommés
+# par le back/.env (BACK_HOSTS > BACK_REMOTE_HOST > REMOTE_HOST, idem côté front).
+# Après un déplacement de machine, une variable oubliée envoie le déploiement sur
+# l'ANCIENNE sans erreur (constat du 28/10/2026 : deux passages sur l'ancienne machine
+# alors que l'entrée `agenthub` visait la nouvelle, puis un « Connection refused »
+# sur la boucle locale de celle-ci). Le fichier est lu par la même résolution que
+# le script (`source`, puis les mêmes replis) : seules les trois valeurs d'hôte sont
+# affichées. Le front n'est contrôlé que s'il est un conteneur sur un hôte : avec
+# VITE_API_URL en https:// (Cloudflare Pages), deploy-full.sh ne lui donne aucun hôte.
+- name: Read the deployment targets of the prod env files
+  ansible.builtin.shell:
+    cmd: |
+      cd {{ agenthub_src | quote }}
+      source {{ ('./' ~ agenthub_back_env_file) | quote }} >/dev/null 2>&1 || true
+      echo "back=${BACK_HOSTS:-${BACK_REMOTE_HOST:-${REMOTE_HOST:-}}}"
+      echo "front=${FRONT_HOSTS:-${FRONT_REMOTE_HOST:-${REMOTE_HOST:-}}}"
+      echo "vite=$(grep -E '^[[:space:]]*VITE_API_URL=' {{ ('./' ~ agenthub_front_env_file) | quote }} | tail -1 | sed 's/^[^=]*=//' | tr -d "\"'")"
+  args:
+    executable: /bin/bash
+  delegate_to: localhost
+  become: false
+  register: agenthub_env_targets
+  changed_when: false
+
+- name: Fail when the env files target another machine than the inventory
+  vars:
+    agenthub_target_lines: "{{ agenthub_env_targets.stdout_lines }}"
+    agenthub_expected_hosts: "{{ [hostvars['agenthub'].ansible_host, hostvars['agenthub'].hostname | default('')] | select | list }}"
+    agenthub_back_targets: >-
+      {{ (agenthub_target_lines | select('match', '^back=') | first | regex_replace('^back=', '')).split(',') | map('trim') | map('regex_replace', '^.*@', '') | reject('equalto', '') | list }}
+    agenthub_front_targets: >-
+      {{ (agenthub_target_lines | select('match', '^front=') | first | regex_replace('^front=', '')).split(',') | map('trim') | map('regex_replace', '^.*@', '') | reject('equalto', '') | list }}
+    agenthub_front_is_cloud: "{{ (agenthub_target_lines | select('match', '^vite=https://') | list | length) > 0 }}"
+    agenthub_wrong_targets: >-
+      {{ (agenthub_back_targets + ([] if agenthub_front_is_cloud else agenthub_front_targets))
+         | difference(agenthub_expected_hosts) }}
+  ansible.builtin.assert:
+    that:
+      - agenthub_back_targets | length > 0
+      - agenthub_wrong_targets | length == 0
+    fail_msg: >-
+      {{ agenthub_src }}{{ agenthub_back_env_file }} vise {{ agenthub_wrong_targets | join(', ') or 'aucun hôte' }}
+      alors que l'entrée `agenthub` de l'inventaire est {{ agenthub_expected_hosts | join(' / ') }}.
+      deploy-full.sh lit BACK_HOSTS, puis BACK_REMOTE_HOST, puis REMOTE_HOST (front :
+      FRONT_HOSTS, FRONT_REMOTE_HOST, REMOTE_HOST) : la première définie l'emporte.
+      Corriger le fichier puis `./app-env.sh save {{ agenthub_app_env_id }}`, sinon la
+      restauration depuis le coffre le réécrit au prochain passage.
+    quiet: true
+  delegate_to: localhost
+  become: false
 
 # `run.sh prod` == `deploy-full.sh` (build local + push via un contexte Docker
 # SSH + démarrage distant), avec la gestion des migrations en amont (voir

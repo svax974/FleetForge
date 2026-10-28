@@ -1,6 +1,6 @@
 ---
 # Supprime AgentHub ET ses données : conteneurs, volumes nommés (Postgres,
-# Redis, dossier partagé), images, CNAME DNS, runners des utilisateurs (comptes
+# Redis, dossier partagé), images, CNAME DNS (si géré ici), runners des utilisateurs (comptes
 # `agr-*` et leurs dossiers) et l'accès du hub à ce serveur. Destructif, non
 # reconstructible sans sauvegarde de la base applicative.
 #
@@ -9,8 +9,8 @@
 # `--limit` OBLIGATOIRE : `agenthub-old` est l'ancienne machine, dont la purge
 # suit le déplacement du 27/10/2026 ; sans lui le motif viserait aussi
 # `agenthub`, la machine en service. Le motif nomme `agenthub-old` en dur, un
-# nom absent de l'inventaire y est simplement ignoré. La purge retire le CNAME
-# public : à republier ensuite par deploy-agenthub.yml (agenthub-install).
+# nom absent de l'inventaire y est simplement ignoré. Le CNAME public n'est pas
+# touché tant que l'entrée `agenthub` porte `cloudflare_front: true`.
 - name: Purge AgentHub
   hosts: agenthub:agenthub-old
   pre_tasks:

@@ -56,6 +56,11 @@ agenthub_src: "/Users/steph/Dev/Apps/AgentHub/agent-hub/"
 agenthub_back_env_file: "back/.env"
 agenthub_front_env_file: "front/.env"
 
+# `false` : un .env local qui diffère du coffre arrête le déploiement (voir
+# tasks/main.yml). `true` : il est remplacé par le coffre, l'ancien gardé en
+# .env.bak-<date>.
+agenthub_env_overwrite_local: false
+
 # Lancer les migrations TypeORM en plus du déploiement (--migrate,
 # scripts/run.sh). Laissé à `false` par défaut : au tout premier déploiement
 # la base est vide et DB_SCHEMA_MODE=sync (voir back/.env.example)

@@ -12,6 +12,11 @@
 # synchronisation générique — même mécanisme que rotki-install/
 # freellm-install/esplora-install (CLAUDE.md, « Obligation DNS + vhost pour un
 # service nommé »).
+#
+# `cloudflare_front: true` sur l'entrée `agenthub` : le nom public vit chez
+# Cloudflare (front derrière son edge), géré à la main. L'inclusion
+# ci-dessous ne publie alors RIEN et le signale (voir cnames.yml) ; le vhost
+# des proxies, lui, continue de s'appuyer sur `proxy_hostname`.
 - name: Ensure the service CNAME to the canonical proxy front
   ansible.builtin.include_role:
     name: cloudflare-dns-update
@@ -70,8 +75,10 @@
 - name: Report DNS + certificate status
   ansible.builtin.debug:
     msg: >-
-      CNAME {{ agenthub_hostname }} → proxy.{{ domain_name }} garanti (front
-      round-robin entre les proxies {{ groups['proxies'] | default([]) | join(', ') }}).
+      {{ agenthub_hostname }} :
+      {{ 'CNAME → proxy.' ~ domain_name ~ ' garanti (front round-robin entre les proxies ' ~ (groups['proxies'] | default([]) | join(', ')) ~ ').'
+         if (cloudflare_front | default(false) | bool) == false
+         else 'enregistrement DNS géré hors Ansible (Cloudflare), non touché.' }}
       Certificat : déjà couvert par le wildcard *.{{ domain_name }}
       (cert-install/install-cert) — aucune action cert nécessaire pour ce
       nouveau nom. Reste à pousser le vhost sur les proxies :
