@@ -371,8 +371,15 @@ Détails :
   service, « vider les runs terminés » côté opérateur) répond `unknown_run`.
 - `ssh_diagnose` : verbes de `ro-gate` seulement — `logs journal|unit
   NOM|docker NOM [DURÉE] [all]`, `status UNITÉ`, `containers`, `stats`,
-  `firewall`, `system`, `ports`, `http PORT [CHEMIN]` ; `verb` peut porter la
-  demande entière (`"logs docker searxng 1h"`). Sans `parc`, l'hôte est cherché
+  `firewall`, `system`, `disk`, `ports`, `http PORT [CHEMIN]` ; `verb` peut porter la
+  demande entière (`"logs docker searxng 1h"`). `disk` (lecture seule, ~40 s au
+  plus) dit ce qui remplit les disques et ce qui est récupérable, une ligne
+  `<sujet> clé=valeur…` par mesure, tailles en octets : `fs` (df), `docker.*`
+  (API Docker `GET /system/df` : images sans conteneur et sans étiquette, cache
+  de construction, conteneurs arrêtés, volumes inutilisés marqués `risky=yes`),
+  `journal`, `apt.cache`, `kernels.old`, `varlog`, `snap.disabled`, puis `du`
+  (les plus gros répertoires du système de fichiers le plus plein, `du -x`
+  profondeur 2, borné dans le temps). Sans `parc`, l'hôte est cherché
   dans tous les parcs (refusé s'il existe dans plusieurs). Exige
   `ff_ro_diagnostics: true` au déploiement puis
   `./play.sh <parc> deploy-readonly-user.yml --limit <entrées canoniques>` :

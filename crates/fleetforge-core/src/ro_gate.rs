@@ -37,12 +37,13 @@ pub const VERBS: &[&str] = &[
     "stats",
     "firewall",
     "system",
+    "disk",
     "ports",
     "http",
 ];
 
 /// Plafond de la sortie conservée. La passerelle plafonne déjà (80 lignes,
-/// 16 Kio en HTTP) ; ce second plafond protège d'une passerelle d'une autre
+/// 60 pour `disk`, 16 Kio en HTTP) ; ce second plafond protège d'une passerelle d'une autre
 /// version, ou d'un hôte qui ne serait pas celui qu'on croit.
 const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 
@@ -329,6 +330,7 @@ mod tests {
             ("status", v(&["nginx"])),
             ("containers", v(&[])),
             ("system", v(&[])),
+            ("disk", v(&[])),
             ("http", v(&["9750"])),
             ("http", v(&["9750", "/metrics?x=1"])),
         ] {
@@ -348,6 +350,8 @@ mod tests {
             ("status", v(&["a;b"])),
             ("status", v(&["a b"])),
             ("containers", v(&["--no-trunc"])),
+            ("disk", v(&["/"])),
+            ("disk", v(&["--prune"])),
             ("http", v(&["0"])),
             ("http", v(&["70000"])),
             ("http", v(&["80", "relative"])),
