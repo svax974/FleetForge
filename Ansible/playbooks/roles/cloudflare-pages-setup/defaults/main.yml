@@ -1,0 +1,22 @@
+---
+# Fichier front/.env du dépôt applicatif (chemin complet). Il porte déjà
+# CLOUDFLARE_API_TOKEN et CLOUDFLARE_ACCOUNT_ID — ceux que `wrangler pages deploy`
+# lira — et reçoit CLOUDFLARE_PAGES_PROJECT / CLOUDFLARE_PAGES_BRANCH.
+cfpages_env_file: ""
+
+# Nom du projet Pages : celui de l'hôte d'inventaire (minuscules, chiffres, tirets).
+cfpages_project: "{{ inventory_hostname | lower | replace('_', '-') }}"
+cfpages_branch: "main"
+
+# Nom de domaine personnalisé : <hôte>.<domaine du parc>. `domain_name` est la zone
+# du compte Cloudflare du parc. `proxy_hostname` n'est PAS lu : sur une entrée qui ne
+# le déclare pas, le global des group_vars le remplacerait (voir cloudflare-dns-update).
+cfpages_zone: "{{ domain_name }}"
+cfpages_domain: "{{ inventory_hostname ~ '.' ~ cfpages_zone }}"
+
+# false : le projet et le domaine sont posés, l'enregistrement DNS reste à faire à la main.
+cfpages_publish_dns: true
+cfpages_dns_token: "{{ cloudflare_token | default('') }}"
+
+# Racine de l'API Cloudflare (surchargée seulement pour tester contre un serveur factice).
+cfpages_api: "https://api.cloudflare.com/client/v4"

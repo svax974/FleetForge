@@ -16,11 +16,16 @@
 #      Cloudflare, `cloudflare_front: true` sur l'entrée) ; cert déjà
 #      couvert par le wildcard *.<domaine>, rien à émettre
 #   3. vhost sur les proxies : sites-enabled/agenthub.conf (WebSocket,
-#      timeout 1h, buffering off sur /api/v1/agenthub/ws/)
+#      timeout 1h, buffering off sur /api/v1/agenthub/ws/). Avec
+#      `cloudflare_front: true` il ne sert que l'API (agenthub-back.<domaine>,
+#      vers back_port) : le front est sur Cloudflare Pages, sans location ici
 #   4. agenthub-security : filtre les ports 4700/4701 dans DOCKER-USER
 #      (proxies + whitelist + VPN), règles de host_vars/agenthub.yml
 #   5. silence Alertmanager sur service="agenthub" (alertmanager-update)
-#   6. agenthub-deploy   : build+push+démarrage de l'app (scripts du dépôt
+#   6. agenthub-deploy   : fixe les cibles dans les .env (webapp-env-update : BACK_HOSTS,
+#      FRONT_HOSTS absent si `cloudflare_front: true`…) et, dans ce cas, prépare le
+#      front Cloudflare Pages (cloudflare-pages-setup : projet, branche, domaine) ;
+#      puis build+push+démarrage de l'app (scripts du dépôt
 #      app, PAS un docker_container/docker_compose Ansible — voir
 #      agenthub-deploy/defaults) ; le même script apparie le runner du hub et
 #      installe les runners des utilisateurs (un compte Linux par

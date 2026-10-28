@@ -1,0 +1,69 @@
+---
+# Nom de l'API du projet : `<projet>-back.<domaine du parc>`. Le front est sur Pages
+# (nom `<projet>.<domaine>`) ; le navigateur appelle l'API sur un AUTRE nom, que les
+# vhosts des proxies servent — c'est `VITE_API_URL` du front/.env qui le désigne
+# (posé par webapp-env-update, `webapp_env_api_host`).
+#
+# Un A record PROXIFIÉ par proxy éligible, créé s'il manque, jamais modifié :
+#   - entrée `access_mode: private` : les proxies dont l'adresse n'est celle d'AUCUN
+#     serveur VPN (même règle que `proxy-private.<zone>`, cloudflare-dns-update) ;
+#     aucun éligible : tous les proxies, avec avertissement ;
+#   - sinon : tous les proxies.
+# Proxifié, parce que le vhost lit l'IP cliente dans CF-Connecting-IP
+# (proxy-update/templates/_cloudflare_front.inc) : hors de l'edge Cloudflare elle
+# vaudrait celle de l'appelant et le filtre `_access.inc` n'aurait plus de sens.
+#
+# Un autre type d'enregistrement sous ce nom (CNAME hérité…) n'est pas remplacé : A et
+# CNAME ne coexistent pas, un avertissement le dit.
+
+- name: Work out the proxies the API record points to
+  ansible.builtin.set_fact:
+    cfpages_api_proxies: >-
+      {%- set vpn_addrs = groups['vpns'] | default([]) | map('extract', hostvars, 'ansible_host') | list -%}
+      {%- set all_proxies = groups['proxies'] | default([]) | map('extract', hostvars, 'ansible_host') | list -%}
+      {%- set eligible = all_proxies | reject('in', vpn_addrs) | list -%}
+      {{ eligible if ((access_mode | default('')) == 'private' and eligible | length > 0) else all_proxies }}
+  delegate_to: localhost
+  become: false
+
+- name: Look up the DNS records of the API domain
+  ansible.builtin.uri:
+    url: "{{ cfpages_api }}/zones/{{ cfpages_zone_lookup.json.result[0].id }}/dns_records?name={{ cfpages_api_domain }}"
+    headers:
+      Authorization: "Bearer {{ cfpages_dns_token }}"
+  register: cfpages_api_records
+  no_log: true
+  delegate_to: localhost
+  become: false
+  changed_when: false
+
+- name: Create the missing A records of the API domain
+  ansible.builtin.uri:
+    url: "{{ cfpages_api }}/zones/{{ cfpages_zone_lookup.json.result[0].id }}/dns_records"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ cfpages_dns_token }}"
+    body_format: json
+    body:
+      type: A
+      name: "{{ cfpages_api_domain }}"
+      content: "{{ item }}"
+      proxied: true
+    status_code: [200]
+  loop: "{{ cfpages_api_proxies | difference(cfpages_api_records.json.result | selectattr('type', 'equalto', 'A') | map(attribute='content') | list) }}"
+  loop_control:
+    label: "{{ cfpages_api_domain }} → {{ item }}"
+  no_log: true
+  changed_when: true
+  delegate_to: localhost
+  become: false
+  when: cfpages_api_records.json.result | rejectattr('type', 'equalto', 'A') | list | length == 0
+
+- name: Warn about a non-A record under the API domain
+  ansible.builtin.debug:
+    msg: >-
+      {{ cfpages_api_domain }} porte déjà un enregistrement {{ (cfpages_api_records.json.result
+      | rejectattr('type', 'equalto', 'A') | map(attribute='type') | list) | join(', ') }} : laissé
+      tel quel, aucun A record créé. Il doit mener aux proxies ({{ cfpages_api_proxies | join(', ') }}),
+      proxifié, pour que le vhost lise l'IP cliente.
+  when: cfpages_api_records.json.result | rejectattr('type', 'equalto', 'A') | list | length > 0

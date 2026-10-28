@@ -1,0 +1,209 @@
+---
+# Prépare le front d'une application WebAppTemplate (vx-public) hébergé sur
+# Cloudflare Pages — le cas `cloudflare_front: true` de l'inventaire — pour que
+# `wrangler pages deploy` (lancé par deploy-full.sh) trouve de quoi publier :
+#
+#   1. le projet Pages `<hôte>` est créé s'il n'existe pas ;
+#   2. CLOUDFLARE_PAGES_PROJECT et CLOUDFLARE_PAGES_BRANCH sont posés dans front/.env ;
+#   3. le domaine personnalisé `<hôte>.<domaine du parc>` est attaché au projet ;
+#   4. son enregistrement DNS (CNAME proxifié vers `<sous-domaine>.pages.dev`) est
+#      créé S'IL EST ABSENT. Un enregistrement existant n'est JAMAIS modifié : s'il
+#      pointe ailleurs, un avertissement le dit (cas d'une migration où le nom
+#      sert encore l'ancien front) ;
+#   5. le nom de l'API `<projet>-back.<domaine>` reçoit ses A records proxifiés
+#      vers les proxies (tasks/api.yml), le front y appelant le back à travers
+#      leur vhost. `cfpages_api_domain` est ensuite lu par webapp-env-update.
+#
+# Jetons : l'API Pages utilise CLOUDFLARE_API_TOKEN du front/.env (droit « Cloudflare
+# Pages : Edit » sur le compte), le DNS `cloudflare_token` du parc (« Edit zone DNS »).
+# Aucun jeton n'est affiché ni journalisé.
+#
+# Appelé APRÈS la restauration des .env : le front/.env modifié ici est ensuite
+# resauvegardé par webapp-env-update.
+
+- name: Read the Cloudflare credentials of the front env file
+  ansible.builtin.set_fact:
+    cfpages_api_token: >-
+      {{ lookup('ansible.builtin.file', cfpages_env_file, errors='ignore') | default('', true)
+         | regex_findall('^CLOUDFLARE_API_TOKEN=["\']?([^"\'\n]*)', multiline=True) | last | default('') }}
+    cfpages_account: >-
+      {{ lookup('ansible.builtin.file', cfpages_env_file, errors='ignore') | default('', true)
+         | regex_findall('^CLOUDFLARE_ACCOUNT_ID=["\']?([^"\'\n]*)', multiline=True) | last | default('') }}
+  no_log: true
+  delegate_to: localhost
+  become: false
+
+- name: Fail without the Pages credentials
+  ansible.builtin.assert:
+    that:
+      - cfpages_api_token | length > 0
+      - cfpages_account | length > 0
+    fail_msg: >-
+      {{ cfpages_env_file }} doit porter CLOUDFLARE_API_TOKEN (jeton avec le droit
+      « Cloudflare Pages : Edit » sur le compte) et CLOUDFLARE_ACCOUNT_ID : c'est aussi ce
+      que lit wrangler au déploiement.
+  delegate_to: localhost
+  become: false
+
+- name: Look up the Pages project
+  ansible.builtin.uri:
+    url: "{{ cfpages_api }}/accounts/{{ cfpages_account }}/pages/projects/{{ cfpages_project }}"
+    headers:
+      Authorization: "Bearer {{ cfpages_api_token }}"
+    status_code: [200, 404]
+  register: cfpages_lookup
+  no_log: true
+  delegate_to: localhost
+  become: false
+  changed_when: false
+
+- name: Create the Pages project
+  ansible.builtin.uri:
+    url: "{{ cfpages_api }}/accounts/{{ cfpages_account }}/pages/projects"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ cfpages_api_token }}"
+    body_format: json
+    body:
+      name: "{{ cfpages_project }}"
+      production_branch: "{{ cfpages_branch }}"
+    status_code: [200]
+  register: cfpages_created
+  no_log: true
+  changed_when: true
+  delegate_to: localhost
+  become: false
+  when: cfpages_lookup.status == 404
+
+# `<sous-domaine>.pages.dev` : Cloudflare l'allonge d'un suffixe quand le nom est déjà
+# pris sur un autre compte — on lit la valeur renvoyée plutôt que de la déduire du nom.
+- name: Name the API domain of the project
+  ansible.builtin.set_fact:
+    cfpages_api_domain: "{{ cfpages_project ~ '-back.' ~ cfpages_zone }}"
+  delegate_to: localhost
+  become: false
+
+- name: Keep the pages.dev name of the project
+  ansible.builtin.set_fact:
+    cfpages_target: "{{ (cfpages_created if cfpages_lookup.status == 404 else cfpages_lookup).json.result.subdomain }}"
+  delegate_to: localhost
+  become: false
+
+- name: Pin the Pages project and branch in the front env file
+  ansible.builtin.lineinfile:
+    path: "{{ cfpages_env_file }}"
+    regexp: '^{{ item.key }}='
+    line: '{{ item.key }}="{{ item.value }}"'
+  loop:
+    - { key: CLOUDFLARE_PAGES_PROJECT, value: "{{ cfpages_project }}" }
+    - { key: CLOUDFLARE_PAGES_BRANCH, value: "{{ cfpages_branch }}" }
+  loop_control:
+    label: "{{ item.key }}"
+  delegate_to: localhost
+  become: false
+  diff: false
+
+- name: List the custom domains of the Pages project
+  ansible.builtin.uri:
+    url: "{{ cfpages_api }}/accounts/{{ cfpages_account }}/pages/projects/{{ cfpages_project }}/domains"
+    headers:
+      Authorization: "Bearer {{ cfpages_api_token }}"
+  register: cfpages_domains
+  no_log: true
+  delegate_to: localhost
+  become: false
+  changed_when: false
+
+- name: Attach the custom domain to the Pages project
+  ansible.builtin.uri:
+    url: "{{ cfpages_api }}/accounts/{{ cfpages_account }}/pages/projects/{{ cfpages_project }}/domains"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ cfpages_api_token }}"
+    body_format: json
+    body:
+      name: "{{ cfpages_domain }}"
+    status_code: [200]
+  no_log: true
+  changed_when: true
+  delegate_to: localhost
+  become: false
+  when: cfpages_domain not in (cfpages_domains.json.result | map(attribute='name') | list)
+
+# ── DNS : créé s'il est absent, jamais modifié ───────────────────────────────
+- name: Find the DNS zone
+  ansible.builtin.uri:
+    url: "{{ cfpages_api }}/zones?name={{ cfpages_zone }}"
+    headers:
+      Authorization: "Bearer {{ cfpages_dns_token }}"
+  register: cfpages_zone_lookup
+  no_log: true
+  delegate_to: localhost
+  become: false
+  changed_when: false
+  when:
+    - cfpages_publish_dns | bool
+    - cfpages_dns_token | length > 0
+
+- name: Look up the DNS record of the custom domain
+  ansible.builtin.uri:
+    url: "{{ cfpages_api }}/zones/{{ cfpages_zone_lookup.json.result[0].id }}/dns_records?name={{ cfpages_domain }}"
+    headers:
+      Authorization: "Bearer {{ cfpages_dns_token }}"
+  register: cfpages_record
+  no_log: true
+  delegate_to: localhost
+  become: false
+  changed_when: false
+  when: cfpages_zone_lookup is not skipped
+
+- name: Create the DNS record of the custom domain
+  ansible.builtin.uri:
+    url: "{{ cfpages_api }}/zones/{{ cfpages_zone_lookup.json.result[0].id }}/dns_records"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ cfpages_dns_token }}"
+    body_format: json
+    body:
+      type: CNAME
+      name: "{{ cfpages_domain }}"
+      content: "{{ cfpages_target }}"
+      proxied: true
+    status_code: [200]
+  no_log: true
+  changed_when: true
+  delegate_to: localhost
+  become: false
+  when:
+    - cfpages_record is not skipped
+    - cfpages_record.json.result | length == 0
+
+- name: Warn about a DNS record that points elsewhere
+  ansible.builtin.debug:
+    msg: >-
+      {{ cfpages_domain }} existe déjà dans la zone et pointe sur
+      {{ cfpages_record.json.result[0].content }} (pas sur {{ cfpages_target }}) : laissé
+      tel quel. Tant qu'il n'est pas basculé à la main, le domaine ne sert PAS le front Pages.
+  when:
+    - cfpages_record is not skipped
+    - cfpages_record.json.result | length > 0
+    - cfpages_record.json.result[0].content != cfpages_target
+
+- name: Warn that the DNS record was not handled
+  ansible.builtin.debug:
+    msg: >-
+      Enregistrement DNS de {{ cfpages_domain }} non géré ({{ 'cfpages_publish_dns: false'
+      if not (cfpages_publish_dns | bool) else 'cloudflare_token vide' }}) : CNAME proxifié
+      vers {{ cfpages_target }} à poser à la main.
+  when: cfpages_record is skipped
+
+# ── DNS de l'API (`<projet>-back`) : A proxifiés vers les proxies ───────────────
+- name: Publish the API domain
+  ansible.builtin.include_tasks: api.yml
+  when: cfpages_zone_lookup is not skipped
+
+- name: Report the Pages front
+  ansible.builtin.debug:
+    msg: >-
+      Front Cloudflare Pages : projet {{ cfpages_project }} (branche {{ cfpages_branch }}),
+      domaine {{ cfpages_domain }}, publié par `wrangler pages deploy` au déploiement.

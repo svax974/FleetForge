@@ -83,6 +83,27 @@
     label: "{{ item.item }}"
   when: not item.stat.exists
 
+# Variables que l'INVENTAIRE décide, fixées dans les .env restaurés (voir les
+# rôles) : cibles du déploiement, et front sur Cloudflare Pages quand l'entrée
+# déclare `cloudflare_front: true`. Pages d'abord : il écrit dans front/.env, que
+# webapp-env-update resauvegarde ensuite dans le coffre avec le back/.env.
+- name: Prepare the Cloudflare Pages front (project, branch, domain)
+  ansible.builtin.include_role:
+    name: cloudflare-pages-setup
+  vars:
+    cfpages_env_file: "{{ agenthub_src }}{{ agenthub_front_env_file }}"
+  when: cloudflare_front | default(false) | bool
+
+- name: Pin the deployment targets in the prod env files
+  ansible.builtin.include_role:
+    name: webapp-env-update
+  vars:
+    webapp_env_src: "{{ agenthub_src }}"
+    webapp_env_back_file: "{{ agenthub_back_env_file }}"
+    webapp_env_front_file: "{{ agenthub_front_env_file }}"
+    webapp_env_app_id: "{{ agenthub_app_env_id }}"
+    webapp_env_api_host: "{{ cfpages_api_domain | default('') }}"
+
 # Sans ces deux clés du back/.env de prod, deploy-full.sh saute le hook d'auto-provisionnement
 # sans bruit : un hub neuf n'aurait ni runner ni runners d'utilisateurs (l'étape « Choisis l'IA
 # de ton équipe » réduite au LLM direct). grep -q : aucune valeur n'est affichée.
@@ -148,11 +169,13 @@
     that:
       - agenthub_back_targets | length > 0
       - agenthub_wrong_targets | length == 0
+      - (not (cloudflare_front | default(false) | bool)) or (agenthub_front_targets | length == 0)
     fail_msg: >-
       {{ agenthub_src }}{{ agenthub_back_env_file }} vise {{ agenthub_wrong_targets | join(', ') or 'aucun hôte' }}
       alors que l'entrée `agenthub` de l'inventaire est {{ agenthub_expected_hosts | join(' / ') }}.
       deploy-full.sh lit BACK_HOSTS, puis BACK_REMOTE_HOST, puis REMOTE_HOST (front :
-      FRONT_HOSTS, FRONT_REMOTE_HOST, REMOTE_HOST) : la première définie l'emporte.
+      FRONT_HOSTS, FRONT_REMOTE_HOST, REMOTE_HOST) : la première définie l'emporte. Avec
+      `cloudflare_front: true` le front ne doit avoir AUCUN hôte (il part sur Cloudflare Pages).
       Corriger le fichier puis `./app-env.sh save {{ agenthub_app_env_id }}`, sinon la
       restauration depuis le coffre le réécrit au prochain passage.
     quiet: true
@@ -185,6 +208,7 @@
 # joué juste avant) — un contrôle en boucle locale reste valide quel que soit
 # l'état du pare-feu ou l'IP du poste de contrôle.
 - name: Wait for the front to answer
+  when: not (cloudflare_front | default(false) | bool)
   ansible.builtin.uri:
     url: "http://127.0.0.1:{{ hostvars['agenthub'].app_port }}/"
     status_code: [200, 301, 302]
@@ -207,8 +231,8 @@
 - name: Report how the app is exposed
   ansible.builtin.debug:
     msg: >-
-      AgentHub déployé : front sur 127.0.0.1:{{ hostvars['agenthub'].app_port }},
-      back sur 127.0.0.1:{{ hostvars['agenthub'].back_port }}. Publiquement
+      AgentHub déployé : {{ 'front sur Cloudflare Pages, ' if (cloudflare_front | default(false) | bool)
+      else 'front sur 127.0.0.1:' ~ hostvars['agenthub'].app_port ~ ', ' }}back sur 127.0.0.1:{{ hostvars['agenthub'].back_port }}. Publiquement
       joignable via https://{{ agenthub_hostname | default('agenthub.' ~ domain_name) }}
       (vhost proxies) une fois `--tags proxy-conf` joué, et filtré dans
       DOCKER-USER (proxies + whitelist + VPN uniquement) une fois

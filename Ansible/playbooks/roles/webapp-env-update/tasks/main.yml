@@ -1,0 +1,136 @@
+---
+# Fixe, dans les .env de prod d'une application WebAppTemplate (vx-public), les
+# variables que l'inventaire décide : où le déploiement part. `deploy-full.sh`
+# ignore l'inventaire et vise les hôtes nommés par le .env ; une valeur oubliée
+# après un déplacement de machine envoie le déploiement sur l'ancienne, sans
+# erreur (constat du 28/10/2026, agenthub). Le rôle s'exécute sur l'entrée
+# d'inventaire de l'application (`hosts: <entrée>`) et agit sur le poste de
+# contrôle.
+#
+#   back/.env  BACK_HOSTS        = ansible_host de l'entrée
+#              FRONT_HOSTS       = ansible_host, ABSENT si `cloudflare_front: true`
+#                                  (le front va sur Cloudflare Pages, pas sur le serveur)
+#              REMOTE_SSH_PORT   = ansible_port
+#              REMOTE_USER       = remote_username
+#   front/.env VITE_API_URL      = https://<webapp_env_api_host><chemin actuel>, avec
+#                                  `cloudflare_front: true` et `webapp_env_api_host` donné
+#                                  (le front Pages appelle l'API sur son propre nom)
+#   back/.env  (suite)
+#              REMOTE_HOST, BACK_REMOTE_HOST, FRONT_REMOTE_HOST retirés : un seul
+#              couple explicite fait foi (ils servent de repli à BACK_HOSTS/FRONT_HOSTS
+#              et à clean-remote.sh, donc une valeur périmée y serait relue).
+#
+# Volontairement NON touchés : PROXY_HOSTS, CLIENT_ORIGINS, WHITELIST, SSH_KEY_FILE.
+# Ce sont des choix d'exploitation (le proxy partageant l'adresse d'un VPN en est
+# écarté exprès, les origines CORS portent des noms que l'inventaire ignore).
+#
+# Contrôle de cohérence avec le front : `cloudflare_front: true` exige un
+# VITE_API_URL en https:// dans front/.env — c'est lui, et lui seul, qui fait
+# basculer deploy-full.sh sur Cloudflare Pages ; sans, un front serait déployé
+# sur le serveur malgré l'absence de FRONT_HOSTS. Réciproquement un https://
+# sans `cloudflare_front` publierait sur Pages un front que l'inventaire place
+# sur le serveur.
+#
+# Les fichiers modifiés sont resauvegardés dans le coffre (`app-env.sh save`) :
+# sans cela le `restore` du déploiement suivant les défait. Le coffre modifié est
+# dans le dépôt PRIVÉ du parc : à committer.
+
+- name: Fail without an application checkout
+  ansible.builtin.assert:
+    that: webapp_env_src | length > 0
+    fail_msg: "webapp_env_src est vide : le rôle appelant doit passer le dépôt applicatif."
+  delegate_to: localhost
+  become: false
+
+- name: Compute the deployment targets declared by the inventory
+  ansible.builtin.set_fact:
+    webapp_env_cf: "{{ cloudflare_front | default(false) | bool }}"
+    webapp_env_values:
+      BACK_HOSTS: "{{ ansible_host }}"
+      REMOTE_SSH_PORT: "{{ ansible_port | default(22) }}"
+      REMOTE_USER: "{{ remote_username }}"
+
+- name: Read VITE_API_URL from the front env file
+  ansible.builtin.set_fact:
+    webapp_env_vite_api_url: >-
+      {{ lookup('ansible.builtin.file', webapp_env_src ~ webapp_env_front_file, errors='ignore')
+         | default('', true) | regex_findall('^[ ]*VITE_API_URL=["\']?([^"\'\n]*)', multiline=True)
+         | last | default('') }}
+
+# Front sur Cloudflare Pages : le navigateur appelle l'API sur son propre nom
+# (`webapp_env_api_host`, ex. `<projet>-back.<domaine>`, publié par
+# cloudflare-pages-setup). Le chemin de l'URL actuelle est conservé (`/api/v1`
+# par défaut, quand elle est relative ou absente).
+- name: Work out the API URL the Pages front must call
+  ansible.builtin.set_fact:
+    webapp_env_api_url: >-
+      {%- set path = webapp_env_vite_api_url | regex_replace('^https?://[^/]+', '') -%}
+      https://{{ webapp_env_api_host }}{{ path if path.startswith('/') else '/api/v1' }}
+  when:
+    - webapp_env_cf
+    - webapp_env_api_host | length > 0
+
+- name: Check that the front mode matches `cloudflare_front`
+  ansible.builtin.assert:
+    that:
+      - (webapp_env_api_url | default(webapp_env_vite_api_url)).startswith('https://') == webapp_env_cf
+    fail_msg: >-
+      {{ inventory_hostname }} : cloudflare_front vaut {{ webapp_env_cf }} mais VITE_API_URL
+      de {{ webapp_env_src }}{{ webapp_env_front_file }} {{ 'commence' if webapp_env_vite_api_url.startswith('https://') else 'ne commence pas' }}
+      par https://. deploy-full.sh ne déploie sur Cloudflare Pages QUE si VITE_API_URL est
+      en https:// : {{ 'poser une URL https:// dans ce fichier' if webapp_env_cf else 'passer cloudflare_front: true sur son entrée, ou une URL relative dans ce fichier' }}.
+
+- name: Point VITE_API_URL at the API domain in the front env file
+  ansible.builtin.lineinfile:
+    path: "{{ webapp_env_src }}{{ webapp_env_front_file }}"
+    regexp: '^[ ]*VITE_API_URL='
+    line: "VITE_API_URL={{ webapp_env_api_url }}"
+  delegate_to: localhost
+  become: false
+  diff: false
+  register: webapp_env_api_pinned
+  when: webapp_env_api_url is defined
+
+- name: Pin the deployment targets in the back env file
+  ansible.builtin.lineinfile:
+    path: "{{ webapp_env_src }}{{ webapp_env_back_file }}"
+    regexp: '^{{ item.key }}='
+    line: '{{ item.key }}="{{ item.value }}"'
+  loop: "{{ (webapp_env_values | combine({} if webapp_env_cf else {'FRONT_HOSTS': ansible_host})) | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  delegate_to: localhost
+  become: false
+  diff: false
+  register: webapp_env_pinned
+
+- name: Remove the variables that must not exist in the back env file
+  ansible.builtin.lineinfile:
+    path: "{{ webapp_env_src }}{{ webapp_env_back_file }}"
+    regexp: '^{{ item }}='
+    state: absent
+  loop: "{{ ['REMOTE_HOST', 'BACK_REMOTE_HOST', 'FRONT_REMOTE_HOST'] + (['FRONT_HOSTS'] if webapp_env_cf else []) }}"
+  delegate_to: localhost
+  become: false
+  diff: false
+  register: webapp_env_removed
+
+- name: Save the env files into the vault
+  ansible.builtin.command:
+    cmd: ./app-env.sh save {{ webapp_env_app_id }}
+    chdir: "{{ playbook_dir }}/.."
+  delegate_to: localhost
+  become: false
+  register: webapp_env_saved
+  changed_when: "'saved to' in webapp_env_saved.stdout"
+  when:
+    - webapp_env_app_id | length > 0
+    - (playbook_dir ~ '/../.private/apps/' ~ webapp_env_app_id) is directory
+
+- name: Report what was fixed
+  ansible.builtin.debug:
+    msg: >-
+      .env de {{ webapp_env_app_id | default(inventory_hostname, true) }} : cibles fixées sur {{ ansible_host }}
+      (back{{ '' if webapp_env_cf else ' + front' }}){{ ', front sur Cloudflare Pages (FRONT_HOSTS absent)' if webapp_env_cf else '' }}.
+      {{ 'Coffre mis à jour : à committer dans le dépôt privé.' if webapp_env_saved is changed else '' }}
+  when: (webapp_env_pinned is changed) or (webapp_env_removed is changed) or (webapp_env_api_pinned is changed)

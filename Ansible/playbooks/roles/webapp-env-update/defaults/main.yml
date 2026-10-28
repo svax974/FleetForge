@@ -1,0 +1,15 @@
+---
+# Dépôt applicatif (WebAppTemplate / vx-public) dont on fixe les .env de prod, avec
+# son slash final, et chemins des fichiers relatifs à ce dépôt. À passer par le
+# rôle appelant (voir agenthub-deploy).
+webapp_env_src: ""
+webapp_env_back_file: "back/.env"
+webapp_env_front_file: "front/.env"
+
+# Identifiant de l'application dans le dépôt privé du parc (.private/apps/apps.yml).
+# Vide, ou sans copie dans .private/apps/<id> : rien n'est resauvegardé.
+webapp_env_app_id: ""
+
+# Nom sous lequel le navigateur joint l'API quand le front est sur Cloudflare Pages
+# (`cloudflare_front: true`) : VITE_API_URL en est déduit. Vide : VITE_API_URL n'est pas touché.
+webapp_env_api_host: ""
