@@ -199,17 +199,17 @@
       certificate: "{{ cfopull_client_cert.content | b64decode }}"
       private_key: "{{ lookup('ansible.builtin.file', cfopull_dir ~ '/client.key') }}"
       bundle_method: ubiquitous
-    status_code: [200, 201, 400, 401, 403, 404, 409]
+    status_code: [200, 201, 202, 400, 401, 403, 404, 409]
   register: cfopull_upload
   no_log: true
-  changed_when: cfopull_upload.status in [200, 201]
+  changed_when: cfopull_upload.status in [200, 201, 202]
   delegate_to: localhost
   become: false
   when: cfopull_cert_id | length == 0
 
 - name: Fail clearly when Cloudflare refuses the upload
   ansible.builtin.assert:
-    that: cfopull_upload.status in [200, 201]
+    that: cfopull_upload.status in [200, 201, 202]
     fail_msg: >-
       Cloudflare refuse le certificat (HTTP {{ cfopull_upload.status }}) :
       {{ (cfopull_upload.json | default({})).errors | default([]) | to_json }}.
@@ -248,16 +248,16 @@
     body_format: json
     body:
       config: "{{ cfopull_bindings }}"
-    status_code: [200, 400, 401, 403, 404]
+    status_code: [200, 202, 400, 401, 403, 404]
   register: cfopull_binding
   no_log: true
-  changed_when: cfopull_binding.status == 200
+  changed_when: cfopull_binding.status in [200, 202]
   delegate_to: localhost
   become: false
 
 - name: Fail clearly when Cloudflare refuses the hostname binding
   ansible.builtin.assert:
-    that: cfopull_binding.status == 200
+    that: cfopull_binding.status in [200, 202]
     fail_msg: >-
       Cloudflare refuse le rattachement de {{ cfopull_hostnames | join(', ') }} (HTTP {{ cfopull_binding.status }}) :
       {{ (cfopull_binding.json | default({})).errors | default([]) | to_json }}.
@@ -265,8 +265,10 @@
   delegate_to: localhost
   become: false
 
-# Cloudflare déploie l'association en quelques minutes (initializing → pending_deployment → active). Le vhost qui exige le
-# certificat ne doit être posé qu'ensuite, sinon les requêtes via Cloudflare échouent le temps du déploiement.
+# Cloudflare accepte l'association (202) puis la déploie en quelques minutes (initializing → pending_deployment → active).
+# Le vhost qui exige le certificat ne doit être posé qu'ensuite, sinon les requêtes via Cloudflare échouent le temps du
+# déploiement. `ignore_errors` : à court d'essais, Ansible marque l'élément en échec quoi que dise failed_when, et no_log
+# en masque le détail ; l'assertion suivante donne alors le statut lisible.
 - name: Wait until Cloudflare presents the certificate on every hostname
   ansible.builtin.uri:
     url: "{{ cfopull_api }}/zones/{{ cfopull_zone_id }}/origin_tls_client_auth/hostnames/{{ item }}"
@@ -280,7 +282,7 @@
   loop: "{{ cfopull_hostnames }}"
   no_log: true
   changed_when: false
-  failed_when: false
+  ignore_errors: true
   delegate_to: localhost
   become: false
 
