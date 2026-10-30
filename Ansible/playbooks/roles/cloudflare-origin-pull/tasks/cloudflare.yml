@@ -147,9 +147,23 @@
     url: "{{ cfopull_api }}/zones/{{ cfopull_zone_id }}/origin_tls_client_auth"
     headers:
       Authorization: "Bearer {{ cfopull_token }}"
+    status_code: [200, 401, 403]
   register: cfopull_uploaded
   no_log: true
   changed_when: false
+  delegate_to: localhost
+  become: false
+
+# Le listage est le premier appel qui exige la permission SSL (la recherche de zone se contente de Zone Read) : son
+# refus est expliqué ici, l'erreur du module uri étant masquée par no_log (le jeton est dans les en-têtes).
+- name: Fail clearly when the token may not manage the zone's certificates
+  ansible.builtin.assert:
+    that: cfopull_uploaded.status == 200
+    fail_msg: >-
+      Cloudflare refuse (HTTP {{ cfopull_uploaded.status }}) : le jeton cloudflare_token n'a pas la permission
+      « Zone → SSL and Certificates → Edit » sur {{ cfopull_zone }}. L'ajouter (dashboard Cloudflare → My Profile →
+      API Tokens → ce jeton → Edit → Permissions ; la valeur du jeton ne change pas), puis relancer le playbook.
+      Rien n'a encore été changé chez Cloudflare ni sur les proxies (le vhost ne se pose qu'après cette étape).
   delegate_to: localhost
   become: false
 
