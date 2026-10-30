@@ -1,0 +1,25 @@
+---
+# Intervalle de scrape du vmagent d'un back, changé le temps d'un test de charge.
+#
+# vmagent tourne sur chaque hôte back (sidecar de docker-compose, posé par le deploy du PROJET — deploy-full.sh —,
+# pas par Ansible) : il scrape les conteneurs back et pousse vers Prometheus par remote_write. Son intervalle est
+# donc `global.scrape_interval` de SON vmagent.yml (30s), pas celui de Prometheus.
+
+# Mode : `fast` (intervalle rapide), `normal` (remet l'intervalle d'origine) ou `status` (lecture seule).
+vmagent_scrape_mode: status
+
+# Intervalle posé en mode `fast`.
+vmagent_fast_scrape_interval: "10s"
+
+# Conteneur vmagent (`container_name: ${PROJECT_NAME}_vmagent` dans docker-compose.yml du projet).
+vmagent_project: papanglabs
+vmagent_container: "{{ vmagent_project }}_vmagent"
+
+# Chemin du fichier de configuration DANS le conteneur : sert à retrouver le fichier de l'hôte (source du bind mount).
+vmagent_config_destination: /etc/vmagent/config.yml
+
+# Port HTTP interne de vmagent : `/config` rend la configuration effectivement chargée (la preuve que le rechargement a eu lieu).
+vmagent_http_port: 8429
+
+# Copie de l'original, à côté du fichier : c'est d'elle que `normal` relit l'intervalle à remettre.
+vmagent_config_backup_suffix: ".pre-loadtest"

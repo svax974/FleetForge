@@ -22,6 +22,11 @@ prometheus_fast_scrape_interval: "10s"
 prometheus_fast_scrape_timeout: "8s"
 prometheus_fast_scrape_jobs: [exporter, svcprobe]
 
+# Intervalle de scrape propre à UN job (clé = job_name), pour les jobs qui n'ont pas le mécanisme « par instance »
+# ci-dessus. Seul `papangmetrics-api` le lit aujourd'hui. Vide = intervalle global. Le délai est
+# `prometheus_fast_scrape_timeout`. Posé le temps d'un test de charge par `update-loadtest-scrape.yml`.
+prometheus_job_scrape_intervals: {}
+
 # Répertoires de service discovery (un par job). Les rôles `exporter-*` y
 # déposent un JSON par hôte via `delegate_to: {{ prometheus_host }}`.
 prometheus_sd_jobs:

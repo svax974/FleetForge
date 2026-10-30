@@ -1,0 +1,151 @@
+---
+# Change `global.scrape_interval` du vmagent d'un back, EN PLACE, puis le recharge (SIGHUP), et le prouve par `/config`.
+#
+# Pourquoi EN PLACE (`cat >`) et pas `lineinfile`/`replace`/`template` : docker-compose monte `vmagent.yml` dans le
+# conteneur en bind mount de FICHIER, donc par inode. Ces modules écrivent un temporaire puis le renomment : l'inode
+# change, le conteneur continue de lire l'ancien contenu détaché, et le rechargement recharge l'ANCIENNE configuration
+# en journalisant un succès (même piège que prometheus.yml, voir prometheus-install). `cat > fichier` tronque et réécrit
+# le MÊME inode : le conteneur voit le nouveau contenu.
+#
+# Rien n'est rejoué du déploiement du back : ni image, ni conteneur recréé, pas de trou de scrape. Un `deploy-full.sh`
+# ultérieur renvoie le vmagent.yml du projet (30s) : il remet l'intervalle d'origine de lui-même.
+
+- name: Check the mode
+  ansible.builtin.assert:
+    that: vmagent_scrape_mode in ['fast', 'normal', 'status']
+    fail_msg: "vmagent_scrape_mode doit valoir fast, normal ou status (reçu : {{ vmagent_scrape_mode }})"
+  tags: [vmagent]
+
+- name: Find the vmagent container and the host file bind-mounted as its configuration
+  ansible.builtin.command:
+    argv:
+      - docker
+      - inspect
+      - "{{ vmagent_container }}"
+      - --format
+      - '{% raw %}{{ range .Mounts }}{{ if eq .Destination "{% endraw %}{{ vmagent_config_destination }}{% raw %}" }}{{ .Source }}{{ end }}{{ end }}{% endraw %}'
+  register: _vmagent_inspect
+  changed_when: false
+  failed_when: _vmagent_inspect.rc != 0 or (_vmagent_inspect.stdout | trim | length) == 0
+  become: true
+  check_mode: false
+  tags: [vmagent]
+
+- name: Remember the paths
+  ansible.builtin.set_fact:
+    _vmagent_file: "{{ _vmagent_inspect.stdout | trim }}"
+    _vmagent_backup: "{{ _vmagent_inspect.stdout | trim }}{{ vmagent_config_backup_suffix }}"
+  tags: [vmagent]
+
+- name: Look for the saved original
+  ansible.builtin.stat:
+    path: "{{ _vmagent_backup }}"
+  register: _vmagent_backup_stat
+  become: true
+  tags: [vmagent]
+
+# La valeur d'origine est lue AVANT toute modification : dans la copie si elle existe (un `fast` déjà joué), sinon dans le fichier.
+- name: Read the original global scrape interval
+  ansible.builtin.shell: |
+    set -eu
+    src='{{ _vmagent_backup if _vmagent_backup_stat.stat.exists else _vmagent_file }}'
+    grep -m1 -E '^  scrape_interval:' "$src" | sed -E 's/^  scrape_interval: *//; s/ *#.*$//'
+  args:
+    executable: /bin/bash
+  register: _vmagent_original
+  changed_when: false
+  failed_when: (_vmagent_original.stdout | trim | length) == 0
+  become: true
+  check_mode: false
+  tags: [vmagent]
+
+- name: Read the interval the file carries now
+  ansible.builtin.shell: |
+    set -eu
+    grep -m1 -E '^  scrape_interval:' '{{ _vmagent_file }}' | sed -E 's/^  scrape_interval: *//; s/ *#.*$//'
+  args:
+    executable: /bin/bash
+  register: _vmagent_current
+  changed_when: false
+  become: true
+  check_mode: false
+  tags: [vmagent]
+
+- name: Say what is about to happen
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }}: file {{ _vmagent_file }}, interval now {{ _vmagent_current.stdout | trim }},
+      original {{ _vmagent_original.stdout | trim }}, mode {{ vmagent_scrape_mode }}
+  tags: [vmagent]
+
+- name: Save the original configuration next to it (once)
+  ansible.builtin.command:
+    argv: [cp, -p, "{{ _vmagent_file }}", "{{ _vmagent_backup }}"]
+    creates: "{{ _vmagent_backup }}"
+  become: true
+  when: vmagent_scrape_mode == 'fast'
+  tags: [vmagent]
+
+- name: Write the target interval in place
+  ansible.builtin.shell: |
+    set -eu
+    file='{{ _vmagent_file }}'
+    tmp="$(mktemp)"
+    sed -E 's/^(  scrape_interval:).*/\1 {{ _vmagent_target }}/' "$file" > "$tmp"
+    if cmp -s "$tmp" "$file"; then echo unchanged; else cat "$tmp" > "$file"; echo changed; fi
+    rm -f "$tmp"
+  args:
+    executable: /bin/bash
+  vars:
+    _vmagent_target: "{{ vmagent_fast_scrape_interval if vmagent_scrape_mode == 'fast' else (_vmagent_original.stdout | trim) }}"
+  register: _vmagent_write
+  changed_when: (_vmagent_write.stdout | trim) == 'changed'
+  become: true
+  when: vmagent_scrape_mode in ['fast', 'normal']
+  tags: [vmagent]
+
+- name: Reload vmagent (SIGHUP re-reads the configuration without restarting it)
+  ansible.builtin.command:
+    argv: [docker, kill, --signal=SIGHUP, "{{ vmagent_container }}"]
+  become: true
+  when: _vmagent_write is changed
+  changed_when: true
+  tags: [vmagent]
+
+- name: Find vmagent's address on the Docker network
+  ansible.builtin.command:
+    argv:
+      - docker
+      - inspect
+      - "{{ vmagent_container }}"
+      - --format
+      - '{% raw %}{{ range .NetworkSettings.Networks }}{{ .IPAddress }} {{ end }}{% endraw %}'
+  register: _vmagent_ip
+  changed_when: false
+  become: true
+  check_mode: false
+  tags: [vmagent]
+
+# `/config` rend la configuration que vmagent a CHARGÉE : c'est la preuve du rechargement, pas l'état du fichier.
+- name: Prove it, from the configuration vmagent has loaded
+  ansible.builtin.uri:
+    url: "http://{{ (_vmagent_ip.stdout | trim).split(' ')[0] }}:{{ vmagent_http_port }}/config"
+    return_content: true
+  register: _vmagent_loaded
+  until: >-
+    _vmagent_loaded.status == 200 and
+    ((_vmagent_loaded.content | regex_search('scrape_interval: *[0-9a-z]+')) | default('') | regex_replace('scrape_interval: *', ''))
+    == (vmagent_fast_scrape_interval if vmagent_scrape_mode == 'fast'
+        else (_vmagent_original.stdout | trim if vmagent_scrape_mode == 'normal' else _vmagent_current.stdout | trim))
+  retries: 6
+  delay: 5
+  when: not ansible_check_mode
+  tags: [vmagent]
+
+- name: Drop the saved original once restored
+  ansible.builtin.file:
+    path: "{{ _vmagent_backup }}"
+    state: absent
+  become: true
+  when: vmagent_scrape_mode == 'normal'
+  tags: [vmagent]

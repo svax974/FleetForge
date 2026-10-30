@@ -86,6 +86,10 @@ scrape_configs:
   # /metrics exige le bearer METRICS_AUTH_TOKEN.
   - job_name: 'papangmetrics-api'
     metrics_path: /metrics
+{% if 'papangmetrics-api' in prometheus_job_scrape_intervals %}
+    scrape_interval: {{ prometheus_job_scrape_intervals['papangmetrics-api'] }}
+    scrape_timeout: {{ prometheus_fast_scrape_timeout }}
+{% endif %}
 {% if prometheus_papangmetrics_token | length > 0 %}
     authorization:
       type: Bearer

@@ -1,0 +1,121 @@
+---
+# Scrape à 10 s le temps d'un TEST DE CHARGE de PapangLabs, puis retour à l'état d'origine.
+#
+#   ./play.sh papanglabs update-loadtest-scrape.yml -e loadtest_scrape_mode=fast      # AVANT le test
+#   ./play.sh papanglabs update-loadtest-scrape.yml -e loadtest_scrape_mode=normal    # APRÈS le test
+#   ./play.sh papanglabs update-loadtest-scrape.yml -e loadtest_scrape_mode=status    # lecture seule : où en est-on ?
+#
+# `-e loadtest_scrape_mode=…` est OBLIGATOIRE : pas de défaut, pour qu'un oubli n'arme (ni ne désarme) rien.
+#
+# Pourquoi : les garde-fous du test (scripts/loadtest du template vx-public) lisent Prometheus. Une métrique scrapée
+# toutes les 60 s arrive avec jusqu'à 3 minutes de retard, trop pour couper un test avant la saturation. Constat du
+# 30/10/2026 : `exporter` 60 s (back*, proxy*), `papangmetrics-api` 60 s, `papanglabs_api` 30 s (celui-là est poussé par
+# le vmagent des back, pas scrapé par Prometheus).
+#
+# Ce que fait `fast` — deux endroits, car deux mécanismes :
+#   1. Prometheus (prometheus1) : rejoue `prometheus-install` avec
+#        • `prometheus_fast_scrape_instances` = la liste des group_vars (timescale1, timescale2) + les machines du test,
+#          ce qui passe `exporter` et `svcprobe` de ces instances à `prometheus_fast_scrape_interval` (10 s) via les jobs
+#          `*-fast` du gabarit ; le label `job` reste d'origine, les alertes n'y voient rien ;
+#        • `prometheus_job_scrape_intervals` pour `papangmetrics-api`, qui n'a pas de mécanisme « par instance ».
+#      Le conteneur Prometheus est RECRÉÉ (prometheus.yml est monté par inode : seul un recreate est pris en compte) :
+#      un court trou de scrape, sans perte de données (volume `data`), d'où à faire AVANT de lancer le test.
+#   2. vmagent des back de prod (role vmagent-scrape-update) : `global.scrape_interval` de leur vmagent.yml, réécrit EN
+#      PLACE puis rechargé par SIGHUP, et prouvé par `/config` de vmagent. Ni image, ni conteneur recréé.
+#
+# `normal` remet exactement l'état d'origine : Prometheus est rejoué SANS surcharge (les group_vars font foi) ; le vmagent
+# relit l'intervalle d'origine dans la copie `vmagent.yml.pre-loadtest` et la supprime. Un `deploy-full.sh` du back entre
+# les deux renvoie de lui-même le vmagent.yml du projet (30 s) : `normal` ne change alors rien, et le dit.
+#
+# Les machines (`loadtest_scrape_instances`) sont celles qu'un test charge ou que ses garde-fous lisent : back1-prod et
+# back2-prod (API), proxy1 et proxy2 (nginx), brk1. Les back de PRÉPROD ne sont jamais touchés (hôtes écrits en dur).
+#
+#   -e loadtest_scrape_interval_override=15s  autre intervalle que 10s (les deux mécanismes)
+#   --tags prometheus | vmagent | verify      ne jouer qu'une partie
+#
+# Motifs `hosts:` écrits en dur (CLAUDE.md : une variable y serait résolue avant les group_vars).
+
+- name: Check the requested mode
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: loadtest_scrape_mode must be given and valid
+      ansible.builtin.assert:
+        that:
+          - loadtest_scrape_mode is defined
+          - loadtest_scrape_mode in ['fast', 'normal', 'status']
+        fail_msg: "Passer -e loadtest_scrape_mode=fast|normal|status"
+        quiet: true
+
+- name: Prometheus — scrape interval of the instances and jobs a load test reads
+  hosts: prometheus1
+  remote_user: "{{ remote_username }}"
+  vars:
+    loadtest_scrape_instances: [back1-prod, back2-prod, proxy1, proxy2, brk1]
+    # Un seul intervalle pour les deux mécanismes (modifiable : -e loadtest_scrape_interval=15s).
+    loadtest_scrape_interval: "{{ loadtest_scrape_interval_override | default('10s') }}"
+  pre_tasks:
+    # set_fact (et pas `vars:`) : il réutilise la valeur des group_vars en l'ajoutant, sans se référencer lui-même
+    # (une variable de play définie par elle-même est une récursion infinie).
+    - name: Fast — add the test machines to the fast-scrape instances, and speed up papangmetrics-api
+      ansible.builtin.set_fact:
+        prometheus_fast_scrape_instances: "{{ ((prometheus_fast_scrape_instances | default([])) + loadtest_scrape_instances) | unique | list }}"
+        prometheus_job_scrape_intervals: "{{ {'papangmetrics-api': loadtest_scrape_interval} }}"
+        prometheus_fast_scrape_interval: "{{ loadtest_scrape_interval }}"
+      when: loadtest_scrape_mode == 'fast'
+      tags: [prometheus]
+
+    - name: Say what Prometheus will run with
+      ansible.builtin.debug:
+        msg: >-
+          mode {{ loadtest_scrape_mode }} — fast instances {{ prometheus_fast_scrape_instances | default([]) }},
+          per-job intervals {{ prometheus_job_scrape_intervals | default({}) }}
+      tags: [prometheus]
+  roles:
+    # `status` ne touche à rien : le rôle n'est pas joué (recreate du conteneur).
+    - role: prometheus-install
+      when: loadtest_scrape_mode in ['fast', 'normal']
+      tags: [prometheus]
+
+- name: vmagent of the production back hosts — global scrape interval
+  hosts: back1-prod:back2-prod
+  remote_user: "{{ remote_username }}"
+  serial: 1
+  roles:
+    - role: vmagent-scrape-update
+      vmagent_scrape_mode: "{{ loadtest_scrape_mode }}"
+      vmagent_fast_scrape_interval: "{{ loadtest_scrape_interval_override | default('10s') }}"
+      tags: [vmagent]
+
+# Preuve côté Prometheus : le nombre d'échantillons `up` sur la dernière minute vaut ≥ 5 quand l'intervalle est ≤ 12 s.
+# Seulement en `fast` : il faut ~1 minute de données, d'où les relances.
+- name: Prove it from Prometheus itself
+  hosts: prometheus1
+  remote_user: "{{ remote_username }}"
+  gather_facts: false
+  vars:
+    _checks:
+      - { name: "host exporters of the test machines", query: 'min(count_over_time(up{job="exporter",instance=~"back1-prod|back2-prod|proxy1|proxy2|brk1"}[1m]))' }
+      - { name: "papangmetrics-api", query: 'min(count_over_time(up{job="papangmetrics-api"}[1m]))' }
+      - { name: "papanglabs_api (vmagent)", query: 'min(count_over_time(up{job="papanglabs_api",instance=~".*-prod-.*"}[1m]))' }
+  tasks:
+    - name: Fast — wait until each job has at least 5 `up` samples in the last minute
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ prometheus_port }}/api/v1/query?query={{ item.query | urlencode }}"
+        user: "{{ prometheus_user }}"
+        password: "{{ prometheus_pass }}"
+        force_basic_auth: true
+        return_content: true
+        status_code: [200]
+      loop: "{{ _checks }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: _prom_count
+      until: >-
+        (_prom_count.json.data.result | length) > 0 and
+        ((_prom_count.json.data.result[0].value[1] | float) >= 5)
+      retries: 18
+      delay: 10
+      when: loadtest_scrape_mode == 'fast'
+      tags: [verify]
