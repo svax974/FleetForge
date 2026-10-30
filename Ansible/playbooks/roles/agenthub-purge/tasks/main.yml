@@ -197,6 +197,20 @@
   become: true
   when: agenthub_hosts_allow.stat.exists
 
+# La règle ufw que setup-user-runners.sh ajoute pour le même réseau (2026-10-30), reconnue à son
+# commentaire : `ufw allow proto tcp from <réseau> to any port <port sshd> comment '…'`.
+- name: Remove the hub network's ufw rule (setup-user-runners.sh)
+  ansible.builtin.shell: |
+    set -uo pipefail
+    command -v ufw >/dev/null 2>&1 || exit 0
+    ufw show added 2>/dev/null | awk '/setup-user-runners\.sh/ && $2 == "allow" { print $6, $10 }' \
+      | while read -r net port; do ufw delete allow proto tcp from "$net" to any port "$port" >/dev/null && echo removed; done
+  args:
+    executable: /bin/bash
+  become: true
+  register: agenthub_ufw_purge
+  changed_when: "'removed' in agenthub_ufw_purge.stdout"
+
 # ── DNS : retirer le CNAME public (sauf `cloudflare_front: true`) ────
 - name: Remove the AgentHub CNAME
   community.general.cloudflare_dns:
