@@ -1,5 +1,5 @@
 ---
-# Authenticated Origin Pulls par zone, avec une autorité propre au parc.
+# Authenticated Origin Pulls par nom d'hôte, avec une autorité propre au parc.
 #
 #   ./play.sh web3c deploy-cloudflare-origin-pull.yml
 #

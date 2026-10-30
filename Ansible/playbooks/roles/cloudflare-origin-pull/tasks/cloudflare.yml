@@ -142,27 +142,29 @@
   delegate_to: localhost
   become: false
 
-- name: List the client certificates already uploaded to the zone
+# Authenticated Origin Pulls PER HOSTNAME (only the -back names of the cloudflare_front entries): the certificate lives in
+# the per-hostname store (`origin_tls_client_auth/hostnames/certificates`), NOT the zone-level one (`origin_tls_client_auth`),
+# whose certificates the hostname binding below does not know (fixed 2026-10-30). Every call accepts the error statuses so
+# that Cloudflare's own `errors` (code + message, never the token) are shown: the uri module's error is hidden by no_log.
+- name: List the client certificates already uploaded for hostnames
   ansible.builtin.uri:
-    url: "{{ cfopull_api }}/zones/{{ cfopull_zone_id }}/origin_tls_client_auth"
+    url: "{{ cfopull_api }}/zones/{{ cfopull_zone_id }}/origin_tls_client_auth/hostnames/certificates"
     headers:
       Authorization: "Bearer {{ cfopull_token }}"
-    status_code: [200, 401, 403]
+    status_code: [200, 400, 401, 403, 404]
   register: cfopull_uploaded
   no_log: true
   changed_when: false
   delegate_to: localhost
   become: false
 
-# Le listage est le premier appel qui exige la permission SSL (la recherche de zone se contente de Zone Read) : son
-# refus est expliqué ici, l'erreur du module uri étant masquée par no_log (le jeton est dans les en-têtes).
-- name: Fail clearly when the token may not manage the zone's certificates
+- name: Fail clearly when Cloudflare refuses the listing
   ansible.builtin.assert:
     that: cfopull_uploaded.status == 200
     fail_msg: >-
-      Cloudflare refuse (HTTP {{ cfopull_uploaded.status }}) : le jeton cloudflare_token n'a pas la permission
-      « Zone → SSL and Certificates → Edit » sur {{ cfopull_zone }}. L'ajouter (dashboard Cloudflare → My Profile →
-      API Tokens → ce jeton → Edit → Permissions ; la valeur du jeton ne change pas), puis relancer le playbook.
+      Cloudflare refuse le listage des certificats par nom d'hôte (HTTP {{ cfopull_uploaded.status }}) :
+      {{ (cfopull_uploaded.json | default({})).errors | default([]) | to_json }}.
+      Permission attendue sur le jeton cloudflare_token : « Zone → SSL and Certificates → Edit » sur {{ cfopull_zone }}.
       Rien n'a encore été changé chez Cloudflare ni sur les proxies (le vhost ne se pose qu'après cette étape).
   delegate_to: localhost
   become: false
@@ -179,16 +181,16 @@
 - name: Keep the identifier of the matching uploaded certificate
   ansible.builtin.set_fact:
     cfopull_cert_id: >-
-      {{ cfopull_uploaded.json.result
+      {{ cfopull_uploaded.json.result | default([], true)
          | selectattr('certificate', 'defined')
          | selectattr('certificate', 'search', cfopull_pem_marker | regex_escape)
          | map(attribute='id') | list | first | default('') }}
   delegate_to: localhost
   become: false
 
-- name: Upload the client certificate
+- name: Upload the client certificate for hostnames
   ansible.builtin.uri:
-    url: "{{ cfopull_api }}/zones/{{ cfopull_zone_id }}/origin_tls_client_auth"
+    url: "{{ cfopull_api }}/zones/{{ cfopull_zone_id }}/origin_tls_client_auth/hostnames/certificates"
     method: POST
     headers:
       Authorization: "Bearer {{ cfopull_token }}"
@@ -196,10 +198,22 @@
     body:
       certificate: "{{ cfopull_client_cert.content | b64decode }}"
       private_key: "{{ lookup('ansible.builtin.file', cfopull_dir ~ '/client.key') }}"
-    status_code: [200]
+      bundle_method: ubiquitous
+    status_code: [200, 201, 400, 401, 403, 404, 409]
   register: cfopull_upload
   no_log: true
-  changed_when: true
+  changed_when: cfopull_upload.status in [200, 201]
+  delegate_to: localhost
+  become: false
+  when: cfopull_cert_id | length == 0
+
+- name: Fail clearly when Cloudflare refuses the upload
+  ansible.builtin.assert:
+    that: cfopull_upload.status in [200, 201]
+    fail_msg: >-
+      Cloudflare refuse le certificat (HTTP {{ cfopull_upload.status }}) :
+      {{ (cfopull_upload.json | default({})).errors | default([]) | to_json }}.
+      Rien n'est rattaché aux noms d'hôte ni posé sur les proxies.
   delegate_to: localhost
   become: false
   when: cfopull_cert_id | length == 0
@@ -234,9 +248,53 @@
     body_format: json
     body:
       config: "{{ cfopull_bindings }}"
-    status_code: [200]
+    status_code: [200, 400, 401, 403, 404]
+  register: cfopull_binding
   no_log: true
-  changed_when: true
+  changed_when: cfopull_binding.status == 200
+  delegate_to: localhost
+  become: false
+
+- name: Fail clearly when Cloudflare refuses the hostname binding
+  ansible.builtin.assert:
+    that: cfopull_binding.status == 200
+    fail_msg: >-
+      Cloudflare refuse le rattachement de {{ cfopull_hostnames | join(', ') }} (HTTP {{ cfopull_binding.status }}) :
+      {{ (cfopull_binding.json | default({})).errors | default([]) | to_json }}.
+      Le vhost des proxies n'est pas encore posé : la prod est inchangée.
+  delegate_to: localhost
+  become: false
+
+# Cloudflare déploie l'association en quelques minutes (initializing → pending_deployment → active). Le vhost qui exige le
+# certificat ne doit être posé qu'ensuite, sinon les requêtes via Cloudflare échouent le temps du déploiement.
+- name: Wait until Cloudflare presents the certificate on every hostname
+  ansible.builtin.uri:
+    url: "{{ cfopull_api }}/zones/{{ cfopull_zone_id }}/origin_tls_client_auth/hostnames/{{ item }}"
+    headers:
+      Authorization: "Bearer {{ cfopull_token }}"
+    status_code: [200, 400, 401, 403, 404]
+  register: cfopull_hostname_status
+  until: ((cfopull_hostname_status.json | default({})).result | default({}, true)).status | default('') == 'active'
+  retries: 36
+  delay: 10
+  loop: "{{ cfopull_hostnames }}"
+  no_log: true
+  changed_when: false
+  failed_when: false
+  delegate_to: localhost
+  become: false
+
+- name: Fail clearly when a hostname is not active
+  ansible.builtin.assert:
+    that: ((item.json | default({})).result | default({}, true)).status | default('') == 'active'
+    fail_msg: >-
+      {{ item.item }} n'est pas actif chez Cloudflare après 6 minutes (HTTP {{ item.status }},
+      statut {{ ((item.json | default({})).result | default({}, true)).status | default('?') }},
+      certificat {{ ((item.json | default({})).result | default({}, true)).cert_status | default('?') }}) :
+      {{ (item.json | default({})).errors | default([]) | to_json }}. Rejouer plus tard : le vhost n'est pas encore posé.
+  loop: "{{ cfopull_hostname_status.results }}"
+  loop_control:
+    label: "{{ item.item }}"
   delegate_to: localhost
   become: false
 
