@@ -120,6 +120,30 @@
   register: agenthub_user_runners_purge
   changed_when: "'removed' in agenthub_user_runners_purge.stdout"
 
+# Le filtre de la boucle locale des runners d'utilisateurs (setup-user-runners.sh, 2026-10-30) :
+# son service de rafraîchissement, puis sa table nftables (rien d'autre du pare-feu n'est touché).
+- name: Remove the user runners' loopback filter (service and nftables table)
+  ansible.builtin.shell: |
+    set -uo pipefail
+    unit=/etc/systemd/system/agenthub-user-runners-firewall.service
+    changed=0
+    if [ -e "$unit" ]; then
+      systemctl disable --now --quiet agenthub-user-runners-firewall.service || true
+      rm -f "$unit"
+      systemctl daemon-reload
+      changed=1
+    fi
+    if command -v nft >/dev/null 2>&1 && nft list table inet agenthub_user_runners >/dev/null 2>&1; then
+      nft delete table inet agenthub_user_runners
+      changed=1
+    fi
+    [ "$changed" -eq 0 ] || echo removed
+  args:
+    executable: /bin/bash
+  become: true
+  register: agenthub_user_runners_firewall_purge
+  changed_when: "'removed' in agenthub_user_runners_firewall_purge.stdout"
+
 - name: Remove the hub's provisioning account (only the one setup-user-runners.sh created)
   ansible.builtin.shell: |
     set -euo pipefail
@@ -144,6 +168,7 @@
     - /usr/local/bin/agenthub-user-runner-ssh
     - /etc/sudoers.d/agenthub-user-runner
     - /etc/ssh/sshd_config.d/90-agenthub-user-runners.conf
+    - /etc/ssh/sshd_config.d/10-agenthub-user-runners-deny.conf
   become: true
   register: agenthub_user_runner_files
 

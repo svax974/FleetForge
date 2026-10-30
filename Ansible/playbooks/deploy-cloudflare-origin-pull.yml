@@ -25,7 +25,7 @@
 #
 # À poser À LA MAIN dans Cloudflare (Security → WAF → Rate limiting rules, hors
 # Ansible : le plan gratuit n'en offre qu'une, sur 10 s), en plus du limiteur
-# applicatif (`common_throttleEnabled`) :
+# applicatif (le limiteur de `common`, toujours actif) :
 #   (ends_with(http.host, "-back.<domaine>") and starts_with(http.request.uri.path, "/api/v1/users/"))
 #   → 10 requêtes / 10 s par IP, action Block (ou Managed Challenge) 10 s à 1 min.
 # Couvre connect, auth, register, email-code, logout, refresh d'un coup, pour
