@@ -26,10 +26,18 @@
 # À poser À LA MAIN dans Cloudflare (Security → WAF → Rate limiting rules, hors
 # Ansible : le plan gratuit n'en offre qu'une, sur 10 s), en plus du limiteur
 # applicatif (le limiteur de `common`, toujours actif) :
-#   (ends_with(http.host, "-back.<domaine>") and starts_with(http.request.uri.path, "/api/v1/users/"))
+#   (ends_with(http.host, "-back.<domaine>") and (
+#     starts_with(http.request.uri.path, "/api/v1/users/connect") or
+#     starts_with(http.request.uri.path, "/api/v1/users/auth") or
+#     starts_with(http.request.uri.path, "/api/v1/users/register") or
+#     starts_with(http.request.uri.path, "/api/v1/users/refresh") or
+#     starts_with(http.request.uri.path, "/api/v1/users/email/") or
+#     starts_with(http.request.uri.path, "/api/v1/users/me/totp/")))
 #   → 10 requêtes / 10 s par IP, action Block (ou Managed Challenge) 10 s à 1 min.
-# Couvre connect, auth, register, email-code, logout, refresh d'un coup, pour
-# toutes les API `-back` du parc.
+# Les routes d'authentification seulement (posée ainsi le 2026-10-30) : tout
+# `/api/v1/users/` bloquait aussi me, settings, wallets et les pages d'admin dès
+# 10 appels, et le compteur (par IP, plan gratuit) est commun à toutes les API
+# `-back` du parc. Le reste relève du limiteur de `common` (300/min/route).
 #
 # Jeton : `cloudflare_token` avec « Zone → SSL and Certificates → Edit » (voir
 # roles/cloudflare-origin-pull/defaults). Renouvellement : supprimer
