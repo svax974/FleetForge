@@ -1,0 +1,38 @@
+---
+# Zone du compte Cloudflare du parc (`domain_name`) et jeton : le même
+# `cloudflare_token` que cloudflare-dns-update / cloudflare-pages-setup, mais il
+# lui faut en plus la permission « Zone → SSL and Certificates → Edit » (les
+# origin_tls_client_auth ne sont pas couverts par « Edit zone DNS »).
+cfopull_zone: "{{ domain_name }}"
+cfopull_token: "{{ cloudflare_token | default('') }}"
+
+# Racine de l'API Cloudflare (surchargée seulement pour tester contre un serveur factice).
+cfopull_api: "https://api.cloudflare.com/client/v4"
+
+# Noms de domaine sur lesquels Cloudflare présente son certificat client à
+# l'origine : le nom d'API `<hôte>-back.<domaine>` de CHAQUE entrée
+# `cloudflare_front: true` (même dérivation que `cfpages_api_domain`,
+# cloudflare-pages-setup), seuls noms dont le vhost inclut `_cloudflare_front.inc`
+# et dont `_access.inc` exige le certificat en mode public. Une entrée sans
+# l'attribut n'est jamais listée : son vhost ne vérifie rien.
+cfopull_hostnames: >-
+  {{ groups['all'] | map('extract', hostvars)
+     | selectattr('cloudflare_front', 'defined') | selectattr('cloudflare_front')
+     | map(attribute='inventory_hostname') | map('lower') | map('replace', '_', '-')
+     | map('regex_replace', '$', '-back.' ~ domain_name) | list }}
+
+# Autorité et certificat client propres à CE parc, générés une fois sur le poste
+# de contrôle. `keys/*` est gitignoré : la clé privée de l'autorité n'est jamais
+# versionnée (convention : keys/README.md). Le certificat client (+ sa clé) est
+# ce que Cloudflare présente aux origines ; l'autorité, elle, est ce que nginx
+# fait confiance (`ssl_client_certificate`) — un compte Cloudflare tiers ne
+# peut donc pas se faire passer pour la zone, contrairement au certificat
+# d'origine PARTAGÉ par tous les clients Cloudflare.
+cfopull_dir: "{{ playbook_dir }}/../keys/cloudflare-origin-pull"
+cfopull_valid_days: 3650
+cfopull_subject_ca: "/CN={{ domain_name }} Cloudflare origin pull CA"
+cfopull_subject_client: "/CN={{ domain_name }} Cloudflare origin pull client"
+
+# Où nginx lit l'autorité sur les proxies (référencée par les vhosts, à chemin
+# fixe : ne pas changer sans modifier `ssl_client_certificate` dans les gabarits).
+cfopull_ca_dest: /etc/nginx/cloudflare-origin-pull-ca.pem

@@ -15,10 +15,15 @@
 #   2. agenthub-install  : NE touche PAS au DNS d'agenthub (<domaine>) (géré chez
 #      Cloudflare, `cloudflare_front: true` sur l'entrée) ; cert déjà
 #      couvert par le wildcard *.<domaine>, rien à émettre
-#   3. vhost sur les proxies : sites-enabled/agenthub.conf (WebSocket,
+#   3. (`cloudflare_front: true`) Authenticated Origin Pulls côté Cloudflare
+#      (cloudflare-origin-pull : autorité du parc, certificat client envoyé et
+#      activé sur agenthub-back.<domaine>) — AVANT le vhost, qui l'exige
+#   3b. vhost sur les proxies : sites-enabled/agenthub.conf (WebSocket,
 #      timeout 1h, buffering off sur /api/v1/agenthub/ws/). Avec
 #      `cloudflare_front: true` il ne sert que l'API (agenthub-back.<domaine>,
-#      vers back_port) : le front est sur Cloudflare Pages, sans location ici
+#      vers back_port), publique derrière le certificat client de Cloudflare
+#      (hooks/ seul reste privé) : le front est sur Cloudflare Pages, sans location ici.
+#      L'autorité est déposée sur chaque proxy par deploy-one-site avant le gabarit
 #   4. agenthub-security : filtre les ports 4700/4701 dans DOCKER-USER
 #      (proxies + whitelist + VPN), règles de host_vars/agenthub.yml
 #   5. silence Alertmanager sur service="agenthub" (alertmanager-update)
@@ -35,7 +40,8 @@
 #   8. silence raccourci à 20 min (retombée des alertes de la coupure)
 #
 # Tags :
-#   --tags proxy-conf   rejoue seulement le vhost (reload, pas les autres sites)
+#   --tags proxy-conf   rejoue seulement le vhost (reload, pas les autres sites), avec
+#                       l'activation Cloudflare des Authenticated Origin Pulls qui le précède
 #   --tags runner        rejoue seulement l'activation du runner
 #   --tags flutter       rejoue seulement les prérequis Flutter du runner (SDK + chaîne Linux desktop, rôle agenthub-install)
 #   --tags monitoring    réarme seulement la sonde
@@ -67,6 +73,22 @@
   remote_user: "{{ remote_username }}"
   roles:
     - agenthub-install
+
+# Le vhost exige, en mode public, le certificat client de NOTRE zone Cloudflare :
+# il doit être activé sur le nom d'API AVANT le vhost, sinon toute l'API publique
+# répond 403. Jeton `cloudflare_token` avec « SSL and Certificates : Edit ».
+- name: Authenticated Origin Pulls côté Cloudflare
+  hosts: agenthub
+  gather_facts: false
+  become: false
+  tags: [proxy-conf]
+  tasks:
+    - name: Create the parc certificate and enable it on the API name
+      ansible.builtin.include_role:
+        name: cloudflare-origin-pull
+      vars:
+        cfopull_part: cloudflare
+      when: cloudflare_front | default(false) | bool
 
 # Pousse SEULEMENT sites-enabled/agenthub.conf sur chaque proxy. Ni restart,
 # ni resynchronisation des autres vhosts — reload, uniquement si ce fichier a

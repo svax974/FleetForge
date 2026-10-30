@@ -90,6 +90,15 @@
     - "{{ proxy_update_dir }}/auth/*"
   no_log: true
 
+# Autorité des Authenticated Origin Pulls, avant les vhosts : `_cloudflare_front.inc`
+# la référence dès qu'une entrée porte `cloudflare_front: true` (`nginx -t` refuse
+# un `ssl_client_certificate` absent). Aucune entrée : rien n'est déposé.
+- name: Install the Cloudflare origin-pull CA
+  ansible.builtin.include_role:
+    name: cloudflare-origin-pull
+    tasks_from: nginx
+  when: groups['all'] | map('extract', hostvars) | selectattr('cloudflare_front', 'defined') | selectattr('cloudflare_front') | list | length > 0
+
 # Journaux dédiés (et leur rotation 7 jours) des vhosts web3c-sync : le
 # répertoire DOIT exister avant la copie des vhosts, sans quoi `nginx` refuse de
 # démarrer (open() failed sur access_log/error_log). Seulement pour un parc qui

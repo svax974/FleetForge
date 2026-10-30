@@ -1,0 +1,65 @@
+---
+# Authenticated Origin Pulls par zone, avec une autorité propre au parc.
+#
+#   ./play.sh web3c deploy-cloudflare-origin-pull.yml
+#
+# Pour TOUTE entrée `cloudflare_front: true` (front sur Cloudflare Pages, API sous
+# `<hôte>-back.<domaine>`) : génère l'autorité et le certificat client du parc
+# (keys/cloudflare-origin-pull/, une fois), les envoie à Cloudflare, les active
+# sur les noms d'API (`cfopull_hostnames`, dérivés de l'inventaire) et dépose
+# l'autorité sur chaque proxy. Une entrée sans l'attribut n'est pas concernée :
+# son vhost ne vérifie aucun certificat client.
+#
+# Côté vhost, rien à écrire : `_cloudflare_front.inc` pose `ssl_verify_client
+# optional`, `_access.inc` exige le certificat dans les locations en mode public.
+# Les `deploy-<app>.yml` concernés (modèle : deploy-agenthub.yml) jouent eux-mêmes
+# le côté Cloudflare avant leur vhost, et proxy-update dépose l'autorité avant
+# tout gabarit : ce playbook sert au premier passage, au renouvellement et à
+# l'ajout d'une nouvelle entrée `cloudflare_front` sans redéployer l'application.
+#
+# Vérification après coup :
+#   curl -sk --resolve agenthub-back.<domaine>:443:<IP proxy> https://agenthub-back.<domaine>/api/v1/health
+#   → 403 (accès direct au proxy, sans le certificat de Cloudflare) ;
+#   curl -s https://agenthub-back.<domaine>/api/v1/health
+#   → 200 (via Cloudflare).
+#
+# À poser À LA MAIN dans Cloudflare (Security → WAF → Rate limiting rules, hors
+# Ansible : le plan gratuit n'en offre qu'une, sur 10 s), en plus du limiteur
+# applicatif (`common_throttleEnabled`) :
+#   (ends_with(http.host, "-back.<domaine>") and starts_with(http.request.uri.path, "/api/v1/users/"))
+#   → 10 requêtes / 10 s par IP, action Block (ou Managed Challenge) 10 s à 1 min.
+# Couvre connect, auth, register, email-code, logout, refresh d'un coup, pour
+# toutes les API `-back` du parc.
+#
+# Jeton : `cloudflare_token` avec « Zone → SSL and Certificates → Edit » (voir
+# roles/cloudflare-origin-pull/defaults). Renouvellement : supprimer
+# keys/cloudflare-origin-pull/ puis rejouer CE playbook en entier, sans attendre
+# (Cloudflare présente aussitôt le nouveau certificat ; les proxies doivent
+# avoir la nouvelle autorité dans la foulée).
+
+# Joué sur un hôte de l'inventaire (une seule fois) et non sur `localhost` :
+# `domain_name` et `cloudflare_token` viennent des group_vars du parc, que
+# l'hôte implicite localhost ne reçoit pas. Toutes les tâches s'exécutent
+# elles-mêmes sur le poste de contrôle (delegate_to), aucune connexion SSH.
+- name: Authenticated Origin Pulls — côté Cloudflare
+  hosts: proxies
+  run_once: true
+  gather_facts: false
+  become: false
+  tasks:
+    - name: Create the certificate and enable it on the hostnames
+      ansible.builtin.include_role:
+        name: cloudflare-origin-pull
+      vars:
+        cfopull_part: cloudflare
+
+- name: Authenticated Origin Pulls — côté proxies
+  hosts: proxies
+  remote_user: "{{ remote_username }}"
+  become: true
+  tasks:
+    - name: Install the CA nginx verifies Cloudflare against
+      ansible.builtin.include_role:
+        name: cloudflare-origin-pull
+      vars:
+        cfopull_part: nginx

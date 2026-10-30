@@ -1,0 +1,28 @@
+---
+# Dépose l'AUTORITÉ (jamais la clé) que nginx utilise pour vérifier le
+# certificat client présenté par Cloudflare (`ssl_client_certificate`, posé par
+# `_cloudflare_front.inc` pour toute entrée `cloudflare_front: true`). Inclus par
+# proxy-update (main et deploy-one-site) AVANT tout gabarit de vhost : `nginx -t`
+# refuse un fichier absent, et deploy-one-site laisserait sur le disque un vhost
+# qui casserait le prochain redémarrage de nginx. Pas de reload ici : le vhost
+# déployé ensuite le déclenche après `nginx -t`.
+- name: Fail when the origin-pull CA has not been generated
+  ansible.builtin.assert:
+    that: (cfopull_dir ~ '/ca.pem') is file
+    fail_msg: >-
+      {{ cfopull_dir }}/ca.pem est absent sur ce poste alors qu'une entrée de
+      l'inventaire porte `cloudflare_front: true` : son vhost exige le certificat
+      client de Cloudflare. Jouer d'abord ./play.sh <parc> deploy-cloudflare-origin-pull.yml
+      (génère l'autorité, l'envoie à Cloudflare), ou reprendre keys/cloudflare-origin-pull/
+      depuis le poste qui l'a générée.
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Install the Cloudflare origin-pull CA on the proxy
+  ansible.builtin.copy:
+    src: "{{ cfopull_dir }}/ca.pem"
+    dest: "{{ cfopull_ca_dest }}"
+    owner: root
+    group: root
+    mode: "0644"

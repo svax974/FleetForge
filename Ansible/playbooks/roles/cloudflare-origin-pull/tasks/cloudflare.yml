@@ -1,0 +1,237 @@
+---
+- name: Fail early without an API token
+  ansible.builtin.assert:
+    that:
+      - cfopull_token | length > 0
+    fail_msg: >-
+      `cloudflare_token` est vide. Le jeton du parc doit porter « Zone → SSL and
+      Certificates → Edit » en plus de « Edit zone DNS », limité à la zone
+      {{ cfopull_zone }} (My Profile → API Tokens).
+    success_msg: "Jeton présent, zone {{ cfopull_zone }}."
+  delegate_to: localhost
+  become: false
+
+# ── Autorité + certificat client, générés UNE fois sur le poste de contrôle ──
+# `creates:` rend chaque étape idempotente : relancer le playbook ne régénère
+# rien. Pour renouveler, supprimer le répertoire puis rejouer — l'ancien
+# certificat reste actif chez Cloudflare jusqu'à ce que le nouveau le remplace
+# (tâche d'envoi plus bas), et nginx ne reçoit que la nouvelle autorité : faire
+# suivre immédiatement le déploiement du côté nginx.
+- name: Create the key directory
+  ansible.builtin.file:
+    path: "{{ cfopull_dir }}"
+    state: directory
+    mode: "0700"
+  delegate_to: localhost
+  become: false
+
+- name: Generate the CA
+  ansible.builtin.command:
+    argv:
+      - openssl
+      - req
+      - -x509
+      - -newkey
+      - rsa:4096
+      - -nodes
+      - -sha256
+      - -days
+      - "{{ cfopull_valid_days }}"
+      - -subj
+      - "{{ cfopull_subject_ca }}"
+      - -keyout
+      - "{{ cfopull_dir }}/ca.key"
+      - -out
+      - "{{ cfopull_dir }}/ca.pem"
+    creates: "{{ cfopull_dir }}/ca.pem"
+  delegate_to: localhost
+  become: false
+
+- name: Generate the client key and signing request
+  ansible.builtin.command:
+    argv:
+      - openssl
+      - req
+      - -new
+      - -newkey
+      - rsa:2048
+      - -nodes
+      - -sha256
+      - -subj
+      - "{{ cfopull_subject_client }}"
+      - -keyout
+      - "{{ cfopull_dir }}/client.key"
+      - -out
+      - "{{ cfopull_dir }}/client.csr"
+    creates: "{{ cfopull_dir }}/client.csr"
+  delegate_to: localhost
+  become: false
+
+- name: Write the client certificate extensions
+  ansible.builtin.copy:
+    dest: "{{ cfopull_dir }}/client.ext"
+    mode: "0600"
+    content: |
+      basicConstraints=CA:FALSE
+      keyUsage=digitalSignature
+      extendedKeyUsage=clientAuth
+  delegate_to: localhost
+  become: false
+
+- name: Sign the client certificate with the CA
+  ansible.builtin.command:
+    argv:
+      - openssl
+      - x509
+      - -req
+      - -sha256
+      - -days
+      - "{{ cfopull_valid_days }}"
+      - -in
+      - "{{ cfopull_dir }}/client.csr"
+      - -CA
+      - "{{ cfopull_dir }}/ca.pem"
+      - -CAkey
+      - "{{ cfopull_dir }}/ca.key"
+      - -CAcreateserial
+      - -extfile
+      - "{{ cfopull_dir }}/client.ext"
+      - -out
+      - "{{ cfopull_dir }}/client.pem"
+    creates: "{{ cfopull_dir }}/client.pem"
+  delegate_to: localhost
+  become: false
+
+- name: Restrict the private keys
+  ansible.builtin.file:
+    path: "{{ cfopull_dir }}/{{ item }}"
+    mode: "0600"
+  loop: [ca.key, client.key]
+  delegate_to: localhost
+  become: false
+
+# ── Cloudflare ─────────────────────────────────────────────────────────────
+- name: Look up the zone
+  ansible.builtin.uri:
+    url: "{{ cfopull_api }}/zones?name={{ cfopull_zone }}"
+    headers:
+      Authorization: "Bearer {{ cfopull_token }}"
+  register: cfopull_zone_lookup
+  no_log: true
+  changed_when: false
+  delegate_to: localhost
+  become: false
+
+- name: Fail when the zone is not found
+  ansible.builtin.assert:
+    that: cfopull_zone_lookup.json.result | length > 0
+    fail_msg: "Zone {{ cfopull_zone }} introuvable avec ce jeton."
+  delegate_to: localhost
+  become: false
+
+- name: Set the zone identifier
+  ansible.builtin.set_fact:
+    cfopull_zone_id: "{{ cfopull_zone_lookup.json.result[0].id }}"
+  delegate_to: localhost
+  become: false
+
+- name: Read the client certificate
+  ansible.builtin.slurp:
+    src: "{{ cfopull_dir }}/client.pem"
+  register: cfopull_client_cert
+  delegate_to: localhost
+  become: false
+
+- name: List the client certificates already uploaded to the zone
+  ansible.builtin.uri:
+    url: "{{ cfopull_api }}/zones/{{ cfopull_zone_id }}/origin_tls_client_auth"
+    headers:
+      Authorization: "Bearer {{ cfopull_token }}"
+  register: cfopull_uploaded
+  no_log: true
+  changed_when: false
+  delegate_to: localhost
+  become: false
+
+# Comparaison sur la première ligne de base64 du PEM (la ligne 0 est l'en-tête
+# BEGIN, identique pour tous) : Cloudflare renvoie le certificat avec ses propres
+# retours à la ligne, une égalité stricte du bloc ne tiendrait pas.
+- name: Find the certificate that matches ours
+  ansible.builtin.set_fact:
+    cfopull_pem_marker: "{{ (cfopull_client_cert.content | b64decode | trim).split('\n')[1] }}"
+  delegate_to: localhost
+  become: false
+
+- name: Keep the identifier of the matching uploaded certificate
+  ansible.builtin.set_fact:
+    cfopull_cert_id: >-
+      {{ cfopull_uploaded.json.result
+         | selectattr('certificate', 'defined')
+         | selectattr('certificate', 'search', cfopull_pem_marker | regex_escape)
+         | map(attribute='id') | list | first | default('') }}
+  delegate_to: localhost
+  become: false
+
+- name: Upload the client certificate
+  ansible.builtin.uri:
+    url: "{{ cfopull_api }}/zones/{{ cfopull_zone_id }}/origin_tls_client_auth"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ cfopull_token }}"
+    body_format: json
+    body:
+      certificate: "{{ cfopull_client_cert.content | b64decode }}"
+      private_key: "{{ lookup('ansible.builtin.file', cfopull_dir ~ '/client.key') }}"
+    status_code: [200]
+  register: cfopull_upload
+  no_log: true
+  changed_when: true
+  delegate_to: localhost
+  become: false
+  when: cfopull_cert_id | length == 0
+
+- name: Keep the identifier of the uploaded certificate
+  ansible.builtin.set_fact:
+    cfopull_cert_id: "{{ cfopull_upload.json.result.id }}"
+  delegate_to: localhost
+  become: false
+  when: cfopull_cert_id | length == 0
+
+# Association nom → certificat : c'est elle qui fait que Cloudflare présente le
+# certificat sur ce nom. Le PUT ne porte que les noms de `cfopull_hostnames` ;
+# les autres noms de la zone ne sont pas touchés.
+- name: Build the hostname bindings
+  ansible.builtin.set_fact:
+    cfopull_bindings: >-
+      {%- set out = [] -%}
+      {%- for h in cfopull_hostnames -%}
+      {%- set _ = out.append({'hostname': h, 'cert_id': cfopull_cert_id, 'enabled': true}) -%}
+      {%- endfor -%}
+      {{ out }}
+  delegate_to: localhost
+  become: false
+
+- name: Enable Authenticated Origin Pulls on the hostnames
+  ansible.builtin.uri:
+    url: "{{ cfopull_api }}/zones/{{ cfopull_zone_id }}/origin_tls_client_auth/hostnames"
+    method: PUT
+    headers:
+      Authorization: "Bearer {{ cfopull_token }}"
+    body_format: json
+    body:
+      config: "{{ cfopull_bindings }}"
+    status_code: [200]
+  no_log: true
+  changed_when: true
+  delegate_to: localhost
+  become: false
+
+- name: Say what is left to do
+  ansible.builtin.debug:
+    msg: >-
+      Cloudflare présente désormais le certificat client de {{ cfopull_zone }} sur
+      {{ cfopull_hostnames | join(', ') }}. Reste à déployer l'autorité sur les
+      proxies (play suivant) puis le vhost qui la vérifie. Autorité :
+      {{ cfopull_dir }}/ca.pem.
+  delegate_to: localhost
+  become: false

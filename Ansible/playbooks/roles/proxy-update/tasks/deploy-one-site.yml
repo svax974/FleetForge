@@ -38,6 +38,15 @@
   ansible.builtin.include_tasks: sync-logs.yml
   when: site is match('^sync-')
 
+# Avant le gabarit : un vhost qui inclut `_cloudflare_front.inc` référence cette
+# autorité, et un `nginx -t` en échec laisserait ici le vhost cassé SUR LE DISQUE
+# (il ferait tomber le prochain redémarrage de nginx, tous vhosts confondus).
+- name: Install the Cloudflare origin-pull CA
+  ansible.builtin.include_role:
+    name: cloudflare-origin-pull
+    tasks_from: nginx
+  when: groups['all'] | map('extract', hostvars) | selectattr('cloudflare_front', 'defined') | selectattr('cloudflare_front') | list | length > 0
+
 - name: Deploy the vhost
   ansible.builtin.template:
     src: "{{ proxy_update_dir }}/sites-enabled/{{ site }}"

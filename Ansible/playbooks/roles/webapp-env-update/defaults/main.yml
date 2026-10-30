@@ -10,6 +10,18 @@ webapp_env_front_file: "front/.env"
 # Vide, ou sans copie dans .private/apps/<id> : rien n'est resauvegardé.
 webapp_env_app_id: ""
 
+# `TRUST_PROXY` du back (Express « trust proxy ») : LISTE des adresses de confiance,
+# jamais un nombre de sauts. La chaîne varie selon l'application (client → [Cloudflare]
+# → proxy → [conteneur front] → back-lb → back) et un compte de sauts faux donne au
+# back l'adresse d'un relais pour TOUS les clients — le limiteur par IP de `common`
+# met alors tout le monde dans le même compteur. Avec la liste, req.ip est la
+# dernière adresse de X-Forwarded-For qui n'est PAS un relais connu : réseaux privés
+# (conteneurs, pont Docker, boucle locale) + adresses des proxies du parc.
+webapp_env_trust_proxy: >-
+  {{ (['loopback', 'linklocal', 'uniquelocal']
+      + (groups['proxies'] | default([]) | map('extract', hostvars, 'ansible_host') | list))
+     | unique | join(',') }}
+
 # Nom sous lequel le navigateur joint l'API quand le front est sur Cloudflare Pages
 # (`cloudflare_front: true`) : VITE_API_URL en est déduit. Vide : VITE_API_URL n'est pas touché.
 webapp_env_api_host: ""

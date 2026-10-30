@@ -12,6 +12,8 @@
 #                                  (le front va sur Cloudflare Pages, pas sur le serveur)
 #              REMOTE_SSH_PORT   = ansible_port
 #              REMOTE_USER       = remote_username
+#              TRUST_PROXY       = réseaux privés + adresses des proxies (liste, pas
+#                                  un nombre de sauts : voir defaults/main.yml)
 #   front/.env VITE_API_URL      = https://<webapp_env_api_host><chemin actuel>, avec
 #                                  `cloudflare_front: true` et `webapp_env_api_host` donné
 #                                  (le front Pages appelle l'API sur son propre nom)
@@ -49,6 +51,7 @@
       BACK_HOSTS: "{{ ansible_host }}"
       REMOTE_SSH_PORT: "{{ ansible_port | default(22) }}"
       REMOTE_USER: "{{ remote_username }}"
+      TRUST_PROXY: "{{ webapp_env_trust_proxy }}"
 
 - name: Read VITE_API_URL from the front env file
   ansible.builtin.set_fact:

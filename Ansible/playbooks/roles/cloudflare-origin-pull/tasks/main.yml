@@ -1,0 +1,28 @@
+---
+# Authenticated Origin Pulls PAR ZONE avec un certificat client PROPRE au parc.
+#
+# Pourquoi pas le certificat d'origine par défaut de Cloudflare : il est
+# commun à TOUS les clients Cloudflare — quiconque ouvre un compte gratuit et
+# pointe un domaine vers un proxy le présente aussi. Une autorité à nous, dont
+# Cloudflare détient le certificat client, ne laisse passer que NOTRE zone.
+#
+# Deux temps, deux plays dans deploy-cloudflare-origin-pull.yml :
+#   cloudflare.yml  (localhost)  autorité + certificat client, envoi à Cloudflare,
+#                                activation sur les noms de `cfopull_hostnames`
+#   nginx.yml       (proxies)    dépôt de l'autorité que nginx vérifie
+#
+# Rien ici ne FERME un vhost : `_cloudflare_front.inc` pose `ssl_verify_client
+# optional` pour toute entrée `cloudflare_front: true`, et `_access.inc` exige le
+# certificat dans les locations en mode public de ces entrées. `nginx.yml` est
+# aussi inclus par proxy-update (main, deploy-one-site) avant tout gabarit.
+# Aucune entrée `cloudflare_front: true` : aucun nom à activer, Cloudflare n'est
+# pas appelé (le jeton n'a alors pas besoin de la permission SSL).
+- name: Run the Cloudflare side
+  ansible.builtin.include_tasks: cloudflare.yml
+  when:
+    - cfopull_part | default('cloudflare') == 'cloudflare'
+    - cfopull_hostnames | length > 0
+
+- name: Run the nginx side
+  ansible.builtin.include_tasks: nginx.yml
+  when: cfopull_part | default('cloudflare') == 'nginx'
