@@ -26,6 +26,10 @@
 #      L'autorité est déposée sur chaque proxy par deploy-one-site avant le gabarit
 #   4. agenthub-security : filtre les ports 4700/4701 dans DOCKER-USER
 #      (proxies + whitelist + VPN), règles de host_vars/agenthub.yml
+#   4b. relais SMTP : le hub y est autorisé en 465/587 (mailrelay-security rejoué sur
+#      l'hôte `mailrelay`, qui n'admet que les IP de l'inventaire) — SANS ce pas, un hub
+#      déménagé n'envoie plus aucun mail (le 01/11/2026 : timeout SMTP à l'inscription,
+#      504, parce que 194.163.180.236 n'était pas autorisé sur 62.171.135.125)
 #   5. silence Alertmanager sur service="agenthub" (alertmanager-update)
 #   6. agenthub-deploy   : fixe les cibles dans les .env (webapp-env-update : BACK_HOSTS,
 #      FRONT_HOSTS absent si `cloudflare_front: true`…) et, dans ce cas, prépare le
@@ -45,6 +49,8 @@
 #   --tags runner        rejoue seulement l'activation du runner
 #   --tags flutter       rejoue seulement les prérequis Flutter du runner (SDK + chaîne Linux desktop, rôle agenthub-install)
 #   --tags monitoring    réarme seulement la sonde
+#   --tags mail-relay    rejoue seulement l'autorisation du hub sur le relais SMTP (sans --limit :
+#                        le play vise l'hôte du relais, qu'un --limit agenthub exclurait)
 #
 # Prérequis côté poste de contrôle AVANT de lancer ce playbook (voir
 # agenthub-deploy/defaults/main.yml pour le détail) : back/.env et front/.env
@@ -116,6 +122,23 @@
   become: true
   roles:
     - agenthub-security
+
+# Le relais SMTP n'admet en 465/587 que les IP des hôtes de l'inventaire (plus la
+# whitelist) : mailrelay-security les relit à chaque passage, donc le rejouer ici
+# autorise le hub à la première mise en ligne ou après un changement d'adresse.
+# Aucun `--limit` : il exclurait l'hôte du relais (le play est alors sans effet).
+- name: Authorize the AgentHub on the SMTP relay
+  hosts: all
+  remote_user: "{{ remote_username }}"
+  become: true
+  gather_facts: false
+  tags: [mail-relay]
+  pre_tasks:
+    - name: Skip hosts that do not carry the mailrelay family
+      ansible.builtin.meta: end_host
+      when: "'mailrelay' not in ansible_roles | default([])"
+  roles:
+    - mailrelay-security
 
 # ── Silence pendant le déploiement ─────────────────────────────────────────
 # `deploy-full.sh` coupe le service le temps du build : ~30 min le 21/10/2026,
