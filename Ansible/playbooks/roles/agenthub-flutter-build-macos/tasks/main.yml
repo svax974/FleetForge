@@ -1,0 +1,263 @@
+---
+# Prérequis de build Flutter (android, web, macos, ios) pour un serveur AgentHub sur macOS — voir
+# defaults/main.yml et README.md. Idempotent ; sudo (become) seulement pour Xcode et le lien JVM.
+# Rejouable seul : ./play.sh <parc> deploy-agenthub-flutter-build.yml --tags macos -K
+
+- name: Set the environment shared by the build commands
+  ansible.builtin.set_fact:
+    agenthub_macos_env:
+      JAVA_HOME: "{{ agenthub_macos_java_home }}"
+      ANDROID_HOME: "{{ agenthub_android_sdk_dir }}"
+      ANDROID_SDK_ROOT: "{{ agenthub_android_sdk_dir }}"
+      LANG: en_US.UTF-8
+      PATH: "{{ agenthub_macos_brew_prefix }}/bin:{{ agenthub_macos_brew_prefix }}/sbin:{{ agenthub_macos_flutter_dir }}/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+    agenthub_macos_android_packages: >-
+      {{ ['platform-tools']
+         + (agenthub_android_platforms | map('regex_replace', '^', 'platforms;') | list)
+         + (agenthub_android_build_tools | map('regex_replace', '^', 'build-tools;') | list)
+         + agenthub_android_extra_packages }}
+
+# ── Contrôles préalables : macOS, Homebrew ──────────────────────────────────────────────────────
+- name: Check the machine is a Mac
+  ansible.builtin.assert:
+    that: ansible_facts['system'] == 'Darwin'
+    fail_msg: "{{ inventory_hostname }} n'est pas un Mac ({{ ansible_facts['system'] }}) : ce rôle ne vise que macOS (voir agenthub-flutter-build-linux pour Linux)."
+    success_msg: "{{ inventory_hostname }} : macOS {{ ansible_facts['distribution_version'] }} ({{ ansible_facts['architecture'] }})."
+
+- name: Look for Homebrew
+  ansible.builtin.stat:
+    path: "{{ agenthub_macos_brew_bin }}"
+  register: agenthub_macos_brew
+
+- name: Fail when Homebrew is missing
+  ansible.builtin.assert:
+    that: agenthub_macos_brew.stat.exists
+    fail_msg: >-
+      Homebrew introuvable ({{ agenthub_macos_brew_bin }}) sur {{ inventory_hostname }} : l'installer à la main
+      avec le compte du runner (https://brew.sh, script interactif qui demande sudo) puis relancer ; si le
+      préfixe est ailleurs, régler agenthub_macos_brew_bin.
+    success_msg: "Homebrew présent ({{ agenthub_macos_brew_bin }})."
+
+# ── Xcode : vérifié, jamais installé par Ansible ────────────────────────────────────────────────
+- name: Look for the Xcode developer directory
+  ansible.builtin.command: /usr/bin/xcode-select -p
+  register: agenthub_macos_xcode_select
+  changed_when: false
+  failed_when: false
+
+- name: Read the Xcode version
+  ansible.builtin.command: /usr/bin/xcodebuild -version
+  register: agenthub_macos_xcodebuild
+  changed_when: false
+  failed_when: false
+
+# Xcode installé mais licence non acceptée : xcodebuild le dit (« You have not agreed to the Xcode license »).
+- name: Accept the Xcode license
+  ansible.builtin.command: /usr/bin/xcodebuild -license accept
+  become: true
+  when:
+    - agenthub_macos_xcodebuild.rc != 0
+    - (agenthub_macos_xcodebuild.stdout ~ agenthub_macos_xcodebuild.stderr) is search('(?i)licen[cs]e')
+  changed_when: true
+
+- name: Read the Xcode version again
+  ansible.builtin.command: /usr/bin/xcodebuild -version
+  register: agenthub_macos_xcodebuild_ok
+  changed_when: false
+  failed_when: false
+
+- name: Fail when Xcode is not installed
+  ansible.builtin.assert:
+    that:
+      - agenthub_macos_xcodebuild_ok.rc == 0
+      - "'Xcode' in agenthub_macos_xcodebuild_ok.stdout"
+    fail_msg: >-
+      Xcode n'est pas installé (ou pas utilisable) sur {{ inventory_hostname }} : Ansible ne peut pas
+      l'installer. Installe Xcode depuis l'App Store ou developer.apple.com/download, lance-le une fois,
+      puis `sudo xcode-select -s /Applications/Xcode.app/Contents/Developer` et relance ce playbook.
+      Les Command Line Tools seuls ne suffisent pas pour construire macOS/iOS.
+      Sortie : {{ (agenthub_macos_xcodebuild_ok.stdout ~ ' ' ~ agenthub_macos_xcodebuild_ok.stderr) | trim }}
+    success_msg: "{{ agenthub_macos_xcodebuild_ok.stdout_lines | first }} ({{ agenthub_macos_xcode_select.stdout }})."
+
+- name: Check whether Xcode first launch tasks are done
+  ansible.builtin.command: /usr/bin/xcodebuild -checkFirstLaunchStatus
+  register: agenthub_macos_first_launch
+  changed_when: false
+  failed_when: false
+
+- name: Run the Xcode first launch tasks
+  ansible.builtin.command: /usr/bin/xcodebuild -runFirstLaunch
+  become: true
+  when: agenthub_macos_first_launch.rc != 0
+  changed_when: true
+
+- name: List the iOS simulator runtimes (information only)
+  ansible.builtin.command: /usr/bin/xcrun simctl list runtimes
+  register: agenthub_macos_simctl
+  changed_when: false
+  failed_when: false
+
+- name: Show the iOS simulator runtimes
+  ansible.builtin.debug:
+    msg: "{{ agenthub_macos_simctl.stdout_lines | default([]) if (agenthub_macos_simctl.stdout | default('') is search('iOS')) else 'Aucun runtime iOS installé (Xcode > Settings > Components, ou agenthub_macos_download_ios_platform: true) : seul `flutter build ios` en a besoin.' }}"
+
+- name: Download the iOS platform when it is missing
+  ansible.builtin.command: /usr/bin/xcodebuild -downloadPlatform iOS
+  when:
+    - agenthub_macos_download_ios_platform | bool
+    - not (agenthub_macos_simctl.stdout | default('') is search('iOS'))
+  changed_when: true
+
+# ── Homebrew : JDK 17, CocoaPods, outils Android ────────────────────────────────────────────────
+- name: Install the JDK 17 and CocoaPods with Homebrew
+  community.general.homebrew:
+    name:
+      - "{{ agenthub_macos_java_formula }}"
+      - cocoapods
+    state: present
+    path: "{{ agenthub_macos_brew_prefix }}/bin"
+
+- name: Install the Android command-line tools with Homebrew
+  community.general.homebrew_cask:
+    name: android-commandlinetools
+    state: present
+    path: "{{ agenthub_macos_brew_prefix }}/bin"
+
+- name: Look for the JDK and sdkmanager
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ agenthub_macos_java_home }}/bin/java"
+    - "{{ agenthub_macos_sdkmanager }}"
+    - "{{ agenthub_macos_brew_prefix }}/bin/pod"
+  register: agenthub_macos_bins
+
+- name: Fail when a Homebrew tool is not where expected
+  ansible.builtin.assert:
+    that: agenthub_macos_bins.results | map(attribute='stat.exists') | list | min
+    fail_msg: >-
+      Introuvable : {{ agenthub_macos_bins.results | rejectattr('stat.exists') | map(attribute='item') | join(', ') }}.
+      Vérifier `brew list` et, si besoin, agenthub_macos_java_home / agenthub_macos_sdkmanager.
+    success_msg: "java, sdkmanager et pod présents."
+
+# /usr/libexec/java_home ne voit que /Library/Java/JavaVirtualMachines (formule keg-only).
+- name: Make the JDK visible to /usr/libexec/java_home
+  ansible.builtin.file:
+    src: "{{ agenthub_macos_brew_prefix }}/opt/{{ agenthub_macos_java_formula }}/libexec/openjdk.jdk"
+    dest: "/Library/Java/JavaVirtualMachines/{{ agenthub_macos_java_formula | replace('@', '-') }}.jdk"
+    state: link
+  become: true
+  when: agenthub_macos_link_system_jvm | bool
+
+# ── Flutter ─────────────────────────────────────────────────────────────────────────────────────
+- name: Look for an existing Flutter SDK
+  ansible.builtin.stat:
+    path: "{{ agenthub_macos_flutter_dir }}/bin/flutter"
+  register: agenthub_macos_flutter
+
+- name: Clone the Flutter SDK
+  ansible.builtin.git:
+    repo: https://github.com/flutter/flutter.git
+    dest: "{{ agenthub_macos_flutter_dir }}"
+    version: "{{ agenthub_macos_flutter_channel }}"
+    depth: 1
+  when: not agenthub_macos_flutter.stat.exists
+
+# ── SDK Android : licences et paquets ───────────────────────────────────────────────────────────
+- name: Create the Android SDK directory
+  ansible.builtin.file:
+    path: "{{ agenthub_android_sdk_dir }}"
+    state: directory
+    mode: "0755"
+
+# Licences : fichiers dans <sdk>/licenses ; équivalent non interactif de `flutter doctor --android-licenses`.
+# stdin = des « y », lus seulement s'il reste des licences à accepter.
+- name: Accept the Android SDK licenses
+  ansible.builtin.command: "{{ agenthub_macos_sdkmanager }} --sdk_root={{ agenthub_android_sdk_dir }} --licenses"
+  args:
+    stdin: "{{ 'y\n' * 40 }}"
+  environment: "{{ agenthub_macos_env }}"
+  register: agenthub_macos_licenses
+  changed_when: "'Review licenses' in agenthub_macos_licenses.stdout"
+
+- name: List the installed Android SDK packages
+  ansible.builtin.command: "{{ agenthub_macos_sdkmanager }} --sdk_root={{ agenthub_android_sdk_dir }} --list_installed"
+  environment: "{{ agenthub_macos_env }}"
+  register: agenthub_macos_sdk_installed
+  changed_when: false
+
+- name: Install the missing Android SDK packages
+  ansible.builtin.command:
+    argv: "{{ [agenthub_macos_sdkmanager, '--sdk_root=' ~ agenthub_android_sdk_dir] + agenthub_macos_sdk_missing }}"
+    stdin: "{{ 'y\n' * 40 }}"
+  vars:
+    agenthub_macos_sdk_missing: >-
+      {{ agenthub_macos_android_packages
+         | reject('in', agenthub_macos_sdk_installed.stdout_lines | select('search', '[|]') | map('split', '|') | map('first') | map('trim') | list)
+         | list }}
+  environment: "{{ agenthub_macos_env }}"
+  when: agenthub_macos_sdk_missing | length > 0
+  changed_when: true
+
+# Même règle que le rôle Linux : rien de modifiable par tous.
+- name: Remove the world-writable bits from the Android SDK
+  ansible.builtin.command: find {{ agenthub_android_sdk_dir | quote }} -perm -0002 ! -type l -print -exec chmod o-w {} +
+  register: agenthub_macos_ow
+  changed_when: agenthub_macos_ow.stdout | length > 0
+
+# ── Environnement des sessions de connexion ─────────────────────────────────────────────────────
+- name: Expose JAVA_HOME, ANDROID_HOME and Flutter to login shells
+  ansible.builtin.blockinfile:
+    path: "{{ agenthub_macos_profile_file }}"
+    create: true
+    mode: "0644"
+    marker: "# {mark} agenthub-flutter-build-macos"
+    block: |
+      export JAVA_HOME={{ agenthub_macos_java_home | quote }}
+      export ANDROID_HOME={{ agenthub_android_sdk_dir | quote }}
+      export ANDROID_SDK_ROOT={{ agenthub_android_sdk_dir | quote }}
+      export PATH={{ agenthub_macos_flutter_dir | quote }}/bin:{{ agenthub_macos_brew_prefix | quote }}/bin:$ANDROID_HOME/platform-tools:$PATH
+  when: agenthub_macos_profile_file | length > 0
+
+# ── Flutter : SDK Android, JDK, cache ───────────────────────────────────────────────────────────
+- name: Read the Flutter settings
+  ansible.builtin.command: "{{ agenthub_macos_flutter_dir }}/bin/flutter config --list"
+  environment: "{{ agenthub_macos_env }}"
+  register: agenthub_macos_flutter_config
+  changed_when: false
+  failed_when: false
+
+- name: Point Flutter at the Android SDK and the JDK
+  ansible.builtin.command: "{{ agenthub_macos_flutter_dir }}/bin/flutter config --no-analytics --android-sdk {{ agenthub_android_sdk_dir | quote }} --jdk-dir {{ agenthub_macos_java_home | quote }}"
+  environment: "{{ agenthub_macos_env }}"
+  when: >-
+    ('android-sdk: ' ~ agenthub_android_sdk_dir) not in agenthub_macos_flutter_config.stdout
+    or ('jdk-dir: ' ~ agenthub_macos_java_home) not in agenthub_macos_flutter_config.stdout
+  changed_when: true
+
+- name: Warm the Flutter cache (iOS, macOS, Android and web artifacts)
+  ansible.builtin.command: "{{ agenthub_macos_flutter_dir }}/bin/flutter precache --ios --macos --android --web"
+  environment: "{{ agenthub_macos_env }}"
+  register: agenthub_macos_precache
+  changed_when: "'ownloading' in (agenthub_macos_precache.stdout ~ agenthub_macos_precache.stderr)"
+
+# ── Vérification finale ─────────────────────────────────────────────────────────────────────────
+# Informatif : flutter doctor signale aussi Chrome, Android Studio, périphériques… sans conséquence pour
+# un build non interactif, et les identités de signature (trousseau) ne sont pas gérées ici.
+- name: Run flutter doctor
+  ansible.builtin.command: "{{ agenthub_macos_flutter_dir }}/bin/flutter doctor -v"
+  environment: "{{ agenthub_macos_env }}"
+  register: agenthub_macos_doctor
+  changed_when: false
+  failed_when: false
+
+- name: Show the flutter doctor report
+  ansible.builtin.debug:
+    msg: "{{ agenthub_macos_doctor.stdout_lines }}"
+
+- name: Warn when flutter doctor reports a problem on a build toolchain
+  ansible.builtin.debug:
+    msg: >-
+      ATTENTION {{ inventory_hostname }} : flutter doctor signale un problème sur Android toolchain ou Xcode
+      (voir le rapport ci-dessus). Chrome et Android Studio manquants sont sans effet.
+  when: agenthub_macos_doctor.stdout is search('\[✗\] (Android toolchain|Xcode)')

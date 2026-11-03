@@ -1,0 +1,60 @@
+---
+# Prérequis de BUILD Flutter côté serveur AgentHub tournant sur macOS (Apple silicon ou Intel).
+# Cibles construisibles depuis un Mac : android, web, macos, ios. Pas Windows (hôte Windows) ni Linux
+# (aucune compilation croisée du desktop dans Flutter).
+#
+# Le rôle s'exécute EN TANT QUE le compte qui fait tourner le runner AgentHub (remote_user du play) :
+# Homebrew refuse root et reste lié à un compte, le SDK Android et Flutter vivent dans son home. Seules
+# les étapes Xcode (licence, premier lancement, lien JVM) passent par sudo (`-K` / become_password).
+#
+# Hors périmètre, à fournir séparément : Xcode (App Store ou developer.apple.com, vérifié mais jamais
+# installé ici), certificats de signature et profils de provisionnement (trousseau + secrets du projet).
+
+# ── Homebrew ────────────────────────────────────────────────────────────────────────────────────
+# Présence exigée, jamais installée par ce rôle (le script officiel est interactif et demande sudo).
+agenthub_macos_brew_bin: "{{ '/opt/homebrew/bin/brew' if ansible_facts['architecture'] in ['arm64', 'aarch64'] else '/usr/local/bin/brew' }}"
+agenthub_macos_brew_prefix: "{{ agenthub_macos_brew_bin | dirname | dirname }}"
+
+# ── Compte et dossiers ──────────────────────────────────────────────────────────────────────────
+# Home du compte qui se connecte (= celui du runner). Le SDK Android est placé dans son home, à
+# l'emplacement qu'Android Studio utiliserait (~/Library/Android/sdk) plutôt que dans un dossier
+# partagé : un Mac de build n'a en général qu'un compte de runner, et Gradle peut alors y télécharger
+# lui-même un composant manquant (contrairement au SDK partagé en lecture seule du rôle Linux).
+agenthub_macos_home: "{{ ansible_facts['user_dir'] }}"
+agenthub_android_sdk_dir: "{{ agenthub_macos_home }}/Library/Android/sdk"
+
+# ── JDK ─────────────────────────────────────────────────────────────────────────────────────────
+# JDK 17 (celui qu'exigent Gradle/AGP des versions de Flutter actuelles), formule keg-only : JAVA_HOME
+# pointe dans le Cellar. `flutter config --jdk-dir` et ~/.zprofile l'exposent ; le lien dans
+# /Library/Java/JavaVirtualMachines (sudo) permet en plus à /usr/libexec/java_home de le trouver.
+agenthub_macos_java_formula: "openjdk@17"
+agenthub_macos_java_home: "{{ agenthub_macos_brew_prefix }}/opt/{{ agenthub_macos_java_formula }}/libexec/openjdk.jdk/Contents/Home"
+agenthub_macos_link_system_jvm: true
+
+# ── SDK Android ─────────────────────────────────────────────────────────────────────────────────
+# Outils en ligne de commande : cask Homebrew `android-commandlinetools` (installe sdkmanager dans le
+# préfixe Homebrew) ; le SDK lui-même est installé dans agenthub_android_sdk_dir via --sdk_root.
+agenthub_macos_sdkmanager: "{{ agenthub_macos_brew_prefix }}/bin/sdkmanager"
+
+# Mêmes plateformes / build-tools / extras que le rôle Linux (une seule source : ses defaults) ; une valeur
+# posée en inventaire, sous les mêmes noms, vaut pour les deux rôles.
+agenthub_flutter_build_linux_defaults: "{{ lookup('ansible.builtin.file', role_path ~ '/../agenthub-flutter-build-linux/defaults/main.yml') | from_yaml }}"
+agenthub_android_platforms: "{{ agenthub_flutter_build_linux_defaults.agenthub_android_platforms }}"
+agenthub_android_build_tools: "{{ agenthub_flutter_build_linux_defaults.agenthub_android_build_tools }}"
+agenthub_android_extra_packages: "{{ agenthub_flutter_build_linux_defaults.agenthub_android_extra_packages }}"
+
+# ── Flutter ─────────────────────────────────────────────────────────────────────────────────────
+# Cloné une fois (git, depth 1, comme agenthub-install sous Linux) ; un SDK déjà présent dans ce dossier
+# est réutilisé tel quel. Une montée de version est un choix explicite (`flutter upgrade`), jamais un
+# effet de bord d'un rejeu.
+agenthub_macos_flutter_dir: "{{ agenthub_macos_home }}/development/flutter"
+agenthub_macos_flutter_channel: stable
+
+# ── Xcode ───────────────────────────────────────────────────────────────────────────────────────
+# Télécharge la plateforme iOS (`xcodebuild -downloadPlatform iOS`, Xcode 15+, plusieurs Go) quand elle
+# manque. Désactivé par défaut : `flutter build ios` en a besoin, pas `build macos/apk/web`.
+agenthub_macos_download_ios_platform: false
+
+# ── Environnement des sessions de connexion ─────────────────────────────────────────────────────
+# Bloc géré (JAVA_HOME, ANDROID_HOME, PATH de Flutter) ajouté à ce fichier ; vide = ne rien écrire.
+agenthub_macos_profile_file: "{{ agenthub_macos_home }}/.zprofile"

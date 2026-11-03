@@ -25,6 +25,8 @@ For each server type (proxy, rpc, db, back, front, ...), there can be a few role
 - "TYPE-security" role that takes care of setting-up security measures for the server
 - "TYPE-update" role that takes care of installing/updating data/configurations that might change int time
 
+`agenthub-flutter-build-linux` / `agenthub-flutter-build-macos` (playbook `deploy-agenthub-flutter-build.yml`, tags `linux` / `macos`) complete `agenthub-install` with what a runner needs to BUILD Flutter apps : JDK 17 + Android SDK (+ licences, `flutter precache`) on a Debian/Ubuntu AgentHub server (targets android, web, linux), and Homebrew + JDK + Android SDK + CocoaPods + Flutter with an Xcode check on a Mac (targets android, web, macos, ios ; Xcode and signing certificates stay manual). Flutter cannot cross-compile desktop targets, so Windows and macOS/iOS-from-Linux are not covered. The macOS play targets the `agenthub_flutter_macos` inventory group (to be declared, see the playbook header).
+
 # Docker Repo
 docker login {registry_url} -u {username}
 

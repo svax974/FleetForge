@@ -1,0 +1,312 @@
+---
+# Prérequis de build Flutter Android/web/linux pour le runner AgentHub — voir defaults/main.yml pour le
+# périmètre et README.md. Additif et idempotent ; ne touche ni aux services ni aux fichiers d'agenthub-install.
+# Rejouable seul : ./play.sh web3c deploy-agenthub-flutter-build.yml --tags linux
+
+# ── Contrôles préalables ────────────────────────────────────────────────────────────────────────
+- name: Check the machine can host the Android build tools
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['os_family'] == 'Debian'
+      - ansible_facts['architecture'] == 'x86_64'
+    fail_msg: >-
+      {{ inventory_hostname }} : {{ ansible_facts['os_family'] }}/{{ ansible_facts['architecture'] }} non pris en charge.
+      Les build-tools Android (aapt2, adb) de Google n'existent sous Linux qu'en x86_64 : sur une
+      machine arm64, construire l'APK sur macOS (rôle agenthub-flutter-build-macos) ou en CI.
+    success_msg: "{{ inventory_hostname }} : Debian/Ubuntu x86_64."
+
+- name: Look for the Flutter SDK installed by agenthub-install
+  ansible.builtin.stat:
+    path: "{{ agenthub_flutter_dir }}/bin/flutter"
+  register: agenthub_flutter_build_sdk
+
+- name: Fail when agenthub-install has not installed Flutter yet
+  ansible.builtin.assert:
+    that: agenthub_flutter_build_sdk.stat.exists
+    fail_msg: >-
+      Flutter absent de {{ agenthub_flutter_dir }} sur {{ inventory_hostname }} : joue d'abord
+      agenthub-install (./play.sh web3c deploy-agenthub.yml --tags flutter), ce rôle s'y ajoute.
+    success_msg: "SDK Flutter présent ({{ agenthub_flutter_dir }})."
+
+# ── JDK 17 ──────────────────────────────────────────────────────────────────────────────────────
+- name: Install the JDK 17 (headless) and the unzip tool
+  ansible.builtin.apt:
+    name:
+      - "{{ agenthub_android_java_package }}"
+      - unzip
+      - curl
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  become: true
+
+- name: Look for the JDK
+  ansible.builtin.stat:
+    path: "{{ agenthub_android_java_home }}/bin/java"
+  register: agenthub_android_java
+
+- name: Fail when JAVA_HOME does not hold a JDK
+  ansible.builtin.assert:
+    that: agenthub_android_java.stat.exists
+    fail_msg: >-
+      {{ agenthub_android_java_home }}/bin/java introuvable : adapter agenthub_android_java_home à
+      l'emplacement réel du paquet {{ agenthub_android_java_package }} (ls /usr/lib/jvm).
+    success_msg: "JDK trouvé ({{ agenthub_android_java_home }})."
+
+# ── Outils en ligne de commande du SDK Android ──────────────────────────────────────────────────
+- name: Create the shared Android SDK directory
+  ansible.builtin.file:
+    path: "{{ agenthub_android_sdk_dir }}"
+    state: directory
+    owner: "{{ agenthub_flutter_user }}"
+    group: "{{ agenthub_flutter_user }}"
+    mode: "0755"
+  become: true
+
+# Un témoin par révision : une montée de version (variable) refait l'installation, un rejeu ne fait rien.
+- name: Look for the installed command-line tools
+  ansible.builtin.stat:
+    path: "{{ agenthub_android_sdk_dir }}/cmdline-tools/latest/.agenthub-{{ agenthub_android_cmdline_tools_version }}"
+  register: agenthub_android_cmdline
+
+- name: Install the command-line tools
+  when: not agenthub_android_cmdline.stat.exists
+  block:
+    - name: Read the free disk space on the SDK volume
+      ansible.builtin.shell: |
+        set -o pipefail
+        df --output=avail -BG {{ agenthub_android_sdk_dir | quote }} | tail -n 1 | tr -dc '0-9'
+      args:
+        executable: /bin/bash
+      register: agenthub_android_free
+      changed_when: false
+
+    - name: Fail when the SDK volume is too small
+      ansible.builtin.assert:
+        that: (agenthub_android_free.stdout | int) >= (agenthub_android_min_free_gb | int)
+        fail_msg: >-
+          Seulement {{ agenthub_android_free.stdout }} Go libres sous {{ agenthub_android_sdk_dir }} sur
+          {{ inventory_hostname }} : {{ agenthub_android_min_free_gb }} Go minimum (agenthub_android_min_free_gb).
+          Libérer de la place ou choisir un autre agenthub_android_sdk_dir.
+        success_msg: "{{ agenthub_android_free.stdout }} Go libres (minimum {{ agenthub_android_min_free_gb }})."
+
+    - name: Download the command-line tools (checksum verified)
+      ansible.builtin.get_url:
+        url: "{{ agenthub_android_cmdline_tools_url }}"
+        dest: "{{ agenthub_android_download_dir }}/agenthub-android-cmdline-tools-{{ agenthub_android_cmdline_tools_version }}.zip"
+        checksum: "sha256:{{ agenthub_android_cmdline_tools_sha256 }}"
+        mode: "0644"
+      become: true
+
+    - name: Start from an empty extraction directory
+      ansible.builtin.file:
+        path: "{{ agenthub_android_download_dir }}/agenthub-android-cmdline-tools"
+        state: "{{ item }}"
+        mode: "0755"
+      loop: [absent, directory]
+      become: true
+
+    - name: Extract the command-line tools
+      ansible.builtin.unarchive:
+        src: "{{ agenthub_android_download_dir }}/agenthub-android-cmdline-tools-{{ agenthub_android_cmdline_tools_version }}.zip"
+        dest: "{{ agenthub_android_download_dir }}/agenthub-android-cmdline-tools"
+        remote_src: true
+        creates: "{{ agenthub_android_sdk_dir }}/cmdline-tools/latest/.agenthub-{{ agenthub_android_cmdline_tools_version }}"
+      become: true
+
+    # sdkmanager exige cmdline-tools/latest/bin/ (il déduit la racine du SDK de son emplacement).
+    - name: Replace cmdline-tools/latest with the new revision
+      ansible.builtin.shell: |
+        set -e
+        rm -rf {{ (agenthub_android_sdk_dir ~ '/cmdline-tools/latest') | quote }}
+        mkdir -p {{ (agenthub_android_sdk_dir ~ '/cmdline-tools') | quote }}
+        mv {{ (agenthub_android_download_dir ~ '/agenthub-android-cmdline-tools/cmdline-tools') | quote }} {{ (agenthub_android_sdk_dir ~ '/cmdline-tools/latest') | quote }}
+        touch {{ (agenthub_android_sdk_dir ~ '/cmdline-tools/latest/.agenthub-' ~ agenthub_android_cmdline_tools_version) | quote }}
+      become: true
+
+    - name: Remove the download and the extraction directory
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ agenthub_android_download_dir }}/agenthub-android-cmdline-tools"
+        - "{{ agenthub_android_download_dir }}/agenthub-android-cmdline-tools-{{ agenthub_android_cmdline_tools_version }}.zip"
+      become: true
+
+- name: Fix the SDK ownership and permissions
+  ansible.builtin.import_tasks: perms.yml
+
+# ── Licences et paquets (sdkmanager, en tant que l'utilisateur du runner) ───────────────────────
+# Les licences acceptées sont des fichiers dans <sdk>/licenses : partagés par tous les comptes, une fois.
+# C'est l'équivalent non interactif de `flutter doctor --android-licenses`. stdin = des « y » : sdkmanager
+# n'en lit que s'il reste des licences à accepter.
+- name: Accept the Android SDK licenses
+  ansible.builtin.command:
+    argv:
+      - runuser
+      - -l
+      - "{{ agenthub_flutter_user }}"
+      - -c
+      - "JAVA_HOME={{ agenthub_android_java_home | quote }} {{ agenthub_android_sdk_dir | quote }}/cmdline-tools/latest/bin/sdkmanager --sdk_root={{ agenthub_android_sdk_dir | quote }} --licenses"
+    stdin: "{{ 'y\n' * 40 }}"
+  become: true
+  register: agenthub_android_licenses
+  changed_when: "'Review licenses' in agenthub_android_licenses.stdout"
+
+- name: List the installed SDK packages
+  ansible.builtin.command:
+    argv:
+      - runuser
+      - -l
+      - "{{ agenthub_flutter_user }}"
+      - -c
+      - "JAVA_HOME={{ agenthub_android_java_home | quote }} {{ agenthub_android_sdk_dir | quote }}/cmdline-tools/latest/bin/sdkmanager --sdk_root={{ agenthub_android_sdk_dir | quote }} --list_installed"
+  become: true
+  register: agenthub_android_installed
+  changed_when: false
+
+- name: Work out the missing SDK packages
+  ansible.builtin.set_fact:
+    agenthub_android_missing: >-
+      {{ (['platform-tools']
+          + (agenthub_android_platforms | map('regex_replace', '^', 'platforms;') | list)
+          + (agenthub_android_build_tools | map('regex_replace', '^', 'build-tools;') | list)
+          + agenthub_android_extra_packages)
+         | reject('in', agenthub_android_installed.stdout_lines | select('search', '[|]') | map('split', '|') | map('first') | map('trim') | list)
+         | list }}
+
+- name: Install the missing SDK packages
+  ansible.builtin.command:
+    argv:
+      - runuser
+      - -l
+      - "{{ agenthub_flutter_user }}"
+      - -c
+      - "JAVA_HOME={{ agenthub_android_java_home | quote }} {{ agenthub_android_sdk_dir | quote }}/cmdline-tools/latest/bin/sdkmanager --sdk_root={{ agenthub_android_sdk_dir | quote }} {{ agenthub_android_missing | map('quote') | join(' ') }}"
+    stdin: "{{ 'y\n' * 40 }}"
+  become: true
+  when: agenthub_android_missing | length > 0
+  register: agenthub_android_install
+  changed_when: true
+
+- name: Fix the SDK ownership and permissions again
+  ansible.builtin.import_tasks: perms.yml
+
+# ── Environnement des sessions de connexion ─────────────────────────────────────────────────────
+# agenthub-install expose flutter par un script dans /usr/local/bin, sans variable d'environnement ni
+# modification des services. Même principe ici : on n'édite pas ses fichiers et on ne redémarre rien ;
+# ce fichier ne sert qu'aux sessions de connexion (ssh, runuser -l), le runner et Gradle étant
+# renseignés par `flutter config` ci-dessous.
+- name: Expose JAVA_HOME and ANDROID_HOME to login sessions
+  ansible.builtin.template:
+    src: agenthub-android.sh.j2
+    dest: /etc/profile.d/agenthub-android.sh
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+
+# ── Cache Flutter (Android + web + linux) ───────────────────────────────────────────────────────
+- name: Warm the Flutter cache for the runner user (Android, web and Linux artifacts)
+  ansible.builtin.command:
+    argv:
+      - runuser
+      - -l
+      - "{{ agenthub_flutter_user }}"
+      - -c
+      - "{{ agenthub_flutter_dir }}/bin/flutter precache --android --web --linux"
+  become: true
+  register: agenthub_flutter_build_precache
+  changed_when: "'ownloading' in (agenthub_flutter_build_precache.stdout ~ agenthub_flutter_build_precache.stderr)"
+
+# precache écrit dans le SDK partagé : mêmes règles que agenthub-install.
+- name: Remove the world-writable bits from the shared Flutter SDK
+  ansible.builtin.command: find {{ agenthub_flutter_dir | quote }} -perm -0002 ! -type l -print -exec chmod o-w {} +
+  become: true
+  register: agenthub_flutter_build_ow
+  changed_when: agenthub_flutter_build_ow.stdout | length > 0
+
+- name: Look for the per-account Flutter copier
+  ansible.builtin.stat:
+    path: /usr/local/sbin/agenthub-user-flutter
+  register: agenthub_flutter_build_copier
+
+# Chaque compte `agr-*` a une copie à liens physiques du SDK (agenthub-user-flutter) : refaite quand le
+# cache partagé a changé, ce que vient de faire precache. Sans effet quand tout est à jour.
+- name: Refresh the Flutter copy of every user runner account
+  ansible.builtin.shell: |
+    set -euo pipefail
+    for user in $(getent passwd | awk -F: '$1 ~ /^agr-[a-z0-9]+$/ { print $1 }'); do
+      /usr/local/sbin/agenthub-user-flutter "$user"
+    done
+  args:
+    executable: /bin/bash
+  become: true
+  when: agenthub_flutter_build_copier.stat.exists
+  register: agenthub_flutter_build_copies
+  changed_when: "'made from' in agenthub_flutter_build_copies.stdout"
+
+# ── Flutter : SDK Android et JDK, par compte ────────────────────────────────────────────────────
+# `flutter config` est propre à chaque HOME : le runner et chaque compte agr-* disposant de sa copie de
+# Flutter (un compte sans copie n'a pas encore de runner, il sera traité au prochain passage).
+- name: Point Flutter at the Android SDK and the JDK for every runner account
+  ansible.builtin.shell: |
+    set -u
+    sdk={{ agenthub_android_sdk_dir | quote }}
+    jdk={{ agenthub_android_java_home | quote }}
+    for user in {{ agenthub_flutter_user | quote }} $(getent passwd | awk -F: '$1 ~ /^agr-[a-z0-9]+$/ { print $1 }'); do
+      home="$(getent passwd "$user" | cut -d: -f6)"
+      if [ "$user" != {{ agenthub_flutter_user | quote }} ] && [ ! -x "$home/.agenthub-flutter/bin/flutter" ]; then
+        echo "skipped $user: no Flutter copy yet"
+        continue
+      fi
+      current="$(runuser -l "$user" -c '/usr/local/bin/flutter config --list' 2>/dev/null || true)"
+      if printf '%s\n' "$current" | grep -qF "android-sdk: $sdk" && printf '%s\n' "$current" | grep -qF "jdk-dir: $jdk"; then
+        continue
+      fi
+      runuser -l "$user" -c "/usr/local/bin/flutter config --android-sdk $sdk --jdk-dir $jdk" >/dev/null
+      echo "configured $user"
+    done
+  args:
+    executable: /bin/bash
+  become: true
+  register: agenthub_flutter_build_config
+  changed_when: "'configured' in agenthub_flutter_build_config.stdout"
+
+# ── Vérification finale ─────────────────────────────────────────────────────────────────────────
+- name: Look for the Android and Java binaries
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ agenthub_android_sdk_dir }}/cmdline-tools/latest/bin/sdkmanager"
+    - "{{ agenthub_android_sdk_dir }}/platform-tools/adb"
+    - "{{ agenthub_android_java_home }}/bin/java"
+  register: agenthub_flutter_build_bins
+
+- name: Fail when a build binary is missing
+  ansible.builtin.assert:
+    that: agenthub_flutter_build_bins.results | map(attribute='stat.exists') | list | min
+    fail_msg: >-
+      Binaire manquant sur {{ inventory_hostname }} :
+      {{ agenthub_flutter_build_bins.results | rejectattr('stat.exists') | map(attribute='item') | join(', ') }}.
+    success_msg: "sdkmanager, adb et java présents."
+
+# Informatif : `flutter doctor` signale aussi Chrome, Android Studio… qui n'empêchent aucun build
+# non interactif. Jamais bloquant ; seule la section Android toolchain est signalée à part.
+- name: Run flutter doctor for the runner user
+  ansible.builtin.command: runuser -l {{ agenthub_flutter_user | quote }} -c '/usr/local/bin/flutter doctor -v'
+  become: true
+  register: agenthub_flutter_build_doctor
+  changed_when: false
+  failed_when: false
+
+- name: Show the flutter doctor report
+  ansible.builtin.debug:
+    msg: "{{ agenthub_flutter_build_doctor.stdout_lines }}"
+
+- name: Warn when flutter doctor reports a problem with the Android toolchain
+  ansible.builtin.debug:
+    msg: >-
+      ATTENTION {{ inventory_hostname }} : flutter doctor signale un problème sur « Android toolchain »
+      (voir le rapport ci-dessus). Les autres avertissements (Chrome, Android Studio) sont sans effet.
+  when: agenthub_flutter_build_doctor.stdout is search('\[[^\]]*\] Android toolchain') and not (agenthub_flutter_build_doctor.stdout is search('\[✓\] Android toolchain'))

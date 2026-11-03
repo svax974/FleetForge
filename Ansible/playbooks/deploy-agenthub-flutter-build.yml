@@ -1,0 +1,51 @@
+---
+# AgentHub — prérequis de BUILD des applications Flutter sur les serveurs du runner.
+# S'ajoute à deploy-agenthub.yml (rôle agenthub-install, tag `flutter`, qui installe le SDK Flutter et la
+# chaîne Linux desktop) : à jouer APRÈS lui. Ne touche ni au hub, ni au DNS, ni aux services.
+#
+#   ./play.sh web3c deploy-agenthub-flutter-build.yml --tags linux
+#   ./play.sh <parc> deploy-agenthub-flutter-build.yml --tags macos -K      # -K : sudo pour Xcode
+#
+# Flutter n'a PAS de compilation croisée du desktop : chaque système ne construit que ses cibles.
+#   Linux (agenthub-flutter-build-linux) : android, web, linux            (JDK 17 + SDK Android partagé)
+#   macOS (agenthub-flutter-build-macos) : android, web, macos, ios       (Homebrew + Xcode vérifié)
+#   Windows, et macOS/iOS depuis Linux : impossibles ici (hôte du système cible, ou CI).
+#
+# Groupes d'hôtes (surchargeables en --extra-vars) :
+#   flutter_build_linux_hosts   défaut `agenthub` : la machine Debian/Ubuntu du hub, la seule où
+#                               agenthub-install pose Flutter. Pour un autre serveur Linux, l'ajouter à
+#                               cette cible APRÈS lui avoir appliqué agenthub-install.
+#   flutter_build_macos_hosts   défaut `agenthub_flutter_macos` : groupe À DÉCLARER dans l'inventaire du
+#                               parc (aucun Mac n'y figure aujourd'hui), p. ex.
+#                                 agenthub_flutter_macos:
+#                                   hosts: { mac-builder: { ansible_host: 192.0.2.10, ansible_user: runner } }
+#                               `remote_username` = le compte qui fait tourner le runner AgentHub sur ce Mac
+#                               (Homebrew, Flutter et le SDK Android vivent dans son home).
+#                               Groupe absent : le play macOS est simplement ignoré (avertissement Ansible).
+#
+# Hors périmètre : Xcode (à installer à la main, le rôle le vérifie et le dit), certificats de signature
+# et profils de provisionnement (trousseau + secrets du projet), Windows.
+#
+# Tags :
+#   --tags linux   seulement les serveurs Linux
+#   --tags macos   seulement les Mac
+
+- name: Flutter build prerequisites on the Linux AgentHub servers
+  hosts: "{{ flutter_build_linux_hosts | default('agenthub') }}"
+  remote_user: "{{ remote_username }}"
+  tags: [linux]
+  roles:
+    - role: host-preflight
+      when: ansible_facts['system'] == 'Linux'
+    - role: agenthub-flutter-build-linux
+      when: ansible_facts['os_family'] == 'Debian'
+
+# host-preflight (ufw, jq, état /var/lib/fleetforge) suppose un serveur Linux du parc : volontairement
+# absent ici, un Mac de build n'est pas une machine du parc.
+- name: Flutter build prerequisites on the macOS AgentHub servers
+  hosts: "{{ flutter_build_macos_hosts | default('agenthub_flutter_macos') }}"
+  remote_user: "{{ remote_username }}"
+  tags: [macos]
+  roles:
+    - role: agenthub-flutter-build-macos
+      when: ansible_facts['system'] == 'Darwin'

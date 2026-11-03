@@ -1,0 +1,17 @@
+---
+# Droits du SDK Android partagé : propriétaire = utilisateur du runner, rien de modifiable par les autres.
+# Même règle que le SDK Flutter (agenthub-install/tasks/flutter.yml) : un fichier modifiable par tous le
+# serait à travers chaque compte `agr-*` qui lit ce répertoire. Rejoué après chaque étape qui écrit dedans.
+- name: Give the Android SDK to the runner user
+  ansible.builtin.command: >-
+    find {{ agenthub_android_sdk_dir | quote }} ( ! -user {{ agenthub_flutter_user | quote }} ) ! -type l
+    -print -exec chown {{ agenthub_flutter_user | quote }}:{{ agenthub_flutter_user | quote }} {} +
+  become: true
+  register: agenthub_android_chown
+  changed_when: agenthub_android_chown.stdout | length > 0
+
+- name: Remove the world-writable bits from the Android SDK
+  ansible.builtin.command: find {{ agenthub_android_sdk_dir | quote }} -perm -0002 ! -type l -print -exec chmod o-w {} +
+  become: true
+  register: agenthub_android_ow
+  changed_when: agenthub_android_ow.stdout | length > 0

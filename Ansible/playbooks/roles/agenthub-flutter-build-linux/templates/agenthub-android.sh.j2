@@ -1,0 +1,12 @@
+# {{ ansible_managed }} — agenthub-flutter-build-linux
+# Environnement de build Android pour les sessions de connexion (ssh, runuser -l, su -). Les services
+# systemd du runner ne le lisent pas, et c'est voulu (on ne redémarre aucun service) : `flutter config
+# --android-sdk/--jdk-dir`, posé par le rôle pour chaque compte, suffit à Flutter et à Gradle.
+export JAVA_HOME={{ agenthub_android_java_home }}
+export ANDROID_HOME={{ agenthub_android_sdk_dir }}
+export ANDROID_SDK_ROOT={{ agenthub_android_sdk_dir }}
+case ":$PATH:" in
+  *":$ANDROID_HOME/platform-tools:"*) ;;
+  *) PATH="$PATH:$ANDROID_HOME/platform-tools:$ANDROID_HOME/cmdline-tools/latest/bin" ;;
+esac
+export PATH

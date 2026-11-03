@@ -1,0 +1,57 @@
+---
+# Prérequis de BUILD Flutter côté serveur AgentHub Linux (Debian/Ubuntu) : JDK 17 + SDK Android.
+# Additif à agenthub-install (tasks/flutter.yml), qui installe déjà le SDK Flutter et la chaîne Linux
+# desktop : ce rôle-ci ajoute ce qu'il faut pour `flutter build apk|appbundle|web|linux`. À jouer APRÈS lui.
+#
+# Cibles construisibles depuis cette machine : android, web, linux. Pas macOS/iOS (Xcode, macOS
+# uniquement) ni Windows (hôte Windows) : Flutter n'a pas de compilation croisée pour le desktop.
+
+# ── Réutilisation d'agenthub-install (une seule source de vérité) ───────────────────────────────
+# Les defaults d'un rôle ne sont chargés que si le rôle est joué : lancé seul (--tags), ce rôle ne
+# verrait pas agenthub_flutter_dir/user. On lit donc les valeurs d'agenthub-install ; une valeur posée
+# en inventaire (group_vars/host_vars) l'emporte, comme pour ce rôle.
+agenthub_flutter_build_install_defaults: "{{ lookup('ansible.builtin.file', role_path ~ '/../agenthub-install/defaults/main.yml') | from_yaml }}"
+agenthub_flutter_dir: "{{ agenthub_flutter_build_install_defaults.agenthub_flutter_dir }}"
+agenthub_flutter_user: "{{ agenthub_flutter_build_install_defaults.agenthub_flutter_user }}"
+
+# ── JDK ─────────────────────────────────────────────────────────────────────────────────────────
+# JDK 17 headless : celui qu'exigent Gradle/AGP des versions de Flutter actuelles. Paquet apt (Debian
+# 12 / Ubuntu 22.04+). JAVA_HOME suit le schéma Debian /usr/lib/jvm/java-17-openjdk-<arch>.
+agenthub_android_java_package: openjdk-17-jdk-headless
+agenthub_android_java_home: "/usr/lib/jvm/java-17-openjdk-{{ 'arm64' if ansible_facts['architecture'] in ['aarch64', 'arm64'] else 'amd64' }}"
+
+# ── SDK Android ─────────────────────────────────────────────────────────────────────────────────
+# Répertoire PARTAGÉ (ANDROID_HOME). Propriétaire : l'utilisateur du runner (comme le SDK Flutter) ;
+# lisible et exécutable par tous, jamais modifiable par un autre compte : les runners des utilisateurs
+# (agr-*) le lisent, ils ne peuvent pas y glisser de code. Conséquence : Gradle ne peut PAS y
+# télécharger un composant manquant (plateforme, build-tools, NDK) — il échoue en le nommant ; on
+# l'ajoute ici (listes ci-dessous) et on rejoue le rôle.
+agenthub_android_sdk_dir: /opt/android-sdk
+
+# Outils en ligne de commande (sdkmanager). `<numéro>` = révision du zip commandlinetools-linux-<numéro>_latest.zip
+# (page https://developer.android.com/studio#command-line-tools-only). Une montée de version se fait en
+# changeant la révision ET le sha256 ensemble ; le zip est vérifié avant toute extraction.
+agenthub_android_cmdline_tools_version: "13114758"
+agenthub_android_cmdline_tools_url: "https://dl.google.com/android/repository/commandlinetools-linux-{{ agenthub_android_cmdline_tools_version }}_latest.zip"
+agenthub_android_cmdline_tools_sha256: "7ec965280a073311c339e571cd5de778b9975026cfcbe79f2b1cdcb1e15317ee"
+
+# Plateformes et build-tools à installer. Flutter (Android Gradle Plugin) compile avec
+# `flutter.compileSdkVersion` : garder ici celle de la version de Flutter déployée ET la précédente
+# (les plugins pub.dev épinglent souvent compileSdk = N-1). Valeurs choisies pour Flutter stable fin 2026 : à relire à chaque montée de Flutter.
+agenthub_android_platforms:
+  - "android-36"
+  - "android-35"
+agenthub_android_build_tools:
+  - "36.0.0"
+  - "35.0.0"
+# Composants supplémentaires (sdkmanager), p. ex. le NDK que certains plugins natifs réclament :
+#   - "ndk;27.0.12077973"
+#   - "cmake;3.22.1"
+agenthub_android_extra_packages: []
+
+# Espace libre minimal (Go) sur le volume du SDK avant le téléchargement : zip (~160 Mo) + plateformes
+# + build-tools + cache Gradle/engine Android du runner. Contrôlé seulement tant que le SDK n'est pas en place.
+agenthub_android_min_free_gb: 12
+
+# Où le zip est téléchargé (supprimé ensuite).
+agenthub_android_download_dir: /var/tmp
