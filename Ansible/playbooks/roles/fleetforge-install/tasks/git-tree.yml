@@ -1,0 +1,236 @@
+---
+# Clone git du code Ansible (`ff_ansible_source: git`, voir defaults/main.yml).
+#
+# La machine n'y écrit rien d'autre que des OBJETS git : pas de copie de
+# travail, pas de `git pull` (une avance rapide de la branche suivie est faite
+# ci-dessous, comme le fera `sync_tree`), pas de clé d'écriture. Les arbres
+# d'exécution par commit sont construits par le service, à la demande.
+#
+# Tout passe par `argv` : aucune valeur de variable n'est lue par un shell, sauf
+# `GIT_SSH_COMMAND` — que git lit par un shell, d'où des chemins de la machine
+# seuls (jamais une valeur de l'opérateur ou du dépôt) entre apostrophes.
+
+- name: Check the git source is fully described
+  ansible.builtin.assert:
+    that:
+      - ff_ansible_repo | length > 0
+      - ff_ansible_branch is match('^[A-Za-z0-9][A-Za-z0-9._/-]*$')
+      - "'..' not in ff_ansible_branch"
+      - ff_ansible_cache_keep | int >= 1
+      - ff_ansible_cache_keep | int <= 50
+      - ff_ansible_repo is not match('^(ssh://|git@)') or ff_ansible_deploy_key | length > 0
+    fail_msg: >-
+      ff_ansible_source: git exige `ff_ansible_repo` (URL du dépôt), une
+      `ff_ansible_branch` valide (défaut main), `ff_ansible_cache_keep` entre 1
+      et 50, et — pour une URL ssh — `ff_ansible_deploy_key` au vault du parc
+      (clé de déploiement en LECTURE SEULE ; voir defaults/main.yml).
+    quiet: true
+  tags: [code, ansible]
+
+- name: Install git, tar and ssh on the machine
+  ansible.builtin.apt:
+    name: [git, tar, openssh-client]
+    state: present
+    update_cache: false
+  become: true
+  tags: [code, ansible]
+
+# ── Clé de déploiement (lecture seule) et known_hosts ──────────────────────
+- name: Deploy the read-only deploy key
+  ansible.builtin.copy:
+    content: "{{ ff_ansible_deploy_key | trim }}\n"
+    dest: "{{ ff_ansible_deploy_key_file }}"
+    owner: "{{ ff_user }}"
+    group: "{{ ff_user }}"
+    mode: '0600'
+  become: true
+  no_log: true
+  notify: restart fleetforge
+  when: ff_ansible_deploy_key | length > 0
+  tags: [code, ansible, secrets]
+
+- name: Remove the deploy key when none is configured any more
+  ansible.builtin.file:
+    path: "{{ ff_ansible_deploy_key_file }}"
+    state: absent
+  become: true
+  notify: restart fleetforge
+  when: ff_ansible_deploy_key | length == 0
+  tags: [code, ansible, secrets]
+
+- name: Name the host of the repository
+  ansible.builtin.set_fact:
+    ff_ansible_repo_host: >-
+      {{ ff_ansible_git_host if ff_ansible_git_host | length > 0
+         else ff_ansible_repo.split('@')[-1].split(':')[0].split('/')[0] }}
+  when: ff_ansible_deploy_key | length > 0
+  tags: [code, ansible]
+
+- name: Pin the host keys of the repository (given, or scanned the first time)
+  ansible.builtin.copy:
+    content: "{{ ff_ansible_known_hosts | trim }}\n"
+    dest: "{{ ff_ansible_known_hosts_file }}"
+    owner: "{{ ff_user }}"
+    group: "{{ ff_user }}"
+    mode: '0644'
+  become: true
+  notify: restart fleetforge
+  when: ff_ansible_deploy_key | length > 0 and ff_ansible_known_hosts | length > 0
+  tags: [code, ansible]
+
+- name: Scan the host keys of the repository the first time
+  ansible.builtin.shell:
+    cmd: "ssh-keyscan -t ed25519,ecdsa,rsa -H {{ ff_ansible_repo_host | quote }} > {{ ff_ansible_known_hosts_file | quote }}"
+    creates: "{{ ff_ansible_known_hosts_file }}"
+  become: true
+  become_user: "{{ ff_user }}"
+  notify: restart fleetforge
+  when: ff_ansible_deploy_key | length > 0 and ff_ansible_known_hosts | length == 0
+  tags: [code, ansible]
+
+# ── Clone partiel ──────────────────────────────────────────────────────────
+# `--filter=blob:none --no-checkout` : l'historique complet (commits et arbres,
+# légers) sans aucun fichier ; `git archive` ne demande au serveur que ceux du
+# commit servi. Le dépôt contient d'autres dossiers que `Ansible/` (application,
+# crates) qui ne sont jamais téléchargés.
+- name: Describe how git reaches the repository
+  ansible.builtin.set_fact:
+    ff_git_env:
+      GIT_TERMINAL_PROMPT: "0"
+      GIT_SSH_COMMAND: >-
+        {{ ("ssh -i '" ~ ff_ansible_deploy_key_file ~ "' -o IdentitiesOnly=yes -o BatchMode=yes"
+            ~ " -o 'UserKnownHostsFile=" ~ ff_ansible_known_hosts_file ~ "' -o StrictHostKeyChecking=yes")
+           if ff_ansible_deploy_key | length > 0 else "ssh -o BatchMode=yes" }}
+  tags: [code, ansible]
+
+- name: Create the directories of the git tree
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ ff_user }}"
+    group: "{{ ff_user }}"
+    mode: '0750'
+  loop:
+    - "{{ ff_ansible_data_dir }}"
+    - "{{ ff_ansible_trees_dir }}"
+  become: true
+  tags: [code, ansible]
+
+- name: Clone the repository (partial, without a working copy)
+  ansible.builtin.command:
+    argv:
+      - git
+      - clone
+      - --filter=blob:none
+      - --no-checkout
+      - --branch
+      - "{{ ff_ansible_branch }}"
+      - --
+      - "{{ ff_ansible_repo }}"
+      - "{{ ff_ansible_git_dir }}"
+    creates: "{{ ff_ansible_git_dir }}/.git/HEAD"
+  environment: "{{ ff_git_env }}"
+  become: true
+  become_user: "{{ ff_user }}"
+  tags: [code, ansible]
+
+- name: Point the clone at the configured repository
+  ansible.builtin.command:
+    argv: [git, -C, "{{ ff_ansible_git_dir }}", remote, set-url, origin, "{{ ff_ansible_repo }}"]
+  changed_when: false
+  become: true
+  become_user: "{{ ff_user }}"
+  tags: [code, ansible]
+
+# Avance rapide de la branche suivie à chaque livraison (`--tags ansible`), comme
+# `sync_tree` : `update-ref <nouveau> <ancien>` est un échange conditionnel, et un
+# historique réécrit côté serveur (non-ancêtre) n'est PAS suivi.
+- name: Fetch the followed branch
+  ansible.builtin.command:
+    argv:
+      - git
+      - -C
+      - "{{ ff_ansible_git_dir }}"
+      - fetch
+      - --no-tags
+      - origin
+      - "+refs/heads/{{ ff_ansible_branch }}:refs/remotes/origin/{{ ff_ansible_branch }}"
+  environment: "{{ ff_git_env }}"
+  changed_when: false
+  become: true
+  become_user: "{{ ff_user }}"
+  tags: [code, ansible]
+
+- name: Read the synced head and the fetched tip
+  ansible.builtin.command:
+    argv: [git, -C, "{{ ff_ansible_git_dir }}", rev-parse, --verify, --quiet, "{{ item }}^{commit}"]
+  loop:
+    - "refs/heads/{{ ff_ansible_branch }}"
+    - "refs/remotes/origin/{{ ff_ansible_branch }}"
+  register: ff_git_refs
+  failed_when: false
+  changed_when: false
+  become: true
+  become_user: "{{ ff_user }}"
+  tags: [code, ansible]
+
+- name: Check the fetched tip descends from the synced head
+  ansible.builtin.command:
+    argv:
+      - git
+      - -C
+      - "{{ ff_ansible_git_dir }}"
+      - merge-base
+      - --is-ancestor
+      - "{{ ff_git_refs.results[0].stdout }}"
+      - "{{ ff_git_refs.results[1].stdout }}"
+  register: ff_git_ancestor
+  failed_when: ff_git_ancestor.rc not in [0, 1]
+  changed_when: false
+  when: ff_git_refs.results | map(attribute='stdout') | select | list | length == 2
+  become: true
+  become_user: "{{ ff_user }}"
+  tags: [code, ansible]
+
+- name: Fast-forward the synced head
+  ansible.builtin.command:
+    argv:
+      - git
+      - -C
+      - "{{ ff_ansible_git_dir }}"
+      - update-ref
+      - "refs/heads/{{ ff_ansible_branch }}"
+      - "{{ ff_git_refs.results[1].stdout }}"
+      - "{{ ff_git_refs.results[0].stdout }}"
+  when:
+    - ff_git_ancestor is not skipped
+    - ff_git_ancestor.rc == 0
+    - ff_git_refs.results[0].stdout != ff_git_refs.results[1].stdout
+  notify: restart fleetforge
+  become: true
+  become_user: "{{ ff_user }}"
+  tags: [code, ansible]
+
+- name: Say when the followed branch cannot be fast-forwarded
+  ansible.builtin.debug:
+    msg: >-
+      {{ ff_ansible_branch }} a divergé de la tête synchronisée du clone (historique
+      réécrit côté serveur ?) : PAS d'avance rapide, la tête n'a pas bougé.
+      Intervention humaine : `git -C {{ ff_ansible_git_dir }} update-ref
+      refs/heads/{{ ff_ansible_branch }} <commit>`.
+  when: ff_git_ancestor is not skipped and ff_git_ancestor.rc == 1
+  tags: [code, ansible]
+
+- name: Check the clone holds the followed branch
+  ansible.builtin.command:
+    argv: [git, -C, "{{ ff_ansible_git_dir }}", rev-parse, --verify, "refs/heads/{{ ff_ansible_branch }}^{commit}"]
+  register: ff_git_head
+  changed_when: false
+  become: true
+  become_user: "{{ ff_user }}"
+  tags: [code, ansible]
+
+- name: Report the synced head
+  ansible.builtin.debug:
+    msg: "Arbre git : {{ ff_ansible_branch }} @ {{ ff_git_head.stdout }} (clone {{ ff_ansible_git_dir }}, données {{ ff_ansible_data_dir }})."
+  tags: [code, ansible]

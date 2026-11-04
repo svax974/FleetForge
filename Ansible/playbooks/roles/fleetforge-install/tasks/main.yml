@@ -196,16 +196,23 @@
   when: ff_ansible_sync | bool
   tags: [code, ansible]
 
+# `ff_ansible_source: git` : le code vient d'un clone git (git-tree.yml), les
+# données du parc de `ff_ansible_data_dir` (livrées par la tâche ci-dessus).
+- name: Set up the git tree (code read from a git clone, one commit per run)
+  ansible.builtin.include_tasks: git-tree.yml
+  when: ff_ansible_source == 'git'
+  tags: [code, ansible]
+
 - name: Check the Ansible tree the application will read
   ansible.builtin.stat:
-    path: "{{ ff_ansible_dir }}/inventories"
+    path: "{{ ff_ansible_target }}/inventories"
   register: ff_ansible_tree
   tags: [code, ansible, config]
 
 - name: Fail when the Ansible tree is missing on the machine
   ansible.builtin.fail:
     msg: >-
-      {{ ff_ansible_dir }}/inventories introuvable sur la machine. Avec
+      {{ ff_ansible_target }}/inventories introuvable sur la machine. Avec
       `ff_ansible_sync: false`, l'arbre doit déjà y être (clone du dépôt de
       parc) ; sinon l'application démarrerait sur un parc vide.
   when: not ff_ansible_tree.stat.exists

@@ -71,14 +71,20 @@ ff_api_user: ""
 # Un compte par client (AgentHub, OpenClaw…), chacun cantonné à SES parcs et
 # à un mode, tenu à l'identique par l'API REST et le serveur MCP (`/mcp`) :
 #   read — list_hosts, list_playbooks, alertmanager_alerts, query_prometheus,
-#          ssh_diagnose ;
-#   run  — la lecture, plus run_ansible_playbook, run_status et le flux d'un
-#          run (toujours sous `--check` préalable).
+#          ssh_diagnose, et la lecture du CODE de l'arbre (describe_playbook,
+#          read_tree, search_tree, tree_status) ;
+#   run  — la lecture, plus run_ansible_playbook, run_status, syntax_check,
+#          sync_tree et le flux d'un run (toujours sous `--check` préalable).
 # Un parc hors périmètre, un hôte d'un autre parc, un run d'un autre parc :
 # `403 forbidden`. Dans le group_vars du parc :
 #   ff_api_accounts:
 #     - { user: agenthub, mode: read }            # parcs : [<parc_name>] par défaut
 #     - { user: openclaw, parcs: [web3c], mode: read }
+# Deux bornes facultatives par compte, tenues par `run_ansible_playbook` (RUNNING.md) :
+#   deny_playbooks: ["*-fleetforge.yml", "setup-server.yml"]   # motifs `*` `?` sur le NOM du playbook,
+#                                                              # y compris ceux qu'il importe
+#   max_hosts: 3     # `limit` obligatoire, groupes développés, jamais `no_limit`
+# (compte « autonome » du hub : `mode: run` + `deny_playbooks` du noyau + `max_hosts`).
 # `user` : minuscules, chiffres et `_` (il nomme une variable). Le mot de passe
 # de chacun, `ff_api_password_<user>`, est tiré au PREMIER déploiement et
 # chiffré dans playbooks/group_vars/<parc>.yml (à committer), comme
@@ -178,6 +184,59 @@ ff_rsync_excludes:
 # `ff_ansible_sync: false`, pour que le déploiement ne le réécrive pas.
 ff_ansible_dir: "{{ ff_dir }}/Ansible"
 ff_ansible_sync: true
+
+# ── Origine du CODE de l'arbre : rsync (défaut) ou git ─────────────────────
+# `rsync` : rien ne change — le code ET les données du parc arrivent par
+# `ansible-tree.yml` dans `ff_ansible_dir`, depuis le poste de contrôle.
+#
+# `git` : le code Ansible (`Ansible/` du dépôt) est lu dans un CLONE GIT de
+# la machine, en lecture seule, et CHAQUE EXÉCUTION part d'un commit précis :
+#   {{ ff_ansible_git_dir }}     clone partiel (`--filter=blob:none`, sans copie de
+#                                travail ; seuls les objets de `Ansible/` sont
+#                                demandés au serveur, à la demande)
+#   {{ ff_ansible_data_dir }}    les DONNÉES du parc, livrées comme avant par
+#                                `ansible-tree.yml` (mêmes filtres, même
+#                                `--tags ansible`) mais SEULES : ni playbooks ni
+#                                rôles génériques, qui viennent de git
+#   {{ ff_ansible_trees_dir }}   un arbre d'exécution par commit = `git archive`
+#                                de `Ansible/` + liens vers les données du parc
+#                                (ce que fait `link-private.sh` avec `.private`) ;
+#                                les `ff_ansible_cache_keep` derniers servis sont
+#                                gardés, la tête et les runs en cours jamais retirés
+# Le service lit la tête synchronisée (branche `ff_ansible_branch`) au
+# démarrage ; `sync_tree` (MCP / API, compte `run`) fait avancer cette branche
+# par avance rapide SEULEMENT, et récupère les branches `infra/<parc>/*` des
+# correctifs. Le registre des runs note le commit exécuté.
+#
+# Prérequis, hors de ce rôle :
+#   1. une CLÉ DE DÉPLOIEMENT en LECTURE SEULE sur le dépôt (jamais d'écriture :
+#      les correctifs passent par l'API du fournisseur, côté hub) ;
+#        ssh-keygen -t ed25519 -N '' -C 'fleetforge-<parc>-readonly' -f /tmp/ff-deploy-key
+#      puis la clé publique comme « deploy key » (sans accès en écriture) et la
+#      clé PRIVÉE au vault du parc :
+#        ansible-vault encrypt_string --stdin-name ff_ansible_deploy_key < /tmp/ff-deploy-key
+#   2. `ff_ansible_repo` (URL ssh du dépôt) dans le group_vars du parc.
+# Bascule :  ./play.sh <parc> deploy-fleetforge.yml --tags ansible \
+#              -e ff_ansible_source=git   (ou à demeure dans le group_vars)
+# Retour à rsync : `ff_ansible_source: rsync` ; les trois dossiers ci-dessus
+# restent en place, inertes.
+ff_ansible_source: rsync
+ff_ansible_repo: ""
+ff_ansible_branch: main
+ff_ansible_deploy_key: ""
+# Nom d'hôte du dépôt, pour `ssh-keyscan` quand `ff_ansible_known_hosts` est vide
+# (déduit de `ff_ansible_repo` sinon). Une confiance au premier passage ;
+# renseigner `ff_ansible_known_hosts` (lignes known_hosts) pour la lever.
+ff_ansible_git_host: ""
+ff_ansible_known_hosts: ""
+ff_ansible_git_dir: "{{ ff_dir }}/ansible-git"
+ff_ansible_data_dir: "{{ ff_dir }}/ansible-data"
+ff_ansible_trees_dir: "{{ ff_dir }}/ansible-trees"
+ff_ansible_cache_keep: 5
+ff_ansible_deploy_key_file: "{{ ff_dir }}/.ansible-deploy-key"
+ff_ansible_known_hosts_file: "{{ ff_dir }}/.ansible-known-hosts"
+# Où `ansible-tree.yml` livre les données du parc.
+ff_ansible_target: "{{ ff_ansible_data_dir if ff_ansible_source == 'git' else ff_ansible_dir }}"
 
 # ── Ce que l'arbre livré contient (tasks/ansible-tree.yml) ─────────────────
 # Les données du SEUL parc déployé : ses inventaires, `keys/<parc>/`,

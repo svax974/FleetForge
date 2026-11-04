@@ -19,13 +19,19 @@
       - item.parcs | default([parc_name]) is not string
       - item.parcs | default([parc_name]) | length > 0
       - item.user not in [ff_web_user, ff_api_user]
+      - item.deny_playbooks | default([]) is not string
+      - item.deny_playbooks | default([]) | reject('match', '^[A-Za-z0-9_.*?-]{1,128}$') | list | length == 0
+      - item.max_hosts | default(1) is integer
+      - item.max_hosts | default(1) | int >= 1
+      - item.max_hosts | default(1) | int <= 1000
       - ff_api_accounts | selectattr('user', 'defined') | map(attribute='user') | select('equalto', item.user) | list | length == 1
     fail_msg: >-
       Compte `{{ item.user | default('?') }}` de `ff_api_accounts` invalide :
       `user` en minuscules, chiffres et `_` (il nomme la variable
       `ff_api_password_<user>`), unique, distinct de `ff_web_user` et de
       `ff_api_user` ; `mode` read ou run ; `parcs` une liste non vide
-      (défaut : [{{ parc_name }}]).
+      (défaut : [{{ parc_name }}]) ; `deny_playbooks` une liste de motifs
+      (lettres, chiffres, _ . - * ?) ; `max_hosts` un entier de 1 à 1000.
   loop: "{{ ff_api_accounts }}"
   loop_control:
     label: "{{ item.user | default('?') }}"

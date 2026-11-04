@@ -4,11 +4,14 @@
     config.rs (`accounts_from_file`). -#}
 {%- set ns = namespace(accounts=[]) -%}
 {%- for account in ff_api_accounts -%}
-{%- set ns.accounts = ns.accounts + [{
+{%- set entry = {
       'user': account.user,
       'password_hash': ff_api_account_hashes.results[loop.index0].stdout | trim,
       'parcs': account.parcs | default([parc_name]),
       'mode': account.mode | default('read')
-    }] -%}
+    } -%}
+{%- if account.deny_playbooks is defined -%}{%- set _ = entry.update({'deny_playbooks': account.deny_playbooks}) -%}{%- endif -%}
+{%- if account.max_hosts is defined -%}{%- set _ = entry.update({'max_hosts': account.max_hosts | int}) -%}{%- endif -%}
+{%- set ns.accounts = ns.accounts + [entry] -%}
 {%- endfor -%}
 {{ ns.accounts | to_nice_json }}

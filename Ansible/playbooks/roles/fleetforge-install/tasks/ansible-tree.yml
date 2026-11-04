@@ -20,6 +20,12 @@
 #
 # Les liens du poste sont DÉRÉFÉRENCÉS (`copy_links`) : la machine reçoit des
 # fichiers ordinaires et n'a besoin d'aucun `.private`.
+#
+# `ff_ansible_source: git` : même livraison, mais des DONNÉES seules, dans
+# `ff_ansible_data_dir` (`ff_ansible_target`) : le code (playbooks, rôles,
+# ansible.cfg, scripts) vient du clone git (git-tree.yml) et n'est pas livré
+# ici. Les mêmes filtres décident ce qui est « donnée » ; les rôles et playbooks
+# génériques sont exclus par les trois règles de fin de liste.
 
 - name: Locate the Ansible tree on the control machine
   ansible.builtin.set_fact:
@@ -127,7 +133,13 @@
   ansible.builtin.set_fact:
     ff_tree_filters: >-
       {%- set ns = namespace(f=['--exclude=/.private', '--exclude=/.claude', '--exclude=/backups']) -%}
-      {%- for p in ff_ansible_extra_files -%}{%- set ns.f = ns.f + ['--include=/' ~ p] -%}{%- endfor -%}
+      {%- for p in ff_ansible_extra_files -%}
+      {%- set ns.f = ns.f + ['--include=/' ~ p] -%}
+      {%- if ff_ansible_source == 'git' -%}
+      {%- set parts = p.split('/')[:-1] -%}
+      {%- for i in range(1, parts | length + 1) -%}{%- set ns.f = ns.f + ['--include=/' ~ (parts[:i] | join('/')) ~ '/'] -%}{%- endfor -%}
+      {%- endif -%}
+      {%- endfor -%}
       {%- set ns.f = ns.f + ['--include=/inventories/'] -%}
       {%- for p in ff_inv_own -%}{%- set ns.f = ns.f + ['--include=/inventories/' ~ (p | basename)] -%}{%- endfor -%}
       {%- set ns.f = ns.f + ['--exclude=/inventories/*'] -%}
@@ -140,12 +152,15 @@
       {%- set ns.f = ns.f + ['--exclude=/playbooks/' ~ d ~ '/*'] -%}
       {%- endfor -%}
       {%- for p in ff_role_private -%}{%- set ns.f = ns.f + ['--exclude=/' ~ p] -%}{%- endfor -%}
+      {%- if ff_ansible_source == 'git' -%}
+      {%- set ns.f = ns.f + ['--include=/playbooks/', '--exclude=/playbooks/*', '--exclude=/*'] -%}
+      {%- endif -%}
       {{ ns.f }}
 
 - name: Sync the Ansible tree (the data of this parc only)
   ansible.posix.synchronize:
     src: "{{ ff_src }}/Ansible/"
-    dest: "{{ ff_ansible_dir }}/"
+    dest: "{{ ff_ansible_target }}/"
     delete: false
     copy_links: true
     rsync_opts: "{{ ff_tree_filters + ff_rsync_excludes }}"
@@ -174,7 +189,7 @@
 
 - name: List what the machine holds in each data directory
   ansible.builtin.find:
-    paths: "{{ ff_ansible_dir }}/{{ item.dir }}"
+    paths: "{{ ff_ansible_target }}/{{ item.dir }}"
     file_type: any
     hidden: true
   loop: "{{ ff_tree_keep | default([]) }}"
@@ -197,7 +212,7 @@
       {%- endif -%}
       {%- endfor -%}
       {%- endfor -%}
-      {%- for p in ff_ansible_foreign_paths -%}{%- set ns.out = ns.out + [ff_ansible_dir ~ '/' ~ p] -%}{%- endfor -%}
+      {%- for p in ff_ansible_foreign_paths -%}{%- set ns.out = ns.out + [ff_ansible_target ~ '/' ~ p] -%}{%- endfor -%}
       {{ ns.out }}
   when: ff_ansible_prune | bool
 
@@ -213,7 +228,7 @@
 # Les liens de l'ancienne livraison pointaient vers `.private`, retiré ci-dessus.
 - name: Remove the links left dangling
   ansible.builtin.command:
-    cmd: "find {{ ff_ansible_dir }} -xtype l -print -delete"
+    cmd: "find {{ ff_ansible_target }} -xtype l -print -delete"
   register: ff_tree_dangling
   changed_when: ff_tree_dangling.stdout | length > 0
   become: true

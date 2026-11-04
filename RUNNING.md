@@ -82,6 +82,14 @@ Sans `dist/`, le serveur refuse de démarrer et le dit.
 | `FLEETFORGE_API_PASSWORD` | — | son mot de passe en clair (**développement seul**) |
 | `FLEETFORGE_API_ACCOUNTS_FILE` | — | comptes d'automatisation BORNÉS (fichier JSON 0600), voir « API d'automatisation » |
 | `FLEETFORGE_ANSIBLE_DIR` | — | arbre Ansible : impose `<dossier>/inventories` et `<dossier>/playbooks` |
+| `FLEETFORGE_ANSIBLE_SOURCE` | `rsync` | `git` : le code de l'arbre est lu dans un clone git, un commit par run (voir « Arbre Ansible servi depuis git ») |
+| `FLEETFORGE_ANSIBLE_GIT_DIR` | — | (mode git, obligatoire) clone du dépôt, sans copie de travail |
+| `FLEETFORGE_ANSIBLE_DATA_DIR` | — | (mode git, obligatoire) données du parc : `inventories/`, `keys/`, `parcs/`, group_vars, host_vars |
+| `FLEETFORGE_ANSIBLE_TREES_DIR` | — | (mode git, obligatoire) un arbre d'exécution par commit |
+| `FLEETFORGE_ANSIBLE_BRANCH` | `main` | (mode git) branche suivie |
+| `FLEETFORGE_ANSIBLE_DEPLOY_KEY`, `FLEETFORGE_ANSIBLE_KNOWN_HOSTS` | — | (mode git) clé de déploiement en lecture seule, `known_hosts` du dépôt |
+| `FLEETFORGE_ANSIBLE_CACHE_KEEP` | `5` | (mode git) arbres d'exécution gardés (1 à 50) |
+| `FLEETFORGE_TREE_PRIVATE_FILES` | — | fichiers de l'arbre (chemins relatifs à `Ansible/`, virgules) que `read_tree` ne lit jamais : `ff_ansible_extra_files` |
 | `FLEETFORGE_INVENTORIES_PATH` | réglage stocké | impose les inventaires (prime sur `FLEETFORGE_ANSIBLE_DIR`) |
 | `FLEETFORGE_PLAYBOOKS_PATH` | réglage stocké | impose les playbooks (prime sur `FLEETFORGE_ANSIBLE_DIR`) |
 | `FLEETFORGE_RO_SSH_KEY` | `~/.ssh/id_fleetforge_ro` | clé de diagnostic lecture seule (`ssh_diagnose`) |
@@ -205,6 +213,67 @@ Une livraison antérieure de l'arbre complet laisse ses données sur la machine 
 répertoire, sans toucher à l'état propre à la machine. Pour vérifier :
 `ls ~/fleetforge/Ansible/inventories ~/fleetforge/Ansible/keys` ne doit montrer que le parc.
 
+#### Arbre Ansible servi depuis git (`ff_ansible_source: git`)
+
+Par défaut (`rsync`) rien ne change : code et données arrivent par rsync dans
+`ff_ansible_dir`. En mode `git`, le code (`Ansible/` du dépôt) est lu dans un **clone
+git de la machine**, et **chaque exécution part d'un commit précis**, ce qui permet
+de tester un correctif (`syntax_check`, `--check`) depuis son commit avant que la
+branche suivie n'avance.
+
+| Dossier (variable) | Contenu |
+|---|---|
+| `{{ ff_dir }}/ansible-git` (`ff_ansible_git_dir`) | clone partiel (`--filter=blob:none --no-checkout`) : l'historique sans fichiers ; `git archive` ne demande au serveur que les fichiers de `Ansible/` du commit servi |
+| `{{ ff_dir }}/ansible-data` (`ff_ansible_data_dir`) | **données du parc seules**, livrées comme avant par `ansible-tree.yml` (mêmes filtres, `--tags ansible`) : inventaires, `keys/<parc>/`, `parcs/<parc>/`, group_vars/host_vars, `ff_ansible_extra_files` |
+| `{{ ff_dir }}/ansible-trees` (`ff_ansible_trees_dir`) | un arbre d'exécution par commit : `git archive` de `Ansible/` + liens vers les données du parc (ce que fait `link-private.sh` avec `.private`) ; les `ff_ansible_cache_keep` (5) derniers servis sont gardés, la tête et les runs en cours jamais retirés |
+
+Mise en place (une fois par parc) :
+
+1. une **clé de déploiement en lecture seule** sur le dépôt — jamais d'écriture ici, les
+   correctifs passent par l'API du fournisseur, côté hub :
+   ```sh
+   ssh-keygen -t ed25519 -N '' -C 'fleetforge-<parc>-readonly' -f /tmp/ff-deploy-key
+   ansible-vault encrypt_string --stdin-name ff_ansible_deploy_key < /tmp/ff-deploy-key   # -> group_vars du parc
+   ```
+   la clé publique est déclarée « deploy key » du dépôt, sans droit d'écriture ;
+2. dans `playbooks/group_vars/<parc>.yml` : `ff_ansible_repo: git@github.com:<org>/<dépôt>.git`
+   (et au besoin `ff_ansible_branch`, `ff_ansible_cache_keep`, `ff_ansible_git_host`,
+   `ff_ansible_known_hosts`) ;
+3. `./play.sh <parc> deploy-fleetforge.yml --tags ansible -e ff_ansible_source=git` (ou
+   `ff_ansible_source: git` à demeure). Le rôle installe `git`, dépose la clé
+   (`~/fleetforge/.ansible-deploy-key`, 0600), épingle les clés d'hôte du dépôt
+   (`ssh-keyscan` au premier passage, ou `ff_ansible_known_hosts` pour ne faire
+   confiance à rien de scanné), clone, avance la branche suivie en avance rapide et
+   écrit l'environnement (`FLEETFORGE_ANSIBLE_SOURCE=git`, …) ; le service redémarre.
+
+Au quotidien : `sync_tree` (compte `run`) fait avancer la tête synchronisée par avance
+rapide et récupère les branches `infra/<parc>/*` ; `tree_status` dit la branche, la tête
+(relue du clone au redémarrage), la date de la dernière synchronisation et le nombre
+d'arbres en cache. `--tags ansible` rejoué met à jour les données du parc ET la tête (mêmes
+règles d'avance rapide) ; les liens des arbres déjà construits sont refaits à chaque
+usage, une donnée livrée depuis y paraît donc sans reconstruction.
+
+Retour à rsync : `ff_ansible_source: rsync` (les trois dossiers restent, inertes ;
+`rm -rf` s'ils gênent).
+
+Modes d'échec :
+- **clone absent ou clé refusée** : au démarrage le service journalise « arbre git
+  indisponible » et montre un parc vide ; `tree_status` / `sync_tree` répondent
+  `503 not_configured`. Contrôler à la main, sous le compte du service :
+  `GIT_SSH_COMMAND="ssh -i ~/fleetforge/.ansible-deploy-key -o IdentitiesOnly=yes" git -C ~/fleetforge/ansible-git fetch origin` ;
+- **la branche suivie a divergé** (historique réécrit côté serveur) : `sync_tree` répond
+  `409 not_fast_forward` et la tête ne bouge pas ; une personne rétablit l'état voulu
+  (`git -C ~/fleetforge/ansible-git update-ref refs/heads/main <commit>`). Le rôle le
+  dit aussi (tâche de diagnostic), sans forcer ;
+- **commit inconnu ou hors des références permises** : `404 unknown_commit` (le récupérer
+  d'abord avec `sync_tree` ; seuls la tête synchronisée et `infra/<parc>/*` sont permis) ;
+  autre branche demandée à `sync_tree` : `403 ref_refused` ;
+- **dépôt sans filtre partiel** (serveur ancien) : le `git clone --filter` échoue ; cloner
+  alors sans filtre à la main dans `ff_ansible_git_dir`, le service s'en accommode ;
+- **état écrit dans l'arbre par un rôle** : un arbre d'exécution est propre à un commit et
+  disparaît avec le cache ; ce qu'un rôle déposerait sous `Ansible/` (hors données du parc,
+  liées) ne survit pas. Aucun rôle connu ne le fait.
+
 #### Pilotage réel du parc (décision explicite)
 
 ```sh
@@ -271,7 +340,7 @@ enregistrements Cloudflare ne sont jamais supprimés par les playbooks.
 ### API d'automatisation (AgentHub)
 
 Le poste « Infrastructure Manager » d'AgentHub pilote le parc par le même
-`POST /api/<commande>` que le frontal, avec un **compte à lui**, cantonné à sept
+`POST /api/<commande>` que le frontal, avec un **compte à lui**, cantonné à treize
 commandes et au flux d'un run (`auth::AUTOMATION_COMMANDS`) ; tout le reste
 répond `403 forbidden`. Commandes servies par le web seulement (sauf
 `query_prometheus`, dont seule la forme `parc` est propre au web) : elles n'ont
@@ -281,9 +350,11 @@ pas d'équivalent dans l'application de bureau (CLAUDE.md § 3).
 cantonné à SES parcs et à un mode, tenu à l'identique par l'API REST et le
 serveur MCP :
 - `read` : `list_hosts`, `list_playbooks`, `alertmanager_alerts`,
-  `query_prometheus`, `ssh_diagnose` ;
-- `run` : la lecture, plus `run_ansible_playbook`, `run_status` et le flux
-  `GET /api/events/<run_id>`.
+  `query_prometheus`, `ssh_diagnose`, et la lecture du CODE de l'arbre :
+  `describe_playbook`, `read_tree`, `search_tree`, `tree_status` ;
+- `run` : la lecture, plus `run_ansible_playbook`, `run_status`, `syntax_check`,
+  `sync_tree` et le flux `GET /api/events/<run_id>` (ces quatre-là ne sont
+  **jamais** relayés au poste, `fleetForgePure.ts` côté AgentHub).
 
 Une commande hors du mode, un parc hors périmètre (existant ou non : la
 réponse est la même), un `ssh_diagnose` sur un hôte qu'aucun parc du
@@ -296,11 +367,25 @@ démarrage :
 ```json
 [
   { "user": "agenthub", "password_hash": "$argon2id$…", "parcs": ["web3c"], "mode": "read" },
-  { "user": "openclaw", "password_hash": "$argon2id$…", "parcs": ["web3c"], "mode": "read" }
+  { "user": "openclaw", "password_hash": "$argon2id$…", "parcs": ["web3c"], "mode": "read" },
+  { "user": "autonome", "password_hash": "$argon2id$…", "parcs": ["web3c"], "mode": "run",
+    "deny_playbooks": ["*-fleetforge.yml", "setup-server.yml"], "max_hosts": 3 }
 ]
 ```
 
-Par le déploiement : `ff_api_accounts: [{ user, parcs?, mode }]` dans
+Deux bornes facultatives, tenues par `run_ansible_playbook` avant tout (le compte
+« autonome » du hub est un compte `run` avec ces deux bornes) :
+- `deny_playbooks` : motifs (`*` = toute suite, `?` = un caractère ; lettres, chiffres,
+  `_ . -`) sur le **nom de fichier** du playbook. Le playbook demandé et ceux qu'il
+  importe (`import_playbook` de nom statique, transitivement) sont tous jugés ;
+  `x.yml` et `x.yaml` sont un même playbook. Refus : `403 forbidden_playbook`. La
+  lecture (`describe_playbook`, `read_tree`) reste ouverte ;
+- `max_hosts` (1 à 1000) : `limit` devient **obligatoire** (sans lui un run vise tout ce
+  que cible le playbook, donc un nombre inconnu), `no_limit` est refusé, et les groupes
+  de `limit` sont développés par l'inventaire (`all`, l'organisation, un groupe, un
+  hôte ; sans doublon) : au-delà, `403 too_many_hosts`.
+
+Par le déploiement : `ff_api_accounts: [{ user, parcs?, mode, deny_playbooks?, max_hosts? }]` dans
 `playbooks/group_vars/<parc>.yml` (`parcs` : `[<parc_name>]` par défaut) ; le
 mot de passe de chacun, `ff_api_password_<user>`, est tiré au premier passage
 et chiffré dans ce même fichier (à committer), la machine n'en reçoit que les
@@ -338,7 +423,11 @@ l'authentification basique y circulerait en clair.
   des hôtes et groupes du parc (ni motif, ni `!`, ni `,`) ;
 - passer une variable `ansible_*` ou une valeur contenant un gabarit Jinja ;
 - lancer un run réel sans le `--check` du MÊME lancement (parc, playbook,
-  limit, variables) achevé depuis moins d'une heure → `409 check_required` ;
+  limit, variables, tags, skip_tags, **commit résolu**, no_limit) achevé depuis moins
+  d'une heure → `409 check_required` ;
+- lire autre chose que du code : `read_tree` / `search_tree` / `describe_playbook` ne
+  voient que `playbooks/` (voir plus bas), jamais un inventaire, un group_vars, un
+  host_vars, une clé, une donnée de parc ni un fichier vault ;
 - attendre un parc occupé : `409 run_busy` (un run à la fois par parc, verrou
   partagé avec l'opérateur, qui lui attend) ;
 - lire une sortie non caviardée : `output_tail`, le flux SSE, la sortie de
@@ -346,9 +435,11 @@ l'authentification basique y circulerait en clair.
   défense en profondeur, pas une garantie).
 
 **Erreurs** — toujours `{ "error": "<message>", "code": "<code>" }` :
-`invalid_argument`/`ambiguous_host` (400), `unauthorized` (401), `forbidden`
-(403), `unknown_parc`/`unknown_host`/`unknown_playbook`/`unknown_run` (404),
-`run_busy`/`run_id_in_use`/`check_required` (409), `upstream_error` (502),
+`invalid_argument`/`ambiguous_host` (400), `unauthorized` (401), `forbidden`/
+`forbidden_playbook`/`too_many_hosts`/`ref_refused`/`path_refused` (403),
+`unknown_parc`/`unknown_host`/`unknown_playbook`/`unknown_run`/`unknown_commit`/
+`unknown_path` (404), `run_busy`/`run_id_in_use`/`check_required`/`not_fast_forward`
+(409), `upstream_error` (502),
 `not_configured` (503), `timeout` (504), `failed` (400, erreur non qualifiée).
 
 | Commande | Corps | Réponse |
@@ -358,8 +449,14 @@ l'authentification basique y circulerait en clair.
 | `alertmanager_alerts` | `{ "parc" }` | JSON de `GET /api/v2/alerts?active=true&silenced=false&inhibited=false`, tel quel |
 | `query_prometheus` | `{ "parc", "query", "time"? }` | `{ "parc", "result": [{ "metric": {…}, "timestamp", "value" }], "truncated" }` |
 | `ssh_diagnose` | `{ "host", "verb", "args"?: [..], "parc"? }` | `{ "parc", "host", "verb", "args", "exit_code", "output", "truncated" }` |
-| `run_ansible_playbook` | `{ "parc", "playbook", "limit"?, "extra_vars"?, "check"?, "diff"?, "detach"?, "run_id"?, "label"? }` | `detach: true` → `{ "run_id", "state": "running", "check", "diff" }` ; sinon le run terminé + `run_id` |
-| `run_status` | `{ "run_id", "tail_lines"? (50, ≤ 500) }` | `{ "run_id", "state": "running"\|"success"\|"failed", "exit_code", "started_at", "ended_at", "output_tail", "label", "check", "diff" }` |
+| `describe_playbook` | `{ "parc", "playbook", "commit"? }` | `{ "commit", "plays": [{ "name", "hosts", "roles", "tags" }], "tags", "vars", "needs_no_limit", "imports", "notes" }` |
+| `read_tree` | `{ "parc", "path"?, "commit"? }` | fichier : `{ "commit", "kind": "file", "path", "size", "content", "redacted" }` ; dossier : `{ "commit", "kind": "dir", "path", "entries": [{ "name", "kind": "file"\|"dir", "size"? }], "truncated" }` |
+| `search_tree` | `{ "parc", "pattern", "commit"? }` | `{ "commit", "hits": [{ "path", "line", "text" }], "truncated" }` |
+| `tree_status` | `{ "parc" }` | `{ "source": "git"\|"rsync", "branch", "head", "synced_at", "commits_cached" }` |
+| `run_ansible_playbook` | `{ "parc", "playbook", "limit"?, "no_limit"?, "tags"?, "skip_tags"?, "commit"?, "extra_vars"?, "check"?, "diff"?, "detach"?, "run_id"?, "label"? }` | `detach: true` → `{ "run_id", "state": "running", "check", "diff", "commit" }` ; sinon le run terminé + `run_id`, `commit` |
+| `run_status` | `{ "run_id", "tail_lines"? (50, ≤ 500) }` | `{ "run_id", "state": "running"\|"success"\|"failed", "exit_code", "started_at", "ended_at", "output_tail", "label", "check", "diff", "commit", "tags", "skip_tags", "recap": { "<hôte>": { "ok", "changed", "failed", "unreachable", "skipped" } }, "failures": [{ "host", "task", "role", "msg" }] }` |
+| `syntax_check` | `{ "parc", "playbook", "commit"? }` | `{ "commit", "playbook", "ok", "exit_code", "timed_out", "output", "failures" }` |
+| `sync_tree` | `{ "parc", "commit"?, "ref"? }` | `{ "commit", "head", "reference" }` |
 
 Détails :
 - `run_ansible_playbook` accepte aussi la forme du frontal (`inventoryPath`,
@@ -369,6 +466,66 @@ Détails :
   `GET /api/events/<run_id>` (SSE, événement `end` à la fin).
 - `run_status` lit le registre en mémoire : un run oublié (redémarrage du
   service, « vider les runs terminés » côté opérateur) répond `unknown_run`.
+  `recap` et `failures` sont tirés de la sortie ENTIÈRE du run (callback par défaut
+  d'Ansible : PLAY RECAP et lignes `fatal:`/`failed:`, formes ≤ 2.18 et 2.19+, `--check`
+  compris), pas de ses seules dernières lignes : `recap` est vide tant que le run n'a pas
+  atteint le PLAY RECAP, `failures` se remplit pendant le run. `failures` : 50 au plus,
+  `msg` ≤ 500 caractères sur une ligne, caviardé ; `msg` reprend `stderr` quand il éclaire
+  un `command` en échec ; `host`/`task`/`role` valent `null` pour une erreur avant tout play
+  (playbook illisible) ou une tâche écrite dans le playbook même (`role`) ; un échec couvert
+  par `ignore_errors` (`...ignoring`) ou rattrapé n'y figure pas. `commit` : le commit
+  exécuté (mode git), `null` sinon.
+- `run_ansible_playbook` — nouveaux arguments : `tags` / `skip_tags` (listes, ≤ 20 noms de
+  `^[A-Za-z0-9_.-]{1,64}$`, passés en `--tags=a,b` / `--skip-tags=…`, un seul argument
+  chacun) ; `no_limit: true` (aucun `--limit` ; exclusif avec `limit` ; sans `limit` ni
+  `no_limit` le playbook vise ses propres hôtes, comme avant) ; `commit` (`HEAD` ou sha
+  complet, **mode git seulement** : sinon `503 not_configured`). Un sha doit être connu du
+  clone (`sync_tree`) et atteignable d'une référence permise (tête synchronisée ou
+  `infra/<parc>/*` du parc de l'appel) ; sans `commit`, la tête synchronisée. Le commit est
+  **résolu avant la porte du check** : l'empreinte `[parc, playbook, limit trié, extra_vars,
+  tags triés, skip_tags triés, commit résolu, no_limit]` fait qu'un check du commit A n'autorise
+  pas le même playbook au commit B, ni un check avec `limit` un run `no_limit`. Le run
+  exécute exactement l'arbre de ce commit et le retient jusqu'à sa fin.
+- `describe_playbook` : analyse STATIQUE (jamais d'Ansible, jamais de Jinja évalué) des plays
+  (un `import_playbook` de nom statique est déplié), de leurs rôles et dépendances de rôle
+  (`meta/main.yml`), de `include_role`/`import_role`/`include_tasks`/`import_tasks` de nom
+  statique ; `tags` = union des étiquettes du playbook et des rôles appelés (play, rôle,
+  tâche, bloc, `apply:`), utilisable avec `tags`/`skip_tags` ; `vars` = variables référencées
+  sans `| default(…)` que ni un défaut de rôle, ni `vars:`/`register:`/`set_fact:`, ni une
+  clé de group_vars/host_vars de l'arbre (les NOMS seulement) ne définit — des indices à
+  passer en `extra_vars`, pas une garantie (les gabarits `.j2` ne sont pas lus) ;
+  `needs_no_limit` : vrai quand un play vise des hôtes qu'un `--limit` sur les cibles
+  habituelles écarterait. Heuristique : cibles habituelles = les motifs `hosts:` du premier
+  play qui n'est ni local (`localhost`, `connection: local`) ni `run_once` ; un play suivant
+  dont un motif positif (hors `localhost`, `all`, `*`, `{{ }}`) n'y figure pas est ignoré par
+  un tel `--limit` → vrai (`deploy-fleetforge.yml` : `infras`, puis `proxies` et
+  `prometheus1:monitor`) ; cibles habituelles `all` → faux. `notes` dit ce qui n'a pas pu
+  être résolu.
+- `read_tree` / `search_tree` : le CODE sous `playbooks/` seulement. `path` est relatif à
+  `playbooks/` (un préfixe `playbooks/` est accepté), vide = le dossier lui-même. Refusé
+  (`403 path_refused`) : chemin absolu ou `~`, `..`, composante cachée (`.x`), toute
+  composante nommée `inventories`, `group_vars`, `host_vars`, `keys`, `parcs`, `.private` ou
+  `.git`, fichier chiffré par ansible-vault (en-tête `$ANSIBLE_VAULT`), fichier de clé ou de
+  secret (`*.pem`, `*.key`, `id_*`, `htpasswd`…), fichier binaire, fichier livré avec une
+  donnée de parc (`ff_ansible_extra_files`), et tout chemin dont la cible **réelle**
+  (canonique) sort de `playbooks/` — lien vers `.private`, vers `ansible-data/`, vers `/etc`.
+  Les listes et recherches omettent ces entrées sans le dire. Un fichier fait au plus 64 Kio
+  (au-delà : `400 invalid_argument`), en UTF-8 ; le contenu est caviardé et `redacted: true`
+  dit que le caviardage a changé le texte (ne pas réécrire un fichier entier à partir de
+  lui). `search_tree` : texte FIXE, sensible à la casse, 200 caractères, 100 résultats au
+  plus, lignes ≤ 300 caractères, fichiers ≤ 1 Mio, jamais de lien de dossier suivi.
+- `syntax_check` : `ansible-playbook --syntax-check` depuis l'arbre du commit (délai 120 s) ;
+  aucun hôte contacté, aucun verrou de parc ; sortie ≤ 8000 caractères, caviardée. `commit`
+  par défaut la tête (arbre rsync : l'arbre livré).
+- `sync_tree` (mode git seulement) : `ref` = la branche suivie (défaut ; `git fetch` puis
+  avance rapide de la branche locale, par échange conditionnel `update-ref` : un
+  historique réécrit côté serveur donne `409 not_fast_forward`) ou `infra/<parc>/<nom>`
+  (une seule composante `[A-Za-z0-9._-]{1,64}` ; toutes les `infra/<parc>/*` sont récupérées
+  et élaguées). Toute autre référence : `403 ref_refused`. `commit` (sha complet) doit être
+  atteignable de la tête ou d'une `infra/<parc>/*` récupérée, sinon `404 unknown_commit`.
+  Réponse : le commit demandé (sinon la pointe de la référence), la tête synchronisée après
+  l'opération, la référence. `git` ne reçoit que des arguments séparés (jamais un shell), des
+  références et des commits validés par une grammaire fermée.
 - `ssh_diagnose` : verbes de `ro-gate` seulement — `logs journal|unit
   NOM|docker NOM [DURÉE] [all]`, `status UNITÉ`, `containers`, `stats`,
   `firewall`, `system`, `disk`, `ports`, `http PORT [CHEMIN]` ; `verb` peut porter la
@@ -402,9 +559,10 @@ Détails :
   Prometheus. Sans `parc`, la forme du frontal (supervision du parc
   sélectionné, liste nue) reste réservée à l'opérateur.
 
-**Serveur MCP (`/mcp`)** — les mêmes sept commandes, en outils MCP de même
+**Serveur MCP (`/mcp`)** — les mêmes treize commandes, en outils MCP de même
 nom (`list_hosts`, `list_playbooks`, `alertmanager_alerts`,
-`query_prometheus`, `ssh_diagnose`, `run_ansible_playbook`, `run_status`),
+`query_prometheus`, `ssh_diagnose`, `describe_playbook`, `read_tree`, `search_tree`,
+`tree_status`, `run_ansible_playbook`, `run_status`, `syntax_check`, `sync_tree`),
 schémas d'entrée JSON et descriptions en anglais. Transport Streamable HTTP
 sans session, réponses JSON ; versions du protocole 2024-11-05 à 2026-07-28
 (SDK `rmcp`, `initialize` négocié jusqu'à 2025-11-25, au-delà métadonnées par
