@@ -113,6 +113,31 @@
   loop_control:
     label: "{{ item.record }} → {{ item.value }}"
   register: cfdns_published
+  # Code 81054 : le nom porte déjà un CNAME (public, posé à la main ou par
+  # cnames.yml) — un A ne peut pas coexister avec lui. En synchronisation
+  # GÉNÉRIQUE, ce cas n'arrête pas la boucle : une seule entrée en conflit ferait
+  # échouer toute la tâche, donc sauter cnames.yml et proxy-front.yml derrière
+  # (constat du 04/11/2026 : proxy3 absent du tourniquet proxy.<zone>). Le nom est
+  # listé par « Report the names held by a CNAME » juste après, jamais tu.
+  # En portée réduite (`cfdns_a_scope`, rôles `-install`), le nom EST celui de la
+  # machine : le conflit reste une erreur.
+  failed_when:
+    - cfdns_published.failed | default(false)
+    - not (cfdns_a_scope is not defined and '81054' in (cfdns_published.msg | default('')))
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+# Noms que le A n'a pas pu prendre : à régler à la source (inventaire : `hostname`
+# en `<x>-priv` + `proxy_hostname` pour le nom public, voir CLAUDE.md).
+- name: Report the names held by a CNAME
+  ansible.builtin.debug:
+    msg: >-
+      A NON publié (un CNAME porte déjà ce nom) : {{ item.item.record }}
+      → {{ item.item.value }} (hôte {{ item.item.host }}).
+  loop: "{{ cfdns_published.results | default([]) | selectattr('msg', 'defined') | selectattr('msg', 'search', '81054') | list }}"
+  loop_control:
+    label: "{{ item.item.record }}"
   delegate_to: localhost
   become: false
   run_once: true
