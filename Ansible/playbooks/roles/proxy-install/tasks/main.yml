@@ -1,4 +1,23 @@
 ---
+# A record de CE proxy, publié AVANT tout le reste : `proxyN.<zone>` est l'identité
+# de la machine, il doit exister même si un vhost ou une règle casse plus loin
+# (constat du 04/11/2026 : proxy3 échoue sur `hostvars['tradingbot']` dans
+# proxy-update, les plays suivants sont sautés pour lui, dont le DNS — plus de A).
+#
+# `run_once` vit dans records.yml : le scope est donc l'ENSEMBLE des hôtes du play
+# (`ansible_play_hosts`, après --limit), pas `inventory_hostname` — évalué par le
+# seul premier hôte, il laisserait les autres proxies sans A.
+#
+# L'entrée dans le tourniquet `proxy.<zone>` n'est PAS posée ici : un proxy à
+# moitié déployé ne doit pas recevoir de trafic. Elle reste dans le dernier play
+# de deploy-proxy.yml, une fois le proxy servi.
+- name: Publish the A record of the proxies being deployed (DNS only)
+  ansible.builtin.include_role:
+    name: cloudflare-dns-update
+    tasks_from: records
+  vars:
+    cfdns_a_scope: "{{ ansible_play_hosts }}"
+
 ########### Setup nginx
 # Copy config
 - name: Copy nginx gobal configuration

@@ -62,7 +62,9 @@
 # `proxy.<zone>` — un proxy ajouté au groupe y entre ici — puis les CNAME des
 # services. Même rôle que `update-cloudflare-dns.yml`, joué depuis le poste de
 # contrôle par l'API (aucune connexion aux proxies). Placé APRÈS le déploiement :
-# un nom ne doit pas être publié avant que le proxy ne serve. Ne supprime rien :
+# un proxy ne doit pas entrer dans le tourniquet `proxy.<zone>` avant de servir.
+# Le A de la machine (`proxyN.<zone>`) est, lui, posé plus tôt par `proxy-install` :
+# un échec en cours de route ne le prive plus de son enregistrement. Ne supprime rien :
 # un proxy retiré du groupe reste à nettoyer à la main.
 # `hosts: proxies` (et non `all`) : l'appartenance au parc donne les group_vars
 # (`cloudflare_token`, `domain_name`). Rejouable seul :
