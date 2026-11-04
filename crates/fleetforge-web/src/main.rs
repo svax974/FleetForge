@@ -126,6 +126,17 @@ async fn main() -> Result<()> {
 
     let state = AppState::new(core, config.ro_gate.clone());
 
+    // Arbre git : construit l'arbre de la tête maintenant (un `git archive` peut
+    // demander des objets au serveur) plutôt qu'à la première requête.
+    if config.git_tree.is_some() {
+        let warm = state.core.clone();
+        tokio::task::spawn_blocking(move || {
+            if let Err(e) = warm.get_setting(SettingKey::PlaybooksPath) {
+                fleetforge_core::logging::warn("web", format!("arbre git : {e}"));
+            }
+        });
+    }
+
     // Rouvre les comptes d'hébergeurs enregistrés : l'état « connecté » ne
     // survit pas au processus. En arrière-plan, pour ne pas retarder
     // l'écoute ; un échec laisse le compte non connecté, le détail est au journal.

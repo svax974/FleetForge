@@ -391,7 +391,7 @@ impl<'a> Walker<'a> {
         }
 
         // Variables référencées : toutes les chaînes de la tâche.
-        self.scan_values(task, false, acc);
+        Self::scan_values(task, false, acc);
     }
 
     /// Fichier de tâches inclus : relatif au fichier courant, sinon aux
@@ -418,10 +418,10 @@ impl<'a> Walker<'a> {
         }
     }
 
-    fn scan_values(&self, value: &Value, bare: bool, acc: &mut Acc) {
+    fn scan_values(value: &Value, bare: bool, acc: &mut Acc) {
         match value {
             Value::String(s) => collect_refs(s, bare, false, acc),
-            Value::Sequence(items) => items.iter().for_each(|v| self.scan_values(v, bare, acc)),
+            Value::Sequence(items) => items.iter().for_each(|v| Self::scan_values(v, bare, acc)),
             Value::Mapping(map) => {
                 for (k, v) in map {
                     let key = scalar(k).unwrap_or_default();
@@ -430,7 +430,7 @@ impl<'a> Walker<'a> {
                         "that" => Self::scan_bare(v, true, acc),
                         // Ces clés portent des sous-tâches, déjà parcourues.
                         "block" | "rescue" | "always" | "tags" => {}
-                        _ => self.scan_values(v, bare, acc),
+                        _ => Self::scan_values(v, bare, acc),
                     }
                 }
             }
