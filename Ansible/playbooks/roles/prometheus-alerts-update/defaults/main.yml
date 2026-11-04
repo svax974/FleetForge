@@ -210,6 +210,19 @@ prom_alert_astar_swap_bytes: 2147483648
 # plafond va commencer à ralentir le nœud.
 prom_alert_astar_rss_bytes: 8589934592
 
+# ── Nœuds Storj (groupe `storj`) ──────────────────────────────────────────────
+# Silence des satellites toléré. Ils contactent un nœud environ toutes les
+# heures ; deux heures sans ping, c'est un port P2P fermé et non un retard.
+prom_alert_storj_ping_age_seconds: 7200
+
+# Score d'audit : disqualification à 0,96, irréversible. 0,98 laisse le temps
+# d'enquêter ; un nœud sain reste à 1.
+prom_alert_storj_audit_score: 0.98
+
+# Scores de disponibilité et de suspension : suspension du nœud sous 0,6.
+prom_alert_storj_online_score: 0.9
+prom_alert_storj_suspension_score: 0.8
+
 # ── Nœuds Theta Edge (groupe `theta`) ─────────────────────────────────────────
 # Retard toléré sur la hauteur finalisée du réseau. ~6 s par bloc : 100 blocs
 # font une dizaine de minutes, au-delà le nœud ne suit plus.

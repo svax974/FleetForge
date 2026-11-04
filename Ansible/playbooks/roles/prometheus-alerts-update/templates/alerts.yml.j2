@@ -729,6 +729,176 @@ groups:
             conteneur (P2P sortant uniquement, aucun port entrant requis).
 
 {% endif %}
+{% if 'storj' in prom_alert_groups %}
+
+  # ── Nœuds Storj ────────────────────────────────────────────────────────────
+  # Séries produites par le collecteur `storj-metrics.sh` de svcprobe (rôle
+  # `storj-monitoring`), lu sur l'API du tableau de bord du nœud. Ce groupe
+  # existe pour l'état DÉGRADÉ que `service_up` ne voit pas : un nœud peut
+  # tourner, répondre en local, et pourtant ne plus être joignable des
+  # satellites (port fermé, IP changée), échouer ses audits ou être suspendu —
+  # la disqualification est IRRÉVERSIBLE et fait perdre le montant retenu.
+  # `service_up == 0` relève de `ServiceDown` (groupe `services`), pas d'ici.
+  # Les règles de score ignorent un satellite déjà disqualifié : `StorjDisqualified`
+  # le dit, et ses scores (à 0) ne diraient rien de plus.
+  # Contrôle après déploiement : `count(storj_disk_used_bytes)` doit valoir le
+  # nombre de nœuds, et `count(storj_satellite_audit_score)` être non nul une
+  # fois le nœud connu des satellites — sinon ces règles sont décoratives.
+  - name: storj
+    rules:
+      # Les satellites contactent chaque nœud environ toutes les heures : un
+      # silence prolongé veut dire que le port P2P n'est plus joignable
+      # (redirection routeur perdue, pare-feu, IP changée) alors que le conteneur
+      # tourne. Chaque heure hors ligne dégrade le score de disponibilité.
+      - alert: StorjNodeNotContacted
+        expr: storj_last_pinged_age_seconds > {{ prom_alert_storj_ping_age_seconds }}
+        for: 15m
+        keep_firing_for: {{ prom_alert_flap_grace }}
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Nœud Storj {{ '{{' }} $labels.instance {{ '}}' }} : aucun satellite ne le joint'
+          description: >-
+            Aucun ping de satellite depuis plus de
+            {{ prom_alert_storj_ping_age_seconds }} s. Le conteneur tourne mais
+            le port TCP/UDP 28967 n'est plus joignable depuis
+            Internet : vérifier la redirection du routeur, l'adresse annoncée
+            (ADDRESS) et le pare-feu de l'hébergeur.
+
+      # Seuil de disqualification à 0,96 : le score d'audit ne remonte que
+      # lentement, il faut agir AVANT.
+      - alert: StorjAuditScoreLow
+        expr: >-
+          storj_satellite_audit_score < {{ prom_alert_storj_audit_score }}
+          and on (instance, satellite) storj_satellite_disqualified == 0
+        for: 10m
+        keep_firing_for: {{ prom_alert_flap_grace }}
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Score d''audit Storj bas sur {{ '{{' }} $labels.instance {{ '}}' }} ({{ '{{' }} $labels.satellite {{ '}}' }})'
+          description: >-
+            Score d'audit {{ '{{' }} $value | printf "%.3f" {{ '}}' }}. Sous 0,96 le nœud
+            est disqualifié par ce satellite, sans retour possible. Cause
+            habituelle : pièces illisibles ou manquantes (disque défaillant,
+            montage perdu, permissions). `docker logs storagenode | grep -i audit`.
+
+      - alert: StorjOnlineScoreLow
+        expr: >-
+          storj_satellite_online_score < {{ prom_alert_storj_online_score }}
+          and on (instance, satellite) storj_satellite_disqualified == 0
+        for: 30m
+        keep_firing_for: {{ prom_alert_flap_grace }}
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Score de disponibilité Storj bas sur {{ '{{' }} $labels.instance {{ '}}' }} ({{ '{{' }} $labels.satellite {{ '}}' }})'
+          description: >-
+            Score de disponibilité {{ '{{' }} $value | printf "%.3f" {{ '}}' }}. Sous 0,6 le
+            nœud est suspendu et ne reçoit plus de données.
+
+      - alert: StorjSuspensionScoreLow
+        expr: >-
+          storj_satellite_suspension_score < {{ prom_alert_storj_suspension_score }}
+          and on (instance, satellite) storj_satellite_disqualified == 0
+        for: 30m
+        keep_firing_for: {{ prom_alert_flap_grace }}
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Score de suspension Storj bas sur {{ '{{' }} $labels.instance {{ '}}' }} ({{ '{{' }} $labels.satellite {{ '}}' }})'
+          description: >-
+            Score de suspension {{ '{{' }} $value | printf "%.3f" {{ '}}' }} : le nœud répond
+            mal aux audits. Sous 0,6 il est suspendu.
+
+      - alert: StorjDisqualified
+        expr: storj_satellite_disqualified == 1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Nœud Storj {{ '{{' }} $labels.instance {{ '}}' }} disqualifié par {{ '{{' }} $labels.satellite {{ '}}' }}'
+          description: >-
+            Disqualification : irréversible pour ce satellite. Lire le journal
+            du nœud pour établir la cause avant de relancer quoi que ce soit
+            (un nouveau nœud exige une nouvelle identité).
+
+      - alert: StorjSuspended
+        expr: storj_satellite_suspended == 1
+        for: 30m
+        keep_firing_for: {{ prom_alert_flap_grace }}
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Nœud Storj {{ '{{' }} $labels.instance {{ '}}' }} suspendu par {{ '{{' }} $labels.satellite {{ '}}' }}'
+          description: >-
+            Le satellite n'envoie plus de données. Corriger la cause (audits
+            échoués ou nœud hors ligne) : la suspension se lève d'elle-même
+            quand les scores remontent.
+
+      # QUIC (UDP) mal configuré : le nœud reste utilisable en TCP, mais la
+      # documentation Storj le met parmi les prérequis et le satellite le teste.
+      - alert: StorjQuicMisconfigured
+        expr: storj_quic_ok == 0
+        for: 6h
+        keep_firing_for: {{ prom_alert_flap_grace }}
+        labels:
+          severity: warning
+        annotations:
+          summary: 'QUIC non opérationnel sur le nœud Storj {{ '{{' }} $labels.instance {{ '}}' }}'
+          description: >-
+            Le port UDP 28967 n'est pas joignable (redirection UDP
+            absente du routeur, ou tampon UDP du noyau trop petit : voir
+            net.core.rmem_max).
+
+      - alert: StorjNodeOutdated
+        expr: storj_up_to_date == 0
+        for: 24h
+        keep_firing_for: {{ prom_alert_flap_grace }}
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Nœud Storj {{ '{{' }} $labels.instance {{ '}}' }} en retard sur la version autorisée'
+          description: >-
+            Le nœud ne s'est pas mis à jour seul depuis plus de 24 h. Le
+            conteneur peut avoir été figé ; `docker logs storagenode` et, au
+            besoin, `deploy-storj.yml -e storj_image_pull=true`.
+
+      # Le nœud occupe plus que l'allocation annoncée : le disque se remplit au
+      # delà de ce que l'opérateur a prévu (corbeille non purgée, allocation
+      # réduite après coup).
+      - alert: StorjDiskOverused
+        expr: storj_disk_overused_bytes > 0
+        for: 1h
+        keep_firing_for: {{ prom_alert_flap_grace }}
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Nœud Storj {{ '{{' }} $labels.instance {{ '}}' }} au-delà de son allocation'
+          description: >-
+            Dépassement de {{ '{{' }} $value | humanize1024 {{ '}}' }}o. Relever
+            `storj_storage_size` ou libérer de l'espace avant que le disque
+            hôte ne sature (alerte `DiskSpaceLow` du groupe `resources`).
+
+      # Le contrôle que ce fichier réclame partout : si le collecteur cesse
+      # d'émettre alors que le conteneur tourne, toutes les règles ci-dessus
+      # deviennent décoratives sans que rien ne le dise.
+      - alert: StorjMetricsMissing
+        expr: >-
+          service_up{service="storj"} == 1
+          unless on (instance) storj_disk_used_bytes
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Plus de métriques Storj sur {{ '{{' }} $labels.instance {{ '}}' }}'
+          description: >-
+            Le conteneur tourne mais le tableau de bord ne répond plus au
+            collecteur : les alertes Storj ne voient plus rien. Chercher
+            svcprobe_metrics_error{service="storj"} et rejouer
+            `./play.sh <parc> deploy-storj.yml --limit <hôte> --tags monitoring`.
+
+{% endif %}
 {% if 'searxng' in prom_alert_groups %}
 
   # ── Relai SearXNG ──────────────────────────────────────────────────────────

@@ -1,0 +1,78 @@
+---
+# Paramètres obligatoires, vérifiés AVANT toute action : la génération de
+# l'identité dure des heures, échouer sur un e-mail manquant après elle serait
+# une punition.
+
+# Les paramètres indispensables sont contrôlés EN BLOC : tous les
+# problèmes sont listés d'un coup, avec une ligne de commande complète en
+# exemple, plutôt qu'un échec par paramètre à corriger un à un.
+- name: List the invalid or missing parameters
+  ansible.builtin.set_fact:
+    storj_problems: >-
+      {{ ([] if storj_email | string is match('^[^@ ]+@[^@ ]+$') else
+           ['storj_email : manquant ou invalide (« ' ~ storj_email ~ ' ») — adresse e-mail où Storj envoie ses alertes'])
+       + ([] if storj_storage_size | string is match('^[0-9]+([.][0-9]+)?(B|KB|MB|GB|TB|PB|KiB|MiB|GiB|TiB|PiB)$') else
+           ['storj_storage_size : manquant ou invalide (« ' ~ storj_storage_size ~ ' ») — nombre + unité collée, 500GB minimum (500GB, 2TB, 1.5TiB)'])
+       + ([] if storj_wallet_address | string is match('^0x[0-9a-fA-F]{40}$') else
+           ['storj_wallet_address : manquant ou invalide (« ' ~ storj_wallet_address ~ ' ») — adresse Ethereum de VOTRE wallet : 0x + 40 hexadécimaux']) }}
+
+- name: Fail with the list of problems and a complete example
+  ansible.builtin.fail:
+    msg: |-
+      Paramètres du nœud Storj manquants ou invalides :
+      {% for problem in storj_problems %}
+        - {{ problem }}
+      {% endfor %}
+
+      Ligne de commande complète (à adapter) :
+        ./play.sh <parc> deploy-storj.yml --limit {{ inventory_hostname }} \
+          -e storj_email=vous@exemple.org \
+          -e storj_storage_size=2TB \
+          -e storj_wallet_address=0x1234567890abcdef1234567890abcdef12345678
+  when: storj_problems | length > 0
+
+- name: Compute the allocation in bytes
+  ansible.builtin.set_fact:
+    storj_storage_bytes: >-
+      {{ (storj_storage_size | regex_search('^[0-9]+([.][0-9]+)?') | float
+          * {'B': 1, 'KB': 1000, 'MB': 1000000, 'GB': 1000000000, 'TB': 1000000000000,
+             'PB': 1000000000000000, 'KiB': 1024, 'MiB': 1048576, 'GiB': 1073741824,
+             'TiB': 1099511627776, 'PiB': 1125899906842624}[storj_storage_size | regex_search('[A-Za-z]+$')]) | int }}
+
+- name: Require the 500 GB minimum
+  ansible.builtin.assert:
+    that: storj_storage_bytes | int >= 500000000000
+    fail_msg: "Storj n'accepte pas de nœud de moins de 500 GB (demandé : {{ storj_storage_size }})."
+    quiet: true
+
+# Variable supprimée : le paiement L2 zkSync a pris fin le 01/09/2026, Storj paie
+# en USDC sur Ethereum L1 seulement. Une ancienne ligne de commande qui la passe
+# encore reste valable : elle est ignorée, mais on le dit.
+- name: Warn about the removed storj_wallet_features variable
+  ansible.builtin.debug:
+    msg: >-
+      `storj_wallet_features` n'existe plus et est ignorée : Storj paie en USDC
+      sur Ethereum L1 uniquement (zkSync arrêté le 01/09/2026). Retirer ce
+      paramètre de la ligne de commande.
+  when: storj_wallet_features is defined
+
+- name: Check that the identity source holds the four files
+  ansible.builtin.stat:
+    path: "{{ storj_identity_source }}/{{ item }}"
+  loop: [ca.cert, ca.key, identity.cert, identity.key]
+  delegate_to: localhost
+  become: false
+  register: storj_source_files
+  when: storj_identity_source | length > 0
+
+- name: Fail on an incomplete identity source
+  ansible.builtin.assert:
+    that: storj_source_files.results | map(attribute='stat.exists') | min
+    fail_msg: "`storj_identity_source` ({{ storj_identity_source }}) doit contenir ca.cert, ca.key, identity.cert et identity.key."
+    quiet: true
+  when: storj_identity_source | length > 0
+
+- name: Check that the storage directory is a mount point
+  ansible.builtin.command: "mountpoint -q {{ storj_storage_dir }}"
+  changed_when: false
+  when: storj_require_mount | bool

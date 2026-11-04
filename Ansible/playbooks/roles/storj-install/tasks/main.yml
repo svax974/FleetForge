@@ -1,0 +1,56 @@
+---
+# Déploiement complet d'un nœud Storj : contrôles, identité, conteneur, attente
+# du tableau de bord, rapatriement des clés.
+# Rejouable : une identité existante n'est jamais regénérée.
+#
+#   ./play.sh <parc> deploy-storj.yml --limit <hôte> \
+#       -e storj_email=<adresse> -e storj_storage_size=2TB \
+#       -e storj_wallet_address=0x…   # paiements en USDC, Ethereum L1
+
+- name: Validate the parameters
+  ansible.builtin.include_tasks: validate.yml
+
+- name: Prepare the identity
+  ansible.builtin.include_tasks: identity.yml
+
+- name: Deploy the node container
+  ansible.builtin.include_tasks: node.yml
+
+# Le tableau de bord n'existe qu'une fois le nœud démarré : c'est aussi la
+# première preuve que l'identité est acceptée et que le port est bien publié.
+- name: Wait for the node dashboard
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ storj_dashboard_port }}/api/sno/"
+    return_content: true
+    timeout: 10
+  register: storj_dashboard
+  retries: 18
+  delay: 10
+  until: storj_dashboard.status | default(0) == 200
+  changed_when: false
+
+# Le nœud publie l'adresse de paiement qu'il a RÉELLEMENT prise en compte : on la
+# compare à celle demandée (une adresse mal transmise ne se verrait autrement
+# qu'au premier versement).
+- name: Check the payout address the node reports
+  ansible.builtin.assert:
+    that: storj_dashboard.json.wallet | default('') | lower == storj_wallet_address | lower
+    fail_msg: >-
+      Le nœud ne rapporte pas l'adresse de paiement demandée. Demandé :
+      {{ storj_wallet_address }}. Rapporté : {{ storj_dashboard.json.wallet | default('?') }}.
+      `docker inspect {{ storj_container }}` (variable WALLET) et config.yaml.
+    quiet: true
+
+# Dernier rapatriement, nœud démarré : ajoute l'identifiant du nœud et
+# l'adresse déclarée à info.json.
+- name: Back up the identity and record the node information
+  ansible.builtin.include_tasks: keys.yml
+
+- name: Summary
+  ansible.builtin.debug:
+    msg:
+      - "Nœud Storj {{ storj_dashboard.json.nodeID }} démarré (version {{ storj_dashboard.json.version | default('?') }})."
+      - "Paiements : USDC sur Ethereum L1, adresse {{ storj_dashboard.json.wallet | default(storj_wallet_address) }} (un seuil minimum par wallet s'applique, voir storj.dev/node/payouts)."
+      - "Adresse annoncée : {{ storj_external_address }} — TCP et UDP {{ storj_port }} doivent être joignables depuis Internet (redirection routeur derrière un NAT)."
+      - "Tableau de bord : http://127.0.0.1:{{ storj_dashboard_port }} sur l'hôte (ssh -L {{ storj_dashboard_port }}:127.0.0.1:{{ storj_dashboard_port }} pour l'ouvrir)."
+      - "Un nouveau nœud est « vetting » plusieurs semaines avant de recevoir un volume normal de données."

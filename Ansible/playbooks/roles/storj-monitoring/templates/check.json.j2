@@ -1,0 +1,13 @@
+{
+  "service": "storj",
+  "up": {"kind": "docker", "container": "{{ storjmon_container }}"},
+  "extra_checks": [
+    {"name": "dashboard", "kind": "http", "url": "{{ storjmon_url }}/api/sno/", "status": [200], "timeout": 10},
+    {"name": "p2p", "kind": "tcp", "host": "127.0.0.1", "port": {{ storjmon_p2p_port }}}
+  ],
+  "metrics_command": [
+    "{{ svcprobe_lib_dir }}/storj-metrics.sh",
+    "{{ storjmon_url }}"
+  ],
+  "metrics_timeout": 40
+}

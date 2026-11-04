@@ -1,0 +1,37 @@
+---
+# Désinstalle le nœud Storj en CONSERVANT l'identité, la configuration et les
+# données : arrête et supprime les conteneurs, et retire la sonde svcprobe.
+# Redéployer ensuite (deploy-storj.yml) reprend le même nœud, sans nouvelle
+# identité ni nouvelle période de vérification.
+#
+# Pas de cible Prometheus à retirer : la supervision passe par la cible
+# `svcprobe` de l'HÔTE, qui reste (autres services). Une sonde laissée en place
+# publierait en revanche `service_up 0` indéfiniment (CLAUDE.md § 2) : elle part
+# avec le service.
+#
+# Pour tout supprimer, identité comprise : `purge-storj.yml`.
+# Les DONNÉES doivent être récupérées ou abandonnées consciemment : un nœud
+# arrêté plus de quelques heures dégrade son score de disponibilité, et au-delà
+# de quelques semaines les satellites le disqualifient.
+
+- name: Remove the Storj probe and its collector
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ svcprobe_checks_dir | default('/etc/svcprobe/checks.d') }}/storj.json"
+    - "{{ svcprobe_lib_dir | default('/usr/local/lib/svcprobe') }}/storj-metrics.sh"
+  become: true
+  tags: [monitoring]
+
+# Watchtower d'abord : sinon il recrée le nœud qu'on vient d'arrêter.
+# `stop_timeout` : l'arrêt gracieux du nœud peut durer jusqu'à 5 minutes.
+- name: Remove the Storj containers
+  community.docker.docker_container:
+    name: "{{ item }}"
+    state: absent
+    stop_timeout: "{{ storj_stop_timeout | default(300) }}"
+  loop:
+    - "{{ storj_watchtower_container | default('storj-watchtower') }}"
+    - "{{ storj_container | default('storagenode') }}"
+    - "{{ storj_container | default('storagenode') }}-setup"

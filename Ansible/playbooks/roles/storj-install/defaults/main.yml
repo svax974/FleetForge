@@ -1,0 +1,99 @@
+---
+# Nœud de stockage Storj (https://storj.dev/node) — image Docker officielle
+# `storjlabs/storagenode`, un nœud par hôte.
+#
+# Ce que Storj demande RÉELLEMENT à l'opérateur (vérifié sur storj.dev le
+# 04/11/2026) : une identité (paire CA + certificat, preuve de travail de
+# difficulté 36), une adresse de paiement, un e-mail, une adresse externe
+# joignable et une taille de stockage. Le jeton d'autorisation (`identity
+# authorize`) n'existe plus : « Identities can now be used without authorizing
+# them manually ».
+#
+# Ce que le nœud NE possède PAS : une clé de paiement. Les paiements vont à
+# l'adresse `storj_wallet_address` fournie par l'opérateur ; le nœud ne fait que
+# la publier. Ce qui, en revanche, ne se remplace pas, c'est l'IDENTITÉ
+# (`ca.key`, `identity.key`) : la perdre, c'est perdre le nœud, son historique de
+# réputation et le montant retenu (held amount). `export-storj-keys.yml` la
+# rapatrie sur le poste de contrôle, et `storj-purge` le fait avant toute
+# suppression.
+
+# ── Paramètres OBLIGATOIRES (group_vars / host_vars / -e) ──────────────────
+# Taille allouée au nœud : `500GB`, `2TB`, `1.5TiB`… (unité collée au nombre,
+# 500GB minimum). Storj conseille de garder ~10 % du disque libre au-delà.
+storj_storage_size: ""
+# E-mail d'alerte Storj (nœud hors ligne, version obsolète…). Pas un secret.
+storj_email: ""
+
+# ── Paiement (OBLIGATOIRE) ─────────────────────────────────────────────────
+# Adresse Ethereum (0x + 40 hexadécimaux) qui reçoit les paiements. C'est VOTRE
+# wallet : sa clé privée n'est jamais demandée ni créée par ce rôle.
+# Depuis octobre 2026 Storj paie en USDC (stablecoin, 1 USDC = 1 USD) sur Ethereum
+# L1 uniquement, ERC-20 — plus en jeton STORJ (storj.dev/node/payouts). Le
+# paiement L2 zkSync a pris fin le 01/09/2026 : plus aucune option de réseau à
+# choisir, l'ancienne `storj_wallet_features` n'existe plus. Points de la doc :
+#   • seuil de paiement par wallet (frais de transaction L1 ≤ 25 % du montant :
+#     souvent de l'ordre de 50 USD) — en deçà, le montant est reporté au mois
+#     suivant ;
+#   • le même wallet doit servir tous vos nœuds (conditions Storj) ;
+#   • résident de l'UE : une adresse de plateforme d'échange n'est plus utilisable
+#     (MiCA, confirmation de l'origine des fonds).
+storj_wallet_address: ""
+
+# ── Réseau ─────────────────────────────────────────────────────────────────
+# Port P2P, TCP ET UDP (QUIC). Public par nature : les satellites et les clients
+# s'y connectent directement. À rediriger dans le routeur derrière un NAT.
+storj_port: 28967
+# Adresse annoncée aux satellites. Un nom DDNS est préférable à une IP si
+# celle-ci peut changer.
+storj_external_address: "{{ ansible_host }}:{{ storj_port }}"
+# Tableau de bord : AUCUNE authentification, donc publié sur 127.0.0.1 seul
+# (`storj-security` le vérifie).
+storj_dashboard_port: 14002
+
+# ── Disque ─────────────────────────────────────────────────────────────────
+storj_base_dir: /var/lib/storj
+storj_identity_dir: "{{ storj_base_dir }}/identity"
+# Contient `config.yaml`, la base d'état et `storage/` (les pièces). Idéalement
+# un disque DÉDIÉ, monté statiquement par /etc/fstab : un nœud qui écrit sur le
+# disque système parce que le montage a sauté est disqualifié en quelques audits.
+storj_storage_dir: "{{ storj_base_dir }}/storage"
+# true : refuse de déployer si `storj_storage_dir` n'est pas un point de montage.
+storj_require_mount: false
+# Ignore le contrôle d'espace libre du premier déploiement.
+storj_skip_space_check: false
+
+# ── Identité ───────────────────────────────────────────────────────────────
+# Vide : générée sur l'hôte (`identity create storagenode`). Peut durer des
+# heures, voire des jours selon la puissance et la chance. Déployer d'abord sur
+# une machine rapide, puis rapatrier (export-storj-keys.yml), est possible.
+# Un dossier du POSTE DE CONTRÔLE contenant ca.cert, ca.key, identity.cert et
+# identity.key : envoyé tel quel, sans génération (restauration, migration).
+# JAMAIS la même identité sur deux nœuds actifs : disqualification.
+storj_identity_source: ""
+storj_identity_timeout: 172800   # secondes (48 h) avant d'abandonner la génération
+storj_identity_url: "https://github.com/storj/storj/releases/latest/download/identity_linux_{{ storj_identity_arch }}.zip"
+storj_identity_arch: >-
+  {{ {'x86_64': 'amd64', 'aarch64': 'arm64', 'armv7l': 'arm', 'armv6l': 'arm'}.get(ansible_architecture, 'amd64') }}
+
+# ── Conteneur ──────────────────────────────────────────────────────────────
+storj_container: storagenode
+storj_image: storjlabs/storagenode
+storj_image_tag: latest
+# Arrêt gracieux : le nœud finit ses écritures avant de s'éteindre (docs Storj).
+storj_stop_timeout: 300
+
+# ── Poste de contrôle ──────────────────────────────────────────────────────
+# Destination des identités rapatriées (0700/0600, hors dépôt).
+storj_keys_dir: "{{ lookup('env', 'HOME') }}/.config/fleetforge/storj"
+
+# Mises à jour : le binaire du nœud se met à jour SEUL dans le conteneur
+# (depuis v1.52.2). Watchtower — l'image `storjlabs/watchtower`, recommandée par
+# la documentation Storj — ne sert qu'à renouveler l'IMAGE de base. Il monte le
+# socket Docker (équivalent root sur l'hôte) : à désactiver (`false`) si on
+# préfère rejouer `deploy-storj.yml -e storj_image_pull=true` à la main. Il ne
+# surveille que le conteneur `storj_container`.
+storj_watchtower: true
+storj_watchtower_container: storj-watchtower
+storj_watchtower_image: storjlabs/watchtower:latest
+# true : re-télécharge l'image `storj_image_tag` même si elle est déjà présente.
+storj_image_pull: false

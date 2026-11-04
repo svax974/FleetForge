@@ -1,0 +1,160 @@
+---
+# Nœud de stockage Storj (https://storj.dev/node) — déploiement COMPLET :
+# identité, conteneur, supervision, règles d'alerte, et rapatriement de
+# l'identité sur le poste de contrôle.
+#
+#   ./play.sh <parc> deploy-storj.yml --limit <hôte> \
+#       -e storj_email=<adresse> -e storj_storage_size=2TB \
+#       -e storj_wallet_address=0x1234567890abcdef1234567890abcdef12345678
+#   ./play.sh <parc> deploy-storj.yml --limit <hôte> --tags monitoring   # sonde seule
+#
+# Hôtes visés : ceux dont `ansible_roles` contient `storj` (les applications
+# l'inscrivent avant le run ; avec `play.sh`, l'ajouter à l'entrée d'inventaire).
+# Les autres hôtes du `--limit` sont ignorés, et un run où AUCUN hôte ne la porte
+# échoue au lieu de réussir sans rien faire. Un nœud Storj par machine.
+#
+# ── Paramètres OBLIGATOIRES ────────────────────────────────────────────────
+#   storj_email           e-mail d'alerte Storj
+#   storj_storage_size    espace alloué, 500GB minimum : 2TB, 1.5TiB…
+#   storj_wallet_address  adresse Ethereum de VOTRE wallet. Storj paie en USDC sur
+#                         Ethereum L1 (plus en STORJ, plus de zkSync depuis le
+#                         01/09/2026) : rien d'autre à choisir.
+# Un paramètre manquant ou invalide fait échouer le play AVANT la génération de
+# l'identité, avec des exemples de valeurs. Facultatifs : storj_external_address
+# (nom DDNS plutôt qu'IP), storj_storage_dir (disque dédié), storj_identity_source
+# (identité déjà générée ailleurs) — voir roles/storj-install/defaults/main.yml.
+#
+# ── Identité et ce qui est « récupérable » ─────────────────────────────────
+# Storj n'a plus de jeton d'autorisation : le nœud génère son identité (preuve de
+# travail, de quelques heures à plusieurs jours — le play attend) et c'est tout.
+# Le nœud ne détient AUCUNE clé de paiement : la clé de `storj_wallet_address` est
+# la vôtre, ni demandée ni créée ici. Rapatriés dans
+# ~/.config/fleetforge/storj/<hôte>/ :
+#   identity/ca.key, identity.key   clés du NŒUD — sans elles, nœud, réputation
+#                                   et montant retenu sont perdus (SECRET, 0600)
+#   identity/*.cert, info.json      certificats, identifiant du nœud, adresse
+# Rejouer uniquement la récupération : export-storj-keys.yml.
+#
+# ── Réseau ─────────────────────────────────────────────────────────────────
+# 28967 TCP ET UDP doivent être joignables depuis Internet (redirection du routeur
+# derrière un NAT — hors Ansible). Public par nature : voir storj-security.
+#
+# ── Règles d'alerte ────────────────────────────────────────────────────────
+# Le groupe `storj` doit figurer dans `prom_alert_groups` du parc (group_vars) :
+# sinon le play échoue AVANT l'identité, qui dure des heures. Les règles sont
+# chargées sur la supervision même avec `--limit <hôte>` (délégation).
+#   ./play.sh <parc> deploy-storj.yml --limit <hôte> --tags alerts   # règles seules
+
+# ── Sélection des hôtes ────────────────────────────────────────────────────
+# `group_by` plutôt qu'un garde dans chaque play : `meta: end_host` ne vaut que
+# pour le play en cours.
+- name: Sélection des hôtes de la famille storj
+  hosts: all
+  gather_facts: false
+  tags: [always]
+  tasks:
+    - name: Group the hosts that carry the storj family
+      ansible.builtin.group_by:
+        key: "storj_node_{{ 'yes' if 'storj' in (ansible_roles | default([])) else 'no' }}"
+
+    - name: Fail when no host carries the storj family
+      ansible.builtin.assert:
+        that: groups['storj_node_yes'] | default([]) | length > 0
+        fail_msg: >-
+          Aucun hôte ne porte la famille `storj` dans `ansible_roles` (inventaire).
+          L'ajouter à l'entrée de la machine, ou déployer depuis l'application,
+          qui l'inscrit avant le run.
+      run_once: true
+
+    - name: Fail when the alert group is not enabled for this parc
+      ansible.builtin.assert:
+        that: "'storj' in prom_alert_groups"
+        fail_msg: >-
+          `storj` absent de `prom_alert_groups` (group_vars du parc) : les
+          alertes de disqualification, d'audit et de joignabilité ne seraient PAS
+          chargées. L'ajouter AVANT de déployer — l'identité prend des heures.
+      run_once: true
+      when: groups['storj_node_yes'] | default([]) | length > 0
+
+# ── Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ───────────────────────
+- name: Contrôle préalable
+  hosts: storj_node_yes
+  remote_user: "{{ remote_username }}"
+  roles:
+    - role: host-preflight
+      preflight_require_docker: true
+
+# Génération de l'identité (longue), image, conteneur, tableau de bord, clés.
+- name: Installation du nœud Storj
+  hosts: storj_node_yes
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - storj-install
+
+# Vérifie l'exposition RÉELLE (tableau de bord sur 127.0.0.1, P2P publié en TCP
+# et UDP, rien dans DOCKER-USER pour le bloquer) — ne pose aucune règle.
+- name: Contrôle d'exposition
+  hosts: storj_node_yes
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - storj-security
+
+# ── Supervision (OBLIGATOIRE, voir CLAUDE.md) ──────────────────────────────
+- name: Supervision du nœud
+  hosts: storj_node_yes
+  remote_user: "{{ remote_username }}"
+  roles:
+    - storj-monitoring
+
+# Joué DEPUIS le nœud avec `delegate_to` vers la supervision, et non par un play
+# `hosts: prometheus1:monitor` : `--limit <hôte>` exclurait ce dernier, et les
+# alertes ne seraient jamais chargées — sans erreur, donc sans que rien ne le dise.
+# Une seule fois par run (premier hôte). `prom_alerts_target` aiguille aussi le
+# handler de rechargement du rôle.
+- name: Règles d'alerte Storj
+  hosts: storj_node_yes
+  remote_user: "{{ remote_username }}"
+  tags: [alerts, monitoring]
+  vars:
+    prom_alerts_target: "{{ prometheus_host }}"
+  tasks:
+    - name: Fail when the alert group is not enabled for this parc
+      ansible.builtin.assert:
+        that: "'storj' in prom_alert_groups"
+        fail_msg: "`storj` absent de `prom_alert_groups` (group_vars du parc) : règles non chargées."
+      run_once: true
+
+    - name: Load the alert rules on the Prometheus host
+      ansible.builtin.include_role:
+        name: prometheus-alerts-update
+        apply:
+          delegate_to: "{{ prometheus_host }}"
+          become: true
+          tags: [alerts, monitoring]
+      when: inventory_hostname == groups['storj_node_yes'] | first
+      tags: [alerts, monitoring]
+
+# ── Rappel final ───────────────────────────────────────────────────────────
+# Dernier message du playbook : c'est celui que l'opérateur lit. Ne redit aucun
+# secret, seulement où ils sont.
+- name: Rappel des identifiants
+  hosts: storj_node_yes
+  remote_user: "{{ remote_username }}"
+  gather_facts: false
+  tags: [always]
+  tasks:
+    - name: Check the local identity backup
+      ansible.builtin.stat:
+        path: "{{ lookup('env', 'HOME') }}/.config/fleetforge/storj/{{ inventory_hostname }}/identity/identity.key"
+      delegate_to: localhost
+      become: false
+      register: storj_final_identity
+
+    - name: Say where the credentials are
+      ansible.builtin.debug:
+        msg:
+          - "Identité du nœud : {{ (lookup('env', 'HOME') ~ '/.config/fleetforge/storj/' ~ inventory_hostname ~ '/identity/') if storj_final_identity.stat.exists else 'NON rapatriée — rejouer export-storj-keys.yml' }}"
+          - "Paiements : adresse {{ storj_wallet_address }} (votre wallet, sa clé n'est ni sur le nœud ni sur ce poste)."
+          - "L'identité est à sauvegarder hors de ce poste, puis à ne jamais copier dans le dépôt."

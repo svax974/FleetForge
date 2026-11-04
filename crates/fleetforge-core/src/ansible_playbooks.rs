@@ -278,6 +278,10 @@ fn get_playbook_metadata(name: &str) -> (String, String) {
         "deploy-theta-edge-sweep" => ("Sweep TFuel Theta Edge".into(), "Déploie un cron Node.js qui transfère le TFuel de chaque noeud au-delà d'un seuil vers theta_wallet.".into()),
         "remove-theta-edge-sweep" => ("Suppression sweep TFuel".into(), "Supprime le cron et les scripts de sweep TFuel.".into()),
         "purge-theta-edge-sweep" => ("Purge sweep TFuel".into(), "Supprime le sweep TFuel et son journal.".into()),
+        "deploy-storj" => ("Déploiement noeud Storj".into(), "Déploiement complet d'un nœud Storj : identité (générée sur l'hôte, sans jeton d'autorisation), conteneur officiel, contrôle d'exposition, supervision, règles d'alerte (groupe `storj`) et rapatriement des clés sur le poste (~/.config/fleetforge/storj/<hôte>/). Variables obligatoires : storj_email, storj_storage_size (≥ 500GB), storj_wallet_address (paiements en USDC sur Ethereum L1). Hôtes : famille `storj`. 28967 TCP+UDP à rediriger derrière un NAT.".into()),
+        "remove-storj" => ("Suppression noeud Storj".into(), "Arrête et supprime les conteneurs Storj et la sonde svcprobe ; identité, configuration et données conservées (un redéploiement reprend le même nœud). --limit obligatoire.".into()),
+        "purge-storj" => ("Purge noeud Storj".into(), "Rapatrie l'identité sur le poste puis supprime le nœud, son identité, sa configuration et toutes les données stockées. Exige -e confirm=yes. --limit obligatoire.".into()),
+        "export-storj-keys" => ("Export identité Storj".into(), "Rapatrie sur le poste (~/.config/fleetforge/storj/<hôte>/, 0600) l'identité du nœud (ca.key et identity.key : sans elles, nœud et montant retenu perdus) et un info.json (identifiant, adresse de paiement). Le nœud ne détient aucune clé de paiement.".into()),
         "deploy-mtbridge" => ("Déploiement MTBridge".into(), "Installe MTBridge sur les hôtes Windows (groupe mtbridges) et enregistre la target Prometheus sur le monitor. Variables : mtbridge_github_token (vault), mtbridge_api_key (vault, optionnel), app_port (inventaire, défaut 5005).".into()),
         "remove-mtbridge" => ("Suppression MTBridge".into(), "Arrête la tâche planifiée MTBridge et retire la target Prometheus (données préservées).".into()),
         "purge-mtbridge" => ("Purge MTBridge".into(), "Supprime complètement MTBridge : tâche planifiée, répertoire d'installation, données MT5, règles firewall et target Prometheus.".into()),
@@ -324,7 +328,7 @@ fn categorize(name: &str) -> String {
         "VPN".to_string()
     } else if name.contains("mail") {
         "Mail".to_string()
-    } else if name.contains("rpcbtc") || name.contains("btc") || name.contains("astar") || name.contains("theta") {
+    } else if name.contains("rpcbtc") || name.contains("btc") || name.contains("astar") || name.contains("theta") || name.contains("storj") {
         "Blockchain".to_string()
     } else if name.contains("mtbridge") {
         "Trading".to_string()

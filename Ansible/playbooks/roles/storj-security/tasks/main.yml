@@ -1,0 +1,65 @@
+---
+# Contrôle d'exposition du nœud Storj : ne pose aucune règle (voir defaults),
+# VÉRIFIE l'état réel — ce que `docker port` et `iptables` disent, pas ce que
+# l'inventaire croit.
+
+# Avant Docker 28, un port publié sur 127.0.0.1 restait joignable depuis le
+# segment L2 de l'hôte en routant vers l'IP du conteneur (même constat que
+# theta-edge-security). Le tableau de bord n'a pas d'authentification.
+- name: Read the Docker engine version
+  ansible.builtin.command: docker version --format '{{ "{{" }}.Server.Version{{ "}}" }}'
+  register: storjsec_docker_version
+  changed_when: false
+
+- name: Require Docker >= 28 (127.0.0.1 publications enforced)
+  ansible.builtin.assert:
+    that: storjsec_docker_version.stdout is version('28.0', '>=')
+    fail_msg: >-
+      Docker {{ storjsec_docker_version.stdout }} : le tableau de bord publié sur
+      127.0.0.1 reste joignable depuis le segment L2 de l'hôte. Mettre Docker à
+      jour (≥ 28.0).
+    quiet: true
+
+- name: List the published ports of the Storj node
+  ansible.builtin.command: "docker port {{ storjsec_container }}"
+  register: storjsec_ports
+  changed_when: false
+
+# `docker port` affiche `14002/tcp -> 127.0.0.1:14002` ; toute autre adresse
+# (0.0.0.0, [::]) est une publication sur Internet.
+- name: Fail when the dashboard is published beyond loopback
+  ansible.builtin.assert:
+    that: >-
+      storjsec_ports.stdout_lines | select('match', '^14002/')
+      | reject('search', '-> 127[.]0[.]0[.]1:') | list | length == 0
+    fail_msg: "Tableau de bord Storj publié hors 127.0.0.1 : {{ storjsec_ports.stdout_lines | select('match', '^14002/') | list }}"
+    quiet: true
+
+- name: Fail when the P2P port is not published on TCP and UDP
+  ansible.builtin.assert:
+    that:
+      - storjsec_ports.stdout_lines | select('match', '^28967/tcp') | list | length > 0
+      - storjsec_ports.stdout_lines | select('match', '^28967/udp') | list | length > 0
+    fail_msg: "28967/tcp et 28967/udp doivent tous deux être publiés (QUIC passe en UDP) : {{ storjsec_ports.stdout_lines }}"
+    quiet: true
+
+- name: Read the DOCKER-USER chain
+  ansible.builtin.command: iptables -S DOCKER-USER
+  register: storjsec_docker_user
+  changed_when: false
+  failed_when: false
+  become: true
+
+# DOCKER-USER voit les paquets APRÈS le DNAT de Docker : `--dport` y désigne le
+# port du CONTENEUR (28967, constant), pas le port publié `storj_port`.
+# Un DROP/REJECT sur ce port interne couperait le nœud des satellites.
+- name: Fail when DOCKER-USER blocks the P2P port
+  ansible.builtin.assert:
+    that: >-
+      storjsec_docker_user.stdout_lines | select('search', '--dport 28967( |$)')
+      | select('search', '-j (DROP|REJECT)') | list | length == 0
+    fail_msg: >-
+      DOCKER-USER bloque le port interne 28967 du nœud : le nœud Storj ne serait plus
+      joignable des satellites. Retirer l'entrée correspondante de
+      `docker_ports_rules` (host_vars de la machine) — ce port est public par nature.
+    quiet: true

@@ -1,0 +1,67 @@
+---
+# Tout ce que fait `storj-remove`, PLUS la destruction de l'identité, de la
+# configuration et de toutes les pièces stockées.
+#
+# Une identité détruite, c'est le nœud, sa réputation et le montant retenu
+# (held amount) perdus pour toujours — l'identité ne se recrée pas, elle se
+# regénère et repart de zéro. D'où, dans l'ordre :
+#   1. refus sans `-e confirm=yes` ;
+#   2. rapatriement de l'identité sur le poste de contrôle (`storj-install`,
+#      keys.yml) — un échec interrompt la purge AVANT toute suppression ;
+#   3. seulement ensuite, la suppression.
+#
+#   ./play.sh <parc> purge-storj.yml --limit <hôte> -e confirm=yes
+
+- name: Refuse to purge without explicit confirmation
+  ansible.builtin.assert:
+    that: confirm | default('') == 'yes'
+    fail_msg: >-
+      La purge détruit l'identité du nœud Storj et toutes les données stockées.
+      Relancer avec -e confirm=yes (l'identité sera d'abord rapatriée sur ce poste).
+
+- name: Back up the identity to the control machine first
+  ansible.builtin.include_role:
+    name: storj-install
+    tasks_from: keys
+    public: true   # expose les defaults (chemins) aux tâches suivantes
+
+- name: Run the remove role
+  ansible.builtin.include_role:
+    name: storj-remove
+
+# Les chemins viennent des defaults d'`storj-install`, jamais recopiés.
+# Le CONTENU est supprimé, puis le dossier s'il le permet : un disque de
+# données monté sur `storj_storage_dir` est un point de montage, que `rm -rf`
+# ne peut pas retirer (« Device or resource busy ») après avoir tout effacé.
+- name: Remove the node data, configuration and identity
+  ansible.builtin.shell: |
+    for d in "{{ storj_storage_dir }}" "{{ storj_identity_dir }}" "{{ storj_base_dir }}/identity-gen"; do
+      [ -d "$d" ] || continue
+      find "$d" -mindepth 1 -delete
+      rmdir "$d" 2>/dev/null || true
+    done
+  changed_when: true
+
+# `storj_base_dir` n'est retiré que s'il est vide : il peut être le point de
+# montage d'un disque (ou le parent d'un autre dossier), à ne pas emporter.
+- name: Remove the base directory when empty
+  ansible.builtin.command: "rmdir {{ storj_base_dir }}"
+  register: storj_rmdir
+  changed_when: storj_rmdir.rc == 0
+  failed_when: false
+
+- name: Remove the Storj images
+  community.docker.docker_image:
+    name: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ storj_image }}:{{ storj_image_tag }}"
+    - "{{ storj_watchtower_image }}"
+  failed_when: false
+
+- name: Where the identity went
+  ansible.builtin.debug:
+    msg: >-
+      Identité sauvegardée dans {{ storj_keys_dir }}/{{ inventory_hostname }}/identity/
+      (ca.key et identity.key : SECRETES). Le wallet de paiement n'est pas concerné :
+      c'est le vôtre, il n'a jamais été sur le nœud.

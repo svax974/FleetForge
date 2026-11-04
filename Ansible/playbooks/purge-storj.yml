@@ -1,0 +1,25 @@
+---
+# Supprime le nœud Storj, son identité ET toutes les données stockées.
+#
+#   ./play.sh <parc> purge-storj.yml --limit <hôte> -e confirm=yes
+#
+# L'identité est D'ABORD rapatriée sur le poste de contrôle
+# (~/.config/fleetforge/storj/<hôte>/identity/) : un échec de rapatriement
+# interrompt la purge avant toute suppression. Elle ne ressuscite pas le nœud
+# pour autant — rejouée sur une autre machine, elle ne vaut que si l'ancien nœud
+# est bien arrêté et que le délai de l'absence reste raisonnable.
+#
+# `--limit` est OBLIGATOIRE. Refus sans `-e confirm=yes`.
+
+- name: Purge du nœud Storj (identité et données comprises)
+  hosts: all
+  remote_user: "{{ remote_username }}"
+  become: true
+  pre_tasks:
+    - name: Refuse to run without an explicit --limit
+      ansible.builtin.assert:
+        that: ansible_limit is defined
+        fail_msg: "Sans --limit, tous les hôtes de l'inventaire seraient visés. Ajouter --limit <hôte>."
+      run_once: true
+  roles:
+    - storj-purge

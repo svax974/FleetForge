@@ -1,0 +1,116 @@
+---
+# Conteneur du nœud, d'après la procédure officielle (storj.dev, « Storage
+# Node ») : `SETUP=true` une fois pour créer config.yaml, puis le conteneur
+# durable. Le conteneur tourne sous l'uid de `remote_username` (pas root), comme
+# l'impose la documentation (`--user $(id -u):$(id -g)`).
+
+- name: Read the uid and gid of the service account
+  ansible.builtin.command: "id -{{ item }} {{ remote_username }}"
+  loop: [u, g]
+  register: storj_ids
+  changed_when: false
+
+- name: Remember the container user
+  ansible.builtin.set_fact:
+    storj_container_user: "{{ storj_ids.results[0].stdout }}:{{ storj_ids.results[1].stdout }}"
+
+- name: Create the storage directory
+  ansible.builtin.file:
+    path: "{{ storj_storage_dir }}"
+    state: directory
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: "0750"
+
+- name: Look for an existing node configuration
+  ansible.builtin.stat:
+    path: "{{ storj_storage_dir }}/config.yaml"
+  register: storj_config
+
+# Le disque doit pouvoir accueillir l'allocation annoncée, plus ~10 % de marge
+# (recommandation Storj). Contrôlé au PREMIER déploiement seulement : ensuite le
+# nœud occupe déjà une partie de l'espace, et un rejeu ne doit pas échouer sur
+# ses propres données.
+- name: Read the free space of the storage filesystem
+  ansible.builtin.command: "df -B1 --output=avail {{ storj_storage_dir }}"
+  register: storj_df
+  changed_when: false
+  when: not (storj_config.stat.exists or storj_skip_space_check | bool)
+
+- name: Require room for the allocation plus a 10 % margin
+  ansible.builtin.assert:
+    that: (storj_df.stdout_lines | last | trim | int) >= (storj_storage_bytes | int * 11 // 10)
+    fail_msg: >-
+      {{ storj_storage_dir }} n'offre que {{ (storj_df.stdout_lines | last | trim | int) // 1000000000 }} Go
+      libres pour {{ storj_storage_size }} alloués (+10 % de marge). Réduire
+      `storj_storage_size`, monter un disque plus grand sur ce chemin, ou
+      `-e storj_skip_space_check=true`.
+    quiet: true
+  when: not (storj_config.stat.exists or storj_skip_space_check | bool)
+
+- name: Pull the Storj image
+  community.docker.docker_image:
+    name: "{{ storj_image }}"
+    tag: "{{ storj_image_tag }}"
+    source: pull
+    force_source: "{{ storj_image_pull | bool }}"
+
+# Échoue si le nœud est déjà configuré — d'où le garde-fou sur config.yaml.
+- name: Run the one-time node setup
+  community.docker.docker_container:
+    name: "{{ storj_container }}-setup"
+    image: "{{ storj_image }}:{{ storj_image_tag }}"
+    env:
+      SETUP: "true"
+    user: "{{ storj_container_user }}"
+    mounts:
+      - { type: bind, source: "{{ storj_identity_dir }}", target: /app/identity }
+      - { type: bind, source: "{{ storj_storage_dir }}", target: /app/config }
+    detach: false
+    cleanup: true
+    state: started
+  register: storj_setup
+  when: not storj_config.stat.exists
+
+- name: Fail when the setup container did not exit cleanly
+  ansible.builtin.assert:
+    that: storj_setup.status | default(0) | int == 0
+    fail_msg: "Le conteneur SETUP a échoué (code {{ storj_setup.status | default('?') }}) : voir `docker logs` ou rejouer en retirant {{ storj_storage_dir }}/config.yaml si présent."
+    quiet: true
+  when: not storj_config.stat.exists
+
+- name: Run the Storj node
+  community.docker.docker_container:
+    name: "{{ storj_container }}"
+    image: "{{ storj_image }}:{{ storj_image_tag }}"
+    state: started
+    restart_policy: unless-stopped
+    stop_timeout: "{{ storj_stop_timeout }}"
+    user: "{{ storj_container_user }}"
+    published_ports:
+      - "{{ storj_port }}:28967/tcp"
+      - "{{ storj_port }}:28967/udp"
+      - "127.0.0.1:{{ storj_dashboard_port }}:14002"
+    env:
+      WALLET: "{{ storj_wallet_address }}"
+      EMAIL: "{{ storj_email }}"
+      ADDRESS: "{{ storj_external_address }}"
+      STORAGE: "{{ storj_storage_size }}"
+    mounts:
+      - { type: bind, source: "{{ storj_identity_dir }}", target: /app/identity }
+      - { type: bind, source: "{{ storj_storage_dir }}", target: /app/config }
+
+# Le conteneur écoute sur 28967 EN INTERNE : `-p <storj_port>:28967` ne fait que
+# traduire le port publié. DOCKER-USER (CLAUDE.md) verrait 28967 — c'est
+# pourquoi ce port n'y est pas filtré : public par nature, voir storj-security.
+
+- name: Run Watchtower for the image
+  community.docker.docker_container:
+    name: "{{ storj_watchtower_container }}"
+    image: "{{ storj_watchtower_image }}"
+    state: started
+    restart_policy: always
+    command: ["{{ storj_container }}", "{{ storj_watchtower_container }}", "--stop-timeout", "300s"]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+  when: storj_watchtower | bool

@@ -1,0 +1,15 @@
+---
+# Exposition d'un nœud Storj — décision d'EXPOSITION assumée (CLAUDE.md § 1) :
+#
+#   • 28967 TCP + UDP (QUIC) : PUBLIC par nature. Les satellites et les clients
+#     de stockage s'y connectent directement depuis Internet ; aucun proxy, aucune
+#     liste blanche ne peut s'y interposer. Même logique que le P2P d'Astar.
+#     Pas de règle ufw : le port est publié par Docker (`-p`), dont le DNAT passe
+#     en amont d'ufw — une règle ufw y serait décorative. Il n'est pas non plus
+#     filtré dans DOCKER-USER, et ce rôle vérifie qu'aucune règle ne le bloque
+#     par erreur (un `docker_ports_rules` de la machine qui le viserait couperait
+#     le nœud des satellites sans autre symptôme qu'un score de disponibilité qui
+#     s'effondre).
+#   • 14002 (tableau de bord) : AUCUNE authentification, il révèle adresse de
+#     paiement, identifiant du nœud et statistiques. Publié sur 127.0.0.1 seul.
+storjsec_container: "{{ storj_container | default('storagenode') }}"

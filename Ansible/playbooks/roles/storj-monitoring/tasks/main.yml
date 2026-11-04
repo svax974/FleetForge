@@ -1,0 +1,76 @@
+---
+# Sonde `service_up{service="storj"}` + collecteur de l'API du tableau de bord
+# (scores d'audit, dernier ping des satellites, espace, QUIC). La cible
+# Prometheus et l'ouverture ufw du scrape (9110) sont celles de `svcprobe-install`
+# : un exporter par HÔTE, pas par service. Tout est tagué `monitoring` — réarmer
+# la supervision ne doit jamais imposer de rejouer l'installation (et sa
+# génération d'identité).
+#   ./play.sh <parc> deploy-storj.yml --limit <hôte> --tags monitoring
+
+- name: Fail early when no Prometheus host is defined
+  ansible.builtin.assert:
+    that:
+      - prometheus_host is defined
+      - prometheus_host in hostvars
+    fail_msg: >-
+      `prometheus_host` n'est pas défini ou absent de l'inventaire. Un nœud
+      que personne ne scrape n'est pas supervisé.
+  tags: [monitoring]
+
+# `public: true` : sans lui `svcprobe_checks_dir` et `svcprobe_lib_dir` restent
+# confinés au rôle inclus (voir freellm-monitoring).
+- name: Ensure the shared probe is installed
+  ansible.builtin.include_role:
+    name: svcprobe-install
+    public: true
+  tags: [monitoring]
+
+- name: Install the collector dependencies
+  ansible.builtin.apt:
+    name: [curl, jq]
+    state: present
+  become: true
+  tags: [monitoring]
+
+- name: Deploy the Storj metric collector
+  ansible.builtin.copy:
+    src: storj-metrics.sh
+    dest: "{{ svcprobe_lib_dir }}/storj-metrics.sh"
+    owner: root
+    group: root
+    mode: "0755"
+  become: true
+  tags: [monitoring]
+
+- name: Deploy the Storj probe
+  ansible.builtin.template:
+    src: check.json.j2
+    dest: "{{ svcprobe_checks_dir }}/storj.json"
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+  tags: [monitoring]
+
+# Contrôle : la série de référence des alertes doit exister RÉELLEMENT, faute de
+# quoi le groupe `storj` resterait `inactive` avec `health=ok` — indiscernable
+# d'un nœud en bonne santé. svcprobe met 10 s en cache : attendre l'expiration
+# avant de conclure.
+- name: Read the probe exposition
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ svcprobe_listen_port }}/metrics"
+    return_content: true
+  register: storjmon_probe
+  retries: 12
+  delay: 10
+  until: >-
+    storjmon_probe.status | default(0) == 200
+    and 'storj_disk_used_bytes' in (storjmon_probe.content | default(''))
+  changed_when: false
+  check_mode: false
+  tags: [monitoring]
+
+- name: Report the probe result
+  ansible.builtin.debug:
+    msg: "{{ storjmon_probe.content.split('\n') | select('match', '^(service_up|storj_(last_pinged|disk_used|quic|up_to_date|satellites))') | list }}"
+  tags: [monitoring]

@@ -1,0 +1,18 @@
+---
+# Supervision du nœud Storj.
+#
+# Cas 3 de la convention `-monitoring` (CLAUDE.md § 2) : Storj n'expose pas de
+# Prometheus exploitable (son port de debug sort des métriques « monkit »
+# internes, sans les scores d'audit), mais son tableau de bord local publie une
+# API JSON complète (`/api/sno/`, `/api/sno/satellite/<id>`). Une sonde
+# `svcprobe` suffit donc : `service_up{service="storj"}` + un collecteur qui
+# traduit cette API. Pas d'exporter dédié, donc AUCUN port à ajouter au
+# registre : svcprobe écoute déjà sur 9110 (la cible `svcprobe` de l'hôte est
+# enregistrée par `svcprobe-install` / `host-preflight`).
+#
+# Repris de `storj-install`, jamais recopiés : ce sont les valeurs réellement
+# publiées par le conteneur.
+storjmon_container: "{{ storj_container | default('storagenode') }}"
+storjmon_dashboard_port: "{{ storj_dashboard_port | default(14002) }}"
+storjmon_p2p_port: "{{ storj_port | default(28967) }}"
+storjmon_url: "http://127.0.0.1:{{ storjmon_dashboard_port }}"

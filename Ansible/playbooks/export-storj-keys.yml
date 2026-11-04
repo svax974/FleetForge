@@ -1,0 +1,29 @@
+---
+# Rapatrie sur ce poste l'identité du nœud Storj, sans rien redéployer.
+#
+#   ./play.sh <parc> export-storj-keys.yml --limit <hôte>
+#
+# Destination : ~/.config/fleetforge/storj/<hôte>/
+#   identity/ca.key, identity.key    clés du NŒUD — SECRETES : sans elles le nœud,
+#                                    sa réputation et le montant retenu sont perdus
+#   identity/ca.cert, identity.cert  certificats (publics)
+#   info.json                        identifiant du nœud, adresse de paiement
+#                                    enregistrée, réseau de paiement
+# Fichiers 0600, hors dépôt. Rien de secret n'est affiché.
+#
+# Le nœud ne détient aucune clé de paiement : les paiements vont à l'adresse de votre
+# propre wallet (`storj_wallet_address`), dont la clé n'est jamais ici.
+
+- name: Export de l'identité Storj
+  hosts: all
+  remote_user: "{{ remote_username }}"
+  become: true
+  tasks:
+    - name: Skip hosts that do not carry the storj family
+      ansible.builtin.meta: end_host
+      when: "'storj' not in ansible_roles | default([])"
+
+    - name: Export the identity
+      ansible.builtin.include_role:
+        name: storj-install
+        tasks_from: keys

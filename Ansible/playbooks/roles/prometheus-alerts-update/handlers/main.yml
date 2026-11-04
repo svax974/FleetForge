@@ -1,5 +1,11 @@
 ---
+# `prom_alerts_target` : hôte Prometheus quand le rôle est joué DEPUIS un autre
+# hôte avec `delegate_to` (deploy-storj.yml, que `--limit <hôte>` prive du play
+# `hosts: prometheus1:monitor`). Un handler ne suit PAS le `delegate_to` de la
+# tâche qui le notifie : sans ceci il redémarrerait un conteneur `prometheus`
+# sur l'hôte du service, pas sur la supervision.
 - name: reload prometheus
+  delegate_to: "{{ prom_alerts_target | default(inventory_hostname) }}"
   community.docker.docker_container:
     name: prometheus
     state: started

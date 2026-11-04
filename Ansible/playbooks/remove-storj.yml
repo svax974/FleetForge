@@ -1,0 +1,29 @@
+---
+# Désinstalle le nœud Storj en conservant l'identité, la configuration et les
+# données : redéployer (deploy-storj.yml) reprend le MÊME nœud.
+#
+#   ./play.sh <parc> remove-storj.yml --limit <hôte>
+#
+# Retire les conteneurs (Watchtower compris) et la sonde svcprobe — laissée en
+# place, elle publierait `service_up 0` et ferait sonner `ServiceDown` sur un
+# service volontairement désinstallé.
+#
+# Un nœud arrêté longtemps est pénalisé (score de disponibilité, puis
+# suspension, puis disqualification) : ne pas laisser un nœud « supprimé »
+# traîner quelques semaines avant de le redéployer. Tout supprimer :
+# purge-storj.yml.
+#
+# `--limit` est OBLIGATOIRE.
+
+- name: Désinstallation du nœud Storj (identité et données conservées)
+  hosts: all
+  remote_user: "{{ remote_username }}"
+  become: true
+  pre_tasks:
+    - name: Refuse to run without an explicit --limit
+      ansible.builtin.assert:
+        that: ansible_limit is defined
+        fail_msg: "Sans --limit, tous les hôtes de l'inventaire seraient visés. Ajouter --limit <hôte>."
+      run_once: true
+  roles:
+    - storj-remove

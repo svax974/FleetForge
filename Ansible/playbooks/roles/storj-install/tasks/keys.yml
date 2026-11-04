@@ -1,0 +1,85 @@
+---
+# Rapatrie sur le POSTE de contrôle l'identité du nœud, dans
+# `storj_keys_dir/<hôte>/identity/` (0700/0600), plus `info.json` (adresses et
+# état public). Rejoué par `export-storj-keys.yml`, par `storj-purge` AVANT toute
+# suppression et par `identity.yml` dès la génération.
+#
+#   ca.key, identity.key        clés privées du nœud — SECRETES. Sans elles le
+#                               nœud, sa réputation et le held amount sont
+#                               perdus ; avec elles, n'importe qui peut se faire
+#                               passer pour lui. À sauvegarder hors de ce poste.
+#   ca.cert, identity.cert      certificats (publics).
+#
+# Ce ne sont PAS des clés de paiement : les paiements (USDC) vont à `storj_wallet_address`,
+# l'adresse de VOTRE wallet, dont la clé privée n'est jamais sur le nœud ni sur
+# ce poste. Rien de secret n'est affiché.
+
+- name: Look for the identity on the host
+  ansible.builtin.stat:
+    path: "{{ storj_identity_dir }}/{{ item }}"
+  loop: [ca.cert, ca.key, identity.cert, identity.key]
+  register: storj_export_files
+
+- name: Fail when there is no identity to export
+  ansible.builtin.assert:
+    that: storj_export_files.results | map(attribute='stat.exists') | min
+    fail_msg: "Aucune identité complète dans {{ storj_identity_dir }} : rien à rapatrier."
+    quiet: true
+
+- name: Create the local identity directory
+  ansible.builtin.file:
+    path: "{{ storj_keys_dir }}/{{ inventory_hostname }}/identity"
+    state: directory
+    mode: "0700"
+  delegate_to: localhost
+  become: false
+
+- name: Fetch the identity files
+  ansible.builtin.fetch:
+    src: "{{ storj_identity_dir }}/{{ item }}"
+    dest: "{{ storj_keys_dir }}/{{ inventory_hostname }}/identity/{{ item }}"
+    flat: true
+  loop: [ca.cert, ca.key, identity.cert, identity.key]
+  no_log: true
+
+- name: Restrict the local copies
+  ansible.builtin.file:
+    path: "{{ storj_keys_dir }}/{{ inventory_hostname }}/identity/{{ item }}"
+    mode: "0600"
+  loop: [ca.cert, ca.key, identity.cert, identity.key]
+  delegate_to: localhost
+  become: false
+
+# Un nœud arrêté n'empêche pas l'export : l'identité est lue sur disque. Seuls
+# l'identifiant et l'adresse déclarée au réseau manquent alors dans info.json.
+- name: Ask the node for its ID and registered wallet
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ storj_dashboard_port }}/api/sno/"
+    return_content: true
+    timeout: 10
+  register: storj_export_dashboard
+  failed_when: false
+
+- name: Save the public information
+  ansible.builtin.copy:
+    content: "{{ storj_export_info | to_nice_json }}\n"
+    dest: "{{ storj_keys_dir }}/{{ inventory_hostname }}/info.json"
+    mode: "0600"
+  delegate_to: localhost
+  become: false
+  vars:
+    storj_export_node: "{{ storj_export_dashboard.json | default({}) }}"
+    storj_export_info:
+      host: "{{ inventory_hostname }}"
+      node_id: "{{ storj_export_node.nodeID | default('') }}"
+      payout_wallet: "{{ storj_export_node.wallet | default('') }}"
+      external_address: "{{ storj_external_address }}"
+      identity_dir: "{{ storj_identity_dir }}"
+
+- name: Where the keys were saved
+  ansible.builtin.debug:
+    msg:
+      - "Identité : {{ storj_keys_dir }}/{{ inventory_hostname }}/identity/ (ca.key et identity.key : SECRETES, 0600)."
+      - "Nœud     : {{ (storj_export_dashboard.json | default({})).nodeID | default('inconnu — nœud arrêté ?') }}"
+      - "Paiement : {{ (storj_export_dashboard.json | default({})).wallet | default('inconnu — nœud arrêté ?') }}"
+      - "Aucune clé de paiement n'est détenue par le nœud : les paiements vont à l'adresse de votre propre wallet."
