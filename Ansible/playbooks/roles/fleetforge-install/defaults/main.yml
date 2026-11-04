@@ -215,7 +215,21 @@ ff_ansible_sync: true
 #      puis la clé publique comme « deploy key » (sans accès en écriture) et la
 #      clé PRIVÉE au vault du parc :
 #        ansible-vault encrypt_string --stdin-name ff_ansible_deploy_key < /tmp/ff-deploy-key
-#   2. `ff_ansible_repo` (URL ssh du dépôt) dans le group_vars du parc.
+#   2. `ff_ansible_repo` (URL ssh du dépôt) dans le group_vars du parc. Tout
+#      fournisseur git convient, la seule exigence est ssh :
+#        git@github.com:<org>/<dépôt>.git
+#        git@gitlab.com:<groupe>/<sous-groupe>/<dépôt>.git
+#        ssh://git@gitlab.exemple.org:2222/<groupe>/<dépôt>.git   (auto-hébergé, port propre)
+#      GitLab : « deploy key » en lecture seule (Réglages > Dépôt > Clés de
+#      déploiement, SANS « Grant write permissions »), activée sur le projet.
+#   3. la clé d'hôte du dépôt, `ff_ansible_known_hosts` : ce que la machine
+#      acceptera, et RIEN d'autre (StrictHostKeyChecking=yes). Lignes
+#      known_hosts, à relever sur le fournisseur et à comparer à l'empreinte qu'il
+#      publie ; port autre que 22 : `[hôte]:port ssh-ed25519 AAAA…`. Exemple
+#      GitHub (valeur publiée par GitHub, à remplacer par celle de VOTRE hôte) :
+#        ff_ansible_known_hosts: |
+#          github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl
+#      Vide : `ssh-keyscan` au premier passage (confiance au premier contact).
 # Bascule :  ./play.sh <parc> deploy-fleetforge.yml --tags ansible \
 #              -e ff_ansible_source=git   (ou à demeure dans le group_vars)
 # Retour à rsync : `ff_ansible_source: rsync` ; les trois dossiers ci-dessus
@@ -224,11 +238,17 @@ ff_ansible_source: rsync
 ff_ansible_repo: ""
 ff_ansible_branch: main
 ff_ansible_deploy_key: ""
-# Nom d'hôte du dépôt, pour `ssh-keyscan` quand `ff_ansible_known_hosts` est vide
-# (déduit de `ff_ansible_repo` sinon). Une confiance au premier passage ;
-# renseigner `ff_ansible_known_hosts` (lignes known_hosts) pour la lever.
+# Hôte et port du dépôt, pour `ssh-keyscan` quand `ff_ansible_known_hosts` est
+# vide : déduits de `ff_ansible_repo` (le port de `ssh://hôte:port/…`) si vides
+# ici. Seule la valeur de `ff_ansible_known_hosts` lève la confiance au premier
+# contact.
 ff_ansible_git_host: ""
+ff_ansible_git_port: ""
+# Lignes known_hosts du dépôt (voir 3. ci-dessus).
 ff_ansible_known_hosts: ""
+# URL ssh : `ssh://…` ou la forme courte `utilisateur@hôte:chemin`. Elle impose
+# la clé de déploiement.
+ff_ansible_ssh_url_regex: '^(ssh://|[A-Za-z0-9._-]+@[^/:]+:)'
 ff_ansible_git_dir: "{{ ff_dir }}/ansible-git"
 ff_ansible_data_dir: "{{ ff_dir }}/ansible-data"
 ff_ansible_trees_dir: "{{ ff_dir }}/ansible-trees"

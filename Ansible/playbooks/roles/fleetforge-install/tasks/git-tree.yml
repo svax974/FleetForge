@@ -18,7 +18,7 @@
       - "'..' not in ff_ansible_branch"
       - ff_ansible_cache_keep | int >= 1
       - ff_ansible_cache_keep | int <= 50
-      - ff_ansible_repo is not match('^(ssh://|git@)') or ff_ansible_deploy_key | length > 0
+      - not (ff_ansible_repo is match(ff_ansible_ssh_url_regex)) or ff_ansible_deploy_key | length > 0
     fail_msg: >-
       ff_ansible_source: git exige `ff_ansible_repo` (URL du dépôt), une
       `ff_ansible_branch` valide (défaut main), `ff_ansible_cache_keep` entre 1
@@ -58,11 +58,35 @@
   when: ff_ansible_deploy_key | length == 0
   tags: [code, ansible, secrets]
 
-- name: Name the host of the repository
+# Tout dépôt ssh convient — GitHub, gitlab.com, GitLab auto-hébergé, port
+# personnalisé : `ssh://git@gitlab.exemple.org:2222/groupe/dépôt.git` ou la forme
+# courte `git@gitlab.exemple.org:groupe/dépôt.git`. Hôte et port se déduisent de
+# l'URL (`ff_ansible_git_host` / `ff_ansible_git_port` les forcent) ; ils ne
+# servent qu'au `ssh-keyscan` du premier passage, la connexion de git lisant
+# l'URL elle-même.
+- name: Name the host and the port of the repository
   ansible.builtin.set_fact:
     ff_ansible_repo_host: >-
       {{ ff_ansible_git_host if ff_ansible_git_host | length > 0
-         else ff_ansible_repo.split('@')[-1].split(':')[0].split('/')[0] }}
+         else (ff_ansible_repo | regex_replace('^ssh://(?:[^@/]+@)?([^:/]+)(?::[0-9]+)?/.*$', '\1')
+               if ff_ansible_repo is match('^ssh://')
+               else ff_ansible_repo | regex_replace('^(?:[^@/:]+@)?([^:/]+):.*$', '\1')) }}
+    ff_ansible_repo_port: >-
+      {{ ff_ansible_git_port | string if ff_ansible_git_port | string | length > 0
+         else (ff_ansible_repo | regex_replace('^ssh://(?:[^@/]+@)?[^:/]+(?::([0-9]+))?/.*$', '\1')
+               if ff_ansible_repo is match('^ssh://') else '') }}
+  when: ff_ansible_deploy_key | length > 0
+  tags: [code, ansible]
+
+- name: Check the port of the repository
+  ansible.builtin.assert:
+    that:
+      - ff_ansible_repo_host is match('^[A-Za-z0-9.-]+$')
+      - ff_ansible_repo_port == '' or (ff_ansible_repo_port is match('^[0-9]{1,5}$') and ff_ansible_repo_port | int < 65536)
+    fail_msg: >-
+      Hôte ou port du dépôt illisible dans `ff_ansible_repo` ({{ ff_ansible_repo_host | default('?') }}:{{ ff_ansible_repo_port | default('') }}) :
+      forme `ssh://git@hôte[:port]/chemin.git` ou `git@hôte:chemin.git` (voir RUNNING.md).
+    quiet: true
   when: ff_ansible_deploy_key | length > 0
   tags: [code, ansible]
 
@@ -80,7 +104,7 @@
 
 - name: Scan the host keys of the repository the first time
   ansible.builtin.shell:
-    cmd: "ssh-keyscan -t ed25519,ecdsa,rsa -H {{ ff_ansible_repo_host | quote }} > {{ ff_ansible_known_hosts_file | quote }}"
+    cmd: "ssh-keyscan -t ed25519,ecdsa,rsa {{ ('-p ' ~ ff_ansible_repo_port) if ff_ansible_repo_port | length > 0 else '' }} -H {{ ff_ansible_repo_host | quote }} > {{ ff_ansible_known_hosts_file | quote }}"
     creates: "{{ ff_ansible_known_hosts_file }}"
   become: true
   become_user: "{{ ff_user }}"

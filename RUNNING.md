@@ -236,9 +236,10 @@ Mise en place (une fois par parc) :
    ansible-vault encrypt_string --stdin-name ff_ansible_deploy_key < /tmp/ff-deploy-key   # -> group_vars du parc
    ```
    la clé publique est déclarée « deploy key » du dépôt, sans droit d'écriture ;
-2. dans `playbooks/group_vars/<parc>.yml` : `ff_ansible_repo: git@github.com:<org>/<dépôt>.git`
-   (et au besoin `ff_ansible_branch`, `ff_ansible_cache_keep`, `ff_ansible_git_host`,
-   `ff_ansible_known_hosts`) ;
+2. dans `playbooks/group_vars/<parc>.yml` : `ff_ansible_repo` (URL **ssh** du dépôt, quel que
+   soit le fournisseur : voir [GitHub, GitLab, dépôt auto-hébergé](#github-gitlab-dépôt-auto-hébergé))
+   et au besoin `ff_ansible_branch`, `ff_ansible_cache_keep`, `ff_ansible_known_hosts`,
+   `ff_ansible_git_host`, `ff_ansible_git_port` ;
 3. `./play.sh <parc> deploy-fleetforge.yml --tags ansible -e ff_ansible_source=git` (ou
    `ff_ansible_source: git` à demeure). Le rôle installe `git`, dépose la clé
    (`~/fleetforge/.ansible-deploy-key`, 0600), épingle les clés d'hôte du dépôt
@@ -273,6 +274,84 @@ Modes d'échec :
 - **état écrit dans l'arbre par un rôle** : un arbre d'exécution est propre à un commit et
   disparaît avec le cache ; ce qu'un rôle déposerait sous `Ansible/` (hors données du parc,
   liées) ne survit pas. Aucun rôle connu ne le fait.
+
+##### GitHub, GitLab, dépôt auto-hébergé
+
+Le mode git ne dépend pas du fournisseur : il lit un dépôt par **ssh** avec une clé de
+déploiement et ne connaît que des branches (`main`, `infra/<parc>/*`). Un commit de
+fusion sur la branche suivie (méthode de fusion « commit de fusion » de GitLab, ou
+`--no-ff`) est un descendant de l'ancienne tête : la tête avance en avance rapide
+comme pour n'importe quel commit. Les fusions « squash » ou « rebase » aussi. Seul un
+historique réécrit (force-push) est refusé (`409 not_fast_forward`).
+
+| Dépôt | `ff_ansible_repo` |
+|---|---|
+| GitHub | `git@github.com:<org>/<dépôt>.git` |
+| gitlab.com | `git@gitlab.com:<groupe>/<sous-groupe>/<dépôt>.git` |
+| GitLab auto-hébergé, port 22 | `git@gitlab.exemple.org:<groupe>/<dépôt>.git` |
+| GitLab auto-hébergé, port propre | `ssh://git@gitlab.exemple.org:2222/<groupe>/<dépôt>.git` |
+
+Clé de déploiement **en lecture seule** sur un projet GitLab :
+
+1. générer la paire (`ssh-keygen`, voir plus haut) ; la clé privée va au vault du parc
+   (`ff_ansible_deploy_key`) ;
+2. projet GitLab → *Settings* → *Repository* → *Deploy keys* → *Add new key* : coller la clé
+   **publique**, **sans** cocher *Grant write permissions* (jamais d'écriture : les
+   correctifs passent par l'API du fournisseur, côté hub) ; si la clé a été créée dans un
+   autre projet ou au niveau de l'instance, l'activer dans l'onglet *Privately accessible
+   deploy keys* du projet ;
+3. rien de plus n'est nécessaire : pas de jeton, et FleetForge n'appelle jamais l'API GitLab
+   (c'est le hub qui le fait, pour les correctifs).
+
+**`known_hosts` épinglé.** La machine n'accepte que la clé d'hôte que tu lui donnes
+(`StrictHostKeyChecking=yes`, fichier posé par le rôle), jamais une clé nouvelle :
+`ff_ansible_known_hosts` est donc la variable à renseigner **pour ton hôte**, au group_vars
+du parc. Relève la ligne sur le fournisseur depuis un poste de confiance et compare son
+empreinte à celle que le fournisseur publie (documentation GitLab pour gitlab.com ; la page
+d'administration ou l'administrateur pour une instance auto-hébergée) :
+
+```sh
+ssh-keyscan -t ed25519 gitlab.exemple.org                 # port 22
+ssh-keyscan -t ed25519 -p 2222 gitlab.exemple.org         # port propre : l'entrée sort en [hôte]:2222
+ssh-keyscan -t ed25519 gitlab.exemple.org | ssh-keygen -lf -   # empreinte à comparer
+```
+
+```yaml
+# group_vars/<parc>.yml — exemple (GitHub : valeur publiée par GitHub, À REMPLACER par celle de
+# ton hôte). Port autre que 22 : la ligne commence par `[hôte]:port`, comme ssh-keyscan l'écrit.
+ff_ansible_known_hosts: |
+  github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl
+  # [gitlab.exemple.org]:2222 ssh-ed25519 AAAA…
+```
+
+Sans `ff_ansible_known_hosts`, le rôle fait un `ssh-keyscan` au premier passage (confiance au
+premier contact, sur l'hôte et le port déduits de l'URL ou forcés par `ff_ansible_git_host` /
+`ff_ansible_git_port`) : acceptable pour un essai, pas pour un parc réel. Clé d'hôte
+changée côté serveur : mettre la variable à jour et rejouer `--tags ansible`.
+
+`sync_tree` récupère la branche suivie et `infra/<parc>/*` par le même `git fetch` d'un
+refspec explicite (`+refs/heads/…:refs/remotes/origin/…`) : rien n'est propre à un
+fournisseur. Un projet GitLab qui supprime la branche source après fusion est géré par
+l'élagage (ci-dessous).
+
+##### Nettoyage des branches orphelines et du cache
+
+`sync_tree` ne retire les références `infra/<parc>/*` disparues du dépôt distant que pour
+le parc de l'appelant et quand il récupère une branche de correctif. FleetForge fait donc
+aussi, **au démarrage puis toutes les heures**, un nettoyage local (journal : « arbre git :
+… orpheline(s) retirée(s) ») :
+
+- il retire les références `refs/remotes/origin/infra/*` (et les branches locales `infra/*`)
+  que `git ls-remote` ne trouve plus sur le dépôt distant : une branche de correctif fusionnée
+  puis supprimée cesse d'être une référence permise (un commit déjà fusionné reste
+  exécutable, il est atteignable de la branche suivie) ;
+- il retire les arbres d'exécution au-delà de `ff_ansible_cache_keep` (la tête et les arbres
+  en cours de run restent) ;
+- il ne télécharge aucun objet : la liste distante n'apporte que des noms, rien d'un autre
+  parc n'entre dans le clone ; si le dépôt est injoignable, aucune référence n'est retirée
+  (le journal le dit : « références infra/* non comparées au dépôt »).
+
+Les objets des branches retirées restent dans le clone jusqu'au prochain `git gc` (automatique).
 
 #### Pilotage réel du parc (décision explicite)
 
