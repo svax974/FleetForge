@@ -39,3 +39,20 @@
   ansible.builtin.file:
     path: /etc/nginx/streams-available
     state: directory
+
+# nginx must come back by itself if a start fails (e.g. transient DNS error at restart)
+- name: Creates nginx systemd drop-in directory
+  ansible.builtin.file:
+    path: /etc/systemd/system/nginx.service.d
+    state: directory
+- name: Auto-restart nginx on failure
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/nginx.service.d/restart.conf
+    content: |
+      [Unit]
+      StartLimitIntervalSec=0
+
+      [Service]
+      Restart=on-failure
+      RestartSec=10
+  notify: reload systemd
