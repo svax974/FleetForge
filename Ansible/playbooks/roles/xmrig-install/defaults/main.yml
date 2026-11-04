@@ -1,0 +1,76 @@
+---
+# Mineur XMR — XMRig (https://xmrig.com), binaire statique OFFICIEL, vérifié par signature GPG.
+#
+# Pourquoi XMRig : Monero se mine avec RandomX, un algorithme conçu pour les PROCESSEURS
+# (pas de gain notable en GPU), et XMRig en est l'implémentation de référence, avec les
+# optimisations qui comptent (pages énormes : « jusqu'à +50 % » selon sa doc, registres MSR).
+# Version 6.26.0 (2026-03-28, support de RandomX v2).
+#
+# ── À lire avant de miner ──────────────────────────────────────────────────
+# • RENTABILITÉ : sur un serveur loué ou un ordinateur ordinaire, les gains sont presque
+#   toujours inférieurs au coût (électricité ou location). À vérifier sur un calculateur
+#   avant de déployer.
+# • HÉBERGEUR : le minage est souvent INTERDIT par les conditions d'un VPS/serveur loué
+#   (CPU saturé, suspension de compte). À contrôler chez le vôtre.
+# • Cette installation n'est PAS furtive : service nommé `xmrig`, processus `xmrig`, rien n'est
+#   caché. Elle ne sert qu'à miner sur VOS machines, pour VOTRE adresse.
+#
+# ── Paramètres OBLIGATOIRES ────────────────────────────────────────────────
+# Adresse Monero qui reçoit les gains : adresse PRIMAIRE de 95 caractères commençant par 4
+# (une sous-adresse, 8…, est refusée par certains pools). Adresse PUBLIQUE : la clé privée
+# (les 25 mots) ne doit JAMAIS figurer ici ni sur ce serveur.
+xmrig_wallet: ""
+# Mode : `pool` (minage mutualisé : gains réguliers, petits) ou `solo` (vers VOTRE nœud
+# monerod synchronisé : un bloc très rare, mais la récompense entière).
+xmrig_mode: ""
+# Mode pool : `hôte:port` du pool (voir la page « getting started » du pool choisi).
+xmrig_pool_url: ""
+xmrig_pool_tls: true
+# Mode solo : RPC de monerod. Par défaut le nœud local (famille `monero`, 127.0.0.1:18081)
+# et sa publication ZMQ (blocs reçus instantanément, 18083).
+xmrig_daemon_url: "127.0.0.1:{{ monero_rpc_port | default(18081) }}"
+xmrig_daemon_zmq_port: "{{ monero_zmq_port | default(18083) }}"
+# Nom de la machine côté pool (champ `pass`).
+xmrig_worker: "{{ inventory_hostname | regex_replace('[^A-Za-z0-9_-]', '-') }}"
+
+# ── Version ────────────────────────────────────────────────────────────────
+# Vide : dernière version publiée sur GitHub. Figée (ex. 6.26.0) : ce numéro exact.
+xmrig_version: ""
+xmrig_release_api: "https://api.github.com/repos/xmrig/xmrig/releases"
+xmrig_download_base: "https://github.com/xmrig/xmrig/releases/download"
+xmrig_gpg_key_url: "https://raw.githubusercontent.com/xmrig/xmrig/master/doc/gpg_keys/xmrig.asc"
+# Empreinte de la clé de signature de XMRig (SHA256SUMS.sig).
+xmrig_gpg_fingerprint: "9AC4CEA8E66E35A5C7CDDC1B446A53638BE94409"
+# L'archive statique officielle pour Linux n'existe qu'en x86_64.
+xmrig_required_arch: x86_64
+
+# ── Réglages de minage ─────────────────────────────────────────────────────
+# Part des threads utilisée (`max-threads-hint`). 50 par défaut : sur une machine qui
+# fait autre chose, 100 la fige. Le service tourne en priorité minimale (`Nice=19`,
+# ordonnancement `idle`) : il cède la place au reste, mais la RAM (~2,5 Go) et la chaleur restent.
+xmrig_max_threads_hint: 50
+# Pourcentage de temps de minage reversé aux développeurs de XMRig (défaut amont : 1).
+xmrig_donate_level: 1
+# Pages énormes : 1280 pages de 2 Mio par nœud NUMA (doc XMRig) = 2,5 Go réservés.
+# 0 : ne rien réserver (hashrate nettement plus bas).
+xmrig_hugepages: 1280
+xmrig_1gb_pages: false
+# Registres MSR (gain de hashrate sur certains CPU Intel/AMD, jusqu'à ~15 %) : exige root et
+# le module noyau `msr`, impossible dans une machine virtuelle. Le service tourne alors en
+# ROOT : à n'activer que sciemment, sur une machine physique à vous.
+xmrig_msr: false
+# `auto`, `fast` (2 Go, rapide) ou `light` (256 Mo, très lent : machines à peu de RAM).
+xmrig_randomx_mode: auto
+
+# ── Compte et chemins ──────────────────────────────────────────────────────
+# Compte système dédié sans accès interactif (le mineur n'a besoin d'aucun fichier de srvc) ;
+# root seulement avec `xmrig_msr`. Exception documentée à « srvc pilote ce qu'il déploie » :
+# srvc administre le service par sudo.
+xmrig_user: xmrig
+xmrig_install_dir: /opt/xmrig
+xmrig_config_dir: /etc/xmrig
+
+# ── API HTTP locale (supervision) ──────────────────────────────────────────
+# Lecture seule (`restricted`), 127.0.0.1 UNIQUEMENT, jeton aléatoire tiré UNE fois sur
+# l'hôte (/etc/xmrig/api-token, 0600) — jamais regénéré ensuite. Utilisée par xmrig-monitoring.
+xmrig_api_port: 18088

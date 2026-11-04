@@ -1,0 +1,30 @@
+---
+- name: List the listening TCP sockets
+  ansible.builtin.command: ss -Hltn
+  register: xmrigsec_sockets
+  changed_when: false
+
+# `ss` affiche `127.0.0.1:18088` ; 0.0.0.0, `*` ou [::] seraient une écoute publique.
+- name: Fail when the miner API listens beyond loopback
+  ansible.builtin.assert:
+    that: >-
+      xmrigsec_sockets.stdout_lines
+      | select('search', ':' ~ xmrigsec_api_port ~ '( |$)')
+      | reject('search', ' (127[.]0[.]0[.]1|[[]::1[]]):')
+      | list | length == 0
+    fail_msg: >-
+      L'API de XMRig ({{ xmrigsec_api_port }}) écoute au-delà de la boucle locale :
+      {{ xmrigsec_sockets.stdout_lines | select('search', ':' ~ xmrigsec_api_port ~ '( |$)') | list }}
+    quiet: true
+
+- name: Read the miner configuration permissions
+  ansible.builtin.stat:
+    path: "{{ xmrig_config_dir | default('/etc/xmrig') }}/config.json"
+  register: xmrigsec_config
+
+# La configuration contient le jeton de l'API : jamais lisible par tous.
+- name: Fail when the configuration is world-readable
+  ansible.builtin.assert:
+    that: xmrigsec_config.stat.mode in ['0640', '0600']
+    fail_msg: "{{ xmrig_config_dir | default('/etc/xmrig') }}/config.json est en mode {{ xmrigsec_config.stat.mode }} : il contient le jeton de l'API."
+    quiet: true

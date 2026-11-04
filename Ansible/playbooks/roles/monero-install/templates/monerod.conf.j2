@@ -1,0 +1,47 @@
+# Généré par monero-install — NE PAS ÉDITER SUR L'HÔTE (type de nœud : {{ monero_type }}).
+# Toutes les options : https://docs.getmonero.org/interacting/monerod-reference/
+
+data-dir={{ monero_data_dir }}/bitmonero
+
+# Pas de recherche de mise à jour par DNS (guide officiel) : la supervision compare
+# la version installée à la dernière version signée (monero-monitoring).
+check-updates=disabled
+enable-dns-blocklist=1
+
+log-file={{ monero_log_dir }}/monero.log
+log-level=0
+# Rotation assurée par logrotate (copytruncate), pas par monerod.
+max-log-file-size=0
+
+p2p-bind-ip=0.0.0.0
+p2p-bind-port={{ monero_p2p_port }}
+{% if monero_no_igd | bool %}
+no-igd=1
+{% endif %}
+in-peers={{ monero_in_peers }}
+out-peers={{ monero_out_peers }}
+
+# RPC complet : boucle locale seulement, sans authentification.
+rpc-bind-ip=127.0.0.1
+rpc-bind-port={{ monero_rpc_port }}
+{% if monero_public_node | bool %}
+# Nœud public : RPC RESTREINT, joignable de partout.
+rpc-restricted-bind-ip=0.0.0.0
+rpc-restricted-bind-port={{ monero_restricted_rpc_port }}
+public-node=1
+{% endif %}
+rpc-ssl=autodetect
+
+{% if monero_zmq_enabled | bool %}
+zmq-pub=tcp://127.0.0.1:{{ monero_zmq_port }}
+{% else %}
+no-zmq=1
+{% endif %}
+{% if monero_type == 'pruned' %}
+
+# Nœud élagué : ~1/3 de l'espace disque.
+prune-blockchain=1
+{% if monero_sync_pruned_blocks | bool %}
+sync-pruned-blocks=1
+{% endif %}
+{% endif %}

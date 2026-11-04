@@ -1,0 +1,8 @@
+---
+# Supervision du mineur — cas 3 de la convention `-monitoring` : l'API HTTP locale de XMRig
+# (`/2/summary`, jeton Bearer) donne hashrate, partages et état de la connexion. Sonde
+# `svcprobe` (9110, déjà au registre) : `service_up{service="xmrig"}` + collecteur. Aucun
+# exporter dédié, donc aucun port à ajouter au registre.
+xmrmon_api_port: "{{ xmrig_api_port | default(18088) }}"
+xmrmon_token_file: "{{ xmrig_config_dir | default('/etc/xmrig') }}/api-token"
+xmrmon_release_url: "{{ xmrig_release_api | default('https://api.github.com/repos/xmrig/xmrig/releases') }}/latest"

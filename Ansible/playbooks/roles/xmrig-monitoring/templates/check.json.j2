@@ -1,0 +1,14 @@
+{
+  "service": "xmrig",
+  "up": {"kind": "systemd", "unit": "xmrig"},
+  "extra_checks": [
+    {"name": "api", "kind": "tcp", "host": "127.0.0.1", "port": {{ xmrmon_api_port }}}
+  ],
+  "metrics_command": [
+    "{{ svcprobe_lib_dir }}/xmrig-metrics.sh",
+    "{{ xmrmon_api_port }}",
+    "{{ xmrmon_token_file }}",
+    "{{ xmrmon_release_url }}"
+  ],
+  "metrics_timeout": 40
+}

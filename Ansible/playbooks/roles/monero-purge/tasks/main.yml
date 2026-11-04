@@ -1,0 +1,32 @@
+---
+# Tout ce que fait `monero-remove`, PLUS la suppression de la chaîne, de la configuration
+# et des journaux. Une chaîne supprimée impose une resynchronisation complète (de
+# quelques jours à plusieurs semaines) : refus sans `-e confirm=yes`.
+#
+# Le démon ne détient aucun secret (pas de portefeuille) : rien à sauvegarder avant.
+# Un portefeuille Monero vit ailleurs (votre poste) et n'est jamais touché.
+
+- name: Refuse to purge without explicit confirmation
+  ansible.builtin.assert:
+    that: confirm | default('') == 'yes'
+    fail_msg: >-
+      La purge supprime la chaîne Monero ({{ monero_data_dir | default('/var/lib/monero') }}) : la
+      resynchroniser prend de quelques jours à plusieurs semaines. Relancer avec -e confirm=yes.
+
+- name: Load the install defaults
+  ansible.builtin.include_vars:
+    file: "{{ role_path }}/../monero-install/defaults/main.yml"
+
+- name: Run the remove role
+  ansible.builtin.include_role:
+    name: monero-remove
+
+# Le CONTENU est supprimé, puis le dossier s'il le permet (disque de données monté ici).
+- name: Remove the blockchain, the configuration and the logs
+  ansible.builtin.shell: |
+    for d in "{{ monero_data_dir }}" "{{ monero_config_dir }}" "{{ monero_log_dir }}"; do
+      [ -d "$d" ] || continue
+      find "$d" -mindepth 1 -delete
+      rmdir "$d" 2>/dev/null || true
+    done
+  changed_when: true

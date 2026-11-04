@@ -1,0 +1,23 @@
+---
+# Le type de nœud est le seul paramètre obligatoire. Contrôlé AVANT tout téléchargement,
+# avec les exemples de ligne de commande quand il manque ou est faux.
+
+- name: Fail with usage when the node type is missing or wrong
+  ansible.builtin.fail:
+    msg: |-
+      Type de nœud Monero manquant ou invalide (« {{ monero_type }} »). Valeurs acceptées :
+
+        full    chaîne complète, ~265 GiB (≥ {{ monero_min_free_gib.full }} GiB libres exigés)
+        pruned  chaîne élaguée, ~105 GiB (≥ {{ monero_min_free_gib.pruned }} GiB libres exigés)
+
+      Exemples :
+        ./play.sh <parc> deploy-monero.yml --limit {{ inventory_hostname }} -e type=pruned
+        ./play.sh <parc> deploy-monero.yml --limit {{ inventory_hostname }} -e type=full
+  when: monero_type | string not in ['full', 'pruned']
+
+- name: Fail on an unsupported architecture
+  ansible.builtin.fail:
+    msg: >-
+      Architecture {{ ansible_architecture }} : le projet Monero ne publie des binaires
+      Linux que pour x86_64, aarch64 et armv7l.
+  when: monero_arch | length == 0

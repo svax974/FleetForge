@@ -1,0 +1,27 @@
+# Généré par monero-install — NE PAS ÉDITER SUR L'HÔTE.
+[Unit]
+Description=Monero Daemon ({{ monero_type }} node)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ monero_user }}
+Group={{ monero_user }}
+ExecStart={{ monero_install_dir }}/current/monerod --config-file {{ monero_config_dir }}/monerod.conf --non-interactive
+Restart=always
+RestartSec=30
+# Laisser au démon le temps de vider sa base à l'arrêt : un kill brutal pendant l'écriture
+# peut corrompre la chaîne et imposer une resynchronisation.
+TimeoutStopSec=300
+LimitNOFILE=65535
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths={{ monero_data_dir }} {{ monero_log_dir }}
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

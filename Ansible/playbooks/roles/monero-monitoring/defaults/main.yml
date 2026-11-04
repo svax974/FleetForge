@@ -1,0 +1,8 @@
+---
+# Supervision du nœud Monero — cas 3 de la convention `-monitoring` : monerod n'expose
+# pas Prometheus, mais son RPC (`get_info`, `get_last_block_header`) dit tout ce qu'il faut.
+# Sonde `svcprobe` (9110, déjà au registre) : `service_up{service="monero"}` + collecteur.
+# Aucun exporter dédié, donc aucun port à ajouter au registre.
+monmon_rpc_port: "{{ monero_rpc_port | default(18081) }}"
+monmon_p2p_port: "{{ monero_p2p_port | default(18080) }}"
+monmon_release_url: "{{ monero_hashes_url | default('https://www.getmonero.org/downloads/hashes.txt') }}"

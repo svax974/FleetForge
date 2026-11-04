@@ -1,0 +1,52 @@
+---
+# Désinstalle le mineur : arrête et supprime le service, le binaire, la configuration et la
+# réservation de pages énormes, ainsi que la sonde svcprobe — laissée en place elle publierait
+# `service_up 0` et ferait sonner `ServiceDown` sur un service volontairement désinstallé
+# (CLAUDE.md § 2). Rien n'est à conserver : le mineur ne détient aucune donnée.
+# L'adresse de gains vit dans l'inventaire / la ligne de commande, jamais sur la machine
+# autrement que dans /etc/xmrig/config.json, supprimé ici.
+
+- name: Remove the XMRig probe and its collector
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ svcprobe_checks_dir | default('/etc/svcprobe/checks.d') }}/xmrig.json"
+    - "{{ svcprobe_lib_dir | default('/usr/local/lib/svcprobe') }}/xmrig-metrics.sh"
+  become: true
+  tags: [monitoring]
+
+- name: Stop and disable the miner
+  ansible.builtin.systemd:
+    name: xmrig
+    state: stopped
+    enabled: false
+  failed_when: false
+
+- name: Remove the unit, the binaries, the configuration and the system settings
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/systemd/system/xmrig.service
+    - "{{ xmrig_install_dir | default('/opt/xmrig') }}"
+    - "{{ xmrig_config_dir | default('/etc/xmrig') }}"
+    - /etc/sysctl.d/99-xmrig.conf
+    - /etc/modules-load.d/xmrig-msr.conf
+
+- name: Reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+# Rend les pages énormes à la machine tout de suite (le fichier sysctl n'est plus lu qu'au
+# prochain démarrage).
+- name: Release the huge pages
+  ansible.builtin.command: sysctl -w vm.nr_hugepages=0
+  changed_when: true
+  failed_when: false
+
+- name: Remove the system account
+  ansible.builtin.user:
+    name: "{{ xmrig_user | default('xmrig') }}"
+    state: absent
+    remove: false

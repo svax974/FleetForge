@@ -1,0 +1,126 @@
+---
+# Mineur XMR : paramètres → contrôles → binaire vérifié → configuration → service.
+#
+#   ./play.sh <parc> deploy-xmrig.yml --limit <hôte> -e xmrig_wallet=<adresse 4…> \
+#       -e xmrig_mode=pool -e xmrig_pool_url=<hôte:port>      # ou -e xmrig_mode=solo
+#
+# Aucun secret : l'adresse est publique, la clé du portefeuille n'est jamais ici. Le seul
+# secret créé est le jeton de l'API locale en lecture seule (/etc/xmrig/api-token, 0600).
+
+- name: Validate the parameters
+  ansible.builtin.include_tasks: validate.yml
+
+- name: Check this host can mine
+  ansible.builtin.include_tasks: checks.yml
+
+- name: Download and verify the official binary
+  ansible.builtin.include_tasks: download.yml
+
+- name: Create the miner system account
+  ansible.builtin.user:
+    name: "{{ xmrig_user }}"
+    system: true
+    shell: /usr/sbin/nologin
+    create_home: false
+
+- name: Create the configuration directory
+  ansible.builtin.file:
+    path: "{{ xmrig_config_dir }}"
+    state: directory
+    owner: root
+    group: "{{ xmrig_user }}"
+    mode: "0750"
+
+# Tiré UNE fois : un jeton qui change à chaque rejeu casserait la supervision sans que rien
+# ne l'explique. Écrit en 0600 root, dans un fichier à part (le collecteur y lit son jeton).
+- name: Create the API token once
+  ansible.builtin.shell: "umask 077 && openssl rand -hex 24 > {{ xmrig_config_dir }}/api-token"
+  args:
+    creates: "{{ xmrig_config_dir }}/api-token"
+
+- name: Restrict the token file
+  ansible.builtin.file:
+    path: "{{ xmrig_config_dir }}/api-token"
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Read the API token
+  ansible.builtin.slurp:
+    src: "{{ xmrig_config_dir }}/api-token"
+  register: xmrig_token_raw
+  no_log: true
+
+- name: Write the miner configuration
+  ansible.builtin.template:
+    src: config.json.j2
+    dest: "{{ xmrig_config_dir }}/config.json"
+    owner: root
+    group: "{{ 'root' if xmrig_msr | bool else xmrig_user }}"
+    mode: "0640"
+  vars:
+    xmrig_api_token: "{{ xmrig_token_raw.content | b64decode | trim }}"
+  no_log: true
+  notify: restart xmrig
+
+- name: Write the service unit
+  ansible.builtin.template:
+    src: xmrig.service.j2
+    dest: /etc/systemd/system/xmrig.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: restart xmrig
+
+# Réservé au noyau : chaque page fait 2 Mio, 1280 pages = 2,5 Go qui ne servent plus à rien d'autre.
+- name: Reserve huge pages
+  ansible.posix.sysctl:
+    name: vm.nr_hugepages
+    value: "{{ xmrig_hugepages }}"
+    sysctl_file: /etc/sysctl.d/99-xmrig.conf
+    sysctl_set: true
+    state: present
+    reload: true
+  when: xmrig_hugepages | int > 0
+
+- name: Load the msr module at boot
+  ansible.builtin.copy:
+    content: "msr\n"
+    dest: /etc/modules-load.d/xmrig-msr.conf
+    owner: root
+    group: root
+    mode: "0644"
+  when: xmrig_msr | bool
+
+- name: Enable and start the miner
+  ansible.builtin.systemd:
+    name: xmrig
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Apply pending restarts
+  ansible.builtin.meta: flush_handlers
+
+# L'API répond dès que le mineur est lancé, avant la première connexion au pool.
+- name: Wait for the miner API
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ xmrig_api_port }}/2/summary"
+    headers:
+      Authorization: "Bearer {{ xmrig_token_raw.content | b64decode | trim }}"
+    return_content: true
+    timeout: 10
+  register: xmrig_summary
+  retries: 12
+  delay: 5
+  until: xmrig_summary.status | default(0) == 200
+  changed_when: false
+  no_log: true
+
+- name: Summary
+  ansible.builtin.debug:
+    msg:
+      - "XMRig {{ xmrig_summary.json.version | default(xmrig_resolved_version) }} lancé sur {{ inventory_hostname }} ({{ xmrig_mode }}, {{ xmrig_max_threads_hint }} % des threads, donation {{ xmrig_donate_level }} %)."
+      - "Gains crédités à {{ xmrig_wallet | truncate(12, True, '…') }}… ({{ 'pool ' ~ xmrig_pool_url if xmrig_mode == 'pool' else 'nœud ' ~ xmrig_daemon_url }})."
+      - "Hashrate et partages : journalctl -u xmrig -f (une ligne par minute), ou la supervision."
+      - "Un gain n'apparaît qu'après le seuil de paiement du pool (solo : à la découverte d'un bloc)."

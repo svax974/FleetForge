@@ -1,0 +1,28 @@
+# Généré par xmrig-install — NE PAS ÉDITER SUR L'HÔTE.
+[Unit]
+Description=XMRig Monero miner ({{ xmrig_mode }})
+After=network-online.target{{ ' monerod.service' if xmrig_mode == 'solo' and 'monero' in (ansible_roles | default([])) else '' }}
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ 'root' if xmrig_msr | bool else xmrig_user }}
+ExecStart={{ xmrig_install_dir }}/current/xmrig --config={{ xmrig_config_dir }}/config.json
+{% if xmrig_msr | bool %}
+# `msr` : accès aux registres du processeur (xmrig_msr).
+ExecStartPre=-/sbin/modprobe msr
+{% endif %}
+Restart=always
+RestartSec=15
+# Le mineur cède la place à tout le reste de la machine.
+Nice=19
+CPUSchedulingPolicy=idle
+LimitMEMLOCK=infinity
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,60 @@
+---
+# Désinstalle monerod en CONSERVANT la chaîne et la configuration : un redéploiement
+# repart de la même base, sans resynchronisation (plusieurs jours).
+#
+# Retire la sonde svcprobe (laissée en place elle publierait `service_up 0` et ferait
+# sonner `ServiceDown` sur un service volontairement désinstallé, CLAUDE.md § 2) et les
+# règles ufw. Pour tout supprimer, chaîne comprise : `purge-monero.yml`.
+
+- name: Remove the Monero probe and its collector
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ svcprobe_checks_dir | default('/etc/svcprobe/checks.d') }}/monero.json"
+    - "{{ svcprobe_lib_dir | default('/usr/local/lib/svcprobe') }}/monero-metrics.sh"
+  become: true
+  tags: [monitoring]
+
+- name: Stop and disable monerod
+  ansible.builtin.systemd:
+    name: monerod
+    state: stopped
+    enabled: false
+  failed_when: false
+
+- name: Remove the service unit and the log rotation
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/systemd/system/monerod.service
+    - /etc/logrotate.d/monerod
+
+- name: Reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+- name: Remove the binaries
+  ansible.builtin.file:
+    path: "{{ monero_install_dir | default('/opt/monero') }}"
+    state: absent
+
+# Les deux règles, quel que soit l'état actuel de `monero_public_node`.
+- name: Remove the Monero firewall rules
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    port: "{{ item | string }}"
+    delete: true
+  loop:
+    - "{{ monero_p2p_port | default(18080) }}"
+    - "{{ monero_restricted_rpc_port | default(18089) }}"
+  failed_when: false
+
+# `remove: no` : le compte possède la chaîne, que ce rôle préserve.
+- name: Remove the system account
+  ansible.builtin.user:
+    name: "{{ monero_user | default('monero') }}"
+    state: absent
+    remove: false

@@ -42,3 +42,24 @@ Retirer ou dater un point une fois fait.
 - **Dépôt privé** : `grass` ajouté à `prom_alert_groups` de web3c et le port 5800 au registre, à
   committer dans `fleetforge-parcs`.
 
+## Nœud Monero et mineur XMRig (ajoutés le 04/11/2026)
+
+- **Premiers déploiements réels à observer** : `deploy-monero.yml` et `deploy-xmrig.yml` n'ont
+  été testés que par morceaux (type et espace disque, extraction des sommes signées, vérification GPG
+  hors machine cible, collecteurs, règles), jamais sur un hôte Linux. À jouer d'abord sur une
+  machine de test : téléchargement + `VALIDSIG`, extraction (`--transform` de GNU tar), démarrage
+  de `monerod` et de `xmrig`, tableau de métriques.
+- **Seuils d'espace** (345 GiB `full`, 140 GiB `pruned`) = tailles officielles du 05/10/2026 × ~1,3.
+  Les tailles évoluent (~2,5 GiB/mois) : relire docs.getmonero.org avant de les garder.
+- **Hard fork Monero** : aucune date confirmée trouvée (feuille de route non contraignante : 2027). Les
+  nœuds ET les mineurs périmés sont rejetés ; les alertes `MoneroOutdated` et `XmrigOutdated` le
+  surveillent. Aucune mise à jour automatique : un rejeu de `deploy-*.yml` installe la dernière version.
+- **Minage** : rentabilité faible sur serveur loué ou machine ordinaire, et minage souvent interdit
+  par les hébergeurs — à vérifier avant tout déploiement hors machine à soi.
+- **`xmrig_msr`** (registres MSR) exécute le mineur en root : à n'activer que sciemment, sur une
+  machine physique.
+- **Aucun secret côté serveur** : le portefeuille (25 mots) reste sur le poste de l'opérateur, seule
+  l'adresse publique est fournie. Le jeton de l'API locale du mineur est tiré une fois sur l'hôte.
+- **Dépôt privé** : ports 18080/18081/18083/18089/18088 au registre, et `monero`/`xmrig` à ajouter
+  à `prom_alert_groups` du parc concerné (le déploiement échoue sinon, volontairement).
+

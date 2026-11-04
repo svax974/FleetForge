@@ -1,0 +1,60 @@
+---
+# Contrôles de capacité et d'environnement, AVANT l'installation.
+
+- name: Require the architecture the official build exists for
+  ansible.builtin.assert:
+    that: ansible_architecture == xmrig_required_arch
+    fail_msg: >-
+      Architecture {{ ansible_architecture }} : XMRig ne publie d'archive statique Linux
+      que pour {{ xmrig_required_arch }}.
+    quiet: true
+
+# ── Mode solo : il faut un nœud synchronisé à joindre ──────────────────────
+- name: Check the daemon RPC for solo mining
+  ansible.builtin.uri:
+    url: "http://{{ xmrig_daemon_url }}/get_info"
+    return_content: true
+    timeout: 10
+  register: xmrig_daemon
+  failed_when: false
+  changed_when: false
+  check_mode: false
+  when: xmrig_mode == 'solo'
+
+- name: Fail without a reachable, synchronized daemon
+  ansible.builtin.assert:
+    that:
+      - xmrig_daemon.status | default(0) == 200
+      - xmrig_daemon.json.synchronized | default(false) | bool
+    fail_msg: >-
+      Minage solo : aucun nœud synchronisé joignable sur {{ xmrig_daemon_url }}
+      ({{ ('hauteur ' ~ xmrig_daemon.json.height ~ ' / cible ' ~ xmrig_daemon.json.target_height) if xmrig_daemon.json is defined and xmrig_daemon.json.height is defined else 'pas de réponse' }}).
+      Déployer d'abord le nœud (deploy-monero.yml -e type=pruned) et attendre la fin de sa
+      synchronisation : miner sur une chaîne en retard produit des blocs périmés, jamais payés.
+    quiet: true
+  when: xmrig_mode == 'solo'
+
+# ── Machine ────────────────────────────────────────────────────────────────
+- name: Warn about the memory RandomX needs
+  ansible.builtin.debug:
+    msg: >-
+      {{ ansible_memtotal_mb }} MiB de RAM : RandomX en mode rapide occupe ~2,5 Go (pages
+      énormes comprises). Avec moins de 4 Go, passer -e xmrig_randomx_mode=light (très lent)
+      ou renoncer à miner ici.
+  when:
+    - ansible_memtotal_mb | int < 4000
+    - xmrig_randomx_mode != 'light'
+
+- name: Warn about a virtual machine
+  ansible.builtin.debug:
+    msg: >-
+      Machine virtuelle ({{ ansible_virtualization_type | default('?') }}) : les registres MSR et les
+      pages énormes y sont limités (hashrate réduit), et le minage est fréquemment interdit par
+      les conditions des hébergeurs. Vérifier les vôtres avant de continuer.
+  when: ansible_virtualization_role | default('host') == 'guest'
+
+- name: Refuse MSR in a virtual machine
+  ansible.builtin.assert:
+    that: not (xmrig_msr | bool and ansible_virtualization_role | default('host') == 'guest')
+    fail_msg: "xmrig_msr exige une machine physique : les registres MSR ne sont pas accessibles depuis une machine virtuelle."
+    quiet: true

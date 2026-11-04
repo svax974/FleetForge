@@ -1,0 +1,124 @@
+---
+# Téléchargement et VÉRIFICATION des binaires officiels :
+#   1. hashes.txt (somme des archives, signé par binaryFate) et sa clé publique ;
+#   2. la clé n'est acceptée que si son empreinte est celle épinglée dans les defaults ;
+#   3. la signature de hashes.txt doit être VALIDE ET faite par cette empreinte
+#      (`VALIDSIG <empreinte>` : une signature valide d'une AUTRE clé importée ne passe pas) ;
+#   4. la somme de l'archive téléchargée doit correspondre à celle de hashes.txt.
+# La version installée est celle de hashes.txt, signé : jamais celle d'un en-tête HTTP.
+
+- name: Install the verification tools
+  ansible.builtin.apt:
+    name: [gnupg, bzip2, curl]
+    state: present
+
+- name: Create a temporary verification directory
+  ansible.builtin.tempfile:
+    state: directory
+    prefix: monero-verify-
+  register: monero_verify_dir
+
+- name: Verify and download the release
+  block:
+    - name: Download the signed hashes and the signing key
+      ansible.builtin.get_url:
+        url: "{{ item.url }}"
+        dest: "{{ monero_verify_dir.path }}/{{ item.name }}"
+        mode: "0600"
+        timeout: 60
+      loop:
+        - { url: "{{ monero_hashes_url }}", name: hashes.txt }
+        - { url: "{{ monero_gpg_key_url }}", name: signing-key.asc }
+      loop_control:
+        label: "{{ item.name }}"
+
+    # `--homedir` doit exister (0700) avant l'import.
+    - name: Create the keyring directory
+      ansible.builtin.file:
+        path: "{{ monero_verify_dir.path }}/gnupg"
+        state: directory
+        mode: "0700"
+
+    - name: Import the signing key into a throwaway keyring
+      ansible.builtin.command: "gpg --batch --quiet --homedir {{ monero_verify_dir.path }}/gnupg --import {{ monero_verify_dir.path }}/signing-key.asc"
+      changed_when: false
+
+    - name: Verify the signature of hashes.txt
+      ansible.builtin.command: "gpg --batch --homedir {{ monero_verify_dir.path }}/gnupg --status-fd 1 --verify {{ monero_verify_dir.path }}/hashes.txt"
+      register: monero_gpg_verify
+      changed_when: false
+      failed_when: false
+
+    - name: Require a valid signature by the pinned fingerprint
+      ansible.builtin.assert:
+        that: "('VALIDSIG ' ~ monero_gpg_fingerprint) in monero_gpg_verify.stdout"
+        fail_msg: >-
+          hashes.txt n'est PAS signé par l'empreinte attendue ({{ monero_gpg_fingerprint }}) :
+          téléchargement interrompu, rien n'est installé. Sortie gpg :
+          {{ monero_gpg_verify.stdout | default('') }} {{ monero_gpg_verify.stderr | default('') }}
+        quiet: true
+
+    - name: Read the signed hashes
+      ansible.builtin.slurp:
+        src: "{{ monero_verify_dir.path }}/hashes.txt"
+      register: monero_hashes_raw
+
+    - name: Pick the version and the archive sum
+      ansible.builtin.set_fact:
+        monero_resolved_version: >-
+          {{ monero_version | regex_replace('^v', '') if monero_version | length > 0 else
+             (monero_hashes_raw.content | b64decode | regex_findall('monero-' ~ monero_arch ~ '-v([0-9.]+)[.]tar[.]bz2') | first) }}
+
+    - name: Pick the archive sum
+      ansible.builtin.set_fact:
+        monero_resolved_sha: >-
+          {{ monero_sha256 if monero_sha256 | length > 0 else
+             (monero_hashes_raw.content | b64decode | regex_findall('([0-9a-f]{64})  monero-' ~ monero_arch ~ '-v' ~ monero_resolved_version ~ '[.]tar[.]bz2') | default([''], true) | first | default('', true)) }}
+
+    - name: Fail when no signed sum exists for the requested version
+      ansible.builtin.assert:
+        that: monero_resolved_sha | length == 64
+        fail_msg: >-
+          Aucune somme signée pour monero-{{ monero_arch }}-v{{ monero_resolved_version }} dans hashes.txt
+          (il ne liste que la version courante). Laisser monero_version vide, ou fournir
+          monero_sha256 après l'avoir vérifiée vous-même.
+        quiet: true
+
+    - name: Create the install directory
+      ansible.builtin.file:
+        path: "{{ monero_install_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Download the archive (checksum enforced)
+      ansible.builtin.get_url:
+        url: "{{ monero_download_base }}/monero-{{ monero_arch }}-v{{ monero_resolved_version }}.tar.bz2"
+        dest: "{{ monero_verify_dir.path }}/monero.tar.bz2"
+        checksum: "sha256:{{ monero_resolved_sha }}"
+        mode: "0600"
+        timeout: 900
+
+    - name: Unpack into a versioned directory
+      ansible.builtin.unarchive:
+        src: "{{ monero_verify_dir.path }}/monero.tar.bz2"
+        dest: "{{ monero_install_dir }}"
+        remote_src: true
+        extra_opts: ["--transform=s,^[^/]*,v{{ monero_resolved_version }},"]
+        creates: "{{ monero_install_dir }}/v{{ monero_resolved_version }}/monerod"
+        owner: root
+        group: root
+
+    - name: Point `current` at that version
+      ansible.builtin.file:
+        src: "{{ monero_install_dir }}/v{{ monero_resolved_version }}"
+        dest: "{{ monero_install_dir }}/current"
+        state: link
+      notify: restart monerod
+
+  always:
+    - name: Remove the temporary verification directory
+      ansible.builtin.file:
+        path: "{{ monero_verify_dir.path }}"
+        state: absent

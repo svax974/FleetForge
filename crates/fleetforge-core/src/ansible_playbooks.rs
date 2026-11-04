@@ -285,6 +285,12 @@ fn get_playbook_metadata(name: &str) -> (String, String) {
         "deploy-grass" => ("Déploiement noeud Grass".into(), "Client de bureau Grass officiel sur un serveur sans écran (conteneur à écran virtuel, interface sur 127.0.0.1), supervision et règles d'alerte (groupe `grass`). Refuse une IP de centre de données/proxy (Grass : IP résidentielle uniquement) et deux nœuds sur la même IP publique (une contribution par connexion). Connexion au compte manuelle, une fois. Hôtes : famille `grass`.".into()),
         "remove-grass" => ("Suppression noeud Grass".into(), "Arrête et supprime le conteneur Grass et la sonde svcprobe ; session conservée. --limit obligatoire.".into()),
         "purge-grass" => ("Purge noeud Grass".into(), "Supprime le nœud Grass, sa session et ses images (reconnexion manuelle au prochain déploiement). --limit obligatoire.".into()),
+        "deploy-monero" => ("Déploiement noeud Monero".into(), "Nœud monerod (binaires officiels vérifiés par signature GPG), pare-feu, supervision et règles d'alerte. Type OBLIGATOIRE : -e type=full (~265 GiB) ou -e type=pruned (~105 GiB) ; l'espace disque disponible est contrôlé avant installation. Le nœud ne détient aucun secret (pas de portefeuille). P2P 18080 public, RPC en 127.0.0.1. Hôtes : famille `monero`.".into()),
+        "remove-monero" => ("Suppression noeud Monero".into(), "Arrête et retire monerod, ses règles ufw et sa sonde ; chaîne et configuration conservées. --limit obligatoire.".into()),
+        "purge-monero" => ("Purge noeud Monero".into(), "Supprime le nœud Monero ET la chaîne (resynchronisation de plusieurs jours). Exige -e confirm=yes. --limit obligatoire.".into()),
+        "deploy-xmrig" => ("Déploiement mineur XMR (XMRig)".into(), "Mineur Monero XMRig (binaire officiel vérifié par signature GPG), supervision et règles d'alerte. Paramètres OBLIGATOIRES : xmrig_wallet (adresse publique 4…), xmrig_mode (pool + xmrig_pool_url, ou solo vers un nœud monerod synchronisé). Aucune clé privée. Rentabilité faible et minage souvent interdit chez les hébergeurs : à vérifier avant. Hôtes : famille `xmrig`.".into()),
+        "remove-xmrig" => ("Suppression mineur XMRig".into(), "Arrête et retire XMRig, sa configuration, ses pages énormes et sa sonde. --limit obligatoire.".into()),
+        "purge-xmrig" => ("Purge mineur XMRig".into(), "Identique à remove-xmrig (le mineur ne possède aucune donnée). --limit obligatoire.".into()),
         "deploy-mtbridge" => ("Déploiement MTBridge".into(), "Installe MTBridge sur les hôtes Windows (groupe mtbridges) et enregistre la target Prometheus sur le monitor. Variables : mtbridge_github_token (vault), mtbridge_api_key (vault, optionnel), app_port (inventaire, défaut 5005).".into()),
         "remove-mtbridge" => ("Suppression MTBridge".into(), "Arrête la tâche planifiée MTBridge et retire la target Prometheus (données préservées).".into()),
         "purge-mtbridge" => ("Purge MTBridge".into(), "Supprime complètement MTBridge : tâche planifiée, répertoire d'installation, données MT5, règles firewall et target Prometheus.".into()),
@@ -331,7 +337,7 @@ fn categorize(name: &str) -> String {
         "VPN".to_string()
     } else if name.contains("mail") {
         "Mail".to_string()
-    } else if name.contains("rpcbtc") || name.contains("btc") || name.contains("astar") || name.contains("theta") || name.contains("storj") || name.contains("grass") {
+    } else if name.contains("rpcbtc") || name.contains("btc") || name.contains("astar") || name.contains("theta") || name.contains("storj") || name.contains("grass") || name.contains("monero") || name.contains("xmrig") {
         "Blockchain".to_string()
     } else if name.contains("mtbridge") {
         "Trading".to_string()

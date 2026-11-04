@@ -1,0 +1,134 @@
+---
+# Binaire statique officiel de XMRig, vérifié :
+#   1. SHA256SUMS et sa signature détachée (SHA256SUMS.sig), ainsi que la clé publique ;
+#   2. la signature doit être VALIDE ET faite par l'empreinte épinglée (`VALIDSIG <empreinte>`) ;
+#   3. la somme de l'archive téléchargée doit être celle de SHA256SUMS.
+
+- name: Install the verification tools
+  ansible.builtin.apt:
+    name: [gnupg, curl]
+    state: present
+
+- name: Resolve the version to install
+  when: xmrig_version | length == 0
+  block:
+    - name: Ask GitHub for the latest release
+      ansible.builtin.uri:
+        url: "{{ xmrig_release_api }}/latest"
+        return_content: true
+        timeout: 20
+      register: xmrig_latest
+      changed_when: false
+      check_mode: false
+
+    - name: Take its version
+      ansible.builtin.set_fact:
+        xmrig_resolved_version: "{{ xmrig_latest.json.tag_name | regex_replace('^v', '') }}"
+
+- name: Use the pinned version
+  ansible.builtin.set_fact:
+    xmrig_resolved_version: "{{ xmrig_version | regex_replace('^v', '') }}"
+  when: xmrig_version | length > 0
+
+- name: Create a temporary verification directory
+  ansible.builtin.tempfile:
+    state: directory
+    prefix: xmrig-verify-
+  register: xmrig_verify_dir
+
+- name: Verify and download the release
+  block:
+    - name: Download the sums, their signature and the signing key
+      ansible.builtin.get_url:
+        url: "{{ item.url }}"
+        dest: "{{ xmrig_verify_dir.path }}/{{ item.name }}"
+        mode: "0600"
+        timeout: 60
+      loop:
+        - { url: "{{ xmrig_download_base }}/v{{ xmrig_resolved_version }}/SHA256SUMS", name: SHA256SUMS }
+        - { url: "{{ xmrig_download_base }}/v{{ xmrig_resolved_version }}/SHA256SUMS.sig", name: SHA256SUMS.sig }
+        - { url: "{{ xmrig_gpg_key_url }}", name: signing-key.asc }
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Create the keyring directory
+      ansible.builtin.file:
+        path: "{{ xmrig_verify_dir.path }}/gnupg"
+        state: directory
+        mode: "0700"
+
+    - name: Import the signing key into a throwaway keyring
+      ansible.builtin.command: "gpg --batch --quiet --homedir {{ xmrig_verify_dir.path }}/gnupg --import {{ xmrig_verify_dir.path }}/signing-key.asc"
+      changed_when: false
+
+    - name: Verify the signature of SHA256SUMS
+      ansible.builtin.command: >-
+        gpg --batch --homedir {{ xmrig_verify_dir.path }}/gnupg --status-fd 1
+        --verify {{ xmrig_verify_dir.path }}/SHA256SUMS.sig {{ xmrig_verify_dir.path }}/SHA256SUMS
+      register: xmrig_gpg_verify
+      changed_when: false
+      failed_when: false
+
+    - name: Require a valid signature by the pinned fingerprint
+      ansible.builtin.assert:
+        that: "('VALIDSIG ' ~ xmrig_gpg_fingerprint) in xmrig_gpg_verify.stdout"
+        fail_msg: >-
+          SHA256SUMS n'est PAS signé par l'empreinte attendue ({{ xmrig_gpg_fingerprint }}) :
+          téléchargement interrompu, rien n'est installé. Sortie gpg :
+          {{ xmrig_gpg_verify.stdout | default('') }} {{ xmrig_gpg_verify.stderr | default('') }}
+        quiet: true
+
+    - name: Read the signed sums
+      ansible.builtin.slurp:
+        src: "{{ xmrig_verify_dir.path }}/SHA256SUMS"
+      register: xmrig_sums_raw
+
+    - name: Pick the archive sum
+      ansible.builtin.set_fact:
+        xmrig_resolved_sha: >-
+          {{ (xmrig_sums_raw.content | b64decode | regex_findall('([0-9a-f]{64}) [*]xmrig-' ~ xmrig_resolved_version ~ '-linux-static-x64[.]tar[.]gz') | default([''], true) | first | default('', true)) }}
+
+    - name: Fail when the sum is missing
+      ansible.builtin.assert:
+        that: xmrig_resolved_sha | length == 64
+        fail_msg: "SHA256SUMS ne contient pas xmrig-{{ xmrig_resolved_version }}-linux-static-x64.tar.gz : version inexistante ?"
+        quiet: true
+
+    - name: Create the install directory
+      ansible.builtin.file:
+        path: "{{ xmrig_install_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Download the archive (checksum enforced)
+      ansible.builtin.get_url:
+        url: "{{ xmrig_download_base }}/v{{ xmrig_resolved_version }}/xmrig-{{ xmrig_resolved_version }}-linux-static-x64.tar.gz"
+        dest: "{{ xmrig_verify_dir.path }}/xmrig.tar.gz"
+        checksum: "sha256:{{ xmrig_resolved_sha }}"
+        mode: "0600"
+        timeout: 300
+
+    - name: Unpack into a versioned directory
+      ansible.builtin.unarchive:
+        src: "{{ xmrig_verify_dir.path }}/xmrig.tar.gz"
+        dest: "{{ xmrig_install_dir }}"
+        remote_src: true
+        extra_opts: ["--transform=s,^[^/]*,v{{ xmrig_resolved_version }},"]
+        creates: "{{ xmrig_install_dir }}/v{{ xmrig_resolved_version }}/xmrig"
+        owner: root
+        group: root
+
+    - name: Point `current` at that version
+      ansible.builtin.file:
+        src: "{{ xmrig_install_dir }}/v{{ xmrig_resolved_version }}"
+        dest: "{{ xmrig_install_dir }}/current"
+        state: link
+      notify: restart xmrig
+
+  always:
+    - name: Remove the temporary verification directory
+      ansible.builtin.file:
+        path: "{{ xmrig_verify_dir.path }}"
+        state: absent

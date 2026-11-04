@@ -1,0 +1,23 @@
+---
+# Supprime le nœud Monero ET la chaîne.
+#
+#   ./play.sh <parc> purge-monero.yml --limit <hôte> -e confirm=yes
+#
+# ATTENTION : la chaîne (~105 à ~265 GiB) est supprimée ; la resynchroniser prend de quelques
+# jours à plusieurs semaines. Refus sans `-e confirm=yes`. Le nœud ne détient aucun secret :
+# rien à sauvegarder avant. Un portefeuille Monero vit sur votre poste, jamais touché ici.
+#
+# `--limit` est OBLIGATOIRE.
+
+- name: Purge du nœud Monero (chaîne comprise)
+  hosts: all
+  remote_user: "{{ remote_username }}"
+  become: true
+  pre_tasks:
+    - name: Refuse to run without an explicit --limit
+      ansible.builtin.assert:
+        that: ansible_limit is defined
+        fail_msg: "Sans --limit, tous les hôtes de l'inventaire seraient visés. Ajouter --limit <hôte>."
+      run_once: true
+  roles:
+    - monero-purge

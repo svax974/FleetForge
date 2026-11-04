@@ -1,0 +1,106 @@
+---
+# Nœud Monero : type (full|pruned) → compte et dossiers → contrôles de capacité →
+# binaires officiels vérifiés → configuration → service.
+#
+#   ./play.sh <parc> deploy-monero.yml --limit <hôte> -e type=pruned
+#
+# Le démon ne détient AUCUN secret dans cette configuration : pas de portefeuille, pas de
+# clé, RPC complet en boucle locale sans identifiant, RPC public (si activé) restreint.
+# Voir deploy-monero.yml, « Secrets ».
+
+- name: Validate the node type
+  ansible.builtin.include_tasks: validate.yml
+
+- name: Create the monero system account
+  ansible.builtin.user:
+    name: "{{ monero_user }}"
+    system: true
+    shell: /usr/sbin/nologin
+    create_home: false
+
+- name: Create the data, log and config directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner }}"
+    group: "{{ monero_user }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: "{{ monero_data_dir }}", owner: "{{ monero_user }}", mode: "0750" }
+    - { path: "{{ monero_log_dir }}", owner: "{{ monero_user }}", mode: "0750" }
+    - { path: "{{ monero_config_dir }}", owner: root, mode: "0750" }
+  loop_control:
+    label: "{{ item.path }}"
+
+- name: Check the host can hold this node
+  ansible.builtin.include_tasks: checks.yml
+
+- name: Download and verify the official binaries
+  ansible.builtin.include_tasks: download.yml
+
+- name: Write the configuration
+  ansible.builtin.template:
+    src: monerod.conf.j2
+    dest: "{{ monero_config_dir }}/monerod.conf"
+    owner: root
+    group: "{{ monero_user }}"
+    mode: "0640"
+  notify: restart monerod
+
+- name: Write the service unit
+  ansible.builtin.template:
+    src: monerod.service.j2
+    dest: /etc/systemd/system/monerod.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: restart monerod
+
+- name: Rotate the log
+  ansible.builtin.template:
+    src: logrotate.j2
+    dest: /etc/logrotate.d/monerod
+    owner: root
+    group: root
+    mode: "0644"
+
+# Le type est consigné : un rejeu avec un autre type est refusé (checks.yml) au lieu de
+# démarrer un démon qui contredirait la chaîne existante.
+- name: Record the node type
+  ansible.builtin.copy:
+    content: "{{ monero_type }}\n"
+    dest: "{{ monero_data_dir }}/.fleetforge-type"
+    owner: "{{ monero_user }}"
+    group: "{{ monero_user }}"
+    mode: "0640"
+
+- name: Enable and start monerod
+  ansible.builtin.systemd:
+    name: monerod
+    enabled: true
+    state: started
+    daemon_reload: true
+
+# Appliquer d'éventuels changements de configuration/binaire avant d'interroger le démon.
+- name: Apply pending restarts
+  ansible.builtin.meta: flush_handlers
+
+# `get_info` répond dès que le RPC est monté, bien avant la fin de la synchronisation.
+- name: Wait for the RPC to answer
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ monero_rpc_port }}/get_info"
+    return_content: true
+    timeout: 15
+  register: monero_info
+  retries: 30
+  delay: 10
+  until: monero_info.status | default(0) == 200
+  changed_when: false
+
+- name: Summary
+  ansible.builtin.debug:
+    msg:
+      - "monerod {{ monero_info.json.version | default('?') }} démarré sur {{ inventory_hostname }} (nœud « {{ monero_type }} »)."
+      - "Hauteur {{ monero_info.json.height | default('?') }} / cible {{ monero_info.json.target_height | default('?') }} — la synchronisation initiale prend de quelques jours (SSD) à plusieurs semaines (disque rotatif)."
+      - "P2P {{ monero_p2p_port }}/tcp à joindre depuis Internet (redirection routeur derrière un NAT) ; RPC {{ monero_rpc_port }} et ZMQ {{ monero_zmq_port }} en 127.0.0.1 seulement."
+      - "Suivre l'avancement : journalctl -u monerod -f   ou   curl -s http://127.0.0.1:{{ monero_rpc_port }}/get_info"

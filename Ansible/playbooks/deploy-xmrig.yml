@@ -1,0 +1,149 @@
+---
+# Mineur de Monero (XMR) — XMRig, binaire statique officiel vérifié par signature GPG,
+# service systemd, supervision et règles d'alerte.
+#
+#   ./play.sh <parc> deploy-xmrig.yml --limit <hôte> \
+#       -e xmrig_wallet=<adresse 95 caractères commençant par 4> \
+#       -e xmrig_mode=pool -e xmrig_pool_url=<hôte:port du pool>
+#   ./play.sh <parc> deploy-xmrig.yml --limit <hôte> \
+#       -e xmrig_wallet=<adresse 4…> -e xmrig_mode=solo        # vers un nœud monerod local synchronisé
+#
+# ── À lire avant de miner ──────────────────────────────────────────────────
+# • XMRig est le mineur RandomX de référence : RandomX est conçu pour les PROCESSEURS (aucun
+#   intérêt des GPU pour XMR). Les réglages qui comptent sont gérés : pages énormes (« jusqu'à
+#   +50 % » d'après la doc de XMRig), MSR (option, machine physique seulement), priorité minimale.
+# • RENTABILITÉ : sur un serveur loué ou un ordinateur ordinaire, les gains sont presque toujours
+#   inférieurs au coût (électricité, location). À estimer sur un calculateur avant de déployer.
+# • HÉBERGEUR : le minage est souvent INTERDIT par les conditions d'un VPS ou serveur loué
+#   (CPU saturé → suspension). À vérifier chez le vôtre. Le play avertit sur une machine virtuelle.
+# • Installation non furtive : service `xmrig`, processus `xmrig`, rien n'est caché, et 1 % du temps de
+#   minage revient aux développeurs de XMRig (`xmrig_donate_level`, défaut amont).
+# • Un seul mineur par machine, 50 % des threads par défaut (`xmrig_max_threads_hint`).
+#
+# ── Paramètres OBLIGATOIRES ────────────────────────────────────────────────
+#   xmrig_wallet    adresse Monero PRIMAIRE (95 caractères, 4…) qui reçoit les gains
+#   xmrig_mode      pool (gains réguliers, petits) | solo (un bloc très rare, récompense entière)
+#   xmrig_pool_url  seulement en pool : hôte:port, sans schéma (voir la page « getting started » du pool)
+# Un paramètre manquant fait échouer le play AVANT tout téléchargement, avec des exemples.
+#
+# ── Secrets : l'adresse est PUBLIQUE ───────────────────────────────────────
+# Seule l'adresse figure dans la configuration : la clé privée / la phrase de 25 mots de votre
+# portefeuille ne doivent JAMAIS être mises ici, ni dans un -e, ni sur le serveur. Créer le
+# portefeuille sur votre poste :
+#   monero-wallet-cli --generate-new-wallet <nom>     (ou l'application Monero GUI)
+# puis noter la phrase de 25 mots HORS LIGNE et ne copier que l'adresse (commande `address`).
+# Seul secret créé par ce play : le jeton de l'API locale en lecture seule du mineur,
+# /etc/xmrig/api-token (0600 root, tiré une fois, 127.0.0.1 seulement) — utile à la supervision,
+# jamais à vous. Pour le lire : sudo cat /etc/xmrig/api-token.
+#
+# ── Mode solo ──────────────────────────────────────────────────────────────
+# Exige un nœud monerod SYNCHRONISÉ joignable (par défaut 127.0.0.1:18081 : déployer
+# d'abord deploy-monero.yml). Un nœud élagué suffit.
+#
+# ── Règles d'alerte ────────────────────────────────────────────────────────
+# Le groupe `xmrig` doit figurer dans `prom_alert_groups` du parc. Elles sont chargées sur la
+# supervision même avec `--limit <hôte>` (délégation).
+
+# ── Sélection des hôtes ────────────────────────────────────────────────────
+- name: Sélection des hôtes de la famille xmrig
+  hosts: all
+  gather_facts: false
+  tags: [always]
+  tasks:
+    - name: Group the hosts that carry the xmrig family
+      ansible.builtin.group_by:
+        key: "xmrig_node_{{ 'yes' if 'xmrig' in (ansible_roles | default([])) else 'no' }}"
+
+    - name: Fail when no host carries the xmrig family
+      ansible.builtin.assert:
+        that: groups['xmrig_node_yes'] | default([]) | length > 0
+        fail_msg: >-
+          Aucun hôte ne porte la famille `xmrig` dans `ansible_roles` (inventaire).
+          L'ajouter à l'entrée de la machine, ou déployer depuis l'application, qui l'inscrit
+          avant le run.
+      run_once: true
+
+    - name: Fail when the alert group is not enabled for this parc
+      ansible.builtin.assert:
+        that: "'xmrig' in prom_alert_groups"
+        fail_msg: >-
+          `xmrig` absent de `prom_alert_groups` (group_vars du parc) : les alertes de hashrate,
+          de pool et de partages rejetés ne seraient PAS chargées.
+      run_once: true
+      when: groups['xmrig_node_yes'] | default([]) | length > 0
+
+# Les paramètres sont contrôlés tout de suite, avec les exemples, avant même le préflight.
+- name: Contrôle des paramètres
+  hosts: xmrig_node_yes
+  gather_facts: false
+  tags: [always]
+  tasks:
+    - name: Validate the parameters
+      ansible.builtin.include_role:
+        name: xmrig-install
+        tasks_from: validate
+      tags: [always]
+
+# ── Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ───────────────────────
+- name: Contrôle préalable
+  hosts: xmrig_node_yes
+  remote_user: "{{ remote_username }}"
+  roles:
+    - role: host-preflight
+
+- name: Installation du mineur
+  hosts: xmrig_node_yes
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - xmrig-install
+
+# Vérifie que l'API locale n'écoute qu'en 127.0.0.1 : le mineur n'ouvre aucun port public.
+- name: Contrôle d'exposition
+  hosts: xmrig_node_yes
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - xmrig-security
+
+# ── Supervision (OBLIGATOIRE, voir CLAUDE.md) ──────────────────────────────
+- name: Supervision du mineur
+  hosts: xmrig_node_yes
+  remote_user: "{{ remote_username }}"
+  roles:
+    - xmrig-monitoring
+
+- name: Règles d'alerte XMRig
+  hosts: xmrig_node_yes
+  remote_user: "{{ remote_username }}"
+  tags: [alerts, monitoring]
+  vars:
+    prom_alerts_target: "{{ prometheus_host }}"
+  tasks:
+    - name: Fail when the alert group is not enabled for this parc
+      ansible.builtin.assert:
+        that: "'xmrig' in prom_alert_groups"
+        fail_msg: "`xmrig` absent de `prom_alert_groups` (group_vars du parc) : règles non chargées."
+      run_once: true
+
+    - name: Load the alert rules on the Prometheus host
+      ansible.builtin.include_role:
+        name: prometheus-alerts-update
+        apply:
+          delegate_to: "{{ prometheus_host }}"
+          become: true
+          tags: [alerts, monitoring]
+      when: inventory_hostname == groups['xmrig_node_yes'] | first
+      tags: [alerts, monitoring]
+
+- name: Rappel
+  hosts: xmrig_node_yes
+  gather_facts: false
+  tags: [always]
+  tasks:
+    - name: Say what to expect
+      ansible.builtin.debug:
+        msg:
+          - "Un gain n'apparaît qu'après le seuil de paiement du pool (solo : à la découverte d'un bloc, très rare)."
+          - "Le portefeuille et sa phrase de 25 mots restent chez vous : rien à récupérer sur ce serveur (voir « Secrets » en tête de deploy-xmrig.yml)."
+          - "Arrêter le minage sans rien supprimer : sudo systemctl stop xmrig."

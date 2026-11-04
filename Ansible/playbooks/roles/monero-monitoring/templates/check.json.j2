@@ -1,0 +1,14 @@
+{
+  "service": "monero",
+  "up": {"kind": "systemd", "unit": "monerod"},
+  "extra_checks": [
+    {"name": "rpc", "kind": "http", "url": "http://127.0.0.1:{{ monmon_rpc_port }}/get_height", "status": [200], "timeout": 10},
+    {"name": "p2p", "kind": "tcp", "host": "127.0.0.1", "port": {{ monmon_p2p_port }}}
+  ],
+  "metrics_command": [
+    "{{ svcprobe_lib_dir }}/monero-metrics.sh",
+    "{{ monmon_rpc_port }}",
+    "{{ monmon_release_url }}"
+  ],
+  "metrics_timeout": 40
+}

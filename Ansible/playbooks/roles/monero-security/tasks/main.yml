@@ -1,0 +1,44 @@
+---
+- name: Allow the Monero P2P port
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    port: "{{ monerosec_p2p_port | string }}"
+    comment: "Monero - P2P"
+  become: true
+
+# Présent seulement avec le nœud public ; retiré sinon (sans reset ufw).
+- name: Open or close the restricted public RPC
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    port: "{{ monerosec_restricted_port | string }}"
+    comment: "Monero - public node (restricted RPC)"
+    delete: "{{ not monerosec_public_node | bool }}"
+  become: true
+
+# ── Vérification de l'écoute RÉELLE ────────────────────────────────────────
+- name: List the listening TCP sockets
+  ansible.builtin.command: ss -Hltn
+  register: monerosec_sockets
+  changed_when: false
+
+# `ss` affiche `127.0.0.1:18081` ; 0.0.0.0, `*` ou [::] sont des écoutes publiques.
+- name: Fail when the full RPC or ZMQ listens beyond loopback
+  ansible.builtin.assert:
+    that: >-
+      monerosec_sockets.stdout_lines
+      | select('search', ':(' ~ monerosec_rpc_port ~ '|' ~ monerosec_zmq_port ~ ')( |$)')
+      | reject('search', ' (127[.]0[.]0[.]1|[[]::1[]]):')
+      | list | length == 0
+    fail_msg: >-
+      Le RPC complet ({{ monerosec_rpc_port }}) ou ZMQ ({{ monerosec_zmq_port }}) écoute au-delà de la boucle
+      locale : le RPC complet commande le démon sans authentification.
+      Sockets : {{ monerosec_sockets.stdout_lines | select('search', ':(' ~ monerosec_rpc_port ~ '|' ~ monerosec_zmq_port ~ ')( |$)') | list }}
+    quiet: true
+
+- name: Check the P2P port is listening
+  ansible.builtin.assert:
+    that: monerosec_sockets.stdout_lines | select('search', ':' ~ monerosec_p2p_port ~ '( |$)') | list | length > 0
+    fail_msg: "Rien n'écoute sur le port P2P {{ monerosec_p2p_port }} : monerod est-il démarré ?"
+    quiet: true

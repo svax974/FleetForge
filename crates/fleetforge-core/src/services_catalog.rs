@@ -190,6 +190,8 @@ fn get_service_label(service_name: &str) -> (String, String) {
         "astar" => "Nœud blockchain Astar.",
         "theta-edge" => "Nœud Theta Edge.",
         "storj" => "Nœud de stockage décentralisé Storj.",
+        "monero" => "Nœud Monero (monerod), complet ou élagué.",
+        "xmrig" => "Mineur Monero XMRig.",
         "grass" => "Nœud Grass : partage de bande passante (IP résidentielle requise).",
         _ => "Service déployable via Ansible.",
     };
@@ -216,7 +218,7 @@ fn categorize_service(service_name: &str) -> String {
         }
         s if s.contains("vpn") => "VPN".to_string(),
         s if s.contains("mail") => "Mail".to_string(),
-        s if s.contains("btc") || s.contains("bitcoin") || s.contains("astar") || s.contains("theta") || s.contains("storj") || s.contains("grass") || s.contains("blockchain") => {
+        s if s.contains("btc") || s.contains("bitcoin") || s.contains("astar") || s.contains("theta") || s.contains("storj") || s.contains("grass") || s.contains("monero") || s.contains("xmrig") || s.contains("blockchain") => {
             "Blockchain".to_string()
         }
         s if s.contains("docker") => "Docker".to_string(),

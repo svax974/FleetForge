@@ -210,6 +210,23 @@ prom_alert_astar_swap_bytes: 2147483648
 # plafond va commencer à ralentir le nœud.
 prom_alert_astar_rss_bytes: 8589934592
 
+# ── Nœuds Monero (groupe `monero`) ────────────────────────────────────────────
+# Un bloc toutes les ~2 minutes : 30 minutes sans bloc sur un nœud synchronisé = blocage.
+prom_alert_monero_block_age_seconds: 1800
+# Espace libre minimal sur le disque de la chaîne (25 Gio) : sous ce seuil monerod risque de
+# s'arrêter en pleine écriture.
+prom_alert_monero_free_bytes: 26843545600
+# Version en retard : une semaine pour rejouer le déploiement avant un éventuel hard fork.
+prom_alert_monero_outdated_for: "168h"
+
+# ── Mineurs XMRig (groupe `xmrig`) ────────────────────────────────────────────
+# Hashrate 15 min sous cette fraction de la moyenne des 24 h = chute.
+prom_alert_xmrig_hashrate_drop_ratio: 0.5
+# Part de partages rejetés tolérée sur 1 h (quelques rejets sont normaux).
+prom_alert_xmrig_rejected_ratio: 0.05
+# Version en retard : un hard fork de l'algorithme rend le mineur inutile, agir sous 3 jours.
+prom_alert_xmrig_outdated_for: "72h"
+
 # ── Nœuds Grass (groupe `grass`) ──────────────────────────────────────────────
 # Application lancée sans aucune connexion sortante : le temps laissé au nœud de
 # rétablir sa connexion (redémarrage de box, coupure) avant d'alerter.

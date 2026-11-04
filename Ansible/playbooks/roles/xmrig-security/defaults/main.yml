@@ -1,0 +1,6 @@
+---
+# Exposition d'un mineur XMRig : il n'ÉCOUTE sur aucun port public. Il ne fait que des
+# connexions sortantes (pool ou nœud). Son seul port d'écoute est l'API HTTP locale, en
+# lecture seule, liée à 127.0.0.1 ; ce rôle VÉRIFIE l'écoute réelle (`ss`). Aucune règle
+# ufw à poser.
+xmrigsec_api_port: "{{ xmrig_api_port | default(18088) }}"

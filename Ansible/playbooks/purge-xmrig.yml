@@ -1,0 +1,19 @@
+---
+# Identique à remove-xmrig.yml : le mineur ne possède aucune donnée à purger.
+#
+#   ./play.sh <parc> purge-xmrig.yml --limit <hôte>
+#
+# `--limit` est OBLIGATOIRE.
+
+- name: Purge du mineur XMRig
+  hosts: all
+  remote_user: "{{ remote_username }}"
+  become: true
+  pre_tasks:
+    - name: Refuse to run without an explicit --limit
+      ansible.builtin.assert:
+        that: ansible_limit is defined
+        fail_msg: "Sans --limit, tous les hôtes de l'inventaire seraient visés. Ajouter --limit <hôte>."
+      run_once: true
+  roles:
+    - xmrig-purge

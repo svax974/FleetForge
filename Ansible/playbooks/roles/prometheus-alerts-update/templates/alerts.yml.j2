@@ -1003,6 +1003,192 @@ groups:
             `./play.sh <parc> deploy-grass.yml --limit <hôte> --tags monitoring`.
 
 {% endif %}
+{% if 'monero' in prom_alert_groups %}
+
+  # ── Nœuds Monero ───────────────────────────────────────────────────────────
+  # Séries du collecteur `monero-metrics.sh` de svcprobe (rôle `monero-monitoring`), lues sur
+  # le RPC local de monerod. Elles couvrent ce que `service_up` ne voit pas : un démon qui
+  # tourne mais n'avance plus, n'a plus de pairs, manque de disque ou est périmé.
+  # `service_up == 0` relève de `ServiceDown` (groupe `services`), pas d'ici.
+  # Pendant la synchronisation INITIALE (jours) le nœud n'est pas `synchronized` : les règles
+  # de blocage n'en tiennent compte que lorsqu'il l'est. Contrôle après déploiement :
+  # `count(monero_height)` doit valoir le nombre de nœuds.
+  - name: monero
+    rules:
+      # Nœud synchronisé mais plus aucun nouveau bloc : un bloc toutes les ~2 minutes, une
+      # demi-heure de silence n'est pas du hasard (pairs perdus, chaîne bloquée, horloge).
+      - alert: MoneroBlockStalled
+        expr: >-
+          monero_last_block_age_seconds > {{ prom_alert_monero_block_age_seconds }}
+          and on (instance) monero_synchronized == 1
+        for: 15m
+        keep_firing_for: {{ prom_alert_flap_grace }}
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Nœud Monero {{ '{{' }} $labels.instance {{ '}}' }} : plus de nouveau bloc'
+          description: >-
+            Dernier bloc vieux de {{ '{{' }} $value | humanizeDuration {{ '}}' }} alors que le nœud se
+            dit synchronisé. `journalctl -u monerod -n 100` ; vérifier les pairs et l'heure de la machine.
+
+      - alert: MoneroNoPeers
+        expr: monero_outgoing_connections == 0
+        for: 15m
+        keep_firing_for: {{ prom_alert_flap_grace }}
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Nœud Monero {{ '{{' }} $labels.instance {{ '}}' }} : aucun pair sortant'
+          description: >-
+            Le nœud est isolé du réseau (sortie Internet, DNS, liste de bannissement).
+
+      # Pas de pair ENTRANT pendant des heures : le port P2P n'est pas joignable. Le nœud
+      # fonctionne, mais ne sert plus le réseau.
+      - alert: MoneroNoInboundPeers
+        expr: monero_incoming_connections == 0
+        for: 12h
+        keep_firing_for: {{ prom_alert_flap_grace }}
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Nœud Monero {{ '{{' }} $labels.instance {{ '}}' }} : aucun pair entrant'
+          description: >-
+            Le port P2P 18080 n'est pas joignable depuis Internet (redirection du routeur, pare-feu
+            de l'hébergeur). Le nœud fonctionne pour vous, mais ne contribue pas au réseau.
+
+      # monerod s'arrête quand le disque est plein, la base peut en souffrir.
+      - alert: MoneroDiskSpaceLow
+        expr: monero_free_space_bytes < {{ prom_alert_monero_free_bytes }}
+        for: 30m
+        keep_firing_for: {{ prom_alert_flap_grace }}
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Disque de la chaîne Monero presque plein sur {{ '{{' }} $labels.instance {{ '}}' }}'
+          description: >-
+            Il reste {{ '{{' }} $value | humanize1024 {{ '}}' }}o. La chaîne grossit d'environ 2,5 Gio par
+            mois ; agrandir le disque ou passer à un nœud élagué (-e type=pruned, après resynchronisation).
+
+      # Un nœud en retard sur un hard fork se coupe du réseau.
+      - alert: MoneroOutdated
+        expr: monero_version_outdated == 1
+        for: {{ prom_alert_monero_outdated_for }}
+        keep_firing_for: {{ prom_alert_flap_grace }}
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Monero {{ '{{' }} $labels.instance {{ '}}' }} en retard sur la dernière version'
+          description: >-
+            Une version périmée est rejetée du réseau à la prochaine mise à jour obligatoire
+            (hard fork). Rejouer `./play.sh <parc> deploy-monero.yml --limit <hôte> -e type=<type>`.
+
+      - alert: MoneroMetricsMissing
+        expr: >-
+          service_up{service="monero"} == 1
+          unless on (instance) monero_height
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Plus de métriques Monero sur {{ '{{' }} $labels.instance {{ '}}' }}'
+          description: >-
+            Le service tourne mais le RPC ne répond plus au collecteur (démarrage, base occupée).
+            Chercher svcprobe_metrics_error{service="monero"}.
+
+{% endif %}
+{% if 'xmrig' in prom_alert_groups %}
+
+  # ── Mineurs XMRig ──────────────────────────────────────────────────────────
+  # Séries du collecteur `xmrig-metrics.sh` de svcprobe (rôle `xmrig-monitoring`), lues sur
+  # l'API locale du mineur. Un mineur qui tourne sans rien produire consomme la machine pour
+  # rien : `service_up` ne le voit pas. `service_up == 0` relève de `ServiceDown`.
+  # Contrôle après déploiement : `count(xmrig_pool_connected)` doit valoir le nombre de mineurs.
+  - name: xmrig
+    rules:
+      - alert: XmrigHashrateZero
+        expr: xmrig_hashrate_hps{window="60s"} == 0
+        for: 15m
+        keep_firing_for: {{ prom_alert_flap_grace }}
+        labels:
+          severity: critical
+        annotations:
+          summary: 'XMRig ne mine plus sur {{ '{{' }} $labels.instance {{ '}}' }}'
+          description: >-
+            Hashrate nul depuis 15 minutes alors que le service tourne (plus de travail du
+            pool, mémoire insuffisante, processeur bridé). `journalctl -u xmrig -n 100`.
+
+      # Chute durable par rapport à l'habitude de la machine : bridage thermique, voisin
+      # bruyant (machine virtuelle), pages énormes non obtenues après un redémarrage.
+      - alert: XmrigHashrateDropped
+        expr: >-
+          xmrig_hashrate_hps{window="15m"}
+          < {{ prom_alert_xmrig_hashrate_drop_ratio }} * avg_over_time(xmrig_hashrate_hps{window="15m"}[1d])
+        for: 1h
+        keep_firing_for: {{ prom_alert_flap_grace }}
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Hashrate XMRig en chute sur {{ '{{' }} $labels.instance {{ '}}' }}'
+          description: >-
+            Hashrate 15 min inférieur à la moitié de la moyenne des 24 dernières heures.
+            Vérifier la température, la charge de la machine et les pages énormes
+            (`grep -i huge /var/log/syslog`, `journalctl -u xmrig | grep -i "huge pages"`).
+
+      - alert: XmrigPoolDisconnected
+        expr: xmrig_pool_connected == 0
+        for: 15m
+        keep_firing_for: {{ prom_alert_flap_grace }}
+        labels:
+          severity: critical
+        annotations:
+          summary: 'XMRig déconnecté de son pool (ou de son nœud) sur {{ '{{' }} $labels.instance {{ '}}' }}'
+          description: >-
+            Le mineur ne parvient plus à joindre sa destination : pool tombé, adresse changée,
+            filtrage sortant, ou nœud monerod arrêté en mode solo.
+
+      - alert: XmrigSharesRejected
+        expr: >-
+          increase(xmrig_shares_rejected_total[1h])
+          / (increase(xmrig_shares_accepted_total[1h]) + increase(xmrig_shares_rejected_total[1h]))
+          > {{ prom_alert_xmrig_rejected_ratio }}
+          and (increase(xmrig_shares_accepted_total[1h]) + increase(xmrig_shares_rejected_total[1h])) >= 10
+        for: 1h
+        keep_firing_for: {{ prom_alert_flap_grace }}
+        labels:
+          severity: warning
+        annotations:
+          summary: 'XMRig : partages rejetés en nombre sur {{ '{{' }} $labels.instance {{ '}}' }}'
+          description: >-
+            Plus de {{ prom_alert_xmrig_rejected_ratio }} des partages de la dernière heure sont
+            rejetés : version d'algorithme périmée (hard fork), latence vers le pool, ou
+            adresse refusée. Les gains sont perdus.
+
+      - alert: XmrigOutdated
+        expr: xmrig_version_outdated == 1
+        for: {{ prom_alert_xmrig_outdated_for }}
+        keep_firing_for: {{ prom_alert_flap_grace }}
+        labels:
+          severity: warning
+        annotations:
+          summary: 'XMRig en retard sur la dernière version sur {{ '{{' }} $labels.instance {{ '}}' }}'
+          description: >-
+            Un hard fork de l'algorithme (RandomX) rend un mineur périmé inutile : tous ses
+            partages sont rejetés. `./play.sh <parc> deploy-xmrig.yml --limit <hôte> …`.
+
+      - alert: XmrigMetricsMissing
+        expr: >-
+          service_up{service="xmrig"} == 1
+          unless on (instance) xmrig_pool_connected
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Plus de métriques XMRig sur {{ '{{' }} $labels.instance {{ '}}' }}'
+          description: >-
+            Le service tourne mais l'API locale ne répond plus au collecteur (jeton, port).
+            Chercher svcprobe_metrics_error{service="xmrig"}.
+
+{% endif %}
 {% if 'searxng' in prom_alert_groups %}
 
   # ── Relai SearXNG ──────────────────────────────────────────────────────────

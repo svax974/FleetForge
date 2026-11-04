@@ -1,0 +1,16 @@
+---
+# Exposition d'un nœud Monero (service NATIF, donc ufw s'applique réellement).
+#
+#   • P2P (18080) : PUBLIC par nature — les autres nœuds s'y connectent. Ouvert à tous.
+#   • RPC (18081) et ZMQ (18083) : 127.0.0.1 UNIQUEMENT. Le RPC complet commande le démon
+#     et n'a pas d'authentification ; ce rôle VÉRIFIE l'écoute réelle (`ss`).
+#   • RPC restreint (18089) : seulement si `monero_public_node` — décision d'exposition
+#     explicite (nœud public pour les portefeuilles d'autrui).
+# Règle additive ET soustractive (CLAUDE.md § 1) : désactiver le nœud public retire la
+# règle 18089, sans ufw reset.
+monerosec_p2p_port: "{{ monero_p2p_port | default(18080) }}"
+monerosec_rpc_port: "{{ monero_rpc_port | default(18081) }}"
+monerosec_zmq_port: "{{ monero_zmq_port | default(18083) }}"
+monerosec_zmq_enabled: "{{ monero_zmq_enabled | default(true) }}"
+monerosec_restricted_port: "{{ monero_restricted_rpc_port | default(18089) }}"
+monerosec_public_node: "{{ monero_public_node | default(false) }}"

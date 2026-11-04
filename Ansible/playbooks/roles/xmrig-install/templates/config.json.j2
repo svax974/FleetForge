@@ -1,0 +1,58 @@
+{
+    "api": {
+        "id": null,
+        "worker-id": "{{ xmrig_worker }}"
+    },
+    "http": {
+        "enabled": true,
+        "host": "127.0.0.1",
+        "port": {{ xmrig_api_port }},
+        "access-token": "{{ xmrig_api_token }}",
+        "restricted": true
+    },
+    "autosave": false,
+    "background": false,
+    "colors": false,
+    "title": false,
+    "randomx": {
+        "init": -1,
+        "mode": "{{ xmrig_randomx_mode }}",
+        "1gb-pages": {{ xmrig_1gb_pages | bool | to_json }},
+        "rdmsr": {{ xmrig_msr | bool | to_json }},
+        "wrmsr": {{ xmrig_msr | bool | to_json }},
+        "numa": true
+    },
+    "cpu": {
+        "enabled": true,
+        "huge-pages": {{ (xmrig_hugepages | int > 0) | to_json }},
+        "max-threads-hint": {{ xmrig_max_threads_hint | int }},
+        "asm": true
+    },
+    "opencl": { "enabled": false },
+    "cuda": { "enabled": false },
+    "donate-level": {{ xmrig_donate_level | int }},
+    "pools": [
+{% if xmrig_mode == 'solo' %}
+        {
+            "url": "daemon+http://{{ xmrig_daemon_url }}",
+            "user": "{{ xmrig_wallet }}",
+            "pass": "{{ xmrig_worker }}",
+            "daemon": true,
+            "daemon-zmq-port": {{ xmrig_daemon_zmq_port | int }},
+            "keepalive": true
+        }
+{% else %}
+        {
+            "url": "{{ xmrig_pool_url }}",
+            "user": "{{ xmrig_wallet }}",
+            "pass": "{{ xmrig_worker }}",
+            "keepalive": true,
+            "tls": {{ xmrig_pool_tls | bool | to_json }}
+        }
+{% endif %}
+    ],
+    "print-time": 60,
+    "health-print-time": 60,
+    "retries": 5,
+    "retry-pause": 5
+}

@@ -1,0 +1,96 @@
+---
+# Contrôles de capacité, AVANT l'installation : un nœud qui manque de disque en pleine
+# synchronisation (plusieurs jours) s'arrête, et la base peut en pâtir. Mieux vaut le
+# savoir avant de télécharger quoi que ce soit.
+#
+# Les seuils (defaults) viennent des tailles OFFICIELLES de la chaîne (265 GiB complète,
+# 105 GiB élaguée au 2026-10-05) avec une marge de croissance ; le guide officiel
+# recommande bien davantage (≈ 2,5 × la taille), d'où un avertissement distinct.
+
+- name: Look for an existing blockchain
+  ansible.builtin.stat:
+    path: "{{ monero_data_dir }}/bitmonero/lmdb/data.mdb"
+  register: monero_chain
+
+- name: Read the recorded node type
+  ansible.builtin.slurp:
+    src: "{{ monero_data_dir }}/.fleetforge-type"
+  register: monero_recorded
+  failed_when: false
+
+- name: Remember the recorded type
+  ansible.builtin.set_fact:
+    monero_recorded_type: "{{ (monero_recorded.content | default('') | b64decode | trim) if monero_recorded.content is defined else '' }}"
+
+# Une chaîne existante qui change de type n'est pas une simple option : voir defaults.
+- name: Refuse to change the type of an existing chain
+  ansible.builtin.fail:
+    msg: >-
+      {{ monero_data_dir }} contient une chaîne de type « {{ monero_recorded_type or 'inconnu' }} » ;
+      -e type={{ monero_type }} demandé.
+      full → pruned : arrêter le démon puis utiliser monero-blockchain-prune (il écrit une
+      copie élaguée : prévoir la place des deux). pruned → full : impossible sans tout
+      resynchroniser — supprimer la chaîne (purge-monero.yml) puis redéployer.
+  when:
+    - monero_chain.stat.exists
+    - monero_recorded_type | length > 0
+    - monero_recorded_type != monero_type
+
+# ── Espace disque ──────────────────────────────────────────────────────────
+# Mesuré sur le système de fichiers qui portera la chaîne (le dossier existe déjà).
+- name: Read the free space of the data filesystem
+  ansible.builtin.command: "df -B1 --output=avail {{ monero_data_dir }}"
+  register: monero_df
+  changed_when: false
+
+- name: Compute the free space in GiB
+  ansible.builtin.set_fact:
+    monero_free_gib: "{{ ((monero_df.stdout_lines | last | trim | int) / 1073741824) | round(1) }}"
+
+# Première installation seulement : ensuite le nœud occupe déjà l'espace, et un rejeu ne
+# doit pas échouer sur ses propres données.
+- name: Require enough free space for the chosen node type
+  ansible.builtin.assert:
+    that: monero_free_gib | float >= monero_min_free_gib[monero_type] | float
+    fail_msg: >-
+      {{ monero_free_gib }} GiB libres sur le disque de {{ monero_data_dir }} : insuffisant pour un nœud
+      « {{ monero_type }} » (≥ {{ monero_min_free_gib[monero_type] }} GiB exigés ; la chaîne pèse
+      {{ '265' if monero_type == 'full' else '105' }} GiB aujourd'hui et grossit d'environ 2,5 GiB par mois).
+      {{ "Essayer -e type=pruned (≥ " ~ monero_min_free_gib.pruned ~ " GiB)." if monero_type == 'full' and monero_free_gib | float >= monero_min_free_gib.pruned | float else "Monter un disque plus grand sur " ~ monero_data_dir ~ " (monero_data_dir)." }}
+      Pour passer outre : -e monero_skip_space_check=true.
+    quiet: true
+  when: not (monero_chain.stat.exists or monero_skip_space_check | bool)
+
+- name: Warn when the space is below the official recommendation
+  ansible.builtin.debug:
+    msg: >-
+      {{ monero_free_gib }} GiB libres : {{ "contrôle ignoré (monero_skip_space_check), SOUS le minimum de " ~ monero_min_free_gib[monero_type] ~ " GiB" if monero_free_gib | float < monero_min_free_gib[monero_type] | float else "suffisant pour démarrer" }},
+      mais sous les {{ monero_recommended_free_gib[monero_type] }} GiB que recommande le guide officiel
+      pour un nœud « {{ monero_type }} ». Surveiller l'espace (alerte MoneroDiskSpaceLow).
+  when:
+    - not monero_chain.stat.exists
+    - monero_free_gib | float < monero_recommended_free_gib[monero_type] | float
+
+# ── Support disque et mémoire (avertissements) ─────────────────────────────
+# LMDB fait énormément d'écritures aléatoires : une synchronisation initiale sur disque
+# rotatif prend des semaines, contre quelques jours sur SSD (guide officiel : SSD).
+- name: Detect a rotational disk
+  ansible.builtin.shell: >-
+    lsblk -dno ROTA "$(findmnt -no SOURCE -T {{ monero_data_dir }})" 2>/dev/null | head -n1 | tr -d ' '
+  register: monero_rota
+  changed_when: false
+  failed_when: false
+
+- name: Warn about a rotational disk
+  ansible.builtin.debug:
+    msg: >-
+      {{ monero_data_dir }} semble sur un disque ROTATIF : la synchronisation initiale peut
+      prendre des semaines. Le guide officiel recommande un SSD.
+  when: monero_rota.stdout | default('') == '1'
+
+- name: Warn about low memory
+  ansible.builtin.debug:
+    msg: >-
+      {{ ansible_memtotal_mb }} MiB de RAM : le guide officiel recommande 4 GiB ou plus.
+      La synchronisation sera lente et le démon peut être tué par manque de mémoire.
+  when: ansible_memtotal_mb | int < monero_min_ram_mb | int

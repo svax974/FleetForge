@@ -1,0 +1,7 @@
+---
+# Le mineur ne possède aucune donnée : `purge` = `remove`. Rôle distinct pour que les
+# applications offrent la même paire d'actions pour toute famille (CLAUDE.md § 2).
+
+- name: Run the remove role
+  ansible.builtin.include_role:
+    name: xmrig-remove

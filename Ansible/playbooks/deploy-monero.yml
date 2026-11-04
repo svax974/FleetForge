@@ -1,0 +1,147 @@
+---
+# Nœud Monero (monerod) — binaires OFFICIELS vérifiés par signature GPG, service systemd,
+# pare-feu, supervision et règles d'alerte.
+#
+#   ./play.sh <parc> deploy-monero.yml --limit <hôte> -e type=pruned
+#   ./play.sh <parc> deploy-monero.yml --limit <hôte> -e type=full
+#   ./play.sh <parc> deploy-monero.yml --limit <hôte> -e type=pruned --tags monitoring   # sonde seule
+#
+# ── Le type de nœud (OBLIGATOIRE) ──────────────────────────────────────────
+#   full    chaîne complète, ~265 GiB   — exige ≥ 345 GiB libres
+#   pruned  chaîne élaguée, ~105 GiB    — exige ≥ 140 GiB libres
+# (tailles officielles au 05/10/2026 : docs.getmonero.org/running-node/monerod-systemd/ ; le guide
+# recommande davantage, ~2,5 × : un avertissement le dit). L'espace disponible est mesuré sur le
+# disque de /var/lib/monero AVANT tout téléchargement ; un disque trop petit fait échouer le play
+# en proposant l'alternative. `-e monero_skip_space_check=true` passe outre. Le type d'une chaîne
+# existante ne change pas : voir roles/monero-install/defaults/main.yml.
+#
+# Hôtes visés : ceux dont `ansible_roles` contient `monero`. SSD recommandé (une synchronisation
+# sur disque rotatif prend des semaines), 4 GiB de RAM.
+#
+# ── Secrets : il n'y en a AUCUN à récupérer sur le nœud ────────────────────
+# Cette configuration ne contient ni portefeuille ni clé : RPC complet sur 127.0.0.1 sans
+# identifiant, RPC public (si `monero_public_node`) restreint en lecture. Monero n'a pas de
+# « compte » côté nœud. Les seuls secrets de l'écosystème sont ceux de VOTRE portefeuille
+# (la phrase de 25 mots, la clé de dépense), qui se créent et restent sur votre poste :
+#   monero-wallet-cli --generate-new-wallet <nom>     (ou l'application Monero GUI, ou Cake Wallet…)
+# Noter la phrase de 25 mots HORS LIGNE ; seule l'ADRESSE (publique, 95 caractères, 4…) sert
+# ailleurs — dont le mineur (deploy-xmrig.yml). Ne jamais mettre une phrase ou une clé dans
+# un -e, un group_vars ou un serveur.
+#
+# ── Réseau ─────────────────────────────────────────────────────────────────
+# P2P 18080/tcp : PUBLIC par nature, ouvert à tous par `monero-security` (ufw) ; à rediriger
+# dans le routeur derrière un NAT (hors Ansible). RPC 18081 et ZMQ 18083 : 127.0.0.1 seulement,
+# l'écoute RÉELLE est vérifiée. `-e monero_public_node=true` ouvre en plus le RPC restreint
+# 18089 (nœud public pour les portefeuilles d'autrui) : décision d'exposition, fermée par défaut.
+#
+# ── Règles d'alerte ────────────────────────────────────────────────────────
+# Le groupe `monero` doit figurer dans `prom_alert_groups` du parc. Elles sont chargées sur la
+# supervision même avec `--limit <hôte>` (délégation).
+
+# ── Sélection des hôtes et type ────────────────────────────────────────────
+- name: Sélection des hôtes de la famille monero
+  hosts: all
+  gather_facts: false
+  tags: [always]
+  tasks:
+    - name: Group the hosts that carry the monero family
+      ansible.builtin.group_by:
+        key: "monero_node_{{ 'yes' if 'monero' in (ansible_roles | default([])) else 'no' }}"
+
+    - name: Fail when no host carries the monero family
+      ansible.builtin.assert:
+        that: groups['monero_node_yes'] | default([]) | length > 0
+        fail_msg: >-
+          Aucun hôte ne porte la famille `monero` dans `ansible_roles` (inventaire).
+          L'ajouter à l'entrée de la machine, ou déployer depuis l'application, qui l'inscrit
+          avant le run.
+      run_once: true
+
+    - name: Fail when the alert group is not enabled for this parc
+      ansible.builtin.assert:
+        that: "'monero' in prom_alert_groups"
+        fail_msg: >-
+          `monero` absent de `prom_alert_groups` (group_vars du parc) : les alertes de blocage,
+          de pairs, de disque et de version ne seraient PAS chargées.
+      run_once: true
+      when: groups['monero_node_yes'] | default([]) | length > 0
+
+# Le type est contrôlé tout de suite, avec les exemples, avant même le préflight.
+- name: Contrôle du type de nœud
+  hosts: monero_node_yes
+  gather_facts: false
+  tags: [always]
+  tasks:
+    - name: Validate the node type
+      ansible.builtin.include_role:
+        name: monero-install
+        tasks_from: validate
+      tags: [always]
+
+# ── Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ───────────────────────
+- name: Contrôle préalable
+  hosts: monero_node_yes
+  remote_user: "{{ remote_username }}"
+  roles:
+    - role: host-preflight
+
+# Compte, dossiers, contrôle d'espace, binaires vérifiés, configuration, service.
+- name: Installation du nœud Monero
+  hosts: monero_node_yes
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - monero-install
+
+# Ouvre le P2P et vérifie l'écoute réelle (RPC et ZMQ en boucle locale).
+- name: Pare-feu et contrôle d'exposition
+  hosts: monero_node_yes
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - monero-security
+
+# ── Supervision (OBLIGATOIRE, voir CLAUDE.md) ──────────────────────────────
+- name: Supervision du nœud
+  hosts: monero_node_yes
+  remote_user: "{{ remote_username }}"
+  roles:
+    - monero-monitoring
+
+# Joué DEPUIS le nœud avec `delegate_to` vers la supervision : un play
+# `hosts: prometheus1:monitor` serait exclu par `--limit <hôte>`. Une fois par run.
+- name: Règles d'alerte Monero
+  hosts: monero_node_yes
+  remote_user: "{{ remote_username }}"
+  tags: [alerts, monitoring]
+  vars:
+    prom_alerts_target: "{{ prometheus_host }}"
+  tasks:
+    - name: Fail when the alert group is not enabled for this parc
+      ansible.builtin.assert:
+        that: "'monero' in prom_alert_groups"
+        fail_msg: "`monero` absent de `prom_alert_groups` (group_vars du parc) : règles non chargées."
+      run_once: true
+
+    - name: Load the alert rules on the Prometheus host
+      ansible.builtin.include_role:
+        name: prometheus-alerts-update
+        apply:
+          delegate_to: "{{ prometheus_host }}"
+          become: true
+          tags: [alerts, monitoring]
+      when: inventory_hostname == groups['monero_node_yes'] | first
+      tags: [alerts, monitoring]
+
+# ── Rappel final ───────────────────────────────────────────────────────────
+- name: Rappel
+  hosts: monero_node_yes
+  gather_facts: false
+  tags: [always]
+  tasks:
+    - name: Say what to expect
+      ansible.builtin.debug:
+        msg:
+          - "Synchronisation initiale en cours : de quelques jours (SSD) à plusieurs semaines (disque rotatif). `journalctl -u monerod -f`."
+          - "Rien à récupérer côté nœud : aucun portefeuille ni clé n'y est (voir « Secrets » en tête de deploy-monero.yml)."
+          - "Pour miner en solo vers ce nœud, une fois synchronisé : deploy-xmrig.yml -e xmrig_mode=solo."

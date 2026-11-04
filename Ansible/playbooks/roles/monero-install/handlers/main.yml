@@ -1,0 +1,7 @@
+---
+# L'arrêt du démon peut durer (vidage de la base) : `TimeoutStopSec` de l'unité.
+- name: restart monerod
+  ansible.builtin.systemd:
+    name: monerod
+    state: restarted
+    daemon_reload: true

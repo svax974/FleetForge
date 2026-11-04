@@ -256,7 +256,7 @@ fn get_role_metadata(name: &str) -> (String, String) {
 
         // Monitoring
         "prometheus-install" => ("Installation Prometheus".into(), "Déploie Prometheus (Docker) avec authentification basique et lien vers Alertmanager. Les règles d'alerte sont posées par prometheus-alerts-update. Variables : prometheus_port (défaut 9090), prometheus_retention, alertmanager_host.".into()),
-        "prometheus-alerts-update" => ("MAJ règles d'alerte Prometheus".into(), "Déploie les règles d'alerte sur l'hôte Prometheus du parc courant. Partagé par les deux stacks (prometheus-install et monitoring-install) pour que les règles ne divergent pas. Applique les exemptions par hôte (`alert_exclude: [Alerte]` sur une entrée d'inventaire) en enveloppant l'expression déployée d'un `unless on (instance)`, et refuse une exemption visant une règle non chargée. Groupes sélectionnables via prom_alert_groups : availability, resources, database, papangmetrics, bitcoin, astar, theta, storj, grass, searxng, openclaw, sync, services, dmarc, backups.".into()),
+        "prometheus-alerts-update" => ("MAJ règles d'alerte Prometheus".into(), "Déploie les règles d'alerte sur l'hôte Prometheus du parc courant. Partagé par les deux stacks (prometheus-install et monitoring-install) pour que les règles ne divergent pas. Applique les exemptions par hôte (`alert_exclude: [Alerte]` sur une entrée d'inventaire) en enveloppant l'expression déployée d'un `unless on (instance)`, et refuse une exemption visant une règle non chargée. Groupes sélectionnables via prom_alert_groups : availability, resources, database, papangmetrics, bitcoin, astar, theta, storj, grass, monero, xmrig, searxng, openclaw, sync, services, dmarc, backups.".into()),
         "prometheus-remove" => ("Suppression Prometheus".into(), "Arrête et supprime le conteneur Prometheus. Préserve la TSDB, la configuration et les règles d'alerte.".into()),
         "prometheus-purge" => ("Purge Prometheus".into(), "Supprime Prometheus et toutes ses données : TSDB, configuration, règles et cibles. Destructif (historique des métriques perdu).".into()),
         "prometheus-security" => ("Sécurité Prometheus".into(), "Firewall : accès à l'UI/API Prometheus réservé à la whitelist et aux VPN. Additif, ne modifie pas la politique UFW par défaut.".into()),
@@ -467,6 +467,20 @@ fn get_role_metadata(name: &str) -> (String, String) {
         "grass-remove" => ("Suppression noeud Grass".into(), "Arrête et supprime le conteneur et la sonde svcprobe. Session (compte connecté) conservée : un redéploiement évite la reconnexion manuelle.".into()),
         "grass-purge" => ("Purge noeud Grass".into(), "Supprime conteneur, sonde, session, images et dossier de construction. Seule conséquence : se reconnecter une fois à Grass au prochain déploiement.".into()),
 
+        // Monero (nœud monerod)
+        "monero-install" => ("Installation noeud Monero".into(), "Déploie monerod (binaires officiels, signature GPG de binaryFate vérifiée par empreinte épinglée, somme SHA-256 contrôlée) sous un compte dédié, avec configuration, unité systemd et rotation des journaux. Type OBLIGATOIRE : -e type=full (~265 GiB, ≥ 345 GiB libres exigés) ou -e type=pruned (~105 GiB, ≥ 140 GiB libres). Mesure l'espace disque AVANT tout téléchargement (propose l'alternative si trop juste), avertit sur disque rotatif ou RAM < 4 GiB, refuse de changer le type d'une chaîne existante. RPC complet en 127.0.0.1 sans authentification, ZMQ en boucle locale. Aucun secret.".into()),
+        "monero-security" => ("Pare-feu et exposition noeud Monero".into(), "Ouvre le P2P 18080 (public par nature), ouvre/ferme le RPC restreint 18089 selon monero_public_node (sans ufw reset) et vérifie par `ss` que le RPC complet et ZMQ n'écoutent qu'en 127.0.0.1.".into()),
+        "monero-monitoring" => ("Supervision noeud Monero".into(), "Sonde svcprobe service_up{service=\"monero\"} + collecteur du RPC local : hauteur, retard de synchronisation, pairs sortants/entrants, pool de transactions, taille de la base, espace libre, âge du dernier bloc, version installée vs dernière version signée. Alertes : groupe `monero` de prom_alert_groups.".into()),
+        "monero-remove" => ("Suppression noeud Monero".into(), "Arrête monerod, retire l'unité, les binaires, les règles ufw, le compte système et la sonde svcprobe. Chaîne et configuration conservées : un redéploiement évite la resynchronisation.".into()),
+        "monero-purge" => ("Purge noeud Monero".into(), "Tout ce que fait monero-remove plus la suppression de la chaîne (105 à 265 GiB, plusieurs jours de resynchronisation), de la configuration et des journaux. Exige -e confirm=yes. Aucun secret à sauvegarder.".into()),
+
+        // XMRig (mineur Monero)
+        "xmrig-install" => ("Installation mineur XMR (XMRig)".into(), "Déploie XMRig (archive statique officielle, signature GPG vérifiée par empreinte épinglée, SHA-256 contrôlé) en service systemd, priorité minimale. Paramètres OBLIGATOIRES contrôlés avant tout téléchargement, avec exemples : xmrig_wallet (adresse publique 95 caractères, 4…), xmrig_mode (pool ou solo), xmrig_pool_url (pool). Solo : exige un nœud monerod synchronisé. Pages énormes, MSR optionnel (root, machine physique), donation 1 % par défaut. API HTTP locale en lecture seule (127.0.0.1) avec jeton tiré une fois. Aucune clé privée.".into()),
+        "xmrig-security" => ("Contrôle exposition mineur XMRig".into(), "Ne pose aucune règle (le mineur n'écoute sur aucun port public) : vérifie que l'API HTTP n'écoute qu'en 127.0.0.1 et que la configuration, qui contient le jeton, n'est pas lisible par tous.".into()),
+        "xmrig-monitoring" => ("Supervision mineur XMRig".into(), "Sonde svcprobe service_up{service=\"xmrig\"} + collecteur de l'API locale : hashrate (10 s/60 s/15 min), connexion au pool ou au nœud, partages acceptés/rejetés, version installée vs dernière publiée. Alertes : groupe `xmrig` de prom_alert_groups.".into()),
+        "xmrig-remove" => ("Suppression mineur XMRig".into(), "Arrête et supprime le service, les binaires, la configuration, la réservation de pages énormes, le compte système et la sonde svcprobe.".into()),
+        "xmrig-purge" => ("Purge mineur XMRig".into(), "Identique à xmrig-remove : le mineur ne possède aucune donnée.".into()),
+
         // MTBridge (MetaTrader 5 bridge — Windows)
         "mtbridge-deploy" => ("Déploiement MTBridge".into(), "Clone et installe MTBridge sur un hôte Windows via Task Scheduler. Configure Python, l'environnement MT5 et l'auto-logon. Variables : mtbridge_github_token (vault), mtbridge_api_key (vault, optionnel), app_port (inventaire).".into()),
         "mtbridge-monitoring" => ("Monitoring MTBridge".into(), "Enregistre MTBridge comme target Prometheus sur le serveur monitor (scrape /metrics sur app_port). Ouvre le firewall Windows pour l'IP du monitor.".into()),
@@ -528,6 +542,8 @@ fn categorize(name: &str) -> String {
         || name.starts_with("theta-edge-")
         || name.starts_with("storj-")
         || name.starts_with("grass-")
+        || name.starts_with("monero-")
+        || name.starts_with("xmrig-")
     {
         "Blockchain".to_string()
     } else if name.starts_with("docker-") {

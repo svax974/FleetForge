@@ -1,0 +1,11 @@
+# Généré par monero-install.
+{{ monero_log_dir }}/monero.log {
+    weekly
+    rotate 4
+    compress
+    delaycompress
+    missingok
+    notifempty
+    # monerod garde le fichier ouvert : on tronque après copie.
+    copytruncate
+}
