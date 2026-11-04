@@ -1,0 +1,151 @@
+---
+# Nœud Grass (https://www.grass.io) sur un serveur SANS écran : l'application de
+# bureau OFFICIELLE (.deb Linux), non modifiée, dans un conteneur à écran virtuel
+# (Xvfb + VNC + client web). Supervision et règles d'alerte comprises.
+#
+#   ./play.sh <parc> deploy-grass.yml --limit <hôte>
+#   ./play.sh <parc> deploy-grass.yml --limit <hôte> --tags monitoring   # sonde seule
+#
+# ── À LIRE AVANT DE DÉPLOYER ───────────────────────────────────────────────
+# Sources : pages d'aide officielles grass.io/learn (04/11/2026) et conditions
+# https://www.getgrass.io/terms-and-conditions/.
+#
+# • IP RÉSIDENTIELLE OBLIGATOIRE. « Grass only supports residential IPs. Datacenter,
+#   proxy, or VPN IPs are not supported and cannot be manually unblocked. Using these
+#   types of connections will result in 0% network quality and prevent you from
+#   earning points. » Un VPS est inutile : le play REFUSE de déployer si l'IP publique
+#   de l'hôte est classée centre de données ou proxy (ip-api.com ; Grass reste juge).
+#   « Bannissement » ou « gains remis à zéro » : je n'ai trouvé que des blogs tiers ;
+#   côté officiel, le seul effet documenté est 0 % de qualité (aucun point), et leurs
+#   conditions autorisent la suspension d'un compte pour mauvais usage.
+# • UNE CONTRIBUTION PAR CONNEXION. « Devices on the same network share that
+#   connection's contribution » : plusieurs machines derrière la MÊME box ne multiplient
+#   rien. Le play refuse deux nœuds sur la même IP publique (`grass_allow_shared_ip` pour
+#   passer outre, sans gain). Un second nœud n'a de sens que sur une AUTRE ligne
+#   (autre abonnement, autre site) ; un téléphone en 4G/5G compte comme connexion distincte.
+# • UN compte par personne, UN seul client Grass par appareil.
+# • Pas d'automatisation : Grass n'a pas de mode headless ni d'API de nœud, et ses
+#   conditions interdisent de rétro-concevoir ou de contourner l'application. Ce rôle
+#   se contente de LANCER le client officiel sous un écran virtuel.
+#
+# ── Connexion au compte : UNE fois, à la main ──────────────────────────────
+# L'interface (noVNC) n'est publiée que sur 127.0.0.1 de l'hôte, sans authentification :
+#   ssh -p <port> -L 5800:127.0.0.1:5800 <utilisateur>@<hôte>   →   http://localhost:5800
+# Se connecter (ou créer le compte sur app.grass.io) et accepter le partage de bande
+# passante. La session est conservée dans /var/lib/grass.
+#
+# Hôtes visés : ceux dont `ansible_roles` contient `grass`. Aucun paramètre obligatoire,
+# aucun identifiant Grass n'est jamais demandé ni stocké. Réglages : voir
+# roles/grass-install/defaults/main.yml (version figée, classe de fenêtre, etc.).
+#
+# ── Limites ────────────────────────────────────────────────────────────────
+# • L'image n'a pas pu être exécutée au moment de l'écriture (pas de Docker sur le poste
+#   de développement) : premier déploiement à observer. La 8.x du client ne figure dans
+#   aucune image communautaire connue ; si la fenêtre ne s'affiche pas, voir
+#   `grass_main_window_class` et `docker logs grass`.
+# • « Network Quality » et les points ne se lisent que sur le tableau de bord Grass : la
+#   supervision surveille ce qui les annule (IP, connexions, version), pas le gain.
+#
+# ── Règles d'alerte ────────────────────────────────────────────────────────
+# Le groupe `grass` doit figurer dans `prom_alert_groups` du parc. Elles sont chargées
+# sur la supervision même avec `--limit <hôte>` (délégation).
+
+# ── Sélection des hôtes ────────────────────────────────────────────────────
+- name: Sélection des hôtes de la famille grass
+  hosts: all
+  gather_facts: false
+  tags: [always]
+  tasks:
+    - name: Group the hosts that carry the grass family
+      ansible.builtin.group_by:
+        key: "grass_node_{{ 'yes' if 'grass' in (ansible_roles | default([])) else 'no' }}"
+
+    - name: Fail when no host carries the grass family
+      ansible.builtin.assert:
+        that: groups['grass_node_yes'] | default([]) | length > 0
+        fail_msg: >-
+          Aucun hôte ne porte la famille `grass` dans `ansible_roles` (inventaire).
+          L'ajouter à l'entrée de la machine, ou déployer depuis l'application,
+          qui l'inscrit avant le run.
+      run_once: true
+
+    - name: Fail when the alert group is not enabled for this parc
+      ansible.builtin.assert:
+        that: "'grass' in prom_alert_groups"
+        fail_msg: >-
+          `grass` absent de `prom_alert_groups` (group_vars du parc) : les alertes
+          d'IP non résidentielle, de connexion et de version ne seraient PAS chargées.
+      run_once: true
+      when: groups['grass_node_yes'] | default([]) | length > 0
+
+# ── Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ───────────────────────
+- name: Contrôle préalable
+  hosts: grass_node_yes
+  remote_user: "{{ remote_username }}"
+  roles:
+    - role: host-preflight
+      preflight_require_docker: true
+
+# Contrôles d'éligibilité (IP résidentielle, une contribution par connexion),
+# image à partir du .deb officiel, conteneur, attente de l'interface.
+- name: Installation du nœud Grass
+  hosts: grass_node_yes
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - grass-install
+
+# Vérifie l'exposition RÉELLE (interface sur 127.0.0.1 seule) — ne pose aucune règle :
+# Grass n'écoute sur aucun port, il n'y a rien à ouvrir.
+- name: Contrôle d'exposition
+  hosts: grass_node_yes
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - grass-security
+
+# ── Supervision (OBLIGATOIRE, voir CLAUDE.md) ──────────────────────────────
+- name: Supervision du nœud
+  hosts: grass_node_yes
+  remote_user: "{{ remote_username }}"
+  roles:
+    - grass-monitoring
+
+# Joué DEPUIS le nœud avec `delegate_to` vers la supervision : un play
+# `hosts: prometheus1:monitor` serait exclu par `--limit <hôte>`. Une fois par run.
+- name: Règles d'alerte Grass
+  hosts: grass_node_yes
+  remote_user: "{{ remote_username }}"
+  tags: [alerts, monitoring]
+  vars:
+    prom_alerts_target: "{{ prometheus_host }}"
+  tasks:
+    - name: Fail when the alert group is not enabled for this parc
+      ansible.builtin.assert:
+        that: "'grass' in prom_alert_groups"
+        fail_msg: "`grass` absent de `prom_alert_groups` (group_vars du parc) : règles non chargées."
+      run_once: true
+
+    - name: Load the alert rules on the Prometheus host
+      ansible.builtin.include_role:
+        name: prometheus-alerts-update
+        apply:
+          delegate_to: "{{ prometheus_host }}"
+          become: true
+          tags: [alerts, monitoring]
+      when: inventory_hostname == groups['grass_node_yes'] | first
+      tags: [alerts, monitoring]
+
+# ── Rappel final ───────────────────────────────────────────────────────────
+- name: Rappel de la connexion manuelle
+  hosts: grass_node_yes
+  remote_user: "{{ remote_username }}"
+  gather_facts: false
+  tags: [always]
+  tasks:
+    - name: Say what is left to do
+      ansible.builtin.debug:
+        msg:
+          - "Reste à faire, à la main : se connecter à son compte Grass dans l'interface."
+          - "  ssh -p {{ ansible_port | default(22) }} -L 5800:127.0.0.1:5800 {{ remote_username }}@{{ ansible_host }}   puis   http://localhost:5800"
+          - "Vérifier ensuite sur le tableau de bord Grass que « Network Quality » est supérieur à 0 %."

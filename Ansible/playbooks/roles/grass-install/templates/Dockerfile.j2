@@ -1,0 +1,27 @@
+# Généré par grass-install — NE PAS ÉDITER SUR L'HÔTE.
+#
+# Application de bureau Grass OFFICIELLE ({{ grass_resolved_version }}), non modifiée, sous un écran
+# virtuel (Xvfb) servi par VNC et un client web. Le .deb est téléchargé par Ansible
+# (somme SHA-256 : {{ grass_deb_checksum }}) puis copié tel quel.
+FROM {{ grass_base_image }}
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends --no-install-suggests \
+      ca-certificates libayatana-appindicator3-1 libwebkit2gtk-4.1-0 libgtk-3-0 libegl-dev \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY grass.deb /tmp/grass.deb
+RUN dpkg -i /tmp/grass.deb || (apt-get update && apt-get install -y -f --no-install-recommends && rm -rf /var/lib/apt/lists/*) \
+ && rm -f /tmp/grass.deb
+
+COPY startapp.sh /startapp.sh
+RUN chmod +x /startapp.sh
+{% if grass_main_window_class | length > 0 %}
+COPY main-window-selection.jwmrc /etc/jwm/main-window-selection.jwmrc
+{% endif %}
+
+RUN set-cont-env APP_NAME "Grass" \
+ && set-cont-env APP_VERSION "{{ grass_resolved_version }}"
+
+# Redémarre l'application si elle s'arrête (plantage, mise à jour interne).
+ENV KEEP_APP_RUNNING=1

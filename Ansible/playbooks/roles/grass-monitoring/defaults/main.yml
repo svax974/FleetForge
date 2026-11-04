@@ -1,0 +1,15 @@
+---
+# Supervision du nœud Grass — cas 3 de la convention `-monitoring` (CLAUDE.md § 2) :
+# Grass n'expose AUCUNE métrique ni API de nœud. Sonde `svcprobe` (9110, déjà au
+# registre) : `service_up{service="grass"}` + un collecteur qui observe ce qu'on
+# PEUT observer depuis l'hôte.
+#
+# Limite assumée : le signal décisif — « Network Quality » et les points gagnés —
+# n'existe que sur le tableau de bord Grass, derrière une session de compte et sans
+# API officielle. Il n'est pas supervisable ici ; ce rôle surveille ce qui le rend
+# NUL ou le fait dériver (IP classée centre de données, plus de connexion, version
+# périmée), pas le gain lui-même.
+grassmon_container: "{{ grass_container | default('grass') }}"
+grassmon_gui_port: "{{ grass_gui_port | default(5800) }}"
+grassmon_manifest_url: "{{ grass_manifest_url | default('https://files.grass.io/file/grass-extension-upgrades/desktop-installer-latest.json') }}"
+grassmon_ip_check_url: "{{ grass_ip_check_url | default('http://ip-api.com/json/?fields=status,message,query,isp,org,hosting,proxy,mobile') }}"

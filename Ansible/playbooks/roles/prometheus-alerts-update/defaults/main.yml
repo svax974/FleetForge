@@ -210,6 +210,15 @@ prom_alert_astar_swap_bytes: 2147483648
 # plafond va commencer à ralentir le nœud.
 prom_alert_astar_rss_bytes: 8589934592
 
+# ── Nœuds Grass (groupe `grass`) ──────────────────────────────────────────────
+# Application lancée sans aucune connexion sortante : le temps laissé au nœud de
+# rétablir sa connexion (redémarrage de box, coupure) avant d'alerter.
+prom_alert_grass_no_connections_for: "30m"
+
+# Version en retard sur la publication officielle. Grass publie souvent : 48 h
+# laissent à l'opérateur le temps de rejouer le déploiement sans bruit.
+prom_alert_grass_outdated_for: "48h"
+
 # ── Nœuds Storj (groupe `storj`) ──────────────────────────────────────────────
 # Silence des satellites toléré. Ils contactent un nœud environ toutes les
 # heures ; deux heures sans ping, c'est un port P2P fermé et non un retard.

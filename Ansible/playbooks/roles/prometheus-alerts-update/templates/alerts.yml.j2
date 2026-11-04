@@ -899,6 +899,110 @@ groups:
             `./play.sh <parc> deploy-storj.yml --limit <hôte> --tags monitoring`.
 
 {% endif %}
+{% if 'grass' in prom_alert_groups %}
+
+  # ── Nœuds Grass ────────────────────────────────────────────────────────────
+  # Séries du collecteur `grass-metrics.sh` de svcprobe (rôle `grass-monitoring`).
+  # Grass n'expose aucune métrique de nœud : « Network Quality » et les points
+  # n'existent que sur son tableau de bord, hors de portée d'une sonde. Ce groupe
+  # couvre ce qui rend le nœud INUTILE sans l'arrêter (`service_up` reste à 1) :
+  # IP classée centre de données ou proxy (0 % de qualité, aucun point), application
+  # sans connexion, version en retard (« Connected » sans rien contribuer).
+  # `service_up == 0` relève de `ServiceDown` (groupe `services`), pas d'ici.
+  # Contrôle après déploiement : `count(grass_app_process_up)` doit valoir le nombre
+  # de nœuds, sinon ces règles sont décoratives.
+  - name: grass
+    rules:
+      - alert: GrassAppDown
+        expr: grass_app_process_up == 0
+        for: 10m
+        keep_firing_for: {{ prom_alert_flap_grace }}
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Application Grass arrêtée dans son conteneur sur {{ '{{' }} $labels.instance {{ '}}' }}'
+          description: >-
+            Le conteneur tourne mais `grass-desktop` n'est plus lancé (plantage,
+            session expirée). `docker logs grass` ; l'image la relance seule
+            (KEEP_APP_RUNNING). Se reconnecter dans l'interface si la session est perdue.
+
+      # Ce que Grass dit lui-même : IP de centre de données, proxy ou VPN = 0 % de
+      # qualité réseau, aucun point. Un nœud sur un VPS, ou derrière un VPN oublié.
+      - alert: GrassIpNotResidential
+        expr: grass_public_ip_hosting == 1 or grass_public_ip_proxy == 1
+        for: 1h
+        keep_firing_for: {{ prom_alert_flap_grace }}
+        labels:
+          severity: critical
+        annotations:
+          summary: 'IP publique de {{ '{{' }} $labels.instance {{ '}}' }} classée centre de données ou proxy : Grass ne rapporte rien'
+          description: >-
+            Grass ne prend en charge que les IP résidentielles ; ici le nœud affichera
+            0 % de qualité réseau. Chercher un VPN actif sur l'hôte ou sur le
+            routeur, un changement d'IP vers une plage d'hébergeur, ou un
+            déploiement fait sur le mauvais serveur. Classement établi par ip-api.com,
+            à recouper sur IPQualityScore et IP2Location.
+
+      # Application lancée, aucune connexion sortante : déconnecté du réseau Grass
+      # (compte non connecté, pare-feu sortant, DNS) — indétectable par service_up.
+      - alert: GrassNoConnections
+        expr: grass_app_process_up == 1 and grass_established_connections == 0
+        for: {{ prom_alert_grass_no_connections_for }}
+        keep_firing_for: {{ prom_alert_flap_grace }}
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Grass tourne sans aucune connexion sortante sur {{ '{{' }} $labels.instance {{ '}}' }}'
+          description: >-
+            Aucune connexion TCP sortante établie depuis le conteneur. Causes
+            fréquentes : compte non connecté dans l'interface (la connexion initiale est
+            manuelle), filtrage sortant, DNS. Interface via
+            `ssh -L 5800:127.0.0.1:5800 <hôte>`, puis http://localhost:5800.
+
+      - alert: GrassOutdated
+        expr: grass_version_outdated == 1
+        for: {{ prom_alert_grass_outdated_for }}
+        keep_firing_for: {{ prom_alert_flap_grace }}
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Grass en retard sur la version officielle sur {{ '{{' }} $labels.instance {{ '}}' }}'
+          description: >-
+            Une version périmée peut perdre sa connexion en restant « Connected »
+            sans rien contribuer. Reconstruire l'image :
+            `./play.sh <parc> deploy-grass.yml --limit <hôte>` (dernière version par défaut).
+
+      # Sans classement de l'IP, GrassIpNotResidential ne voit plus rien.
+      - alert: GrassIpCheckBlind
+        expr: grass_public_ip_lookup_ok == 0
+        for: 12h
+        keep_firing_for: {{ prom_alert_flap_grace }}
+        labels:
+          severity: warning
+        annotations:
+          summary: "L'IP publique de {{ '{{' }} $labels.instance {{ '}}' }} n'est plus classable"
+          description: >-
+            Le service de classement (ip-api.com) ne répond plus depuis l'hôte :
+            GrassIpNotResidential est aveugle. Vérifier l'accès sortant et la limite
+            de 45 requêtes par minute.
+
+      # Le contrôle que ce fichier réclame partout : le collecteur doit émettre
+      # tant que le conteneur tourne.
+      - alert: GrassMetricsMissing
+        expr: >-
+          service_up{service="grass"} == 1
+          unless on (instance) grass_app_process_up
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Plus de métriques Grass sur {{ '{{' }} $labels.instance {{ '}}' }}'
+          description: >-
+            La sonde ne publie plus grass_app_process_up : les alertes Grass ne voient
+            plus rien. Chercher svcprobe_metrics_error{service="grass"} et rejouer
+            `./play.sh <parc> deploy-grass.yml --limit <hôte> --tags monitoring`.
+
+{% endif %}
 {% if 'searxng' in prom_alert_groups %}
 
   # ── Relai SearXNG ──────────────────────────────────────────────────────────

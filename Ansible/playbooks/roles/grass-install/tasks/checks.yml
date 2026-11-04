@@ -1,0 +1,103 @@
+---
+# Contrôles d'éligibilité, AVANT toute installation : un nœud Grass sur une IP de
+# centre de données ne rapporte rien (0 % de qualité réseau), et plusieurs nœuds sur
+# la même connexion se partagent une seule contribution. Mieux vaut le savoir avant
+# d'avoir construit l'image.
+
+- name: Require the architecture the official app is built for
+  ansible.builtin.assert:
+    that: ansible_architecture == grass_required_arch
+    fail_msg: >-
+      Architecture {{ ansible_architecture }} : l'application Grass officielle pour
+      Linux n'existe qu'en {{ grass_required_arch }} (pas de paquet ARM).
+    quiet: true
+
+# ── IP publique : résidentielle ? ──────────────────────────────────────────
+- name: Classify the public IP of this host
+  ansible.builtin.uri:
+    url: "{{ grass_ip_check_url }}"
+    return_content: true
+    timeout: 15
+  register: grass_ip_lookup
+  failed_when: false
+  changed_when: false
+  check_mode: false
+  when: not grass_skip_ip_check | bool
+
+- name: Remember the public IP and its classification
+  ansible.builtin.set_fact:
+    grass_ip_info: "{{ grass_ip_lookup.json | default({}) }}"
+
+- name: Fail when the IP could not be classified
+  ansible.builtin.assert:
+    that: grass_ip_info.status | default('') == 'success'
+    fail_msg: >-
+      Impossible de classer l'IP publique de {{ inventory_hostname }}
+      ({{ grass_ip_info.message | default(grass_ip_lookup.msg | default('pas de réponse')) }}).
+      Vérifier l'accès sortant vers ip-api.com, ou, après avoir contrôlé l'IP à la main
+      (IPQualityScore, IP2Location), passer -e grass_skip_ip_check=true.
+    quiet: true
+  when: not grass_skip_ip_check | bool
+
+- name: Fail on a datacenter, proxy or VPN address
+  ansible.builtin.assert:
+    that:
+      - not (grass_ip_info.hosting | default(false) | bool)
+      - not (grass_ip_info.proxy | default(false) | bool)
+    fail_msg: >-
+      L'IP publique de {{ inventory_hostname }} ({{ grass_ip_info.query | default('?') }},
+      {{ grass_ip_info.isp | default('?') }}) est classée
+      {{ 'centre de données / hébergeur' if grass_ip_info.hosting | default(false) | bool else 'proxy / VPN' }}.
+      Grass ne prend en charge que les IP résidentielles : un nœud ici afficherait 0 %
+      de qualité réseau et ne gagnerait aucun point. À déployer sur une connexion
+      domestique. Si ce classement est une erreur : -e grass_skip_ip_check=true.
+    quiet: true
+  when: not grass_skip_ip_check | bool
+
+- name: Remember the public IP for the uniqueness check
+  ansible.builtin.set_fact:
+    grass_public_ip: "{{ grass_ip_info.query | default('') }}"
+
+- name: Report the classification
+  ansible.builtin.debug:
+    msg: >-
+      IP publique {{ grass_public_ip or 'non contrôlée' }}
+      ({{ grass_ip_info.isp | default('?') }}) —
+      {{ "résidentielle d'après ip-api.com" if not grass_skip_ip_check | bool else "contrôle ignoré (grass_skip_ip_check)" }}.
+      Grass reste seul juge : surveiller « Network Quality » sur son tableau de bord.
+
+# ── Une seule contribution par connexion ───────────────────────────────────
+# Deux sources : les AUTRES entrées d'inventaire qui portent la famille `grass` et
+# partagent le même `ansible_host` (derrière un NAT domestique, l'adresse publique
+# est la même et les machines ne se distinguent que par le port), et les autres
+# hôtes de CE run dont l'IP publique mesurée est identique.
+- name: List the other Grass machines on the same connection
+  ansible.builtin.set_fact:
+    grass_same_connection: >-
+      {% set ns = namespace(found=[]) -%}
+      {% for h in groups['all'] -%}
+      {% if h != inventory_hostname and 'grass' in (hostvars[h].ansible_roles | default([]))
+            and hostvars[h].ansible_host | default(h) == ansible_host -%}
+      {% set ns.found = ns.found + [h] -%}
+      {% endif -%}
+      {% endfor -%}
+      {% for h in ansible_play_hosts_all | default([]) -%}
+      {% if h != inventory_hostname and grass_public_ip | length > 0
+            and hostvars[h].grass_public_ip | default('') == grass_public_ip
+            and h not in ns.found -%}
+      {% set ns.found = ns.found + [h] -%}
+      {% endif -%}
+      {% endfor -%}
+      {{ ns.found }}
+
+- name: Fail when another Grass machine shares this connection
+  ansible.builtin.assert:
+    that: (grass_same_connection | length == 0) or (grass_allow_shared_ip | bool)
+    fail_msg: >-
+      {{ inventory_hostname }} partage sa connexion Internet avec
+      {{ grass_same_connection | join(', ') }}, qui portent aussi la famille `grass`.
+      Selon Grass, plusieurs appareils sur le même réseau se partagent UNE contribution :
+      un second nœud ne rapporte rien de plus. Garder un seul nœud par connexion
+      (ou, pour en avoir plusieurs, des lignes Internet DIFFÉRENTES). Pour passer outre :
+      -e grass_allow_shared_ip=true.
+    quiet: true

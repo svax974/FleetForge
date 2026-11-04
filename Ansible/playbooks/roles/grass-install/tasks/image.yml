@@ -1,0 +1,90 @@
+---
+# Image locale `grass-desktop:<version>` : base jlesage + .deb officiel. Construite
+# sur l'hôte (le .deb n'est distribué que par Grass, aucune image « officielle »
+# n'existe), avec un nom d'étiquette par version : un changement de version
+# reconstruit, un rejeu à l'identique ne fait rien.
+
+- name: Resolve the version to install
+  when: grass_version | length == 0
+  block:
+    - name: Read the official desktop manifest
+      ansible.builtin.uri:
+        url: "{{ grass_manifest_url }}"
+        return_content: true
+        timeout: 20
+      register: grass_manifest
+      changed_when: false
+      check_mode: false
+
+    - name: Take the Linux x86_64 package from the manifest
+      ansible.builtin.set_fact:
+        grass_resolved_version: "{{ grass_manifest.json.version | regex_replace('^v', '') }}"
+        grass_resolved_url: "{{ grass_manifest.json.platforms['linux-x86_64'].url }}"
+
+- name: Use the pinned version
+  ansible.builtin.set_fact:
+    grass_resolved_version: "{{ grass_version | regex_replace('^v', '') }}"
+    grass_resolved_url: >-
+      {{ grass_deb_url if grass_deb_url | length > 0 else
+         'https://files.grass.io/file/grass-extension-upgrades/v' ~ (grass_version | regex_replace('^v', ''))
+         ~ '/grass-desktop_' ~ (grass_version | regex_replace('^v', '')) ~ '_amd64.deb' }}
+  when: grass_version | length > 0
+
+- name: Look for an existing image of that version
+  community.docker.docker_image_info:
+    name: "{{ grass_image }}:{{ grass_resolved_version }}"
+  register: grass_image_present
+
+- name: Build the image
+  when: grass_rebuild | bool or grass_image_present.images | length == 0
+  block:
+    - name: Create the build directory
+      ansible.builtin.file:
+        path: "{{ grass_build_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Download the official .deb
+      ansible.builtin.get_url:
+        url: "{{ grass_resolved_url }}"
+        dest: "{{ grass_build_dir }}/grass.deb"
+        checksum: "{{ ('sha256:' ~ grass_deb_sha256) if grass_deb_sha256 | length > 0 else omit }}"
+        mode: "0644"
+        timeout: 180
+        force: true
+
+    - name: Measure the package
+      ansible.builtin.stat:
+        path: "{{ grass_build_dir }}/grass.deb"
+        checksum_algorithm: sha256
+      register: grass_deb_stat
+
+    - name: Remember the checksum
+      ansible.builtin.set_fact:
+        grass_deb_checksum: "{{ grass_deb_stat.stat.checksum }}"
+
+    - name: Write the Dockerfile and the launcher
+      ansible.builtin.template:
+        src: "{{ item.src }}"
+        dest: "{{ grass_build_dir }}/{{ item.dest }}"
+        mode: "{{ item.mode }}"
+      loop:
+        - { src: Dockerfile.j2, dest: Dockerfile, mode: "0644" }
+        - { src: startapp.sh.j2, dest: startapp.sh, mode: "0755" }
+
+    - name: Write the main-window selection
+      ansible.builtin.template:
+        src: main-window-selection.jwmrc.j2
+        dest: "{{ grass_build_dir }}/main-window-selection.jwmrc"
+        mode: "0644"
+      when: grass_main_window_class | length > 0
+
+    - name: Build the Grass image
+      community.docker.docker_image:
+        name: "{{ grass_image }}"
+        tag: "{{ grass_resolved_version }}"
+        source: build
+        force_source: "{{ grass_rebuild | bool }}"
+        build:
+          path: "{{ grass_build_dir }}"
+          pull: true

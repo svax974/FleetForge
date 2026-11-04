@@ -1,0 +1,36 @@
+---
+# Conteneur du nœud. L'application tourne sous l'uid de `remote_username`, son état
+# (session, compte connecté) vit dans `grass_config_dir`.
+
+- name: Read the uid and gid of the service account
+  ansible.builtin.command: "id -{{ item }} {{ remote_username }}"
+  loop: [u, g]
+  register: grass_ids
+  changed_when: false
+
+- name: Create the data directory
+  ansible.builtin.file:
+    path: "{{ grass_config_dir }}"
+    state: directory
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: "0700"
+
+- name: Run the Grass node
+  community.docker.docker_container:
+    name: "{{ grass_container }}"
+    image: "{{ grass_image }}:{{ grass_resolved_version }}"
+    state: started
+    restart_policy: unless-stopped
+    shm_size: "{{ grass_shm_size }}"
+    published_ports:
+      - "127.0.0.1:{{ grass_gui_port }}:5800"
+    env:
+      USER_ID: "{{ grass_ids.results[0].stdout }}"
+      GROUP_ID: "{{ grass_ids.results[1].stdout }}"
+      TZ: "{{ grass_timezone }}"
+      DISPLAY_WIDTH: "{{ grass_display_width | string }}"
+      DISPLAY_HEIGHT: "{{ grass_display_height | string }}"
+      KEEP_APP_RUNNING: "1"
+    mounts:
+      - { type: bind, source: "{{ grass_config_dir }}", target: /config }

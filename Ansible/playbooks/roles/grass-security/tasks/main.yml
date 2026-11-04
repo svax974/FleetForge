@@ -1,0 +1,31 @@
+---
+# Contrôle d'exposition du nœud Grass : ne pose aucune règle, vérifie l'état réel.
+
+# Avant Docker 28, un port publié sur 127.0.0.1 restait joignable depuis le segment
+# L2 de l'hôte (même constat que theta-edge-security et storj-security).
+- name: Read the Docker engine version
+  ansible.builtin.command: docker version --format '{{ "{{" }}.Server.Version{{ "}}" }}'
+  register: grasssec_docker_version
+  changed_when: false
+
+- name: Require Docker >= 28 (127.0.0.1 publications enforced)
+  ansible.builtin.assert:
+    that: grasssec_docker_version.stdout is version('28.0', '>=')
+    fail_msg: >-
+      Docker {{ grasssec_docker_version.stdout }} : l'interface graphique publiée sur
+      127.0.0.1 reste joignable depuis le segment L2 de l'hôte, et elle n'a pas
+      d'authentification. Mettre Docker à jour (≥ 28.0).
+    quiet: true
+
+- name: List the published ports of the Grass container
+  ansible.builtin.command: "docker port {{ grasssec_container }}"
+  register: grasssec_ports
+  changed_when: false
+
+# `docker port` affiche `5800/tcp -> 127.0.0.1:5800` ; toute autre adresse
+# (0.0.0.0, [::]) est une publication sur Internet.
+- name: Fail when a port is published beyond loopback
+  ansible.builtin.assert:
+    that: grasssec_ports.stdout_lines | reject('search', '-> 127[.]0[.]0[.]1:') | list | length == 0
+    fail_msg: "Ports Grass publiés hors 127.0.0.1 : {{ grasssec_ports.stdout_lines | reject('search', '-> 127[.]0[.]0[.]1:') | list }}"
+    quiet: true

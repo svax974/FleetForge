@@ -1,0 +1,10 @@
+#!/bin/sh
+# Généré par grass-install — lancé par l'image jlesage sous l'écran virtuel.
+export HOME=/config
+export LC_ALL=C
+# Rendu logiciel : il n'y a pas de GPU sous Xvfb. Sans ces variables, WebKitGTK
+# échoue sur certains hôtes avec « Could not create surfaceless EGL display ».
+export WEBKIT_DISABLE_DMABUF_RENDERER=1
+export WEBKIT_DISABLE_COMPOSITING_MODE=1
+export LIBGL_ALWAYS_SOFTWARE=1
+exec /usr/bin/grass-desktop

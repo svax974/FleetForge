@@ -1,0 +1,26 @@
+---
+# Désinstalle le nœud Grass en CONSERVANT la session (`grass_config_dir`) : un
+# redéploiement reprend le même compte connecté, sans nouvelle connexion manuelle.
+#
+# Retire la sonde svcprobe — laissée en place, elle publierait `service_up 0` et
+# ferait sonner `ServiceDown` sur un service volontairement désinstallé
+# (CLAUDE.md § 2). Pas de cible Prometheus propre : la supervision passe par la cible
+# `svcprobe` de l'hôte, qui reste (autres services).
+#
+# Pour tout supprimer, session et image comprises : `purge-grass.yml`.
+
+- name: Remove the Grass probe and its collector
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ svcprobe_checks_dir | default('/etc/svcprobe/checks.d') }}/grass.json"
+    - "{{ svcprobe_lib_dir | default('/usr/local/lib/svcprobe') }}/grass-metrics.sh"
+  become: true
+  tags: [monitoring]
+
+- name: Remove the Grass container
+  community.docker.docker_container:
+    name: "{{ grass_container | default('grass') }}"
+    state: absent
+    stop_timeout: 30

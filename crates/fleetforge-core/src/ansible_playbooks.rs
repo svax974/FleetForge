@@ -282,6 +282,9 @@ fn get_playbook_metadata(name: &str) -> (String, String) {
         "remove-storj" => ("Suppression noeud Storj".into(), "Arrête et supprime les conteneurs Storj et la sonde svcprobe ; identité, configuration et données conservées (un redéploiement reprend le même nœud). --limit obligatoire.".into()),
         "purge-storj" => ("Purge noeud Storj".into(), "Rapatrie l'identité sur le poste puis supprime le nœud, son identité, sa configuration et toutes les données stockées. Exige -e confirm=yes. --limit obligatoire.".into()),
         "export-storj-keys" => ("Export identité Storj".into(), "Rapatrie sur le poste (~/.config/fleetforge/storj/<hôte>/, 0600) l'identité du nœud (ca.key et identity.key : sans elles, nœud et montant retenu perdus) et un info.json (identifiant, adresse de paiement). Le nœud ne détient aucune clé de paiement.".into()),
+        "deploy-grass" => ("Déploiement noeud Grass".into(), "Client de bureau Grass officiel sur un serveur sans écran (conteneur à écran virtuel, interface sur 127.0.0.1), supervision et règles d'alerte (groupe `grass`). Refuse une IP de centre de données/proxy (Grass : IP résidentielle uniquement) et deux nœuds sur la même IP publique (une contribution par connexion). Connexion au compte manuelle, une fois. Hôtes : famille `grass`.".into()),
+        "remove-grass" => ("Suppression noeud Grass".into(), "Arrête et supprime le conteneur Grass et la sonde svcprobe ; session conservée. --limit obligatoire.".into()),
+        "purge-grass" => ("Purge noeud Grass".into(), "Supprime le nœud Grass, sa session et ses images (reconnexion manuelle au prochain déploiement). --limit obligatoire.".into()),
         "deploy-mtbridge" => ("Déploiement MTBridge".into(), "Installe MTBridge sur les hôtes Windows (groupe mtbridges) et enregistre la target Prometheus sur le monitor. Variables : mtbridge_github_token (vault), mtbridge_api_key (vault, optionnel), app_port (inventaire, défaut 5005).".into()),
         "remove-mtbridge" => ("Suppression MTBridge".into(), "Arrête la tâche planifiée MTBridge et retire la target Prometheus (données préservées).".into()),
         "purge-mtbridge" => ("Purge MTBridge".into(), "Supprime complètement MTBridge : tâche planifiée, répertoire d'installation, données MT5, règles firewall et target Prometheus.".into()),
@@ -328,7 +331,7 @@ fn categorize(name: &str) -> String {
         "VPN".to_string()
     } else if name.contains("mail") {
         "Mail".to_string()
-    } else if name.contains("rpcbtc") || name.contains("btc") || name.contains("astar") || name.contains("theta") || name.contains("storj") {
+    } else if name.contains("rpcbtc") || name.contains("btc") || name.contains("astar") || name.contains("theta") || name.contains("storj") || name.contains("grass") {
         "Blockchain".to_string()
     } else if name.contains("mtbridge") {
         "Trading".to_string()

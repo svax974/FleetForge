@@ -1,0 +1,11 @@
+---
+# Exposition d'un nœud Grass.
+#
+# Grass n'ÉCOUTE sur aucun port : le nœud ne fait que des connexions SORTANTES vers
+# le réseau Grass. Il n'y a donc rien à ouvrir, ni dans ufw, ni sur le routeur.
+#
+# Le seul port est l'interface graphique de l'écran virtuel (5800 dans le conteneur),
+# SANS authentification : elle donne la main sur l'application connectée au compte
+# Grass. Elle est publiée sur 127.0.0.1 seul ; ce rôle le VÉRIFIE (un port publié par
+# Docker échappe à ufw, CLAUDE.md § 1).
+grasssec_container: "{{ grass_container | default('grass') }}"

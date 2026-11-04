@@ -1,0 +1,33 @@
+---
+# Déploiement d'un nœud Grass : contrôles d'éligibilité (IP résidentielle, une
+# contribution par connexion), image à partir du .deb officiel, conteneur sous écran
+# virtuel, attente de l'interface. La CONNEXION au compte reste manuelle, une fois.
+#
+#   ./play.sh <parc> deploy-grass.yml --limit <hôte>
+
+- name: Check that this host can earn anything
+  ansible.builtin.include_tasks: checks.yml
+
+- name: Build the image
+  ansible.builtin.include_tasks: image.yml
+
+- name: Run the container
+  ansible.builtin.include_tasks: container.yml
+
+- name: Wait for the virtual-screen web interface
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ grass_gui_port }}/"
+    timeout: 10
+  register: grass_gui
+  retries: 18
+  delay: 10
+  until: grass_gui.status | default(0) == 200
+  changed_when: false
+
+- name: Summary
+  ansible.builtin.debug:
+    msg:
+      - "Grass {{ grass_resolved_version }} démarré sur {{ inventory_hostname }} (IP publique {{ grass_public_ip or 'non contrôlée' }})."
+      - "Prochaine étape, MANUELLE et unique : se connecter à son compte Grass dans l'interface."
+      - "  ssh -p {{ ansible_port | default(22) }} -L {{ grass_gui_port }}:127.0.0.1:{{ grass_gui_port }} {{ remote_username }}@{{ ansible_host }}   puis   http://localhost:{{ grass_gui_port }}"
+      - "La session est conservée dans {{ grass_config_dir }} : elle survit aux redémarrages et aux mises à jour de l'image."

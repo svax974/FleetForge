@@ -1,0 +1,15 @@
+{
+  "service": "grass",
+  "up": {"kind": "docker", "container": "{{ grassmon_container }}"},
+  "extra_checks": [
+    {"name": "gui", "kind": "http", "url": "http://127.0.0.1:{{ grassmon_gui_port }}/", "status": [200], "timeout": 10},
+    {"name": "app", "kind": "command", "argv": ["docker", "exec", "{{ grassmon_container }}", "pgrep", "-x", "grass-desktop"], "timeout": 10}
+  ],
+  "metrics_command": [
+    "{{ svcprobe_lib_dir }}/grass-metrics.sh",
+    "{{ grassmon_container }}",
+    "{{ grassmon_manifest_url }}",
+    "{{ grassmon_ip_check_url }}"
+  ],
+  "metrics_timeout": 40
+}

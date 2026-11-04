@@ -256,7 +256,7 @@ fn get_role_metadata(name: &str) -> (String, String) {
 
         // Monitoring
         "prometheus-install" => ("Installation Prometheus".into(), "Déploie Prometheus (Docker) avec authentification basique et lien vers Alertmanager. Les règles d'alerte sont posées par prometheus-alerts-update. Variables : prometheus_port (défaut 9090), prometheus_retention, alertmanager_host.".into()),
-        "prometheus-alerts-update" => ("MAJ règles d'alerte Prometheus".into(), "Déploie les règles d'alerte sur l'hôte Prometheus du parc courant. Partagé par les deux stacks (prometheus-install et monitoring-install) pour que les règles ne divergent pas. Applique les exemptions par hôte (`alert_exclude: [Alerte]` sur une entrée d'inventaire) en enveloppant l'expression déployée d'un `unless on (instance)`, et refuse une exemption visant une règle non chargée. Groupes sélectionnables via prom_alert_groups : availability, resources, database, papangmetrics, bitcoin, astar, theta, storj, searxng, openclaw, sync, services, dmarc, backups.".into()),
+        "prometheus-alerts-update" => ("MAJ règles d'alerte Prometheus".into(), "Déploie les règles d'alerte sur l'hôte Prometheus du parc courant. Partagé par les deux stacks (prometheus-install et monitoring-install) pour que les règles ne divergent pas. Applique les exemptions par hôte (`alert_exclude: [Alerte]` sur une entrée d'inventaire) en enveloppant l'expression déployée d'un `unless on (instance)`, et refuse une exemption visant une règle non chargée. Groupes sélectionnables via prom_alert_groups : availability, resources, database, papangmetrics, bitcoin, astar, theta, storj, grass, searxng, openclaw, sync, services, dmarc, backups.".into()),
         "prometheus-remove" => ("Suppression Prometheus".into(), "Arrête et supprime le conteneur Prometheus. Préserve la TSDB, la configuration et les règles d'alerte.".into()),
         "prometheus-purge" => ("Purge Prometheus".into(), "Supprime Prometheus et toutes ses données : TSDB, configuration, règles et cibles. Destructif (historique des métriques perdu).".into()),
         "prometheus-security" => ("Sécurité Prometheus".into(), "Firewall : accès à l'UI/API Prometheus réservé à la whitelist et aux VPN. Additif, ne modifie pas la politique UFW par défaut.".into()),
@@ -460,6 +460,13 @@ fn get_role_metadata(name: &str) -> (String, String) {
         "storj-remove" => ("Suppression noeud Storj".into(), "Arrête et supprime les conteneurs (nœud, Watchtower) et la sonde svcprobe. Identité, configuration et données conservées : un redéploiement reprend le même nœud.".into()),
         "storj-purge" => ("Purge noeud Storj".into(), "Rapatrie d'abord l'identité sur le poste, puis supprime conteneurs, sonde, identité, configuration et toutes les données stockées. Exige -e confirm=yes.".into()),
 
+        // Grass (partage de bande passante, client de bureau officiel)
+        "grass-install" => ("Installation noeud Grass".into(), "Déploie le client de bureau Grass OFFICIEL (.deb Linux x86_64, non modifié) dans un conteneur à écran virtuel (Xvfb + VNC + client web, jlesage), interface publiée sur 127.0.0.1 seulement. Refuse de déployer sur une IP classée centre de données/proxy (Grass ne prend en charge que les IP résidentielles : 0 % de qualité sinon) et sur une IP publique déjà utilisée par un autre nœud Grass (une seule contribution par connexion). La connexion au compte reste manuelle, une fois.".into()),
+        "grass-security" => ("Contrôle exposition noeud Grass".into(), "Ne pose aucune règle (Grass n'écoute sur aucun port) : vérifie Docker ≥ 28 et que l'interface graphique, sans authentification, n'est publiée que sur 127.0.0.1.".into()),
+        "grass-monitoring" => ("Supervision noeud Grass".into(), "Sonde svcprobe service_up{service=\"grass\"} + collecteur : processus de l'application, connexions sortantes, version installée vs publiée, classement de l'IP publique (centre de données/proxy). Le gain (Network Quality, points) n'est lisible que sur le tableau de bord Grass. Alertes : groupe `grass` de prom_alert_groups.".into()),
+        "grass-remove" => ("Suppression noeud Grass".into(), "Arrête et supprime le conteneur et la sonde svcprobe. Session (compte connecté) conservée : un redéploiement évite la reconnexion manuelle.".into()),
+        "grass-purge" => ("Purge noeud Grass".into(), "Supprime conteneur, sonde, session, images et dossier de construction. Seule conséquence : se reconnecter une fois à Grass au prochain déploiement.".into()),
+
         // MTBridge (MetaTrader 5 bridge — Windows)
         "mtbridge-deploy" => ("Déploiement MTBridge".into(), "Clone et installe MTBridge sur un hôte Windows via Task Scheduler. Configure Python, l'environnement MT5 et l'auto-logon. Variables : mtbridge_github_token (vault), mtbridge_api_key (vault, optionnel), app_port (inventaire).".into()),
         "mtbridge-monitoring" => ("Monitoring MTBridge".into(), "Enregistre MTBridge comme target Prometheus sur le serveur monitor (scrape /metrics sur app_port). Ouvre le firewall Windows pour l'IP du monitor.".into()),
@@ -520,6 +527,7 @@ fn categorize(name: &str) -> String {
         || name.starts_with("astar-")
         || name.starts_with("theta-edge-")
         || name.starts_with("storj-")
+        || name.starts_with("grass-")
     {
         "Blockchain".to_string()
     } else if name.starts_with("docker-") {

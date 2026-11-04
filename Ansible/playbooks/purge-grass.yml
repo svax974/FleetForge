@@ -1,0 +1,22 @@
+---
+# Supprime le nœud Grass, sa session et ses images.
+#
+#   ./play.sh <parc> purge-grass.yml --limit <hôte>
+#
+# Seule conséquence : se reconnecter une fois à Grass au prochain déploiement. Le
+# compte Grass et ses points vivent chez Grass, pas sur ce serveur.
+#
+# `--limit` est OBLIGATOIRE.
+
+- name: Purge du nœud Grass (session et images comprises)
+  hosts: all
+  remote_user: "{{ remote_username }}"
+  become: true
+  pre_tasks:
+    - name: Refuse to run without an explicit --limit
+      ansible.builtin.assert:
+        that: ansible_limit is defined
+        fail_msg: "Sans --limit, tous les hôtes de l'inventaire seraient visés. Ajouter --limit <hôte>."
+      run_once: true
+  roles:
+    - grass-purge

@@ -1,0 +1,36 @@
+---
+# Tout ce que fait `grass-remove`, PLUS la suppression de la session, des images et
+# du dossier de construction. Seule conséquence : se reconnecter une fois à Grass au
+# prochain déploiement. Le compte Grass et ses points ne sont pas concernés (ils
+# vivent chez Grass, pas sur ce serveur).
+
+- name: Run the remove role
+  ansible.builtin.include_role:
+    name: grass-remove
+
+# Chemins et noms des defaults d'`grass-install`, jamais recopiés.
+- name: Load the install defaults
+  ansible.builtin.include_vars:
+    file: "{{ role_path }}/../grass-install/defaults/main.yml"
+
+# Le CONTENU est supprimé, puis le dossier s'il le permet (point de montage possible).
+- name: Remove the session data and the build directory
+  ansible.builtin.shell: |
+    for d in "{{ grass_config_dir }}" "{{ grass_build_dir }}"; do
+      [ -d "$d" ] || continue
+      find "$d" -mindepth 1 -delete
+      rmdir "$d" 2>/dev/null || true
+    done
+  changed_when: true
+
+# `docker images <nom>` liste TOUTES les étiquettes du dépôt (une par version
+# construite) ; l'ID est supprimé une fois, quel que soit le nombre d'étiquettes.
+- name: List the Grass images
+  ansible.builtin.command: "docker images {{ grass_image }} --format '{{ \"{{\" }}.ID{{ \"}}\" }}'"
+  register: grass_images
+  changed_when: false
+
+- name: Remove the Grass images
+  ansible.builtin.command: "docker rmi -f {{ item }}"
+  loop: "{{ grass_images.stdout_lines | unique }}"
+  changed_when: true

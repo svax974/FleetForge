@@ -1,0 +1,76 @@
+---
+# Nœud Grass (https://www.grass.io) — l'application de bureau OFFICIELLE (.deb
+# Linux), non modifiée, exécutée dans un écran virtuel (image jlesage/baseimage-gui :
+# Xvfb + serveur VNC + client web). Aucun script ni émulation du protocole : Grass
+# n'a pas de mode headless officiel, et ses conditions interdisent de rétro-concevoir
+# ou de contourner l'application (https://www.getgrass.io/terms-and-conditions/).
+#
+# ── Ce que Grass exige RÉELLEMENT (vérifié sur grass.io/learn le 04/11/2026) ──
+# • IP RÉSIDENTIELLE uniquement : « Grass only supports residential IPs.
+#   Datacenter, proxy, or VPN IPs are not supported and cannot be manually
+#   unblocked. Using these types of connections will result in 0% network quality
+#   and prevent you from earning points. » Un VPS (OVH, Contabo…) est donc inutile.
+#   D'où le contrôle d'IP de ce rôle, bloquant par défaut.
+# • UNE contribution par connexion : « Devices on the same network share that
+#   connection's contribution » — plusieurs machines derrière la MÊME box ne
+#   multiplient rien. D'où le contrôle d'IP publique partagée.
+# • Un compte par personne ; un seul client Grass par appareil.
+# • Pas d'API de nœud : la connexion se fait UNE fois, à la main, dans l'interface
+#   graphique (voir deploy-grass.yml). Rien n'est automatisable de ce côté.
+#
+# Aucun paramètre obligatoire : le déploiement ne demande ni identifiant ni mot de
+# passe Grass (jamais stockés ici).
+
+# ── Version ────────────────────────────────────────────────────────────────
+# Vide : dernière version publiée dans le manifeste officiel
+# (desktop-installer-latest.json). Un rejeu reconstruit l'image si elle a changé.
+# Renseignée (ex. 8.1.0) : version figée ; `grass_deb_url` est alors déduit du
+# modèle de nom de la 8.x et se surcharge si Grass le change.
+grass_version: ""
+grass_manifest_url: "https://files.grass.io/file/grass-extension-upgrades/desktop-installer-latest.json"
+grass_deb_url: ""
+# Somme SHA-256 attendue du .deb (facultative, utile avec une version figée).
+grass_deb_sha256: ""
+# L'application officielle n'existe que pour x86_64 sous Linux (pas d'ARM).
+grass_required_arch: x86_64
+
+# ── Image et conteneur ─────────────────────────────────────────────────────
+grass_container: grass
+grass_image: grass-desktop
+# Ubuntu 22.04 : la base avec laquelle les images communautaires du client Grass
+# ont été validées (libwebkit2gtk-4.1, libappindicator).
+grass_base_image: "jlesage/baseimage-gui:ubuntu-22.04-v4.14.0"
+grass_build_dir: /var/lib/grass-build
+# Données du conteneur : `/config` = session, compte connecté, réglages. Les perdre
+# oblige à se reconnecter (le compte Grass, lui, n'est pas touché).
+grass_config_dir: /var/lib/grass
+grass_shm_size: 1g
+grass_display_width: 1280
+grass_display_height: 800
+grass_timezone: Etc/UTC
+# Classe de la fenêtre principale pour jlesage (main-window-selection.jwmrc).
+# Vide : sélection automatique. À renseigner seulement si la fenêtre ne s'affiche
+# pas correctement dans l'interface web (la classe de la 8.x n'a pas pu être
+# vérifiée sans exécuter l'application ; le fichier .desktop indique grass-desktop).
+grass_main_window_class: ""
+# Rend l'image (re)construite même si elle existe déjà.
+grass_rebuild: false
+
+# ── Interface graphique ────────────────────────────────────────────────────
+# Interface web (noVNC) SANS authentification supplémentaire : quiconque l'atteint
+# pilote l'application connectée au compte Grass. Publiée sur 127.0.0.1 seulement ;
+# pour s'y connecter : ssh -L 5800:127.0.0.1:5800 <hôte> puis http://localhost:5800.
+# (`grass-security` le vérifie.)
+grass_gui_port: 5800
+
+# ── Contrôles d'éligibilité (voir checks.yml) ──────────────────────────────
+# Service interrogé DEPUIS l'hôte pour classer son IP publique (hosting = centre de
+# données, proxy = VPN/proxy). Gratuit, HTTP seulement, 45 requêtes/minute. Ce
+# n'est PAS le classement de Grass : un doute se vérifie aussi sur IPQualityScore et
+# IP2Location, comme le recommande Grass.
+grass_ip_check_url: "http://ip-api.com/json/?fields=status,message,query,isp,org,hosting,proxy,mobile"
+# true : ne pas bloquer sur l'IP (le nœud ne rapportera probablement rien).
+grass_skip_ip_check: false
+# true : autoriser deux machines sur la même IP publique (elles se partagent UNE
+# contribution : aucun gain, seulement de la charge réseau en plus).
+grass_allow_shared_ip: false

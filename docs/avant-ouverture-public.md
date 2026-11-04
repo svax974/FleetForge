@@ -19,3 +19,26 @@ Retirer ou dater un point une fois fait.
 - **Redirection routeur 28967 TCP + UDP** si l'hôte est derrière un NAT (hors Ansible).
 - **Règles d'alerte `storj`** non validées par `promtool` : vérifier le chargement
   sur la supervision après le premier déploiement (`count(storj_disk_used_bytes)`).
+
+## Nœud Grass (ajouté le 04/11/2026)
+
+- **Premier déploiement réel à observer** : `deploy-grass.yml` n'a été testé que par morceaux
+  (contrôles d'IP, version, collecteur, règles), jamais avec Docker. Le client 8.x n'apparaît dans
+  aucune image communautaire connue : vérifier que la fenêtre s'affiche dans l'interface web
+  (`grass_main_window_class` sinon), que l'image se construit (dépendances du .deb) et que
+  l'application reste lancée (`docker logs grass`).
+- **À déployer chez soi uniquement** : Grass ne prend en charge que les IP résidentielles
+  (grass.io/learn) ; le déploiement refuse une IP classée centre de données/proxy.
+- **Une contribution par connexion** : plusieurs machines derrière la même box ne rapportent
+  pas plus (le déploiement refuse deux nœuds sur la même IP publique).
+- **Connexion au compte manuelle** (pas d'API ni de mode headless) : à refaire après une purge.
+- **Conditions d'utilisation de Grass** : interdisent de rétro-concevoir ou de contourner
+  l'application ; le rôle lance le client officiel tel quel, sans automatisation. À relire si
+  Grass durcit sa politique sur les environnements virtualisés.
+- **Gain non supervisé** : « Network Quality » et les points ne se lisent que sur le tableau de
+  bord Grass (pas d'API) : vérifier à la main après le premier déploiement.
+- **Règles d'alerte `grass`** non validées par `promtool` : vérifier le chargement et
+  `count(grass_app_process_up)` après le premier déploiement.
+- **Dépôt privé** : `grass` ajouté à `prom_alert_groups` de web3c et le port 5800 au registre, à
+  committer dans `fleetforge-parcs`.
+
