@@ -76,8 +76,17 @@ impl ApiError {
             FaultKind::UnknownParc
             | FaultKind::UnknownHost
             | FaultKind::UnknownPlaybook
-            | FaultKind::UnknownRun => StatusCode::NOT_FOUND,
-            FaultKind::RunBusy | FaultKind::RunIdInUse | FaultKind::CheckRequired => StatusCode::CONFLICT,
+            | FaultKind::UnknownRun
+            | FaultKind::UnknownCommit
+            | FaultKind::UnknownPath => StatusCode::NOT_FOUND,
+            FaultKind::ForbiddenPlaybook
+            | FaultKind::TooManyHosts
+            | FaultKind::RefRefused
+            | FaultKind::PathRefused => StatusCode::FORBIDDEN,
+            FaultKind::RunBusy
+            | FaultKind::RunIdInUse
+            | FaultKind::CheckRequired
+            | FaultKind::NotFastForward => StatusCode::CONFLICT,
             FaultKind::NotConfigured => StatusCode::SERVICE_UNAVAILABLE,
             FaultKind::Upstream => StatusCode::BAD_GATEWAY,
             FaultKind::Timeout => StatusCode::GATEWAY_TIMEOUT,
@@ -485,6 +494,12 @@ pub async fn dispatch(
         "alertmanager_alerts" => automation::serve(&state, role, &scope, &command, &p).await,
         "ssh_diagnose" => automation::serve(&state, role, &scope, &command, &p).await,
         "run_status" => automation::serve(&state, role, &scope, &command, &p).await,
+        "describe_playbook" => automation::serve(&state, role, &scope, &command, &p).await,
+        "read_tree" => automation::serve(&state, role, &scope, &command, &p).await,
+        "search_tree" => automation::serve(&state, role, &scope, &command, &p).await,
+        "tree_status" => automation::serve(&state, role, &scope, &command, &p).await,
+        "syntax_check" => automation::serve(&state, role, &scope, &command, &p).await,
+        "sync_tree" => automation::serve(&state, role, &scope, &command, &p).await,
 
         other => Err(ApiError::invalid(format!("commande inconnue : {other}"))),
     }
@@ -601,6 +616,12 @@ pub const COMMANDS: &[&str] = &[
     "alertmanager_alerts",
     "ssh_diagnose",
     "run_status",
+    "describe_playbook",
+    "read_tree",
+    "search_tree",
+    "tree_status",
+    "syntax_check",
+    "sync_tree",
 ];
 
 #[cfg(test)]

@@ -102,7 +102,27 @@ async fn main() -> Result<()> {
     let core = Core::new().context("initialisation du cœur")?;
     core.with_db(|db| db.seed_predefined_models())
         .context("catalogue de modèles")?;
-    adopt_deployed_paths(&core)?;
+    match &config.git_tree {
+        // Arbre git : ni `FLEETFORGE_ANSIBLE_DIR` ni les réglages stockés ne
+        // disent où il est — le clone, les données et les arbres d'exécution
+        // sont ceux du déploiement.
+        Some(git) => {
+            let tree = fleetforge_core::ansible_git::GitTree::new(git.clone())?;
+            match tree.status() {
+                Ok(status) => fleetforge_core::logging::info(
+                    "web",
+                    format!("arbre git : {} @ {}", status.branch, status.head),
+                ),
+                Err(e) => fleetforge_core::logging::warn(
+                    "web",
+                    format!("arbre git indisponible au démarrage ({e}) : parc vide tant que le clone manque"),
+                ),
+            }
+            core.attach_git_tree(tree);
+        }
+        None => adopt_deployed_paths(&core)?,
+    }
+    core.set_private_tree_files(config.private_tree_files.clone());
 
     let state = AppState::new(core, config.ro_gate.clone());
 

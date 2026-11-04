@@ -12,6 +12,7 @@
 
 use anyhow::{bail, Context, Result};
 use argon2::password_hash::PasswordHash;
+use fleetforge_core::ansible_git::{GitTreeConfig, DEFAULT_KEEP};
 use fleetforge_core::ro_gate::RoGateConfig;
 use serde::Deserialize;
 use std::collections::BTreeSet;
@@ -32,6 +33,12 @@ pub struct Config {
     pub accounts: Vec<Account>,
     /// Diagnostic en lecture seule (`ssh_diagnose`).
     pub ro_gate: RoGateConfig,
+    /// Arbre Ansible servi depuis git (`FLEETFORGE_ANSIBLE_SOURCE=git`). `None` :
+    /// l'arbre livré par rsync (`FLEETFORGE_ANSIBLE_DIR`).
+    pub git_tree: Option<GitTreeConfig>,
+    /// Fichiers de l'arbre portant une donnée de parc, jamais lus par
+    /// `read_tree` (`FLEETFORGE_TREE_PRIVATE_FILES`, séparés par des virgules).
+    pub private_tree_files: Vec<String>,
 }
 
 /// Ce qu'un compte a le droit de faire.
@@ -69,17 +76,40 @@ pub struct Scope {
     /// données de son parc, ce parc seul).
     pub parcs: Option<BTreeSet<String>>,
     pub mode: Mode,
+    /// Motifs (`*`, `?`) des noms de playbooks que `run_ansible_playbook`
+    /// refuse à ce compte (`forbidden_playbook`) — y compris ceux qu'un
+    /// playbook importe.
+    pub deny_playbooks: Vec<String>,
+    /// Hôtes au plus visés par un run de ce compte (`too_many_hosts`) ; `limit`
+    /// devient obligatoire et `no_limit` refusé. `None` : pas de borne.
+    pub max_hosts: Option<usize>,
 }
 
 impl Scope {
     /// Tout : l'opérateur, le compte hérité, l'absence d'authentification.
     pub fn everything() -> Self {
-        Self { parcs: None, mode: Mode::Run }
+        Self { parcs: None, mode: Mode::Run, deny_playbooks: Vec::new(), max_hosts: None }
     }
 
     /// Rien : une requête qui n'est pas passée par l'authentification.
     pub fn nothing() -> Self {
-        Self { parcs: Some(BTreeSet::new()), mode: Mode::Read }
+        Self { parcs: Some(BTreeSet::new()), mode: Mode::Read, deny_playbooks: Vec::new(), max_hosts: None }
+    }
+
+    /// Ce playbook (nom de fichier) est-il interdit à ce compte ?
+    ///
+    /// `x.yaml` et `x.yml` sont un même playbook pour Ansible : un motif en
+    /// `.yml` couvre aussi la forme `.yaml`, et inversement.
+    pub fn denies(&self, playbook: &str) -> bool {
+        let other = match (playbook.strip_suffix(".yaml"), playbook.strip_suffix(".yml")) {
+            (Some(stem), _) => Some(format!("{stem}.yml")),
+            (_, Some(stem)) => Some(format!("{stem}.yaml")),
+            _ => None,
+        };
+        self.deny_playbooks.iter().any(|p| {
+            fleetforge_core::automation::glob_match(p, playbook)
+                || other.as_deref().is_some_and(|o| fleetforge_core::automation::glob_match(p, o))
+        })
     }
 
     pub fn covers(&self, parc: &str) -> bool {
@@ -188,6 +218,10 @@ impl Config {
             static_dir,
             accounts,
             ro_gate: ro_gate_from_env()?,
+            git_tree: git_tree_from_env()?,
+            private_tree_files: env("FLEETFORGE_TREE_PRIVATE_FILES")
+                .map(|v| v.split(',').map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect())
+                .unwrap_or_default(),
         })
     }
 }
@@ -201,13 +235,21 @@ struct AccountEntry {
     password_hash: String,
     parcs: Vec<String>,
     mode: Mode,
+    /// Motifs de noms de playbooks interdits (`*-fleetforge.yml`).
+    #[serde(default)]
+    deny_playbooks: Vec<String>,
+    /// Hôtes au plus visés par un run.
+    #[serde(default)]
+    max_hosts: Option<usize>,
 }
 
 /// Comptes bornés, lus dans un fichier JSON (`FLEETFORGE_API_ACCOUNTS_FILE`,
 /// posé par `fleetforge-install`) :
 ///
 /// ```json
-/// [{ "user": "agenthub", "password_hash": "$argon2id$…", "parcs": ["web3c"], "mode": "read" }]
+/// [{ "user": "agenthub", "password_hash": "$argon2id$…", "parcs": ["web3c"], "mode": "read" },
+///  { "user": "autonomous", "password_hash": "$argon2id$…", "parcs": ["web3c"], "mode": "run",
+///    "deny_playbooks": ["*-fleetforge.yml"], "max_hosts": 3 }]
 /// ```
 ///
 /// Tout défaut refuse le démarrage plutôt qu'un compte : un fichier ignoré
@@ -245,11 +287,23 @@ fn accounts_from_file(path: &Path) -> Result<Vec<Account>> {
                 fleetforge_core::automation::validate_parc_name(parc)
                     .with_context(|| format!("{shown} : compte {}", e.user))?;
             }
+            for pattern in &e.deny_playbooks {
+                fleetforge_core::automation::validate_glob(pattern)
+                    .with_context(|| format!("{shown} : compte {}", e.user))?;
+            }
+            if e.max_hosts.is_some_and(|n| !(1..=1000).contains(&n)) {
+                bail!("{shown} : max_hosts de {} hors de 1..=1000", e.user);
+            }
             Ok(Account {
                 user: e.user,
                 secret: Secret::Hash(e.password_hash),
                 role: Role::Automation,
-                scope: Arc::new(Scope { parcs: Some(e.parcs.into_iter().collect()), mode: e.mode }),
+                scope: Arc::new(Scope {
+                    parcs: Some(e.parcs.into_iter().collect()),
+                    mode: e.mode,
+                    deny_playbooks: e.deny_playbooks,
+                    max_hosts: e.max_hosts,
+                }),
             })
         })
         .collect()
@@ -286,6 +340,42 @@ fn ro_gate_from_env() -> Result<RoGateConfig> {
     })
 }
 
+/// Arbre Ansible servi depuis git : `FLEETFORGE_ANSIBLE_SOURCE=git` (défaut
+/// `rsync`, rien ne change) puis `FLEETFORGE_ANSIBLE_GIT_DIR` (le clone),
+/// `FLEETFORGE_ANSIBLE_DATA_DIR` (les données du parc),
+/// `FLEETFORGE_ANSIBLE_TREES_DIR` (un arbre d'exécution par commit), et
+/// facultativement `FLEETFORGE_ANSIBLE_BRANCH` (`main`),
+/// `FLEETFORGE_ANSIBLE_DEPLOY_KEY`, `FLEETFORGE_ANSIBLE_KNOWN_HOSTS`,
+/// `FLEETFORGE_ANSIBLE_CACHE_KEEP` (5). Un réglage à moitié posé refuse le
+/// démarrage : l'application montrerait sinon un parc vide.
+fn git_tree_from_env() -> Result<Option<GitTreeConfig>> {
+    match env("FLEETFORGE_ANSIBLE_SOURCE").as_deref() {
+        None | Some("rsync") => return Ok(None),
+        Some("git") => {}
+        Some(other) => bail!("FLEETFORGE_ANSIBLE_SOURCE : « {other} » inconnu (git ou rsync)"),
+    }
+    let required = |key: &str| -> Result<PathBuf> {
+        env(key)
+            .map(PathBuf::from)
+            .with_context(|| format!("{key} est obligatoire avec FLEETFORGE_ANSIBLE_SOURCE=git"))
+    };
+    let mut cfg = GitTreeConfig::new(
+        required("FLEETFORGE_ANSIBLE_GIT_DIR")?,
+        required("FLEETFORGE_ANSIBLE_DATA_DIR")?,
+        required("FLEETFORGE_ANSIBLE_TREES_DIR")?,
+        &env("FLEETFORGE_ANSIBLE_BRANCH").unwrap_or_else(|| "main".to_string()),
+    );
+    cfg.deploy_key = env("FLEETFORGE_ANSIBLE_DEPLOY_KEY").map(PathBuf::from);
+    cfg.known_hosts = env("FLEETFORGE_ANSIBLE_KNOWN_HOSTS").map(PathBuf::from);
+    cfg.keep = match env("FLEETFORGE_ANSIBLE_CACHE_KEEP") {
+        Some(n) => n.parse::<usize>().ok().filter(|n| (1..=50).contains(n)).with_context(|| {
+            format!("FLEETFORGE_ANSIBLE_CACHE_KEEP : « {n} » hors de 1..=50")
+        })?,
+        None => DEFAULT_KEEP,
+    };
+    Ok(Some(cfg))
+}
+
 fn env(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.trim().is_empty())
 }
@@ -294,4 +384,30 @@ fn env(key: &str) -> Option<String> {
 /// En production le rôle Ansible pose `FLEETFORGE_WEB_STATIC` explicitement.
 fn default_static_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../apps/gui/dist")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bounded(deny: &[&str], max_hosts: Option<usize>) -> Scope {
+        Scope {
+            parcs: Some(["web3c".to_string()].into()),
+            mode: Mode::Run,
+            deny_playbooks: deny.iter().map(|s| s.to_string()).collect(),
+            max_hosts,
+        }
+    }
+
+    #[test]
+    fn denied_playbooks_match_by_glob_in_both_extensions() {
+        let scope = bounded(&["*-fleetforge.yml", "setup-server.yml"], Some(3));
+        assert!(scope.denies("deploy-fleetforge.yml"));
+        assert!(scope.denies("deploy-fleetforge.yaml"), "même playbook pour Ansible");
+        assert!(scope.denies("setup-server.yml") && scope.denies("setup-server.yaml"));
+        assert!(!scope.denies("deploy-agenthub.yml") && !scope.denies("setup-servers.yml"));
+        assert!(!Scope::everything().denies("deploy-fleetforge.yml"));
+        assert!(!bounded(&[], None).denies("anything.yml"));
+        assert!(bounded(&["setup-server.yaml"], None).denies("setup-server.yml"));
+    }
 }

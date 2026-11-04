@@ -691,7 +691,11 @@ async fn the_mcp_server_end_to_end() {
         .collect();
     assert_eq!(
         names,
-        ["list_hosts", "list_playbooks", "alertmanager_alerts", "query_prometheus", "ssh_diagnose", "run_ansible_playbook", "run_status"]
+        [
+            "list_hosts", "list_playbooks", "alertmanager_alerts", "query_prometheus", "ssh_diagnose",
+            "describe_playbook", "read_tree", "search_tree", "tree_status",
+            "run_ansible_playbook", "run_status", "syntax_check", "sync_tree"
+        ]
     );
     for tool in listed["result"]["tools"].as_array().unwrap() {
         assert_eq!(tool["inputSchema"]["type"], "object", "{tool}");
@@ -868,6 +872,13 @@ async fn bounded_accounts_keep_to_their_parcs_and_mode() {
         // Mode lecture : ni run, ni état de run.
         ("run_ansible_playbook", json!({ "parc": "web3c", "playbook": "deploy-demo.yml", "check": true })),
         ("run_status", json!({ "run_id": "nope" })),
+        ("syntax_check", json!({ "parc": "web3c", "playbook": "deploy-demo.yml" })),
+        ("sync_tree", json!({ "parc": "web3c" })),
+        // La lecture de l'arbre aussi est bornée au parc du compte.
+        ("read_tree", json!({ "parc": "papanglabs", "path": "" })),
+        ("describe_playbook", json!({ "parc": "papanglabs", "playbook": "deploy-demo.yml" })),
+        ("search_tree", json!({ "parc": "papanglabs", "pattern": "x" })),
+        ("tree_status", json!({ "parc": "papanglabs" })),
     ] {
         let answer = api.call(READER, command, body.clone()).await;
         assert!(forbidden(answer.clone()), "{command} {body} → {answer:?}");
@@ -924,9 +935,12 @@ async fn bounded_accounts_keep_to_their_parcs_and_mode() {
     };
     assert_eq!(
         tools(api.rpc(READER, "tools/list", json!({})).await),
-        ["list_hosts", "list_playbooks", "alertmanager_alerts", "query_prometheus", "ssh_diagnose"]
+        [
+            "list_hosts", "list_playbooks", "alertmanager_alerts", "query_prometheus", "ssh_diagnose",
+            "describe_playbook", "read_tree", "search_tree", "tree_status"
+        ]
     );
-    assert_eq!(tools(api.rpc(RUNNER, "tools/list", json!({})).await).len(), 7);
+    assert_eq!(tools(api.rpc(RUNNER, "tools/list", json!({})).await).len(), 13);
     for (name, arguments) in [
         ("run_ansible_playbook", launch("web3c", "proxy1")),
         ("run_status", json!({ "run_id": own_id })),
@@ -987,4 +1001,548 @@ fn a_flawed_accounts_file_refuses_to_start() {
         0o600,
         "comptes illisibles",
     );
+}
+
+// ═══ Arbre Ansible : lecture, étiquettes, comptes bornés, arbre git ═══════
+
+/// Playbooks et rôles de l'arbre de lecture (livré par rsync).
+fn write_tree_fixture(ansible: &Path) {
+    write(
+        &ansible.join("playbooks/deploy-tagged.yml"),
+        "---\n- name: Tagged\n  hosts: proxies\n  tags: [play-level]\n  roles:\n    - demo-install\n    \
+         - { role: tagged-install, tags: [by-role] }\n- name: Elsewhere\n  hosts: monitoring\n  tasks:\n    \
+         - name: Needs a variable\n      ansible.builtin.debug:\n        msg: \"{{ model_name }} {{ optional | default('x') }}\"\n",
+    );
+    write(&ansible.join("playbooks/deploy-importer.yml"), "---\n- import_playbook: update-security-ssh.yml\n");
+    write(
+        &ansible.join("playbooks/roles/tagged-install/tasks/main.yml"),
+        "---\n- name: Configure\n  ansible.builtin.debug:\n    msg: hello\n  tags: [configure]\n",
+    );
+    write(
+        &ansible.join("playbooks/roles/demo-install/tasks/main.yml"),
+        "---\n- name: Login\n  ansible.builtin.debug:\n    msg: x\n  vars:\n    smtp_password: hunter2-secret\n  tags: [login]\n",
+    );
+    write(&ansible.join("playbooks/roles/demo-install/files/private.json"), "{\"token\": \"abc\"}\n");
+    write(&ansible.join("playbooks/roles/vaulted/vars/main.yml"), "$ANSIBLE_VAULT;1.1;AES256\n6162\n");
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink("../inventories/web3c_inventory.yml", ansible.join("playbooks/leak.yml")).unwrap();
+        std::os::unix::fs::symlink("../playbooks/group_vars/web3c.yml", ansible.join("playbooks/roles/leak-gv.yml")).unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_tree_tools_read_code_only_on_an_rsync_tree() {
+    let (am_port, _) = fake_alertmanager().await;
+    let server = start_with(am_port, |root| {
+        write_tree_fixture(&root.join("ansible"));
+        vec![(
+            "FLEETFORGE_TREE_PRIVATE_FILES".to_string(),
+            "playbooks/roles/demo-install/files/private.json".to_string(),
+        )]
+    })
+    .await;
+    let api = Api { http: Client::new(), server: &server };
+
+    // ── tree_status : pas de git, pas de commit ───────────────────────────
+    let (status, tree) = api.agent("tree_status", json!({ "parc": "web3c" })).await;
+    assert_eq!(status, StatusCode::OK, "{tree}");
+    assert_eq!(
+        tree,
+        json!({ "source": "rsync", "branch": null, "head": null, "synced_at": null, "commits_cached": 0 })
+    );
+    for (command, body) in [
+        ("read_tree", json!({ "parc": "web3c", "path": "", "commit": "HEAD" })),
+        ("describe_playbook", json!({ "parc": "web3c", "playbook": "deploy-tagged.yml", "commit": "HEAD" })),
+        ("sync_tree", json!({ "parc": "web3c" })),
+        ("syntax_check", json!({ "parc": "web3c", "playbook": "deploy-tagged.yml", "commit": "HEAD" })),
+    ] {
+        let (status, answer) = api.agent(command, body.clone()).await;
+        assert_eq!((status, code(&answer)), (StatusCode::SERVICE_UNAVAILABLE, "not_configured"), "{command} → {answer}");
+    }
+
+    // ── read_tree : du code sous playbooks/, rien d'autre ─────────────────
+    let (status, listing) = api.agent("read_tree", json!({ "parc": "web3c" })).await;
+    assert_eq!(status, StatusCode::OK, "{listing}");
+    assert_eq!((listing["kind"].clone(), listing["path"].clone(), listing["commit"].clone()), (json!("dir"), json!("playbooks"), Value::Null));
+    let names: Vec<&str> = listing["entries"].as_array().unwrap().iter().map(|e| e["name"].as_str().unwrap()).collect();
+    assert!(names.contains(&"deploy-tagged.yml") && names.contains(&"roles"), "{names:?}");
+    for hidden in ["group_vars", "host_vars", "leak.yml", "leak-gv.yml"] {
+        assert!(!names.contains(&hidden), "{hidden} ne doit pas apparaître : {names:?}");
+    }
+    let (_, roles) = api.agent("read_tree", json!({ "parc": "web3c", "path": "playbooks/roles/demo-install/files" })).await;
+    assert_eq!(roles["entries"], json!([]), "le fichier livré avec une donnée de parc est omis : {roles}");
+
+    let (status, file) = api.agent("read_tree", json!({ "parc": "web3c", "path": "roles/tagged-install/tasks/main.yml" })).await;
+    assert_eq!(status, StatusCode::OK, "{file}");
+    assert_eq!((file["kind"].clone(), file["redacted"].clone()), (json!("file"), json!(false)));
+    assert!(file["content"].as_str().unwrap().starts_with("---\n") && file["content"].as_str().unwrap().ends_with("hello\n  tags: [configure]\n"), "{file}");
+    let (_, secretive) = api.agent("read_tree", json!({ "parc": "web3c", "path": "roles/demo-install/tasks/main.yml" })).await;
+    assert_eq!(secretive["redacted"], json!(true), "{secretive}");
+    assert!(secretive["content"].as_str().unwrap().contains("smtp_password: [REDACTED]") && !secretive["content"].as_str().unwrap().contains("hunter2"), "{secretive}");
+
+    for path in [
+        "../inventories/web3c_inventory.yml", "playbooks/../inventories/web3c_inventory.yml", "/etc/passwd",
+        "group_vars/web3c.yml", "playbooks/group_vars", "host_vars", "inventories", "keys", "parcs", "leak.yml",
+        "roles/leak-gv.yml", "roles/vaulted/vars/main.yml", "roles/demo-install/files/private.json", ".git/config",
+    ] {
+        let (status, answer) = api.agent("read_tree", json!({ "parc": "web3c", "path": path })).await;
+        assert!(
+            (status == StatusCode::FORBIDDEN && code(&answer) == "path_refused") || (status == StatusCode::NOT_FOUND && code(&answer) == "unknown_path"),
+            "{path} → {status} {answer}"
+        );
+        assert!(!answer.to_string().contains("hunter2") && !answer.to_string().contains("10.0.0.1"), "{path} → {answer}");
+    }
+    let (status, answer) = api.agent("read_tree", json!({ "parc": "../etc", "path": "" })).await;
+    assert_eq!((status, code(&answer)), (StatusCode::BAD_REQUEST, "invalid_argument"));
+
+    // ── search_tree ───────────────────────────────────────────────────────
+    let (status, found) = api.agent("search_tree", json!({ "parc": "web3c", "pattern": "model_name" })).await;
+    assert_eq!(status, StatusCode::OK, "{found}");
+    assert_eq!(found["hits"].as_array().unwrap().len(), 1, "{found}");
+    assert_eq!(found["hits"][0]["path"], "playbooks/deploy-tagged.yml");
+    let (_, found) = api.agent("search_tree", json!({ "parc": "web3c", "pattern": "web3c" })).await;
+    assert!(
+        found["hits"].as_array().unwrap().iter().all(|h| !h["path"].as_str().unwrap().contains("group_vars")),
+        "group_vars/web3c.yml mentionne web3c : {found}"
+    );
+    let (_, found) = api.agent("search_tree", json!({ "parc": "web3c", "pattern": "hunter2" })).await;
+    assert!(found["hits"][0]["text"].as_str().unwrap().contains("[REDACTED]"), "{found}");
+    let (status, answer) = api.agent("search_tree", json!({ "parc": "web3c", "pattern": "" })).await;
+    assert_eq!((status, code(&answer)), (StatusCode::BAD_REQUEST, "invalid_argument"));
+
+    // ── describe_playbook ─────────────────────────────────────────────────
+    let (status, d) = api.agent("describe_playbook", json!({ "parc": "web3c", "playbook": "deploy-tagged.yml" })).await;
+    assert_eq!(status, StatusCode::OK, "{d}");
+    assert_eq!(d["plays"][0]["hosts"], "proxies");
+    assert_eq!(d["plays"][0]["roles"], json!(["demo-install", "tagged-install"]));
+    for tag in ["play-level", "by-role", "configure", "login"] {
+        assert!(d["tags"].as_array().unwrap().contains(&json!(tag)), "{tag} : {d}");
+    }
+    assert_eq!(d["needs_no_limit"], json!(true), "le play `monitoring` sort des cibles `proxies` : {d}");
+    assert_eq!(d["vars"], json!(["model_name"]), "{d}");
+    let (status, answer) = api.agent("describe_playbook", json!({ "parc": "web3c", "playbook": "../x.yml" })).await;
+    assert_eq!((status, code(&answer)), (StatusCode::NOT_FOUND, "unknown_playbook"));
+
+    // ── syntax_check n'existe pas sans commit… mais passe sans (arbre rsync) ─
+    let (status, answer) = api.agent("syntax_check", json!({ "parc": "web3c", "playbook": "deploy-tagged.yml" })).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_eq!((answer["ok"].clone(), answer["commit"].clone()), (json!(true), Value::Null));
+    assert!(api.stub_log().contains("--syntax-check"), "{}", api.stub_log());
+
+    // ── Les mêmes outils par MCP ──────────────────────────────────────────
+    let (failed, tree) = api.tool(AGENTHUB, "read_tree", json!({ "parc": "web3c", "path": "deploy-tagged.yml" })).await;
+    assert!(!failed && tree["content"].as_str().unwrap().contains("Tagged"), "{tree}");
+    let (failed, error) = api.tool(AGENTHUB, "read_tree", json!({ "parc": "web3c", "path": "../inventories" })).await;
+    assert!(failed && error["code"] == "path_refused", "{error}");
+    let (failed, error) = api.tool(AGENTHUB, "read_tree", json!({ "parc": "web3c", "path": "", "extra": 1 })).await;
+    assert!(failed || error["code"].is_string() || error.is_object(), "{error}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tags_skip_tags_and_no_limit_belong_to_the_check_gate() {
+    let (am_port, _) = fake_alertmanager().await;
+    let server = start(am_port).await;
+    let api = Api { http: Client::new(), server: &server };
+    let launch = |extra: Value| {
+        let mut body = json!({ "parc": "web3c", "playbook": "deploy-demo.yml", "limit": ["proxy1"], "detach": true });
+        body.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        body
+    };
+    let run = |body: Value| async {
+        let (status, started) = api.agent("run_ansible_playbook", body).await;
+        assert_eq!(status, StatusCode::OK, "{started}");
+        api.wait_run(started["run_id"].as_str().unwrap()).await
+    };
+
+    // Grammaire des étiquettes : refus avant tout lancement.
+    let long = "a".repeat(65);
+    let too_many: Vec<String> = (0..21).map(|i| format!("t{i}")).collect();
+    for (extra, label) in [
+        (json!({ "check": true, "tags": ["a b"] }), "espace"),
+        (json!({ "check": true, "tags": ["a;id"] }), "point-virgule"),
+        (json!({ "check": true, "tags": [""] }), "vide"),
+        (json!({ "check": true, "skip_tags": [long] }), "trop long"),
+        (json!({ "check": true, "tags": too_many }), "trop nombreuses"),
+        (json!({ "check": true, "tags": "a" }), "pas une liste"),
+        (json!({ "check": true, "no_limit": true }), "no_limit avec limit"),
+        (json!({ "check": true, "commit": "HEAD" }), "commit sans arbre git"),
+        (json!({ "check": true, "commit": "0123456789abcdef0123456789abcdef01234567" }), "sha sans arbre git"),
+    ] {
+        let (status, answer) = api.agent("run_ansible_playbook", launch(extra)).await;
+        assert!(status.is_client_error() || status.is_server_error(), "{label} : {answer}");
+    }
+    assert!(api.stub_log().is_empty(), "aucun refus ne doit atteindre ansible-playbook : {}", api.stub_log());
+
+    // Un check avec tags autorise le run réel de CES tags, dans n'importe quel ordre.
+    let done = run(launch(json!({ "check": true, "tags": ["b", "a"], "skip_tags": ["slow"] }))).await;
+    assert_eq!(done["state"], "success");
+    assert_eq!((done["tags"].clone(), done["skip_tags"].clone(), done["commit"].clone()), (json!(["a", "b"]), json!(["slow"]), Value::Null));
+    let last = api.stub_log().lines().last().unwrap().to_string();
+    assert!(last.contains("--tags=a,b") && last.contains("--skip-tags=slow") && last.contains("--check"), "{last}");
+
+    let done = run(launch(json!({ "tags": ["a", "b", "a"], "skip_tags": ["slow"] }))).await;
+    assert_eq!(done["state"], "success");
+    let last = api.stub_log().lines().last().unwrap().to_string();
+    assert!(last.contains("--tags=a,b") && !last.contains("--check"), "{last}");
+
+    for (extra, label) in [
+        (json!({ "tags": ["a"], "skip_tags": ["slow"] }), "autres tags"),
+        (json!({ "tags": ["a", "b"] }), "sans skip_tags"),
+        (json!({ "tags": ["a", "b"], "skip_tags": ["slow", "x"] }), "autres skip_tags"),
+        (json!({ "skip_tags": ["slow"] }), "sans tags"),
+    ] {
+        let (status, answer) = api.agent("run_ansible_playbook", launch(extra)).await;
+        assert_eq!((status, code(&answer)), (StatusCode::CONFLICT, "check_required"), "{label} : {answer}");
+    }
+
+    // `no_limit` : aucun --limit, et son propre check.
+    let no_limit = |extra: Value| {
+        let mut body = launch(extra);
+        body.as_object_mut().unwrap().remove("limit");
+        body["no_limit"] = json!(true);
+        body
+    };
+    let (_, answer) = api.agent("run_ansible_playbook", no_limit(json!({}))).await;
+    assert_eq!(code(&answer), "check_required", "un check avec limit n'autorise pas no_limit");
+    run(no_limit(json!({ "check": true }))).await;
+    let last = api.stub_log().lines().last().unwrap().to_string();
+    assert!(!last.contains("--limit"), "{last}");
+    assert_eq!(run(no_limit(json!({}))).await["state"], "success");
+    let mut plain = launch(json!({}));
+    plain.as_object_mut().unwrap().remove("limit");
+    let (_, answer) = api.agent("run_ansible_playbook", plain).await;
+    assert_eq!(code(&answer), "check_required", "le check no_limit n'autorise pas l'absence de limit");
+
+    // run_status : recap et échecs, lus de la sortie (le bouchon n'en produit qu'un).
+    let failing = run(launch(json!({ "check": true, "playbook": "deploy-fail.yml" }))).await;
+    assert_eq!(failing["state"], "failed");
+    assert_eq!(failing["failures"][0]["host"], "proxy1", "{failing}");
+    assert_eq!(failing["recap"], json!({}), "pas de PLAY RECAP dans cette sortie : {failing}");
+}
+
+const DENIED_RUNNER: (&str, &str) = ("autonome", "mot-de-passe-autonome");
+
+#[tokio::test(flavor = "multi_thread")]
+async fn deny_playbooks_and_max_hosts_bound_an_account() {
+    let (am_port, _) = fake_alertmanager().await;
+    let accounts = json!([{
+        "user": DENIED_RUNNER.0, "password_hash": hash_with_binary(DENIED_RUNNER.1), "parcs": ["web3c"], "mode": "run",
+        "deny_playbooks": ["update-security-*.yml", "*-fleetforge.yml", "deploy-secret.yml"], "max_hosts": 2
+    }]);
+    let server = start_with(am_port, |root| {
+        write_tree_fixture(&root.join("ansible"));
+        write(&root.join("ansible/playbooks/deploy-fleetforge.yml"), "---\n- hosts: all\n  tasks: []\n");
+        let file = accounts_file(root, accounts);
+        vec![("FLEETFORGE_API_ACCOUNTS_FILE".into(), file.display().to_string())]
+    })
+    .await;
+    let api = Api { http: Client::new(), server: &server };
+    let run = |playbook: &str, extra: Value| {
+        let mut body = json!({ "parc": "web3c", "playbook": playbook, "check": true, "detach": true });
+        body.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        body
+    };
+
+    // Playbooks interdits : par nom, et par ricochet (import_playbook).
+    for playbook in ["update-security-ssh.yml", "deploy-fleetforge.yml", "deploy-importer.yml"] {
+        let (status, answer) = api.call(DENIED_RUNNER, "run_ansible_playbook", run(playbook, json!({ "limit": ["proxy1"] }))).await;
+        assert_eq!((status, code(&answer)), (StatusCode::FORBIDDEN, "forbidden_playbook"), "{playbook} → {answer}");
+    }
+    // Le compte hérité (sans borne) peut les lancer.
+    let (status, _) = api.agent("run_ansible_playbook", run("update-security-ssh.yml", json!({ "limit": ["proxy1"] }))).await;
+    assert_eq!(status, StatusCode::OK);
+    api.wait_run_any().await;
+
+    // Hôtes : limit obligatoire, no_limit refusé, groupes développés.
+    for (extra, label) in [
+        (json!({}), "pas de limit"),
+        (json!({ "limit": [] }), "limit vide"),
+        (json!({ "no_limit": true }), "no_limit"),
+        (json!({ "limit": ["all"] }), "all = 3 hôtes"),
+        (json!({ "limit": ["proxies", "alertmanager1"] }), "3 hôtes par un groupe et un hôte"),
+        (json!({ "limit": ["web3c"] }), "l'organisation = 3 hôtes"),
+    ] {
+        let (status, answer) = api.call(DENIED_RUNNER, "run_ansible_playbook", run("deploy-demo.yml", extra)).await;
+        assert_eq!((status, code(&answer)), (StatusCode::FORBIDDEN, "too_many_hosts"), "{label} → {answer}");
+    }
+    let (status, answer) = api.call(DENIED_RUNNER, "run_ansible_playbook", run("deploy-demo.yml", json!({ "limit": ["ghost"] }))).await;
+    assert_eq!((status, code(&answer)), (StatusCode::NOT_FOUND, "unknown_host"), "{answer}");
+
+    // Deux hôtes (un groupe de deux, ou deux noms) : admis.
+    for limit in [json!(["proxies"]), json!(["proxy1", "alertmanager1"]), json!(["proxy1", "proxy1"])] {
+        let (status, answer) = api.call(DENIED_RUNNER, "run_ansible_playbook", run("deploy-demo.yml", json!({ "limit": limit }))).await;
+        assert_eq!(status, StatusCode::OK, "{limit} → {answer}");
+        let done = api.wait_run_as(DENIED_RUNNER, answer["run_id"].as_str().unwrap()).await;
+        assert_eq!(done["state"], "success");
+    }
+    // Et la borne vaut aussi pour le run réel.
+    let (_, answer) = api.call(DENIED_RUNNER, "run_ansible_playbook", json!({
+        "parc": "web3c", "playbook": "deploy-demo.yml", "limit": ["all"], "detach": true
+    })).await;
+    assert_eq!(code(&answer), "too_many_hosts", "avant même le check : {answer}");
+    // Lectures et description restent ouvertes pour les playbooks interdits.
+    let (status, d) = api.call(DENIED_RUNNER, "describe_playbook", json!({ "parc": "web3c", "playbook": "deploy-fleetforge.yml" })).await;
+    assert_eq!(status, StatusCode::OK, "{d}");
+}
+
+impl Api<'_> {
+    /// Attend que plus aucun run n'occupe le parc : un nouveau lancement ne
+    /// serait sinon refusé `run_busy`.
+    async fn wait_run_any(&self) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let (_, runs) = self.call(OPERATOR, "get_active_runs", json!({})).await;
+            if runs.as_array().is_none_or(|r| r.is_empty()) {
+                return;
+            }
+            assert!(Instant::now() < deadline, "runs interminables");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    async fn wait_run_as(&self, who: (&str, &str), run_id: &str) -> Value {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let (status, body) = self.call(who, "run_status", json!({ "run_id": run_id })).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            if body["state"] != "running" {
+                return body;
+            }
+            assert!(Instant::now() < deadline, "run {run_id} interminable");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+}
+
+/// `git` avec une identité fixe, hors des réglages de l'utilisateur.
+fn git(dir: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_AUTHOR_NAME", "t")
+        .env("GIT_AUTHOR_EMAIL", "t@example.org")
+        .env("GIT_COMMITTER_NAME", "t")
+        .env("GIT_COMMITTER_EMAIL", "t@example.org")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git {args:?} : {}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// Dépôt « serveur », clone et données du parc d'un arbre git ; rend les
+/// variables d'environnement qui font servir l'arbre depuis git.
+fn git_tree_setup(root: &Path) -> Vec<(String, String)> {
+    let origin = root.join("origin");
+    std::fs::create_dir_all(&origin).unwrap();
+    git(&origin, &["init", "-q", "-b", "main"]);
+    write(&origin.join("Ansible/ansible.cfg"), "[defaults]\n");
+    write(&origin.join("Ansible/playbooks/deploy-demo.yml"), "---\n- hosts: all\n  roles: [demo-install]\n");
+    write(&origin.join("Ansible/playbooks/deploy-fail.yml"), "---\n- hosts: all\n  tasks: []\n");
+    write(
+        &origin.join("Ansible/playbooks/roles/demo-install/tasks/main.yml"),
+        "---\n- name: A\n  debug: msg=one\n  tags: [one]\n",
+    );
+    git(&origin, &["add", "-A"]);
+    git(&origin, &["commit", "-q", "-m", "first"]);
+    let clone = root.join("ansible-git");
+    let out = Command::new("git")
+        .args(["clone", "-q", "--no-checkout", "--branch", "main"])
+        .arg(&origin)
+        .arg(&clone)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let data = root.join("ansible-data");
+    write(&data.join("inventories/web3c_inventory.yml"), INVENTORY);
+    write(&data.join("playbooks/group_vars/web3c.yml"), "parc_name: web3c\n");
+    vec![
+        ("FLEETFORGE_ANSIBLE_SOURCE".into(), "git".into()),
+        ("FLEETFORGE_ANSIBLE_GIT_DIR".into(), clone.display().to_string()),
+        ("FLEETFORGE_ANSIBLE_DATA_DIR".into(), data.display().to_string()),
+        ("FLEETFORGE_ANSIBLE_TREES_DIR".into(), root.join("ansible-trees").display().to_string()),
+        ("FLEETFORGE_ANSIBLE_CACHE_KEEP".into(), "3".into()),
+    ]
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_git_tree_runs_one_precise_commit() {
+    let (am_port, _) = fake_alertmanager().await;
+    let server = start_with(am_port, git_tree_setup).await;
+    let api = Api { http: Client::new(), server: &server };
+    let origin = server.root.join("origin");
+    let c1 = git(&origin, &["rev-parse", "HEAD"]);
+    let launch = |extra: Value| {
+        let mut body = json!({ "parc": "web3c", "playbook": "deploy-demo.yml", "limit": ["proxy1"], "detach": true });
+        body.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        body
+    };
+
+    // ── L'état de l'arbre, relu du clone ──────────────────────────────────
+    let (status, tree) = api.agent("tree_status", json!({ "parc": "web3c" })).await;
+    assert_eq!(status, StatusCode::OK, "{tree}");
+    assert_eq!((tree["source"].clone(), tree["branch"].clone(), tree["head"].clone()), (json!("git"), json!("main"), json!(c1)));
+    // L'arbre servi : la tête. Playbooks et inventaire se lisent.
+    let (_, playbooks) = api.agent("list_playbooks", json!({})).await;
+    assert!(playbooks.as_array().unwrap().iter().any(|p| p["path"] == "deploy-demo.yml"), "{playbooks}");
+    let (_, hosts) = api.agent("list_hosts", json!({ "parc": "web3c" })).await;
+    assert_eq!(hosts.as_array().unwrap().len(), 3, "{hosts}");
+    let (_, file) = api.agent("read_tree", json!({ "parc": "web3c", "path": "roles/demo-install/tasks/main.yml" })).await;
+    assert_eq!((file["commit"].clone(), file["content"].as_str().unwrap().contains("tags: [one]")), (json!(c1), true), "{file}");
+    // Les données du parc sont liées dans l'arbre, mais ne se lisent pas.
+    let (status, answer) = api.agent("read_tree", json!({ "parc": "web3c", "path": "group_vars/web3c.yml" })).await;
+    assert_eq!((status, code(&answer)), (StatusCode::FORBIDDEN, "path_refused"));
+    let (_, d) = api.agent("describe_playbook", json!({ "parc": "web3c", "playbook": "deploy-demo.yml" })).await;
+    assert_eq!((d["commit"].clone(), d["tags"].clone()), (json!(c1), json!(["one"])), "{d}");
+
+    // ── Un run part d'un commit précis, consigné au registre ──────────────
+    let (status, started) = api.agent("run_ansible_playbook", launch(json!({ "check": true }))).await;
+    assert_eq!(status, StatusCode::OK, "{started}");
+    assert_eq!(started["commit"], json!(c1), "la tête synchronisée par défaut");
+    let done = api.wait_run(started["run_id"].as_str().unwrap()).await;
+    assert_eq!((done["state"].clone(), done["commit"].clone()), (json!("success"), json!(c1)));
+    let last = api.stub_log().lines().last().unwrap().to_string();
+    let tree_dir = format!("ansible-trees/{}/playbooks/deploy-demo.yml", &c1[..16]);
+    assert!(last.contains(&tree_dir), "le playbook vient de l'arbre du commit : {last}");
+    assert!(last.contains("ansible-data/inventories/web3c_inventory.yml"), "les inventaires sont les données du parc : {last}");
+    assert!(done["output_tail"].as_str().unwrap().contains(&format!("commit {}", &c1[..16])), "{done}");
+    let (status, tree) = api.agent("tree_status", json!({ "parc": "web3c" })).await;
+    assert_eq!((status, tree["commits_cached"].clone()), (StatusCode::OK, json!(1)), "{tree}");
+
+    // ── Un correctif arrive : la synchronisation avance la tête ───────────
+    write(&origin.join("Ansible/playbooks/roles/demo-install/tasks/main.yml"), "---\n- name: A\n  debug: msg=two\n  tags: [two]\n");
+    git(&origin, &["commit", "-q", "-am", "second"]);
+    let c2 = git(&origin, &["rev-parse", "HEAD"]);
+    let (status, synced) = api.agent("sync_tree", json!({ "parc": "web3c" })).await;
+    assert_eq!(status, StatusCode::OK, "{synced}");
+    assert_eq!((synced["commit"].clone(), synced["head"].clone(), synced["reference"].clone()), (json!(c2), json!(c2), json!("main")));
+
+    // Le check du commit c1 n'autorise pas le run de la nouvelle tête.
+    let (status, answer) = api.agent("run_ansible_playbook", launch(json!({}))).await;
+    assert_eq!((status, code(&answer)), (StatusCode::CONFLICT, "check_required"), "{answer}");
+    // … mais il autorise le run de c1 demandé explicitement.
+    let (status, old) = api.agent("run_ansible_playbook", launch(json!({ "commit": c1 }))).await;
+    assert_eq!(status, StatusCode::OK, "{old}");
+    assert_eq!(api.wait_run(old["run_id"].as_str().unwrap()).await["commit"], json!(c1));
+    // `HEAD` est la tête synchronisée : c2, donc son propre check.
+    let (_, answer) = api.agent("run_ansible_playbook", launch(json!({ "commit": "HEAD" }))).await;
+    assert_eq!(code(&answer), "check_required");
+    let (status, check2) = api.agent("run_ansible_playbook", launch(json!({ "commit": "HEAD", "check": true }))).await;
+    assert_eq!(status, StatusCode::OK, "{check2}");
+    assert_eq!(api.wait_run(check2["run_id"].as_str().unwrap()).await["commit"], json!(c2));
+    let (status, real2) = api.agent("run_ansible_playbook", launch(json!({}))).await;
+    assert_eq!(status, StatusCode::OK, "le check de la tête autorise le run par défaut : {real2}");
+    assert_eq!(api.wait_run(real2["run_id"].as_str().unwrap()).await["commit"], json!(c2));
+
+    // Lecture et description à un commit précis.
+    let (_, old_file) = api.agent("read_tree", json!({ "parc": "web3c", "path": "roles/demo-install/tasks/main.yml", "commit": c1 })).await;
+    let (_, new_file) = api.agent("read_tree", json!({ "parc": "web3c", "path": "roles/demo-install/tasks/main.yml" })).await;
+    assert!(old_file["content"].as_str().unwrap().contains("one") && new_file["content"].as_str().unwrap().contains("two"));
+    assert_eq!((old_file["commit"].clone(), new_file["commit"].clone()), (json!(c1), json!(c2)));
+    let (_, d) = api.agent("describe_playbook", json!({ "parc": "web3c", "playbook": "deploy-demo.yml", "commit": c1 })).await;
+    assert_eq!(d["tags"], json!(["one"]));
+
+    // ── Refus : références, commits, grammaire ────────────────────────────
+    for reference in ["dev", "origin/main", "refs/heads/main", "infra/papanglabs/x", "infra/web3c/a/b", "--upload-pack=id"] {
+        let (status, answer) = api.agent("sync_tree", json!({ "parc": "web3c", "ref": reference })).await;
+        assert_eq!((status, code(&answer)), (StatusCode::FORBIDDEN, "ref_refused"), "{reference} → {answer}");
+    }
+    git(&origin, &["checkout", "-q", "-b", "side", &c1]);
+    write(&origin.join("Ansible/playbooks/deploy-side.yml"), "---\n");
+    git(&origin, &["add", "-A"]);
+    git(&origin, &["commit", "-q", "-m", "side"]);
+    let side = git(&origin, &["rev-parse", "HEAD"]);
+    git(&origin, &["checkout", "-q", "main"]);
+    for (body, expected) in [
+        (json!({ "parc": "web3c", "commit": side }), (StatusCode::NOT_FOUND, "unknown_commit")),
+        (json!({ "parc": "web3c", "commit": "0".repeat(40) }), (StatusCode::NOT_FOUND, "unknown_commit")),
+        (json!({ "parc": "web3c", "commit": "main" }), (StatusCode::BAD_REQUEST, "invalid_argument")),
+        (json!({ "parc": "web3c", "commit": &c1[..10] }), (StatusCode::BAD_REQUEST, "invalid_argument")),
+        (json!({ "parc": "web3c", "ref": "infra/web3c/ghost" }), (StatusCode::NOT_FOUND, "unknown_commit")),
+    ] {
+        let (status, answer) = api.agent("sync_tree", body.clone()).await;
+        assert_eq!((status, code(&answer)), expected, "{body} → {answer}");
+    }
+    for commit in [side.clone(), "0".repeat(40)] {
+        let (status, answer) = api.agent("run_ansible_playbook", launch(json!({ "check": true, "commit": commit }))).await;
+        assert_eq!((status, code(&answer)), (StatusCode::NOT_FOUND, "unknown_commit"), "{answer}");
+        let (status, answer) = api.agent("read_tree", json!({ "parc": "web3c", "path": "", "commit": commit })).await;
+        assert_eq!((status, code(&answer)), (StatusCode::NOT_FOUND, "unknown_commit"), "{answer}");
+    }
+
+    // ── Une branche de correctif du hub : récupérée, contrôlée, jamais suivie ─
+    git(&origin, &["checkout", "-q", "-b", "infra/web3c/fix1", &c2]);
+    write(&origin.join("Ansible/playbooks/roles/demo-install/tasks/main.yml"), "---\n- name: A\n  debug: msg=three\n  tags: [three]\n");
+    git(&origin, &["commit", "-q", "-am", "fix"]);
+    let fix = git(&origin, &["rev-parse", "HEAD"]);
+    git(&origin, &["checkout", "-q", "main"]);
+    let (status, synced) = api.agent("sync_tree", json!({ "parc": "web3c", "ref": "infra/web3c/fix1" })).await;
+    assert_eq!(status, StatusCode::OK, "{synced}");
+    assert_eq!((synced["commit"].clone(), synced["head"].clone()), (json!(fix), json!(c2)), "la tête suivie n'a pas bougé");
+    let (status, check) = api.agent("syntax_check", json!({ "parc": "web3c", "playbook": "deploy-demo.yml", "commit": fix })).await;
+    assert_eq!(status, StatusCode::OK, "{check}");
+    assert_eq!((check["ok"].clone(), check["commit"].clone()), (json!(true), json!(fix)));
+    assert!(api.stub_log().contains("--syntax-check"));
+    let (_, d) = api.agent("describe_playbook", json!({ "parc": "web3c", "playbook": "deploy-demo.yml", "commit": fix })).await;
+    assert_eq!(d["tags"], json!(["three"]));
+    let (status, checked) = api.agent("run_ansible_playbook", launch(json!({ "check": true, "commit": fix }))).await;
+    assert_eq!(status, StatusCode::OK, "{checked}");
+    assert_eq!(api.wait_run(checked["run_id"].as_str().unwrap()).await["commit"], json!(fix));
+    let (_, tree) = api.agent("tree_status", json!({ "parc": "web3c" })).await;
+    assert!(tree["commits_cached"].as_u64().unwrap() <= 4, "cache borné (keep=3, plus la tête) : {tree}");
+    let (_, tree) = api.agent("tree_status", json!({ "parc": "web3c" })).await;
+    assert_eq!(tree["head"], json!(c2));
+}
+
+#[test]
+fn a_half_configured_git_tree_refuses_to_start() {
+    let root = fresh_root();
+    let run = |envs: &[(&str, &str)]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_fleetforge-web"))
+            .env_clear()
+            .env("HOME", &root)
+            .env("FLEETFORGE_LOG_DIR", root.join("logs"))
+            .env("FLEETFORGE_WEB_PORT", free_port().to_string())
+            .env("FLEETFORGE_WEB_USER", OPERATOR.0)
+            .env("FLEETFORGE_WEB_PASSWORD", OPERATOR.1)
+            .envs(envs.iter().copied())
+            .output()
+            .unwrap();
+        assert!(!out.status.success());
+        String::from_utf8_lossy(&out.stderr).to_string()
+    };
+    assert!(run(&[("FLEETFORGE_ANSIBLE_SOURCE", "git")]).contains("FLEETFORGE_ANSIBLE_GIT_DIR"));
+    assert!(run(&[("FLEETFORGE_ANSIBLE_SOURCE", "svn")]).contains("inconnu"));
+    let base = [
+        ("FLEETFORGE_ANSIBLE_SOURCE", "git"),
+        ("FLEETFORGE_ANSIBLE_GIT_DIR", "/nowhere/clone"),
+        ("FLEETFORGE_ANSIBLE_DATA_DIR", "/nowhere/data"),
+        ("FLEETFORGE_ANSIBLE_TREES_DIR", "/nowhere/trees"),
+    ];
+    let mut bad_branch = base.to_vec();
+    bad_branch.push(("FLEETFORGE_ANSIBLE_BRANCH", "a..b"));
+    assert!(run(&bad_branch).contains("nom de branche invalide"));
+    let mut bad_keep = base.to_vec();
+    bad_keep.push(("FLEETFORGE_ANSIBLE_CACHE_KEEP", "0"));
+    assert!(run(&bad_keep).contains("FLEETFORGE_ANSIBLE_CACHE_KEEP"));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_flawed_bound_refuses_to_start() {
+    let hash = hash_with_binary("x");
+    let entry = |extra: Value| {
+        let mut e = json!({ "user": "a", "password_hash": hash, "parcs": ["web3c"], "mode": "run" });
+        e.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        json!([e])
+    };
+    refuses_accounts(entry(json!({ "deny_playbooks": ["../x"] })), 0o600, "motif de playbook invalide");
+    refuses_accounts(entry(json!({ "deny_playbooks": [""] })), 0o600, "motif de playbook invalide");
+    refuses_accounts(entry(json!({ "max_hosts": 0 })), 0o600, "max_hosts");
+    refuses_accounts(entry(json!({ "max_hosts": 5000 })), 0o600, "max_hosts");
+    refuses_accounts(entry(json!({ "max_hosts": -1 })), 0o600, "comptes illisibles");
 }

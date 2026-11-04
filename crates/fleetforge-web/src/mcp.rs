@@ -51,11 +51,16 @@ use crate::state::AppState;
 const INSTRUCTIONS: &str = "\
 FleetForge automation API: an Ansible control node for one or more parcs (fleets). \
 A parc is designated by its NAME (e.g. web3c), a host by its inventory name. \
-Read tools have no side effect. run_ansible_playbook is gated: a real run (check: false) \
-is refused with code check_required unless the SAME launch (parc, playbook, limit, \
-extra_vars) completed with check: true less than one hour ago, and a parc runs one \
-playbook at a time (code run_busy). Outputs are redacted. A refusal is a tool error \
-whose text is a JSON object {\"error\": <message>, \"code\": <stable code>}.";
+Read tools have no side effect. The Ansible code under playbooks/ can be read \
+(describe_playbook, read_tree, search_tree; never inventories, group_vars, host_vars, keys, \
+parc data or vault files) and, when the tree is served from git, every run starts from one \
+precise commit (tree_status, sync_tree). run_ansible_playbook is gated: a real run \
+(check: false) is refused with code check_required unless the SAME launch (parc, playbook, \
+limit, extra_vars, tags, skip_tags, commit, no_limit) completed with check: true less than \
+one hour ago, and a parc runs one playbook at a time (code run_busy). An account may be \
+bounded further: forbidden_playbook (deny_playbooks) and too_many_hosts (max_hosts). \
+Outputs are redacted. A refusal is a tool error whose text is a JSON object \
+{\"error\": <message>, \"code\": <stable code>}.";
 
 /// Service à monter sur `/mcp`.
 ///
@@ -168,6 +173,24 @@ fn parc_property() -> Value {
     json!({ "type": "string", "description": "Parc (fleet) name, e.g. web3c. Never a file path." })
 }
 
+fn commit_property() -> Value {
+    json!({
+        "type": "string",
+        "pattern": "^(HEAD|[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$",
+        "description": "HEAD (the synced head of the followed branch) or a full commit sha. Default: the synced head. \
+                        Refused when the tree is not served from git."
+    })
+}
+
+fn tags_property(description: &str) -> Value {
+    json!({
+        "type": "array",
+        "maxItems": 20,
+        "items": { "type": "string", "pattern": "^[A-Za-z0-9_.-]{1,64}$" },
+        "description": description
+    })
+}
+
 fn read_only(title: &str) -> ToolAnnotations {
     ToolAnnotations::with_title(title).read_only(true).destructive(false).idempotent(true)
 }
@@ -254,19 +277,107 @@ static TOOLS: LazyLock<Vec<Tool>> = LazyLock::new(|| {
         )
         .with_annotations(read_only("Diagnose a host")),
         Tool::new(
+            "describe_playbook",
+            "Describe a playbook WITHOUT running it, from a static reading of its YAML and of the roles it \
+             calls (role dependencies, include_role/import_role/include_tasks/import_tasks and \
+             import_playbook with a static name). Answer: {commit, plays: [{name, hosts, roles, tags}], \
+             tags (every tag of the playbook and its roles, usable with run_ansible_playbook tags/skip_tags), \
+             vars (variables referenced without a `default` that no role default, vars:, register:, set_fact: \
+             or group_vars/host_vars key defines: probably to pass in extra_vars; best effort, templates are \
+             not read), needs_no_limit (true when a play targets hosts a --limit on the usual targets, i.e. \
+             the first non-local play, would exclude, as deploy-fleetforge.yml does with its proxies and \
+             Prometheus plays: such a playbook must be run with no_limit: true), imports, notes (what could \
+             not be resolved)}. commit defaults to the synced head.",
+            schema(json!({
+                "type": "object",
+                "properties": {
+                    "parc": parc_property(),
+                    "playbook": { "type": "string", "description": "Playbook path as list_playbooks gives it, e.g. deploy-x.yml." },
+                    "commit": commit_property()
+                },
+                "required": ["parc", "playbook"],
+                "additionalProperties": false
+            })),
+        )
+        .with_annotations(read_only("Describe a playbook")),
+        Tool::new(
+            "read_tree",
+            "Read the Ansible CODE of the tree: a file (at most 64 KiB, UTF-8, redacted; redacted: true when \
+             redaction changed its text, so do not rewrite a whole file from it) or the listing of a directory. \
+             path is relative to playbooks/ (a leading playbooks/ is accepted), e.g. roles/x-install/tasks/main.yml; \
+             empty = playbooks/ itself. Refused with path_refused: absolute paths, `..`, hidden names, any path \
+             component named inventories, group_vars, host_vars, keys or parcs, vault-encrypted files, key and \
+             certificate files, symbolic links whose target leaves playbooks/, files delivered with parc data. \
+             Directory listings silently omit such entries. Answer: {commit, kind: file, path, size, content, \
+             redacted} or {commit, kind: dir, path, entries: [{name, kind, size?}], truncated}.",
+            schema(json!({
+                "type": "object",
+                "properties": {
+                    "parc": parc_property(),
+                    "path": { "type": "string", "description": "Path under playbooks/, at most 512 characters. Default: playbooks/." },
+                    "commit": commit_property()
+                },
+                "required": ["parc"],
+                "additionalProperties": false
+            })),
+        )
+        .with_annotations(read_only("Read the Ansible tree")),
+        Tool::new(
+            "search_tree",
+            "Search a FIXED string (case-sensitive, not a regular expression) in the readable files of \
+             playbooks/ (same exclusions as read_tree). At most 100 hits. Answer: {commit, hits: [{path, line, \
+             text (the trimmed line, at most 300 characters, redacted)}], truncated}.",
+            schema(json!({
+                "type": "object",
+                "properties": {
+                    "parc": parc_property(),
+                    "pattern": { "type": "string", "minLength": 1, "maxLength": 200, "description": "Text to find, on one line." },
+                    "commit": commit_property()
+                },
+                "required": ["parc", "pattern"],
+                "additionalProperties": false
+            })),
+        )
+        .with_annotations(read_only("Search the Ansible tree")),
+        Tool::new(
+            "tree_status",
+            "State of the Ansible tree: {source: git|rsync, branch, head (the synced commit that runs and reads \
+             use by default), synced_at (last git fetch), commits_cached (execution trees kept)}. With source \
+             rsync there is no commit: branch, head and synced_at are null and commit arguments are refused.",
+            schema(json!({
+                "type": "object",
+                "properties": { "parc": parc_property() },
+                "required": ["parc"],
+                "additionalProperties": false
+            })),
+        )
+        .with_annotations(read_only("Ansible tree status")),
+        Tool::new(
             "run_ansible_playbook",
             "Run a playbook of the Ansible tree on a parc. A real run (check: false) is refused with \
-             code check_required unless the SAME launch (parc, playbook, limit, extra_vars) completed \
-             with check: true less than one hour ago. One run per parc at a time (code run_busy). \
-             limit names hosts or groups of the parc, no pattern; extra_vars values are strings, \
-             with no ansible_* variable and no Jinja template. Detached by default: answers {run_id, \
-             state: running, check, diff}; follow the run with run_status.",
+             code check_required unless the SAME launch (parc, playbook, limit, extra_vars, tags, skip_tags, \
+             resolved commit, no_limit) completed with check: true less than one hour ago. One run per parc \
+             at a time (code run_busy). limit names hosts or groups of the parc, no pattern; with no limit \
+             at all the playbook targets its own hosts. no_limit: true states that explicitly (needed by \
+             playbooks whose describe_playbook says needs_no_limit); it excludes limit and is refused for an \
+             account bounded by max_hosts (code too_many_hosts), which must also give a limit of at most \
+             max_hosts hosts, groups expanded. A playbook the account must not run (or imports) is refused \
+             with forbidden_playbook. tags and skip_tags (at most 20 each, [A-Za-z0-9_.-]{1,64}) become \
+             --tags/--skip-tags. commit: HEAD or a full sha, a commit already fetched (sync_tree) and \
+             reachable from the followed branch or infra/<parc>/*; default the synced head; the run executes \
+             exactly that commit's tree. extra_vars values are strings, with no ansible_* variable and no Jinja \
+             template. Detached by default: answers {run_id, state: running, check, diff, commit}; follow the \
+             run with run_status.",
             schema(json!({
                 "type": "object",
                 "properties": {
                     "parc": parc_property(),
                     "playbook": { "type": "string", "description": "Playbook path as list_playbooks gives it, e.g. deploy-x.yml." },
                     "limit": { "type": "array", "items": { "type": "string" }, "description": "Hosts or groups of the parc (--limit)." },
+                    "no_limit": { "type": "boolean", "description": "Run with no --limit at all. Exclusive with limit." },
+                    "tags": tags_property("--tags: run only the tasks carrying one of these tags."),
+                    "skip_tags": tags_property("--skip-tags: skip the tasks carrying one of these tags."),
+                    "commit": commit_property(),
                     "extra_vars": {
                         "type": "object",
                         "additionalProperties": { "type": "string" },
@@ -288,7 +399,11 @@ static TOOLS: LazyLock<Vec<Tool>> = LazyLock::new(|| {
         Tool::new(
             "run_status",
             "State of a run (running, success, failed), exit code, start and end times, check and diff \
-             flags, and the redacted last lines of its output.",
+             flags, the commit it executed (null for an rsync tree), its tags and skip_tags, the redacted last \
+             lines of its output, recap ({host: {ok, changed, failed, unreachable, skipped}} from the PLAY \
+             RECAP, empty until the run reaches it) and failures ([{host, task, role, msg}], at most 50, msg \
+             at most 500 characters and redacted; host, task and role may be null for an error before any \
+             play; also filled while running and for check runs).",
             schema(json!({
                 "type": "object",
                 "properties": {
@@ -300,6 +415,47 @@ static TOOLS: LazyLock<Vec<Tool>> = LazyLock::new(|| {
             })),
         )
         .with_annotations(read_only("Run status")),
+        Tool::new(
+            "syntax_check",
+            "Run `ansible-playbook --syntax-check` on a playbook from the tree of a commit (no host is \
+             contacted, nothing is changed, no parc lock is taken). Answer: {commit, playbook, ok, exit_code, \
+             timed_out, output (at most 8000 characters, redacted), failures}. commit defaults to the synced head.",
+            schema(json!({
+                "type": "object",
+                "properties": {
+                    "parc": parc_property(),
+                    "playbook": { "type": "string", "description": "Playbook path as list_playbooks gives it." },
+                    "commit": commit_property()
+                },
+                "required": ["parc", "playbook"],
+                "additionalProperties": false
+            })),
+        )
+        .with_annotations(
+            ToolAnnotations::with_title("Syntax check").read_only(false).destructive(false).idempotent(true),
+        ),
+        Tool::new(
+            "sync_tree",
+            "Fetch from the git origin of the Ansible tree. ref: the followed branch (default; the local \
+             synced head advances by fast-forward only, code not_fast_forward otherwise) or infra/<parc>/<name> \
+             (fix branches of the hub; every infra/<parc>/* branch is fetched and pruned). Any other ref is \
+             refused (ref_refused). commit: a full sha that must be reachable from the synced head or a fetched \
+             infra/<parc>/* branch, else unknown_commit. Answer: {commit (the commit asked for, else the tip of \
+             the ref), head (the synced head after the operation), reference}. Only with source git (tree_status).",
+            schema(json!({
+                "type": "object",
+                "properties": {
+                    "parc": parc_property(),
+                    "ref": { "type": "string", "description": "The followed branch (e.g. main) or infra/<parc>/<name>. Default: the followed branch." },
+                    "commit": commit_property()
+                },
+                "required": ["parc"],
+                "additionalProperties": false
+            })),
+        )
+        .with_annotations(
+            ToolAnnotations::with_title("Sync the Ansible tree").read_only(false).destructive(false).idempotent(true),
+        ),
     ]
 });
 
@@ -319,6 +475,35 @@ mod tests {
             assert_eq!(tool.input_schema.get("type"), Some(&json!("object")), "{}", tool.name);
             assert!(tool.description.as_deref().is_some_and(|d| !d.is_empty()), "{}", tool.name);
         }
+    }
+
+    #[test]
+    fn every_tool_refuses_unknown_arguments() {
+        for tool in TOOLS.iter() {
+            assert_eq!(tool.input_schema.get("additionalProperties"), Some(&json!(false)), "{}", tool.name);
+        }
+    }
+
+    #[test]
+    fn a_read_account_sees_the_read_tools_only() {
+        let read = Scope { parcs: None, mode: crate::config::Mode::Read, deny_playbooks: vec![], max_hosts: None };
+        let visible: Vec<&str> = TOOLS.iter().map(|t| t.name.as_ref()).filter(|n| read.may(n)).collect();
+        assert_eq!(visible, crate::auth::READ_COMMANDS);
+        for run_only in ["run_ansible_playbook", "run_status", "syntax_check", "sync_tree"] {
+            assert!(!read.may(run_only), "{run_only}");
+            assert!(Scope::everything().may(run_only), "{run_only}");
+        }
+    }
+
+    #[test]
+    fn the_run_tool_declares_the_new_arguments() {
+        let run = TOOLS.iter().find(|t| t.name == "run_ansible_playbook").unwrap();
+        let props = run.input_schema.get("properties").unwrap();
+        for key in ["tags", "skip_tags", "commit", "no_limit", "limit", "extra_vars", "check"] {
+            assert!(props.get(key).is_some(), "{key}");
+        }
+        assert_eq!(props["tags"]["maxItems"], json!(20));
+        assert!(props["commit"]["pattern"].as_str().unwrap().contains("HEAD"));
     }
 
     #[test]

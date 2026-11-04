@@ -22,9 +22,10 @@
 //! d'équivalent dans l'application de bureau (voir CLAUDE.md § 3).
 
 use anyhow::anyhow;
-use fleetforge_core::automation::{self, validate_extra_vars, validate_run_id};
+use fleetforge_core::ansible_output;
+use fleetforge_core::automation::{validate_extra_vars, validate_run_id, validate_tags};
 use fleetforge_core::redact::redact_text;
-use fleetforge_core::{ro_gate, AnsibleRun, Fault, FaultKind, LockPolicy, PlaybookRequest, PreparedRun, RunOptions, SettingKey};
+use fleetforge_core::{ro_gate, AnsibleRun, Fault, FaultKind, LockPolicy, PlaybookRequest, PreparedRun, RunOptions, RunSelection};
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -59,6 +60,12 @@ pub async fn serve(state: &AppState, role: Role, scope: &Scope, command: &str, p
         "ssh_diagnose" => ssh_diagnose(state, role, scope, p).await,
         "run_ansible_playbook" => run_playbook(state, role, scope, p).await,
         "run_status" => run_status(state, role, scope, p),
+        "describe_playbook" => describe_playbook(state, scope, p).await,
+        "read_tree" => read_tree(state, scope, p).await,
+        "search_tree" => search_tree(state, scope, p).await,
+        "tree_status" => tree_status(state, scope, p).await,
+        "syntax_check" => syntax_check(state, scope, p).await,
+        "sync_tree" => sync_tree(state, scope, p).await,
         other => Err(ApiError::invalid(format!("commande inconnue : {other}"))),
     }
 }
@@ -176,6 +183,18 @@ fn run_status(state: &AppState, role: Role, scope: &Scope, p: &Params) -> ApiRes
         .clamp(1, MAX_TAIL_LINES);
     let tail = run.output[run.output.len().saturating_sub(wanted)..].join("\n");
     let tail = if role == Role::Automation { redact_text(&tail) } else { tail };
+    // Bilan par hôte et tâches en échec, lus de la sortie ENTIÈRE du run (pas
+    // de sa fin seule) : un run en cours n'a pas encore de bilan, mais montre
+    // déjà ses échecs.
+    let report = ansible_output::parse(run.output.iter().map(String::as_str));
+    let failures: Vec<_> = report
+        .failures
+        .into_iter()
+        .map(|mut f| {
+            f.task = f.task.map(|t| redact_text(&t));
+            f
+        })
+        .collect();
     ok(json!({
         "run_id": run.id,
         "state": run.status,
@@ -186,6 +205,11 @@ fn run_status(state: &AppState, role: Role, scope: &Scope, p: &Params) -> ApiRes
         "label": run.label,
         "check": run.options.check,
         "diff": run.options.diff,
+        "commit": run.commit,
+        "tags": run.tags,
+        "skip_tags": run.skip_tags,
+        "recap": report.recap,
+        "failures": failures,
     }))
 }
 
@@ -213,13 +237,28 @@ fn generated_run_id() -> String {
 
 /// Empreinte d'un lancement : ce qui doit être identique entre le `--check` et
 /// le run réel qu'il autorise. `--diff` n'en fait pas partie — il ne change
-/// que l'affichage.
-fn fingerprint(parc: &str, playbook: &str, limit: &Option<Vec<String>>, extra: &HashMap<String, String>) -> String {
-    let mut limit: Vec<&str> = limit.iter().flatten().map(String::as_str).collect();
-    limit.sort_unstable();
-    limit.dedup();
+/// que l'affichage. En revanche le COMMIT RÉSOLU en fait partie : un check du
+/// commit A n'autorise pas le même playbook sur le commit B.
+#[allow(clippy::too_many_arguments)]
+fn fingerprint(
+    parc: &str,
+    playbook: &str,
+    limit: &Option<Vec<String>>,
+    extra: &HashMap<String, String>,
+    tags: &[String],
+    skip_tags: &[String],
+    commit: &Option<String>,
+    no_limit: bool,
+) -> String {
+    let sorted = |list: &[String]| {
+        let mut v: Vec<String> = list.to_vec();
+        v.sort_unstable();
+        v.dedup();
+        v
+    };
+    let limit = sorted(limit.as_deref().unwrap_or_default());
     let extra: std::collections::BTreeMap<&String, &String> = extra.iter().collect();
-    json!([parc, playbook, limit, extra]).to_string()
+    json!([parc, playbook, limit, extra, sorted(tags), sorted(skip_tags), commit, no_limit]).to_string()
 }
 
 /// `run_ansible_playbook`.
@@ -227,7 +266,14 @@ fn fingerprint(parc: &str, playbook: &str, limit: &Option<Vec<String>>, extra: &
 /// Arguments (forme du frontal, alias de l'API d'automatisation) :
 /// `playbookPath`|`playbook`, `inventoryPath`|`parc`, `limitHosts`|`limit`,
 /// `extraVars`|`extra_vars`, `deployId`|`run_id` (facultatif : fabriqué sinon),
-/// `label`, `check`, `diff`, `detach`.
+/// `label`, `check`, `diff`, `detach`, et `tags`, `skip_tags`, `commit`
+/// (`HEAD` ou sha complet ; défaut : la tête synchronisée de l'arbre git),
+/// `no_limit` (aucun `--limit` ; exclusif avec `limit`, refusé aux comptes
+/// bornés par `max_hosts`).
+///
+/// Pour le compte d'automatisation, en plus : `deny_playbooks` (le playbook et
+/// ceux qu'il importe) et `max_hosts` (`limit` obligatoire, groupes développés)
+/// de son périmètre sont appliqués avant tout.
 ///
 /// `detach: true` rend la main dès le run inscrit (`{ run_id, state }`) ; sans
 /// lui, la réponse attend la fin du run (comportement du frontal). Dans les
@@ -237,6 +283,10 @@ async fn run_playbook(state: &AppState, role: Role, scope: &Scope, p: &Params) -
     let playbook: String = p.first(&["playbookPath", "playbook"])?;
     let inventory: String = p.first(&["inventoryPath", "parc"])?;
     let limit: Option<Vec<String>> = p.first_opt(&["limitHosts", "limit"])?;
+    let tags: Vec<String> = p.opt("tags")?.unwrap_or_default();
+    let skip_tags: Vec<String> = p.opt("skip_tags")?.unwrap_or_default();
+    let commit: Option<String> = p.opt("commit")?;
+    let no_limit: bool = p.opt("no_limit")?.unwrap_or(false);
     let extra: HashMap<String, String> = p.first_opt(&["extraVars", "extra_vars"])?.unwrap_or_default();
     let id: String = p.first_opt(&["deployId", "run_id"])?.unwrap_or_else(generated_run_id);
     let options = RunOptions {
@@ -248,18 +298,46 @@ async fn run_playbook(state: &AppState, role: Role, scope: &Scope, p: &Params) -
 
     let core = state.core.clone();
     let mut print = None;
+    let (mut tags, mut skip_tags, mut commit) = (tags, skip_tags, commit);
+    let mut playbook = playbook;
     if strict {
         within(scope, &inventory)?;
         // Un NOM de parc, jamais un chemin de fichier d'inventaire.
         core.parc_by_name(&inventory)?;
         validate_extra_vars(&extra, true)?;
-        let resolved = automation::resolve_playbook(&core.get_setting(SettingKey::PlaybooksPath)?, &playbook)?;
-        let fp = fingerprint(&inventory, &automation::playbook_name(&resolved), &limit, &extra);
+        tags = validate_tags(&tags, "tags")?;
+        skip_tags = validate_tags(&skip_tags, "skip_tags")?;
+        let limited = limit.as_ref().is_some_and(|l| !l.is_empty());
+        if no_limit && limited {
+            return Err(anyhow!(Fault::invalid("no_limit et limit s'excluent")).into());
+        }
+        if let Some(max) = scope.max_hosts {
+            enforce_max_hosts(state, &inventory, limit.as_deref().filter(|l| !l.is_empty()), no_limit, max).await?;
+        }
+        // Commit RÉSOLU d'abord (sha complet, atteignable d'une référence
+        // permise) : il entre dans l'empreinte, et c'est lui — pas une tête
+        // qui aurait avancé entre le check et le run — qui sera exécuté.
+        let (parc, wanted) = (inventory.clone(), commit.clone());
+        let c = core.clone();
+        commit = tokio::task::spawn_blocking(move || c.resolve_commit(&parc, wanted.as_deref())).await??;
+        // Le playbook et ceux qu'il importe, dans l'arbre de ce commit.
+        let (parc, wanted, name) = (inventory.clone(), commit.clone(), playbook.clone());
+        let c = core.clone();
+        let chain = tokio::task::spawn_blocking(move || c.playbook_chain(&parc, &name, wanted.as_deref())).await??;
+        if let Some(denied) = chain.iter().find(|n| scope.denies(base_name(n))) {
+            return Err(anyhow!(Fault::new(
+                FaultKind::ForbiddenPlaybook,
+                format!("playbook interdit à ce compte : {denied}"),
+            ))
+            .into());
+        }
+        playbook = chain.first().cloned().unwrap_or(playbook);
+        let fp = fingerprint(&inventory, &playbook, &limit, &extra, &tags, &skip_tags, &commit, no_limit);
         if !options.check && !state.checks.is_fresh(&fp) {
             return Err(anyhow!(Fault::new(
                 FaultKind::CheckRequired,
                 "run réel refusé : lancer d'abord le même playbook avec check: true \
-                 (même parc, même limit, mêmes variables), il y a moins d'une heure",
+                 (même parc, même limit, mêmes variables, mêmes tags, même commit), il y a moins d'une heure",
             ))
             .into());
         }
@@ -281,9 +359,10 @@ async fn run_playbook(state: &AppState, role: Role, scope: &Scope, p: &Params) -
     // Le tout dans une tâche à part : un client qui se déconnecte entre les
     // deux laisserait sinon un run inscrit « en cours » que rien n'exécute.
     let shared = state.clone();
+    let selection = RunSelection { tags, skip_tags, no_limit, commit };
     let (run_id, running) = tokio::spawn(async move {
-        let prepared =
-            tokio::task::spawn_blocking(move || core.prepare_playbook(req, options, lock)).await??;
+        let prepared = tokio::task::spawn_blocking(move || core.prepare_playbook_with(req, options, selection, lock))
+            .await??;
         let run_id = prepared.id().to_string();
         // Avant le lancement : un `run_status` immédiat doit déjà le trouver.
         shared.run_parcs.record(&run_id, &run_parc);
@@ -292,11 +371,13 @@ async fn run_playbook(state: &AppState, role: Role, scope: &Scope, p: &Params) -
     .await??;
 
     if detach {
+        let commit = state.core.runs().get(&run_id).and_then(|r| r.commit);
         return ok(json!({
             "run_id": run_id,
             "state": "running",
             "check": options.check,
             "diff": options.diff,
+            "commit": commit,
         }));
     }
     let run = running.await??;
@@ -305,7 +386,149 @@ async fn run_playbook(state: &AppState, role: Role, scope: &Scope, p: &Params) -
         value["output"] = json!(redact_text(&run.output));
     }
     value["run_id"] = json!(run_id);
+    value["commit"] = json!(state.core.runs().get(&run_id).and_then(|r| r.commit));
     ok(value)
+}
+
+/// Nom de fichier d'un playbook (`sub/x.yml` → `x.yml`).
+fn base_name(playbook: &str) -> &str {
+    playbook.rsplit('/').next().unwrap_or(playbook)
+}
+
+/// `max_hosts` : `limit` est obligatoire (un run sans limite vise tout ce que
+/// cible le playbook, donc un nombre inconnu), `no_limit` refusé, et les
+/// groupes sont développés par l'inventaire pour compter les hôtes.
+async fn enforce_max_hosts(
+    state: &AppState,
+    parc: &str,
+    limit: Option<&[String]>,
+    no_limit: bool,
+    max: usize,
+) -> Result<(), ApiError> {
+    let too_many = |message: String| ApiError::from(anyhow!(Fault::new(FaultKind::TooManyHosts, message)));
+    if no_limit {
+        return Err(too_many(format!("no_limit refusé à ce compte (au plus {max} hôtes)")));
+    }
+    let Some(limit) = limit else {
+        return Err(too_many(format!("limit obligatoire pour ce compte (au plus {max} hôtes)")));
+    };
+    let (core, parc, names) = (state.core.clone(), parc.to_string(), limit.to_vec());
+    let hosts = tokio::task::spawn_blocking(move || core.count_limit_hosts(&parc, &names)).await??;
+    if hosts > max {
+        return Err(too_many(format!("{hosts} hôtes visés, ce compte en admet {max} au plus")));
+    }
+    Ok(())
+}
+
+// === Lecture de l'arbre Ansible, contrôle de syntaxe, synchronisation ===
+
+/// Chaînes d'une valeur JSON, caviardées de bout en bout : ce qui sort part
+/// chez le fournisseur d'un modèle. Sauf `commit` : un sha complet y serait pris
+/// pour un secret hexadécimal, et c'est un identifiant que l'appelant doit
+/// pouvoir réutiliser tel quel.
+fn redacted(value: serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    match value {
+        Value::String(s) => Value::String(redact_text(&s)),
+        Value::Array(items) => Value::Array(items.into_iter().map(redacted).collect()),
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .map(|(k, v)| if k == "commit" { (k, v) } else { (k, redacted(v)) })
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
+/// `{ parc, playbook, commit? }` → plays, étiquettes, variables attendues,
+/// `needs_no_limit` (voir `fleetforge_core::ansible_describe`).
+async fn describe_playbook(state: &AppState, scope: &Scope, p: &Params) -> ApiResult {
+    let parc: String = p.get("parc")?;
+    within(scope, &parc)?;
+    let playbook: String = p.first(&["playbook", "playbookPath"])?;
+    let commit: Option<String> = p.opt("commit")?;
+    let core = state.core.clone();
+    let answer = tokio::task::spawn_blocking(move || core.describe_playbook(&parc, &playbook, commit.as_deref())).await??;
+    ok(redacted(serde_json::to_value(answer)?))
+}
+
+/// `{ parc, path, commit? }` → un fichier de `playbooks/` (≤ 64 Kio, caviardé ;
+/// `redacted: true` quand le caviardage a changé le texte) ou la liste d'un
+/// dossier.
+async fn read_tree(state: &AppState, scope: &Scope, p: &Params) -> ApiResult {
+    let parc: String = p.get("parc")?;
+    within(scope, &parc)?;
+    let path: String = p.opt("path")?.unwrap_or_default();
+    let commit: Option<String> = p.opt("commit")?;
+    let core = state.core.clone();
+    let answer = tokio::task::spawn_blocking(move || core.read_tree(&parc, &path, commit.as_deref())).await??;
+    let mut value = serde_json::to_value(&answer)?;
+    if let Some(content) = value.get("content").and_then(|c| c.as_str()).map(String::from) {
+        let masked = redact_text(&content);
+        // `redact_text` rend les lignes jointes par `\n` : le saut final et la
+        // casse des fins de ligne ne sont pas un caviardage.
+        let plain = content.lines().collect::<Vec<_>>().join("\n");
+        value["redacted"] = json!(masked != plain);
+        let trailing = if content.ends_with('\n') { "\n" } else { "" };
+        value["content"] = json!(format!("{masked}{trailing}"));
+    }
+    ok(redacted_names(value))
+}
+
+/// Chemins et noms d'un résultat de lecture : caviardés comme le reste.
+fn redacted_names(mut value: serde_json::Value) -> serde_json::Value {
+    if let Some(entries) = value.get_mut("entries").and_then(|e| e.as_array_mut()) {
+        for entry in entries {
+            if let Some(name) = entry.get("name").and_then(|n| n.as_str()).map(redact_text) {
+                entry["name"] = json!(name);
+            }
+        }
+    }
+    value
+}
+
+/// `{ parc, pattern, commit? }` → au plus 100 occurrences du texte fixe.
+async fn search_tree(state: &AppState, scope: &Scope, p: &Params) -> ApiResult {
+    let parc: String = p.get("parc")?;
+    within(scope, &parc)?;
+    let pattern: String = p.get("pattern")?;
+    let commit: Option<String> = p.opt("commit")?;
+    let core = state.core.clone();
+    let answer = tokio::task::spawn_blocking(move || core.search_tree(&parc, &pattern, commit.as_deref())).await??;
+    ok(redacted(serde_json::to_value(answer)?))
+}
+
+/// `{ parc }` → `{ source, branch, head, synced_at, commits_cached }`.
+async fn tree_status(state: &AppState, scope: &Scope, p: &Params) -> ApiResult {
+    let parc: String = p.get("parc")?;
+    within(scope, &parc)?;
+    let core = state.core.clone();
+    ok(tokio::task::spawn_blocking(move || core.tree_status(&parc)).await??)
+}
+
+/// `{ parc, playbook, commit? }` → `ansible-playbook --syntax-check` depuis
+/// l'arbre du commit : verdict, code, sortie bornée et caviardée.
+async fn syntax_check(state: &AppState, scope: &Scope, p: &Params) -> ApiResult {
+    let parc: String = p.get("parc")?;
+    within(scope, &parc)?;
+    let playbook: String = p.first(&["playbook", "playbookPath"])?;
+    let commit: Option<String> = p.opt("commit")?;
+    let core = state.core.clone();
+    let answer = tokio::task::spawn_blocking(move || core.syntax_check(&parc, &playbook, commit.as_deref())).await??;
+    ok(redacted(serde_json::to_value(answer)?))
+}
+
+/// `{ parc, commit?, ref? }` → `{ commit, head, reference }` : `git fetch` d'une
+/// référence permise (la branche suivie, avancée en avance rapide, ou
+/// `infra/<parc>/<nom>`), le commit demandé étant refusé s'il n'est atteignable
+/// d'aucune.
+async fn sync_tree(state: &AppState, scope: &Scope, p: &Params) -> ApiResult {
+    let parc: String = p.get("parc")?;
+    within(scope, &parc)?;
+    let commit: Option<String> = p.opt("commit")?;
+    let reference: Option<String> = p.opt("ref")?;
+    let core = state.core.clone();
+    ok(tokio::task::spawn_blocking(move || core.sync_tree(&parc, commit.as_deref(), reference.as_deref())).await??)
 }
 
 /// Exécute un run préparé sur un fil dédié, puis le clôt : flux SSE fermé,
@@ -340,26 +563,75 @@ fn launch(
 mod tests {
     use super::*;
 
+    fn fp(
+        limit: Option<&[&str]>,
+        extra: &[(&str, &str)],
+        tags: &[&str],
+        skip: &[&str],
+        commit: Option<&str>,
+        no_limit: bool,
+    ) -> String {
+        let own = |l: &[&str]| l.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        fingerprint(
+            "web3c",
+            "deploy-x.yml",
+            &limit.map(own),
+            &extra.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+            &own(tags),
+            &own(skip),
+            &commit.map(String::from),
+            no_limit,
+        )
+    }
+
     #[test]
     fn a_launch_fingerprint_ignores_order_but_not_content() {
-        let a = fingerprint(
-            "web3c",
-            "deploy-x.yml",
-            &Some(vec!["b".into(), "a".into()]),
-            &HashMap::from([("k".into(), "v".into()), ("j".into(), "w".into())]),
-        );
-        let b = fingerprint(
-            "web3c",
-            "deploy-x.yml",
-            &Some(vec!["a".into(), "b".into(), "a".into()]),
-            &HashMap::from([("j".into(), "w".into()), ("k".into(), "v".into())]),
-        );
+        let a = fp(Some(&["b", "a"]), &[("k", "v"), ("j", "w")], &["t2", "t1"], &["s"], Some("c1"), false);
+        let b = fp(Some(&["a", "b", "a"]), &[("j", "w"), ("k", "v")], &["t1", "t2", "t1"], &["s"], Some("c1"), false);
         assert_eq!(a, b);
-        let other = fingerprint("web3c", "deploy-x.yml", &Some(vec!["a".into()]), &HashMap::new());
-        assert_ne!(a, other);
-        let no_limit = fingerprint("web3c", "deploy-x.yml", &None, &HashMap::new());
-        let empty_limit = fingerprint("web3c", "deploy-x.yml", &Some(vec![]), &HashMap::new());
-        assert_eq!(no_limit, empty_limit, "sans limite = liste vide");
+        assert_ne!(a, fp(Some(&["a"]), &[], &[], &[], None, false));
+        assert_eq!(
+            fp(None, &[], &[], &[], None, false),
+            fp(Some(&[]), &[], &[], &[], None, false),
+            "sans limite = liste vide"
+        );
+    }
+
+    #[test]
+    fn every_field_of_the_launch_changes_the_fingerprint() {
+        let base = fp(Some(&["a"]), &[("k", "v")], &["t"], &["s"], Some("c1"), false);
+        for (name, other) in [
+            ("limit", fp(Some(&["b"]), &[("k", "v")], &["t"], &["s"], Some("c1"), false)),
+            ("extra_vars", fp(Some(&["a"]), &[("k", "w")], &["t"], &["s"], Some("c1"), false)),
+            ("tags", fp(Some(&["a"]), &[("k", "v")], &["u"], &["s"], Some("c1"), false)),
+            ("skip_tags", fp(Some(&["a"]), &[("k", "v")], &["t"], &["u"], Some("c1"), false)),
+            ("commit", fp(Some(&["a"]), &[("k", "v")], &["t"], &["s"], Some("c2"), false)),
+            ("commit absent", fp(Some(&["a"]), &[("k", "v")], &["t"], &["s"], None, false)),
+            ("no_limit", fp(Some(&["a"]), &[("k", "v")], &["t"], &["s"], Some("c1"), true)),
+        ] {
+            assert_ne!(base, other, "{name} doit compter dans l'empreinte");
+        }
+        // Tags et skip-tags ne se confondent pas.
+        assert_ne!(
+            fp(None, &[], &["a"], &[], None, false),
+            fp(None, &[], &[], &["a"], None, false)
+        );
+        // Un check sans limite n'autorise pas un run `no_limit`.
+        assert_ne!(fp(None, &[], &[], &[], None, false), fp(None, &[], &[], &[], None, true));
+    }
+
+    #[test]
+    fn nested_playbooks_are_judged_by_their_file_name() {
+        assert_eq!(base_name("sub/deploy-fleetforge.yml"), "deploy-fleetforge.yml");
+        assert_eq!(base_name("deploy-x.yml"), "deploy-x.yml");
+    }
+
+    #[test]
+    fn read_results_are_redacted_string_by_string() {
+        let v = redacted(json!({ "a": ["password=hunter2", { "b": "ok" }], "n": 3 }));
+        assert_eq!(v, json!({ "a": ["password=[REDACTED]", { "b": "ok" }], "n": 3 }));
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        assert_eq!(redacted(json!({ "commit": sha, "x": sha })), json!({ "commit": sha, "x": "[REDACTED-HEX]" }));
     }
 
     #[test]

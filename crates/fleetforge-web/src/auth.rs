@@ -37,7 +37,7 @@ use subtle::ConstantTimeEq;
 
 use crate::config::{Account, Mode, Role, Scope, Secret};
 
-/// Commandes ouvertes au compte d'automatisation. Tout le reste — réglages,
+/// Commandes ouvertes au compte d'automatisation (mode `run`). Tout le reste — réglages,
 /// group_vars, hébergeurs, alimentation des machines, sorties brutes des runs
 /// (`get_run_handle`) — reste à l'opérateur. `query_prometheus` n'y est admis
 /// que sous sa forme `{ parc, query }` (lecture seule, voir `automation.rs`).
@@ -47,19 +47,31 @@ pub const AUTOMATION_COMMANDS: &[&str] = &[
     "alertmanager_alerts",
     "query_prometheus",
     "ssh_diagnose",
+    "describe_playbook",
+    "read_tree",
+    "search_tree",
+    "tree_status",
     "run_ansible_playbook",
     "run_status",
+    "syntax_check",
+    "sync_tree",
 ];
 
 /// Commandes d'un compte en LECTURE (`mode: read`) : ni run, ni état de run,
-/// ni flux. `ssh_diagnose` en est : la passerelle ro-gate n'a que des verbes
-/// de lecture.
+/// ni flux, ni contrôle de syntaxe, ni synchronisation de l'arbre.
+/// `ssh_diagnose` en est : la passerelle ro-gate n'a que des verbes de lecture.
+/// Les lectures de l'arbre (`describe_playbook`, `read_tree`, `search_tree`,
+/// `tree_status`) n'ouvrent que le CODE sous `playbooks/` (`ansible_tree`).
 pub const READ_COMMANDS: &[&str] = &[
     "list_hosts",
     "list_playbooks",
     "alertmanager_alerts",
     "query_prometheus",
     "ssh_diagnose",
+    "describe_playbook",
+    "read_tree",
+    "search_tree",
+    "tree_status",
 ];
 
 pub fn commands(mode: Mode) -> &'static [&'static str] {
@@ -314,6 +326,13 @@ mod tests {
         assert!(automation_may(&Method::POST, "/api/run_ansible_playbook", Mode::Run));
         assert!(automation_may(&Method::POST, "/api/run_status", Mode::Run));
         assert!(automation_may(&Method::GET, "/api/events/run-1", Mode::Run));
+        for tool in ["describe_playbook", "read_tree", "search_tree", "tree_status"] {
+            assert!(automation_may(&Method::POST, &format!("/api/{tool}"), Mode::Read), "{tool}");
+        }
+        for tool in ["syntax_check", "sync_tree"] {
+            assert!(automation_may(&Method::POST, &format!("/api/{tool}"), Mode::Run), "{tool}");
+            assert!(!automation_may(&Method::POST, &format!("/api/{tool}"), Mode::Read), "{tool}");
+        }
 
         for (method, path, mode) in [
             (Method::POST, "/api/write_group_vars_file", Mode::Run),
@@ -337,6 +356,6 @@ mod tests {
     fn the_read_commands_are_the_automation_commands_without_runs() {
         let mut runs: Vec<&str> = AUTOMATION_COMMANDS.iter().copied().filter(|c| !READ_COMMANDS.contains(c)).collect();
         runs.sort_unstable();
-        assert_eq!(runs, ["run_ansible_playbook", "run_status"]);
+        assert_eq!(runs, ["run_ansible_playbook", "run_status", "sync_tree", "syntax_check"]);
     }
 }
