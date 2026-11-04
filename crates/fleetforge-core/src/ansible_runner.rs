@@ -13,7 +13,7 @@
 //! les workers forkés d'Ansible cassent sur macOS. [`AnsibleEnv`] réunit ce que
 //! les wrappers apportent, en un seul endroit.
 
-use crate::deploy::RunOptions;
+use crate::deploy::{RunOptions, RunSelection};
 use crate::models::*;
 use crate::parc::Parc;
 use anyhow::Result;
@@ -147,6 +147,18 @@ fn add_options(cmd: &mut Command, options: RunOptions) {
     }
 }
 
+/// `--tags` / `--skip-tags`, en UN argument chacun (`--tags=a,b`) : une
+/// étiquette qui commencerait par `-` ne peut ainsi pas être lue comme une
+/// option. Les noms ont déjà passé `automation::validate_tags`.
+fn add_selection(cmd: &mut Command, selection: &RunSelection) {
+    if !selection.tags.is_empty() {
+        cmd.arg(format!("--tags={}", selection.tags.join(",")));
+    }
+    if !selection.skip_tags.is_empty() {
+        cmd.arg(format!("--skip-tags={}", selection.skip_tags.join(",")));
+    }
+}
+
 fn status_of(code: Option<i32>) -> &'static str {
     if code == Some(0) {
         "success"
@@ -184,12 +196,14 @@ fn failed_run(
 }
 
 /// Execute an existing playbook file, streaming each output line via `on_line`.
+#[allow(clippy::too_many_arguments)]
 pub fn run_existing_playbook_streaming<F>(
     playbook_path: &str,
     parc: &Parc,
     limit_hosts: Option<Vec<String>>,
     extra_vars: Option<HashMap<String, String>>,
     options: RunOptions,
+    selection: &RunSelection,
     env: &AnsibleEnv,
     on_line: F,
 ) -> Result<AnsibleRun>
@@ -217,6 +231,7 @@ where
         }
     }
     add_extra_vars(&mut cmd, extra_vars);
+    add_selection(&mut cmd, selection);
     add_options(&mut cmd, options);
 
     let (combined, code) = match execute_with_streaming(cmd, on_line) {
@@ -243,6 +258,37 @@ where
         finished_at: Some(chrono::Utc::now().to_rfc3339()),
         exit_code: code,
     })
+}
+
+/// Verdict d'un `ansible-playbook --syntax-check`.
+#[derive(Debug, Clone)]
+pub struct SyntaxVerdict {
+    pub ok: bool,
+    pub exit_code: Option<i32>,
+    pub timed_out: bool,
+    /// Sortie (stdout puis stderr), bornée, NON caviardée.
+    pub output: String,
+}
+
+/// Délai d'un contrôle de syntaxe.
+pub const SYNTAX_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+const SYNTAX_MAX_BYTES: usize = 64 * 1024;
+
+/// `ansible-playbook --syntax-check`, un `-i` par fichier du parc. Ne
+/// contacte aucun hôte et ne modifie rien ; ne prend donc pas le verrou du
+/// parc.
+pub fn syntax_check(playbook_path: &str, parc: &Parc, env: &AnsibleEnv) -> Result<SyntaxVerdict> {
+    let mut cmd = Command::new("ansible-playbook");
+    env.apply(&mut cmd);
+    add_inventories(&mut cmd, parc);
+    cmd.arg(playbook_path).arg("--syntax-check");
+    let got = crate::proc::run_bounded(cmd, SYNTAX_TIMEOUT, SYNTAX_MAX_BYTES)?;
+    let output = match (got.stdout.trim().is_empty(), got.stderr.trim().is_empty()) {
+        (_, true) => got.stdout.clone(),
+        (true, false) => got.stderr.clone(),
+        (false, false) => format!("{}\n{}", got.stdout.trim_end(), got.stderr.trim_end()),
+    };
+    Ok(SyntaxVerdict { ok: got.success(), exit_code: got.code, timed_out: got.timed_out, output })
 }
 
 /// Compose a temporary playbook from a set of roles and run it, streaming output.
@@ -362,6 +408,21 @@ mod tests {
         assert_eq!(args_of(&cmd), vec!["--check", "--diff"]);
         let mut none = Command::new("ansible-playbook");
         add_options(&mut none, RunOptions::default());
+        assert!(args_of(&none).is_empty());
+    }
+
+    #[test]
+    fn tags_travel_in_one_argument_each() {
+        let mut cmd = Command::new("ansible-playbook");
+        let selection = RunSelection {
+            tags: vec!["-e".into(), "monitoring".into()],
+            skip_tags: vec!["slow".into()],
+            ..Default::default()
+        };
+        add_selection(&mut cmd, &selection);
+        assert_eq!(args_of(&cmd), vec!["--tags=-e,monitoring", "--skip-tags=slow"]);
+        let mut none = Command::new("ansible-playbook");
+        add_selection(&mut none, &RunSelection::default());
         assert!(args_of(&none).is_empty());
     }
 

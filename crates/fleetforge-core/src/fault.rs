@@ -35,6 +35,20 @@ pub enum FaultKind {
     /// Service tiers injoignable ou réponse invalide (Alertmanager, ssh).
     Upstream,
     Timeout,
+    /// Playbook interdit au compte (`deny_playbooks`).
+    ForbiddenPlaybook,
+    /// Plus d'hôtes visés que le compte n'en admet (`max_hosts`).
+    TooManyHosts,
+    /// Commit inconnu du clone, ou hors des références permises.
+    UnknownCommit,
+    /// Référence git refusée (hors de la branche suivie et de `infra/<parc>/*`).
+    RefRefused,
+    /// La branche suivie ne s'avance pas en avance rapide.
+    NotFastForward,
+    /// Chemin refusé par les règles de lecture de l'arbre.
+    PathRefused,
+    /// Chemin absent de l'arbre.
+    UnknownPath,
 }
 
 impl FaultKind {
@@ -53,6 +67,13 @@ impl FaultKind {
             FaultKind::NotConfigured => "not_configured",
             FaultKind::Upstream => "upstream_error",
             FaultKind::Timeout => "timeout",
+            FaultKind::ForbiddenPlaybook => "forbidden_playbook",
+            FaultKind::TooManyHosts => "too_many_hosts",
+            FaultKind::UnknownCommit => "unknown_commit",
+            FaultKind::RefRefused => "ref_refused",
+            FaultKind::NotFastForward => "not_fast_forward",
+            FaultKind::PathRefused => "path_refused",
+            FaultKind::UnknownPath => "unknown_path",
         }
     }
 }

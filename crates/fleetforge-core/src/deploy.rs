@@ -81,6 +81,25 @@ pub struct RunOptions {
     pub diff: bool,
 }
 
+/// Ce qu'un run sélectionne dans le playbook et dans l'arbre : étiquettes,
+/// exécution sans `--limit` explicite, commit de l'arbre. Même raison d'être
+/// que [`RunOptions`] : seule l'API d'automatisation s'en sert.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunSelection {
+    /// `--tags` (déjà validées, triées).
+    pub tags: Vec<String>,
+    /// `--skip-tags`.
+    pub skip_tags: Vec<String>,
+    /// L'appelant a demandé AUCUN `--limit` (le playbook vise ses propres
+    /// hôtes). Informatif : l'absence de `limit_hosts` suffit à ne pas passer
+    /// `--limit`.
+    pub no_limit: bool,
+    /// Commit RÉSOLU (sha complet) dont l'arbre est exécuté. `None` : arbre
+    /// livré par rsync, ou tête synchronisée quand l'appelant ne précise rien
+    /// (la résolution se fait avant, côté web, pour l'empreinte du check).
+    pub commit: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RunStatus {
@@ -127,6 +146,13 @@ pub struct RunHandle {
     pub exit_code: Option<i32>,
     #[serde(default)]
     pub options: RunOptions,
+    /// Commit dont l'arbre a été exécuté (arbre git), sinon `None`.
+    #[serde(default)]
+    pub commit: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub skip_tags: Vec<String>,
 }
 
 impl RunHandle {
@@ -171,10 +197,22 @@ impl RunRegistry {
             output: Vec::new(),
             exit_code: None,
             options,
+            commit: None,
+            tags: Vec::new(),
+            skip_tags: Vec::new(),
         };
         let mut runs = self.runs.write().unwrap();
         runs.retain(|r| r.id != id);
         runs.push(handle);
+    }
+
+    /// Consigne la sélection d'un run déjà inscrit (commit, étiquettes).
+    pub fn annotate(&self, id: &str, selection: &RunSelection) {
+        if let Some(run) = self.runs.write().unwrap().iter_mut().find(|r| r.id == id) {
+            run.commit = selection.commit.clone();
+            run.tags = selection.tags.clone();
+            run.skip_tags = selection.skip_tags.clone();
+        }
     }
 
     /// Vrai si un run EN COURS porte cet identifiant. Le relancer sous le même

@@ -1,0 +1,52 @@
+
+PLAY [Demo play] ***************************************************************
+
+TASK [demo : Write a marker] ***************************************************
+[ERROR]: Task failed: Failed to connect to the host via ssh: ssh: connect to host 127.0.0.1 port 1: Connection refused
+Origin: /home/srvc/fleetforge/ansible-trees/0123abc/playbooks/roles/demo/tasks/main.yml:1:3
+
+1 - name: Write a marker
+    ^ column 3
+
+fatal: [ghost1]: UNREACHABLE! => {"changed": false, "msg": "Task failed: Failed to connect to the host via ssh: ssh: connect to host 127.0.0.1 port 1: Connection refused", "unreachable": true}
+changed: [local1]
+changed: [local2]
+
+TASK [demo : Check the service config] *****************************************
+skipping: [local1]
+skipping: [local2]
+
+TASK [demo : Ignored failure] **************************************************
+skipping: [local2]
+skipping: [local1]
+
+TASK [demo : Loop with one failing item] ***************************************
+skipping: [local2] => (item=0) 
+skipping: [local2] => (item=1) 
+skipping: [local2]
+skipping: [local1] => (item=0) 
+skipping: [local1] => (item=1) 
+skipping: [local1]
+
+TASK [demo : Skipped] **********************************************************
+skipping: [local1]
+skipping: [local2]
+
+PLAY [Second play] *************************************************************
+
+TASK [Plain failure] ***********************************************************
+[ERROR]: Task failed: Action failed: password=hunter2 boom
+Origin: /home/srvc/fleetforge/ansible-trees/0123abc/playbooks/play.yml:10:7
+
+ 8   gather_facts: false
+ 9   tasks:
+10     - name: Plain failure
+         ^ column 7
+
+fatal: [local1]: FAILED! => {"changed": false, "msg": "password=hunter2 boom"}
+
+PLAY RECAP *********************************************************************
+ghost1                     : ok=0    changed=0    unreachable=1    failed=0    skipped=0    rescued=0    ignored=0   
+local1                     : ok=1    changed=1    unreachable=0    failed=1    skipped=4    rescued=0    ignored=0   
+local2                     : ok=1    changed=1    unreachable=0    failed=0    skipped=4    rescued=0    ignored=0   
+

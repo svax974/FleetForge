@@ -133,6 +133,43 @@ pub fn validate_limit(fleet: &Fleet, limit: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// Hôtes réellement visés par un `--limit` déjà validé ([`validate_limit`]) :
+/// un hôte compte pour un, un groupe pour tous ses membres (enfants compris),
+/// `all` pour le parc entier. Sert à `max_hosts`.
+pub fn count_limit_hosts(fleet: &Fleet, limit: &[String]) -> usize {
+    fn members(group: &AnsibleGroup, out: &mut BTreeSet<String>) {
+        out.extend(group.hosts.iter().map(|h| h.name.clone()));
+        for child in &group.children {
+            members(child, out);
+        }
+    }
+    fn find<'a>(groups: &'a [AnsibleGroup], name: &str, out: &mut Vec<&'a AnsibleGroup>) {
+        for g in groups {
+            if g.name == name {
+                out.push(g);
+            }
+            find(&g.children, name, out);
+        }
+    }
+    let mut hit = BTreeSet::new();
+    for target in limit {
+        if target == "all" {
+            hit.extend(fleet.hosts.iter().map(|h| h.name.clone()));
+            continue;
+        }
+        if fleet.hosts.iter().any(|h| &h.name == target) {
+            hit.insert(target.clone());
+        }
+        let mut nodes = Vec::new();
+        find(&fleet.groups, target, &mut nodes);
+        nodes.into_iter().for_each(|g| members(g, &mut hit));
+        // Le chemin d'ancêtres que porte l'entrée (l'organisation n'est pas un
+        // nœud de l'arbre statique).
+        hit.extend(fleet.hosts.iter().filter(|h| h.groups.contains(target)).map(|h| h.name.clone()));
+    }
+    hit.len()
+}
+
 // === Identifiants ===
 
 fn is_token(s: &str, max: usize, extra: &str) -> bool {
@@ -199,6 +236,69 @@ pub fn validate_extra_vars(vars: &HashMap<String, String>, strict: bool) -> Resu
         }
     }
     Ok(())
+}
+
+/// Étiquettes (`tags`, `skip_tags`) transmises à Ansible.
+pub const MAX_TAGS: usize = 20;
+
+/// `^[A-Za-z0-9_.-]{1,64}$`, au plus [`MAX_TAGS`]. Rendues triées et sans
+/// doublon : l'ordre n'a pas de sens pour Ansible, et l'empreinte du check
+/// doit l'ignorer.
+pub fn validate_tags(tags: &[String], what: &str) -> Result<Vec<String>> {
+    if tags.len() > MAX_TAGS {
+        return fail(FaultKind::InvalidArgument, format!("{what} : au plus {MAX_TAGS} étiquettes"));
+    }
+    for tag in tags {
+        let valid = (1..=64).contains(&tag.len())
+            && tag.chars().all(|c| c.is_ascii_alphanumeric() || "_.-".contains(c));
+        if !valid {
+            return fail(
+                FaultKind::InvalidArgument,
+                format!("{what} : étiquette invalide {tag:?} (lettres, chiffres, _ . -, 64 caractères au plus)"),
+            );
+        }
+    }
+    let mut sorted: Vec<String> = tags.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+    Ok(sorted)
+}
+
+/// Motifs `deny_playbooks` : `*` et `?` seulement, sur le nom du fichier.
+pub fn validate_glob(pattern: &str) -> Result<()> {
+    let valid = (1..=128).contains(&pattern.len())
+        && pattern.chars().all(|c| c.is_ascii_alphanumeric() || "_.-*?".contains(c));
+    if !valid {
+        return fail(
+            FaultKind::InvalidArgument,
+            format!("motif de playbook invalide {pattern:?} (lettres, chiffres, _ . - * ?)"),
+        );
+    }
+    Ok(())
+}
+
+/// Le motif (`*` = toute suite, `?` = un caractère) couvre-t-il tout le texte ?
+pub fn glob_match(pattern: &str, text: &str) -> bool {
+    let (p, t): (Vec<char>, Vec<char>) = (pattern.chars().collect(), text.chars().collect());
+    let (mut pi, mut ti) = (0, 0);
+    let (mut star, mut mark) = (None, 0);
+    while ti < t.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi] == t[ti]) {
+            pi += 1;
+            ti += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star = Some(pi);
+            mark = ti;
+            pi += 1;
+        } else if let Some(s) = star {
+            pi = s + 1;
+            mark += 1;
+            ti = mark;
+        } else {
+            return false;
+        }
+    }
+    p[pi..].iter().all(|c| *c == '*')
 }
 
 // === Playbooks ===
@@ -561,6 +661,62 @@ mod tests {
         assert!(validate_extra_vars(&vars("ANSIBLE_BECOME", "x"), true).is_err());
         assert!(validate_extra_vars(&vars("x", "{{ lookup('pipe','id') }}"), true).is_err());
         assert!(validate_extra_vars(&vars("x", "{% if %}"), true).is_err());
+    }
+
+    #[test]
+    fn tags_have_a_closed_grammar_and_come_back_sorted() {
+        let own = |l: &[&str]| l.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(validate_tags(&own(&["b", "a", "b", "x.y-z_1"]), "tags").unwrap(), ["a", "b", "x.y-z_1"]);
+        assert!(validate_tags(&[], "tags").unwrap().is_empty());
+        let max: Vec<String> = (0..MAX_TAGS).map(|i| format!("t{i}")).collect();
+        assert!(validate_tags(&max, "tags").is_ok());
+        let over: Vec<String> = (0..=MAX_TAGS).map(|i| format!("t{i}")).collect();
+        assert!(validate_tags(&over, "tags").is_err());
+        assert!(validate_tags(&[ "a".repeat(64) ], "tags").is_ok());
+        for bad in ["", "a b", "a,b", "a;id", "a/b", "$(id)", "é", "a\n", &"a".repeat(65), "{{x}}", "a=b", "--x y"] {
+            let err = validate_tags(&[bad.to_string()], "tags").unwrap_err();
+            assert_eq!(kind_of(&err), Some(FaultKind::InvalidArgument), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn playbook_globs_match_whole_names() {
+        for (pattern, name, expected) in [
+            ("*-fleetforge.yml", "deploy-fleetforge.yml", true),
+            ("*-fleetforge.yml", "deploy-fleetforge.yml.bak", false),
+            ("*-fleetforge.yml", "fleetforge.yml", false),
+            ("setup-server.yml", "setup-server.yml", true),
+            ("setup-server.yml", "setup-server2.yml", false),
+            ("update-ufw-*.yml", "update-ufw-all.yml", true),
+            ("update-s?h-*.yml", "update-ssh-x.yml", true),
+            ("*", "anything.yml", true),
+            ("a*b*c", "aXXbYYc", true),
+            ("a*b*c", "aXXbYY", false),
+            ("", "x.yml", false),
+            ("*", "", true),
+        ] {
+            assert_eq!(glob_match(pattern, name), expected, "{pattern} ~ {name}");
+        }
+        for ok in ["*-fleetforge.yml", "a?b", "deploy_x.yml"] {
+            assert!(validate_glob(ok).is_ok(), "{ok}");
+        }
+        for bad in ["", "[a]", "../x", "a b", "a/b", "{a,b}", "é*", &"a".repeat(129)] {
+            assert!(validate_glob(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_limit_counts_the_hosts_it_reaches() {
+        let f = fleet();
+        let own = |l: &[&str]| l.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(count_limit_hosts(&f, &own(&["proxy1"])), 1);
+        assert_eq!(count_limit_hosts(&f, &own(&["proxies"])), 1);
+        assert_eq!(count_limit_hosts(&f, &own(&["monitoring"])), 2);
+        assert_eq!(count_limit_hosts(&f, &own(&["proxy1", "proxies", "proxy1"])), 1, "sans doublon");
+        assert_eq!(count_limit_hosts(&f, &own(&["proxy1", "monitoring"])), 3);
+        assert_eq!(count_limit_hosts(&f, &own(&["all"])), 3);
+        assert_eq!(count_limit_hosts(&f, &own(&["web3c"])), 3, "l'organisation : tous ses hôtes");
+        assert_eq!(count_limit_hosts(&f, &[]), 0);
     }
 
     #[test]

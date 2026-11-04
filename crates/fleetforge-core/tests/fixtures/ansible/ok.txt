@@ -1,0 +1,19 @@
+
+PLAY [Fine] ********************************************************************
+
+TASK [Debug] *******************************************************************
+ok: [local1] => {
+    "msg": "hi"
+}
+ok: [local2] => {
+    "msg": "hi"
+}
+
+TASK [Change] ******************************************************************
+changed: [local2]
+changed: [local1]
+
+PLAY RECAP *********************************************************************
+local1                     : ok=2    changed=1    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   
+local2                     : ok=2    changed=1    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   
+

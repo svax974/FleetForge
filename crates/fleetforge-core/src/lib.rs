@@ -15,11 +15,15 @@
 
 pub mod actions;
 pub mod alert_rules;
+pub mod ansible_describe;
+pub mod ansible_git;
 pub mod ansible_group_vars;
 pub mod ansible_inventory;
+pub mod ansible_output;
 pub mod ansible_playbooks;
 pub mod ansible_roles;
 pub mod ansible_runner;
+pub mod ansible_tree;
 pub mod automation;
 pub mod database;
 pub mod deploy;
@@ -34,6 +38,7 @@ pub mod model;
 pub mod models;
 pub mod parc;
 pub mod paths;
+pub mod proc;
 pub mod redact;
 pub mod ro_gate;
 pub mod service_tracker;
@@ -42,11 +47,13 @@ pub mod settings;
 pub mod style;
 
 use anyhow::{anyhow, Result};
-use std::sync::{Arc, Mutex};
+use serde::Serialize;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, OnceLock};
 
 pub use ansible_group_vars::GroupVarEntry;
 pub use database::Database;
-pub use deploy::{DeployRequest, PlaybookRequest, RunGuard, RunHandle, RunOptions, RunRegistry};
+pub use deploy::{DeployRequest, PlaybookRequest, RunGuard, RunHandle, RunOptions, RunRegistry, RunSelection};
 pub use fault::{Fault, FaultKind};
 pub use metrics::{Probe, ProbeScope, PrometheusClient, PrometheusConfig};
 pub use model::{Fleet, Health, MachineKey, ProviderKind, Server};
@@ -73,7 +80,81 @@ pub struct Core {
     runs: RunRegistry,
     /// Un run à la fois par parc (`deploy::RunLock`).
     locks: deploy::RunLocks,
+    /// Arbre Ansible servi depuis git (`ff_ansible_source: git`). Absent :
+    /// l'arbre livré par rsync, dont les chemins sont des réglages.
+    git: OnceLock<Arc<ansible_git::GitTree>>,
+    /// Fichiers de l'arbre livrés avec une donnée de parc, à ne jamais lire
+    /// par `read_tree` (`ff_ansible_extra_files`).
+    private_files: OnceLock<Vec<String>>,
 }
+
+/// L'arbre Ansible sur lequel opère un appel : celui d'un commit (arbre git)
+/// ou l'arbre livré. Garde le commit retenu (hors du nettoyage du cache) tant
+/// qu'elle vit.
+pub struct TreeView {
+    /// Commit complet ; `None` pour l'arbre livré par rsync.
+    pub commit: Option<String>,
+    pub root: PathBuf,
+    pub playbooks: PathBuf,
+    _pin: Option<ansible_git::PinGuard>,
+}
+
+impl TreeView {
+    fn playbooks_str(&self) -> String {
+        self.playbooks.to_string_lossy().to_string()
+    }
+}
+
+/// `tree_status`.
+#[derive(Debug, Clone, Serialize)]
+pub struct TreeStatus {
+    /// `git` ou `rsync`.
+    pub source: &'static str,
+    pub branch: Option<String>,
+    pub head: Option<String>,
+    pub synced_at: Option<String>,
+    pub commits_cached: usize,
+}
+
+/// Réponse de `describe_playbook`.
+#[derive(Debug, Clone, Serialize)]
+pub struct DescribeAnswer {
+    pub commit: Option<String>,
+    #[serde(flatten)]
+    pub description: ansible_describe::Description,
+}
+
+/// Réponse de `read_tree`.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReadAnswer {
+    pub commit: Option<String>,
+    #[serde(flatten)]
+    pub read: ansible_tree::TreeRead,
+}
+
+/// Réponse de `search_tree`.
+#[derive(Debug, Clone, Serialize)]
+pub struct SearchAnswer {
+    pub commit: Option<String>,
+    pub hits: Vec<ansible_tree::Hit>,
+    pub truncated: bool,
+}
+
+/// Réponse de `syntax_check`.
+#[derive(Debug, Clone, Serialize)]
+pub struct SyntaxAnswer {
+    pub commit: Option<String>,
+    pub playbook: String,
+    pub ok: bool,
+    pub exit_code: Option<i32>,
+    pub timed_out: bool,
+    /// Sortie d'Ansible, bornée, NON caviardée (la façade le fait).
+    pub output: String,
+    pub failures: Vec<ansible_output::TaskFailure>,
+}
+
+/// Sortie d'un contrôle de syntaxe rendue au plus, en caractères.
+pub const SYNTAX_OUTPUT_CHARS: usize = 8000;
 
 /// Que faire quand un run occupe déjà le parc.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,6 +175,9 @@ pub struct PreparedRun {
     req: PlaybookRequest,
     parc: parc::Parc,
     options: RunOptions,
+    selection: RunSelection,
+    /// Arbre du commit exécuté (ou arbre livré).
+    view: TreeView,
     guard: Option<RunGuard>,
 }
 
@@ -110,7 +194,24 @@ impl Core {
             db: Mutex::new(db),
             runs: RunRegistry::new(),
             locks: deploy::RunLocks::default(),
+            git: OnceLock::new(),
+            private_files: OnceLock::new(),
         })
+    }
+
+    /// Passe l'arbre Ansible en mode git. Une fois, au démarrage.
+    pub fn attach_git_tree(&self, tree: Arc<ansible_git::GitTree>) {
+        let _ = self.git.set(tree);
+    }
+
+    pub fn git_tree(&self) -> Option<&Arc<ansible_git::GitTree>> {
+        self.git.get()
+    }
+
+    /// Fichiers de l'arbre que `read_tree` / `search_tree` / `describe_playbook`
+    /// ne lisent jamais (chemins relatifs à `Ansible/`).
+    pub fn set_private_tree_files(&self, files: Vec<String>) {
+        let _ = self.private_files.set(files);
     }
 
     /// Accès brut à la base, pour les rares appels qui n'ont pas de méthode
@@ -131,10 +232,34 @@ impl Core {
     // === Réglages ===
 
     pub fn settings(&self) -> Result<Settings> {
-        self.with_db(Settings::load)
+        let mut settings = self.with_db(Settings::load)?;
+        if self.git.get().is_some() {
+            settings.inventories_path = self.get_setting(SettingKey::InventoriesPath)?;
+            settings.playbooks_path = self.get_setting(SettingKey::PlaybooksPath)?;
+        }
+        Ok(settings)
     }
 
+    /// Un réglage. En mode git, les deux chemins de l'arbre ne sont pas des
+    /// réglages : les inventaires sont les données du parc, les playbooks
+    /// l'arbre de la tête synchronisée (vides si le clone est indisponible —
+    /// l'application montre alors un parc vide et le dit au journal).
     pub fn get_setting(&self, key: SettingKey) -> Result<String> {
+        if let Some(git) = self.git.get() {
+            match key {
+                SettingKey::InventoriesPath => return Ok(git.inventories_dir().to_string_lossy().to_string()),
+                SettingKey::PlaybooksPath => {
+                    return Ok(match self.tree_view(None, None) {
+                        Ok(view) => view.playbooks_str(),
+                        Err(e) => {
+                            logging::warn("core", format!("arbre git indisponible : {e}"));
+                            String::new()
+                        }
+                    })
+                }
+                _ => {}
+            }
+        }
         self.with_db(|db| Ok(db.get_setting(key.as_str())?.unwrap_or_default()))
     }
 
@@ -691,8 +816,23 @@ impl Core {
     /// variable mal nommée, parc occupé (`LockPolicy::Try`).
     pub fn prepare_playbook(
         &self,
+        req: PlaybookRequest,
+        options: RunOptions,
+        lock: LockPolicy,
+    ) -> Result<PreparedRun> {
+        self.prepare_playbook_with(req, options, RunSelection::default(), lock)
+    }
+
+    /// [`Self::prepare_playbook`] avec une sélection : étiquettes et commit.
+    ///
+    /// En mode git, le playbook est cherché dans l'arbre du commit
+    /// (`selection.commit`, sinon la tête synchronisée), que le run retient
+    /// jusqu'à sa fin ; le commit exécuté est consigné au registre.
+    pub fn prepare_playbook_with(
+        &self,
         mut req: PlaybookRequest,
         options: RunOptions,
+        mut selection: RunSelection,
         lock: LockPolicy,
     ) -> Result<PreparedRun> {
         automation::validate_run_id(&req.id)?;
@@ -700,8 +840,15 @@ impl Core {
             return fault::fail(FaultKind::RunIdInUse, format!("un run en cours porte déjà l'identifiant {}", req.id));
         }
         automation::validate_extra_vars(&req.extra_vars, false)?;
+        selection.tags = automation::validate_tags(&selection.tags, "tags")?;
+        selection.skip_tags = automation::validate_tags(&selection.skip_tags, "skip_tags")?;
+        if selection.no_limit && req.limit_hosts.as_ref().is_some_and(|l| !l.is_empty()) {
+            return fault::fail(FaultKind::InvalidArgument, "no_limit et limit s'excluent");
+        }
         let parc = self.resolve_inventory(&req.inventory_path)?;
-        let resolved = automation::resolve_playbook(&self.playbooks_path()?, &req.playbook_path)?;
+        let view = self.tree_view(Some(&parc.name), selection.commit.as_deref())?;
+        selection.commit = view.commit.clone();
+        let resolved = automation::resolve_playbook(&view.playbooks_str(), &req.playbook_path)?;
         req.playbook_path = resolved.to_string_lossy().to_string();
         if let Some(limit) = req.limit_hosts.as_ref().filter(|l| !l.is_empty()) {
             automation::validate_limit(&self.fleet(&parc.name)?, limit)?;
@@ -727,7 +874,8 @@ impl Core {
             &display_hosts,
             options,
         );
-        Ok(PreparedRun { req, parc, options, guard })
+        self.runs.annotate(&req.id, &selection);
+        Ok(PreparedRun { req, parc, options, selection, view, guard })
     }
 
     /// Exécute un run préparé. Bloque le temps du playbook.
@@ -735,10 +883,15 @@ impl Core {
     where
         F: Fn(String) + Send + Sync + 'static,
     {
-        let PreparedRun { req, parc, options, guard } = prepared;
+        let PreparedRun { req, parc, options, selection, view, guard } = prepared;
         let sink = Arc::new(deploy::line_sink(&self.runs, &req.id, on_line));
         let _guard = guard.unwrap_or_else(|| self.wait_for_lock(&parc.name, &*sink));
-        let result = self.playbook_locked(&req, &parc, options, sink);
+        if let Some(commit) = &view.commit {
+            // 16 caractères : le sha entier serait caviardé comme un secret
+            // hexadécimal dans la sortie rendue au compte d'automatisation.
+            sink(format!("[fleetforge] arbre git : commit {}", &commit[..16.min(commit.len())]));
+        }
+        let result = self.playbook_locked(&req, &parc, options, &selection, &view, sink);
         self.settle_run(&req.id, &result);
         result
     }
@@ -749,12 +902,15 @@ impl Core {
         req: &PlaybookRequest,
         parc: &parc::Parc,
         options: RunOptions,
+        selection: &RunSelection,
+        view: &TreeView,
         sink: Arc<S>,
     ) -> Result<AnsibleRun>
     where
         S: Fn(String) + Send + Sync + 'static,
     {
-        let env = self.ansible_env()?;
+        // L'arbre de CE run : celui du commit demandé, pas forcément la tête.
+        let env = ansible_runner::AnsibleEnv::at_root(Some(view.root.clone()));
         let extra = (!req.extra_vars.is_empty()).then(|| req.extra_vars.clone());
 
         // Seuls les hôtes NOMMÉS par `--limit` sont inscrits : sans limite, le
@@ -764,7 +920,7 @@ impl Core {
         // En `--check`, rien n'est installé : l'inventaire ne doit pas le
         // prétendre.
         let family = (!options.check)
-            .then(|| families::family_of_playbook(&self.playbooks_path().unwrap_or_default(), &req.playbook_path))
+            .then(|| families::family_of_playbook(&view.playbooks_str(), &req.playbook_path))
             .flatten();
         let inscribed = match (&family, &req.limit_hosts) {
             (Some(f), Some(hosts)) => self.inscribe_families(parc, std::slice::from_ref(f), hosts, &*sink),
@@ -780,6 +936,7 @@ impl Core {
             req.limit_hosts.clone(),
             extra,
             options,
+            selection,
             &env,
             { let s = sink.clone(); move |l: String| s(l) },
         )?;
@@ -850,6 +1007,166 @@ impl Core {
         let fleet = self.fleet(&parc.name)?;
         let url = automation::alertmanager_url(&self.playbooks_path()?, &fleet)?;
         automation::fetch_alerts(&url).await
+    }
+
+    // === Arbre Ansible : lecture, description, contrôle de syntaxe, synchronisation ===
+
+    /// L'arbre d'un appel. Arbre git : `commit` (`HEAD`, sha complet, ou rien
+    /// pour la tête synchronisée) est résolu, vérifié atteignable d'une
+    /// référence permise de `parc`, construit au besoin et retenu. Arbre
+    /// rsync : aucun commit n'existe, en demander un est une erreur.
+    pub fn tree_view(&self, parc: Option<&str>, commit: Option<&str>) -> Result<TreeView> {
+        let Some(git) = self.git.get() else {
+            if commit.is_some() {
+                return fault::fail(
+                    FaultKind::NotConfigured,
+                    "cet arbre Ansible n'est pas servi depuis git (ff_ansible_source: rsync) : pas de commit",
+                );
+            }
+            let playbooks = self.get_setting(SettingKey::PlaybooksPath)?;
+            if playbooks.is_empty() {
+                return fault::fail(FaultKind::NotConfigured, "dossier des playbooks non configuré");
+            }
+            let playbooks = PathBuf::from(playbooks);
+            let root = playbooks.parent().map(PathBuf::from).unwrap_or_else(|| playbooks.clone());
+            return Ok(TreeView { commit: None, root, playbooks, _pin: None });
+        };
+        let spec = commit.map(ansible_git::parse_commit).transpose()?;
+        // La tête n'a pas besoin du parc ; un sha se résout pour LE parc de
+        // l'appel (branches `infra/<parc>/*`), donc exige un nom de parc valide.
+        let parc = match (&spec, parc) {
+            (Some(ansible_git::CommitSpec::Sha(_)), None) => {
+                return fault::fail(FaultKind::InvalidArgument, "un commit se résout pour un parc : `parc` manquant")
+            }
+            (Some(ansible_git::CommitSpec::Sha(_)), Some(parc)) => {
+                automation::validate_parc_name(parc)?;
+                parc
+            }
+            _ => "",
+        };
+        let sha = git.resolve_commit(parc, spec.as_ref())?;
+        let pin = git.pin(&sha);
+        let tree = git.exec_tree(&sha)?;
+        Ok(TreeView { commit: Some(sha), root: tree.root, playbooks: tree.playbooks, _pin: Some(pin) })
+    }
+
+    /// Commit que lancera un appel qui n'en précise pas, ou qu'il a précisé :
+    /// sha complet en mode git, `None` en mode rsync (où en demander un est une
+    /// erreur). Sert à l'empreinte de la porte du check, AVANT toute
+    /// construction d'arbre.
+    pub fn resolve_commit(&self, parc: &str, commit: Option<&str>) -> Result<Option<String>> {
+        let Some(git) = self.git.get() else {
+            if commit.is_some() {
+                return fault::fail(
+                    FaultKind::NotConfigured,
+                    "cet arbre Ansible n'est pas servi depuis git (ff_ansible_source: rsync) : pas de commit",
+                );
+            }
+            return Ok(None);
+        };
+        automation::validate_parc_name(parc)?;
+        let spec = commit.map(ansible_git::parse_commit).transpose()?;
+        git.resolve_commit(parc, spec.as_ref()).map(Some)
+    }
+
+    fn tree_reader(&self, view: &TreeView) -> Result<ansible_tree::TreeReader> {
+        let private = self.private_files.get().cloned().unwrap_or_default();
+        ansible_tree::TreeReader::new(&view.root, &private)
+    }
+
+    pub fn tree_status(&self, parc: &str) -> Result<TreeStatus> {
+        self.parc_by_name(parc)?;
+        match self.git.get() {
+            None => Ok(TreeStatus { source: "rsync", branch: None, head: None, synced_at: None, commits_cached: 0 }),
+            Some(git) => {
+                let status = git.status()?;
+                Ok(TreeStatus {
+                    source: "git",
+                    branch: Some(status.branch),
+                    head: Some(status.head),
+                    synced_at: status.synced_at,
+                    commits_cached: status.commits_cached,
+                })
+            }
+        }
+    }
+
+    pub fn read_tree(&self, parc: &str, path: &str, commit: Option<&str>) -> Result<ReadAnswer> {
+        let parc = self.parc_by_name(parc)?;
+        let view = self.tree_view(Some(&parc.name), commit)?;
+        let read = self.tree_reader(&view)?.read(path)?;
+        Ok(ReadAnswer { commit: view.commit.clone(), read })
+    }
+
+    pub fn search_tree(&self, parc: &str, pattern: &str, commit: Option<&str>) -> Result<SearchAnswer> {
+        let parc = self.parc_by_name(parc)?;
+        let view = self.tree_view(Some(&parc.name), commit)?;
+        let (hits, truncated) = self.tree_reader(&view)?.search(pattern)?;
+        Ok(SearchAnswer { commit: view.commit.clone(), hits, truncated })
+    }
+
+    pub fn describe_playbook(&self, parc: &str, playbook: &str, commit: Option<&str>) -> Result<DescribeAnswer> {
+        let parc = self.parc_by_name(parc)?;
+        let view = self.tree_view(Some(&parc.name), commit)?;
+        let resolved = automation::resolve_playbook(&view.playbooks_str(), playbook)?;
+        let description = ansible_describe::describe(&self.tree_reader(&view)?, &automation::playbook_name(&resolved))?;
+        Ok(DescribeAnswer { commit: view.commit.clone(), description })
+    }
+
+    /// Le playbook et ceux qu'il importe (`import_playbook`, transitivement),
+    /// par nom de fichier : de quoi appliquer `deny_playbooks` à ce qu'un
+    /// playbook inoffensif ferait jouer par ricochet.
+    pub fn playbook_chain(&self, parc: &str, playbook: &str, commit: Option<&str>) -> Result<Vec<String>> {
+        let parc = self.parc_by_name(parc)?;
+        let view = self.tree_view(Some(&parc.name), commit)?;
+        let resolved = automation::resolve_playbook(&view.playbooks_str(), playbook)?;
+        let name = automation::playbook_name(&resolved);
+        let mut chain = vec![name.clone()];
+        chain.extend(ansible_describe::imported_playbooks(&self.tree_reader(&view)?, &name));
+        Ok(chain)
+    }
+
+    /// Hôtes que viserait ce `--limit` (validé d'abord) : de quoi appliquer
+    /// `max_hosts`.
+    pub fn count_limit_hosts(&self, parc: &str, limit: &[String]) -> Result<usize> {
+        let parc = self.parc_by_name(parc)?;
+        let fleet = self.fleet(&parc.name)?;
+        automation::validate_limit(&fleet, limit)?;
+        Ok(automation::count_limit_hosts(&fleet, limit))
+    }
+
+    /// `ansible-playbook --syntax-check` depuis l'arbre d'un commit.
+    pub fn syntax_check(&self, parc: &str, playbook: &str, commit: Option<&str>) -> Result<SyntaxAnswer> {
+        let parc = self.parc_by_name(parc)?;
+        let view = self.tree_view(Some(&parc.name), commit)?;
+        let resolved = automation::resolve_playbook(&view.playbooks_str(), playbook)?;
+        let env = ansible_runner::AnsibleEnv::at_root(Some(view.root.clone()));
+        let verdict = ansible_runner::syntax_check(&resolved.to_string_lossy(), &parc, &env)?;
+        let report = ansible_output::parse(verdict.output.lines());
+        let output: String = verdict.output.chars().take(SYNTAX_OUTPUT_CHARS).collect();
+        Ok(SyntaxAnswer {
+            commit: view.commit.clone(),
+            playbook: automation::playbook_name(&resolved),
+            ok: verdict.ok,
+            exit_code: verdict.exit_code,
+            timed_out: verdict.timed_out,
+            output,
+            failures: report.failures,
+        })
+    }
+
+    /// `sync_tree` : `git fetch` d'une référence permise, avance rapide de la
+    /// branche suivie, commit rendu. Arbre rsync : rien à synchroniser.
+    pub fn sync_tree(&self, parc: &str, commit: Option<&str>, reference: Option<&str>) -> Result<ansible_git::SyncOutcome> {
+        let parc = self.parc_by_name(parc)?;
+        let Some(git) = self.git.get() else {
+            return fault::fail(
+                FaultKind::NotConfigured,
+                "cet arbre Ansible n'est pas servi depuis git (ff_ansible_source: rsync) : rien à synchroniser",
+            );
+        };
+        let spec = commit.map(ansible_git::parse_commit).transpose()?;
+        git.sync(&parc.name, spec.as_ref(), reference)
     }
 
     /// Entrée d'inventaire visée par un diagnostic.

@@ -1,0 +1,55 @@
+
+PLAY [Demo play] ***************************************************************
+
+TASK [demo : Write a marker] ***************************************************
+[ERROR]: Task failed: Failed to connect to the host via ssh: ssh: connect to host 127.0.0.1 port 1: Connection refused
+Origin: /home/srvc/fleetforge/ansible-trees/0123abc/playbooks/roles/demo/tasks/main.yml:1:3
+
+1 - name: Write a marker
+    ^ column 3
+
+fatal: [ghost1]: UNREACHABLE! => {"changed": false, "msg": "Task failed: Failed to connect to the host via ssh: ssh: connect to host 127.0.0.1 port 1: Connection refused", "unreachable": true}
+changed: [local2]
+changed: [local1]
+
+TASK [demo : Check the service config] *****************************************
+skipping: [local1]
+[ERROR]: Task failed: Module failed: The command exited with a non-zero return code.
+Origin: /home/srvc/fleetforge/ansible-trees/0123abc/playbooks/roles/demo/tasks/main.yml:6:3
+
+4     dest: "/tmp/ff-fixture-{{ inventory_hostname }}"
+5   changed_when: true
+6 - name: Check the service config
+    ^ column 3
+
+fatal: [local2]: FAILED! => {"changed": true, "cmd": ["/bin/sh", "-c", "echo 'bad config line 3' >&2; exit 3"], "delta": "0:00:00.007379", "end": "2026-11-04 14:41:23.624512", "msg": "The command exited with a non-zero return code.", "rc": 3, "start": "2026-11-04 14:41:23.616881", "stderr": "bad config line 3", "stderr_lines": ["bad config line 3"], "stdout": "", "stdout_lines": []}
+
+TASK [demo : Ignored failure] **************************************************
+[ERROR]: Task failed: Module failed: The command exited with a non-zero return code.
+Origin: /home/srvc/fleetforge/ansible-trees/0123abc/playbooks/roles/demo/tasks/main.yml:9:3
+
+7   ansible.builtin.command: /bin/sh -c "echo 'bad config line 3' >&2; exit 3"
+8   when: inventory_hostname == 'local2'
+9 - name: Ignored failure
+    ^ column 3
+
+fatal: [local1]: FAILED! => {"changed": true, "cmd": ["/usr/bin/false"], "delta": "0:00:00.004930", "end": "2026-11-04 14:41:23.624512", "msg": "The command exited with a non-zero return code.", "rc": 1, "start": "2026-11-04 14:41:23.616881", "stderr": "", "stderr_lines": [], "stdout": "", "stdout_lines": []}
+...ignoring
+
+TASK [demo : Loop with one failing item] ***************************************
+changed: [local1] => (item=0)
+[ERROR]: Task failed: Module failed: The command exited with a non-zero return code.
+Origin: /home/srvc/fleetforge/ansible-trees/0123abc/playbooks/roles/demo/tasks/main.yml:13:3
+
+11   ignore_errors: true
+12   when: inventory_hostname == 'local1'
+13 - name: Loop with one failing item
+     ^ column 3
+
+failed: [local1] (item=1) => {"ansible_loop_var": "item", "changed": true, "cmd": ["/bin/sh", "-c", "exit 1"], "delta": "0:00:00.006934", "end": "2026-11-04 14:41:23.624512", "item": 1, "msg": "The command exited with a non-zero return code.", "rc": 1, "start": "2026-11-04 14:41:23.616881", "stderr": "", "stderr_lines": [], "stdout": "", "stdout_lines": []}
+
+PLAY RECAP *********************************************************************
+ghost1                     : ok=0    changed=0    unreachable=1    failed=0    skipped=0    rescued=0    ignored=0   
+local1                     : ok=2    changed=2    unreachable=0    failed=1    skipped=1    rescued=0    ignored=1   
+local2                     : ok=1    changed=1    unreachable=0    failed=1    skipped=0    rescued=0    ignored=0   
+
