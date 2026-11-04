@@ -118,6 +118,15 @@
     build:
       path: "{{ sync_server_build_dir }}"
       pull: false
+      # Ce module construit avec le constructeur CLASSIQUE de Docker, qui ne
+      # remplit pas les arguments de plateforme lus par le Dockerfile
+      # (`FROM --platform=$BUILDPLATFORM`, `GOARCH=${TARGETARCH}`) : sans eux
+      # la construction échoue (« "" is an invalid OS component »). On les
+      # donne, pour l'architecture de l'hôte (la construction est native).
+      args:
+        BUILDPLATFORM: "linux/{{ sync_build_arch }}"
+        TARGETOS: linux
+        TARGETARCH: "{{ sync_build_arch }}"
     force_source: false
     state: present
   become: true

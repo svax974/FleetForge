@@ -112,3 +112,6 @@ sync_trusted_proxies: >-
 # Vérification fonctionnelle (tasks/main.yml).
 sync_health_retries: 24
 sync_health_delay: 5
+
+# Architecture de l'hôte au vocabulaire de Docker/Go (amd64, arm64).
+sync_build_arch: "{{ 'arm64' if (ansible_facts['architecture'] | default('x86_64')) in ['aarch64', 'arm64'] else 'amd64' }}"
