@@ -211,6 +211,18 @@ pub struct SyncOutcome {
     pub reference: String,
 }
 
+/// Ce qu'un nettoyage (`prune_orphans`) a retiré.
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub struct PruneReport {
+    /// Références `infra/*` locales qui n'existent plus sur le dépôt distant.
+    pub refs_removed: Vec<String>,
+    /// Arbres d'exécution retirés du cache (au-delà de `keep`).
+    pub trees_removed: usize,
+    /// Pourquoi les références n'ont pas pu être comparées (dépôt injoignable) :
+    /// rien n'est alors retiré de ce côté.
+    pub refs_error: Option<String>,
+}
+
 /// État de l'arbre git.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct GitStatus {
@@ -542,7 +554,7 @@ impl GitTree {
         }
         let _ = std::fs::write(dir.join(".last_used"), chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default().to_string());
         link_data(&dir, &self.cfg.data_dir)?;
-        self.prune(commit);
+        self.prune(Some(commit));
         Ok(ExecTree { commit: commit.to_string(), root: dir.clone(), playbooks: dir.join("playbooks") })
     }
 
@@ -601,9 +613,11 @@ impl GitTree {
     }
 
     /// Retire les arbres au-delà de `keep`, du moins récemment servi au plus
-    /// ancien ; jamais la tête, le commit demandé ni un arbre retenu.
-    fn prune(&self, current: &str) {
-        let Ok(entries) = std::fs::read_dir(&self.cfg.trees_dir) else { return };
+    /// ancien ; jamais la tête, le commit demandé ni un arbre retenu. Rend le
+    /// nombre d'arbres retirés.
+    fn prune(&self, current: Option<&str>) -> usize {
+        let mut removed = 0;
+        let Ok(entries) = std::fs::read_dir(&self.cfg.trees_dir) else { return 0 };
         let head = self.head().unwrap_or_default();
         let pinned: Vec<String> = self.pins.lock().unwrap_or_else(|e| e.into_inner()).keys().cloned().collect();
         let mut trees: Vec<(u128, PathBuf, String)> = Vec::new();
@@ -636,15 +650,88 @@ impl GitTree {
         trees.sort_by(|a, b| b.0.cmp(&a.0));
         let mut kept = 0;
         for (_, path, commit) in trees {
-            let keep_it = commit == current || commit == head || pinned.contains(&commit);
+            let keep_it = current == Some(commit.as_str()) || commit == head || pinned.contains(&commit);
             if keep_it || kept < self.cfg.keep {
                 kept += 1;
                 continue;
             }
             // `remove_dir_all` ne suit pas les liens : les données du parc,
             // où ils pointent, ne sont jamais touchées.
-            let _ = std::fs::remove_dir_all(&path);
+            if std::fs::remove_dir_all(&path).is_ok() {
+                removed += 1;
+            }
         }
+        removed
+    }
+
+    // --- nettoyage ---
+
+    /// Nettoyage de ce que FleetForge garde en local : les arbres d'exécution
+    /// au-delà du cache, et les références `infra/*` (suivis distants
+    /// `refs/remotes/origin/infra/…`, et branches locales de même nom) que le
+    /// dépôt distant n'a plus — une branche de correctif fusionnée puis
+    /// supprimée par le fournisseur (GitLab « supprimer la branche source »,
+    /// GitHub « delete branch ») ne reste ainsi pas permise indéfiniment.
+    ///
+    /// Appelé au démarrage puis toutes les heures ; `sync` n'élague que le parc
+    /// de l'appelant, et seulement quand il récupère une `infra/<parc>/*`.
+    ///
+    /// La liste des branches distantes vient de `git ls-remote` : aucun objet
+    /// n'est téléchargé, donc rien d'un autre parc n'entre dans le clone. Si
+    /// elle ne peut pas être lue (réseau, clé), AUCUNE référence n'est retirée.
+    pub fn prune_orphans(&self) -> Result<PruneReport> {
+        if !self.cfg.clone_dir.is_dir() {
+            return fail(
+                FaultKind::NotConfigured,
+                format!("clone git absent : {}", self.cfg.clone_dir.display()),
+            );
+        }
+        let mut report = PruneReport::default();
+        {
+            let _build = self.tree_lock.lock().unwrap_or_else(|e| e.into_inner());
+            report.trees_removed = self.prune(None);
+        }
+        let _one_at_a_time = self.sync_lock.lock().unwrap_or_else(|e| e.into_inner());
+        match self.orphan_refs() {
+            Ok(orphans) => {
+                for reference in orphans {
+                    // `update-ref -d` : la référence seule ; les objets restent
+                    // au clone jusqu'à son prochain `git gc`.
+                    if self.ok(&["update-ref", "-d", &reference], false, LOCAL_TIMEOUT).is_ok() {
+                        report.refs_removed.push(reference);
+                    }
+                }
+            }
+            Err(e) => report.refs_error = Some(e.to_string()),
+        }
+        Ok(report)
+    }
+
+    /// Références locales `infra/*` absentes du dépôt distant.
+    fn orphan_refs(&self) -> Result<Vec<String>> {
+        let remote = self.ok(&["ls-remote", "--heads", "origin", "refs/heads/infra/*"], true, FETCH_TIMEOUT)?;
+        let on_remote: std::collections::HashSet<&str> = remote
+            .lines()
+            .filter_map(|line| line.split_once('\t'))
+            .filter_map(|(_, name)| name.strip_prefix("refs/heads/"))
+            .filter(|name| name.starts_with("infra/"))
+            .collect();
+        let local = self.ok(
+            &["for-each-ref", "--format=%(refname)", "refs/remotes/origin/infra", "refs/heads/infra"],
+            false,
+            LOCAL_TIMEOUT,
+        )?;
+        Ok(local
+            .lines()
+            .filter(|reference| {
+                let short = reference
+                    .strip_prefix("refs/remotes/origin/")
+                    .or_else(|| reference.strip_prefix("refs/heads/"))
+                    .unwrap_or_default();
+                short.starts_with("infra/") && !on_remote.contains(short)
+            })
+            .map(String::from)
+            .collect())
     }
 }
 
@@ -1131,5 +1218,261 @@ mod tests {
         assert!(GitTree::new(cfg.clone()).is_err());
         cfg.deploy_key = Some("/k/id; rm -rf x\n".into());
         assert!(GitTree::new(cfg).is_err());
+    }
+
+    // --- dépôt distant NU (comme un projet GitLab ou GitHub) ---
+
+    /// Dépôt distant nu, copie de travail pour y pousser, et clone de FleetForge.
+    struct Remote {
+        root: PathBuf,
+        bare: PathBuf,
+        work: PathBuf,
+        tree: Arc<GitTree>,
+    }
+
+    impl Remote {
+        fn new(name: &str, keep: usize) -> Self {
+            let root = scratch(name);
+            let bare = root.join("remote.git");
+            std::fs::create_dir_all(&bare).unwrap();
+            git(&bare, &["init", "-q", "--bare", "-b", "main"]);
+
+            let work = root.join("work");
+            let out = Command::new("git")
+                .args(["clone", "-q"])
+                .arg(&bare)
+                .arg(&work)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            git(&work, &["checkout", "-q", "-b", "main"]);
+            write(&work.join("Ansible/playbooks/deploy-x.yml"), "---\n- hosts: all\n  tasks: []\n");
+            write(&work.join("Ansible/ansible.cfg"), "[defaults]\n");
+            git(&work, &["add", "-A"]);
+            git(&work, &["commit", "-q", "-m", "first"]);
+            git(&work, &["push", "-q", "origin", "main"]);
+
+            let clone = root.join("ansible-git");
+            let out = Command::new("git")
+                .args(["clone", "-q", "--no-checkout", "--branch", "main"])
+                .arg(&bare)
+                .arg(&clone)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            let data = root.join("ansible-data");
+            write(&data.join("inventories/web3c_inventory.yml"), "all: {}\n");
+            let mut cfg = GitTreeConfig::new(clone, data, root.join("ansible-trees"), "main");
+            cfg.keep = keep;
+            let tree = GitTree::new(cfg).unwrap();
+            Self { root, bare, work, tree }
+        }
+
+        /// Commit sur la branche donnée de la copie de travail, poussé.
+        fn commit(&self, branch: &str, file: &str) -> String {
+            git(&self.work, &["checkout", "-q", branch]);
+            write(&self.work.join(file), "---\n");
+            git(&self.work, &["add", "-A"]);
+            git(&self.work, &["commit", "-q", "-m", file]);
+            git(&self.work, &["push", "-q", "origin", branch]);
+            git(&self.work, &["rev-parse", "HEAD"])
+        }
+
+        /// Nouvelle branche issue de `main`, avec un commit, poussée.
+        fn branch(&self, name: &str, file: &str) -> String {
+            git(&self.work, &["checkout", "-q", "-b", name, "main"]);
+            git(&self.work, &["push", "-q", "origin", name]);
+            self.commit(name, file)
+        }
+
+        fn delete_remote_branch(&self, name: &str) {
+            git(&self.work, &["push", "-q", "origin", "--delete", name]);
+        }
+
+        fn local_infra_refs(&self) -> Vec<String> {
+            let out = git(
+                &self.tree.config().clone_dir,
+                &["for-each-ref", "--format=%(refname)", "refs/remotes/origin/infra", "refs/heads/infra"],
+            );
+            out.lines().map(String::from).collect()
+        }
+    }
+
+    impl Drop for Remote {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[test]
+    fn a_merge_commit_on_the_followed_branch_is_a_plain_fast_forward() {
+        // GitLab (méthode de fusion « commit de fusion ») crée un commit de
+        // fusion à chaque merge request : la tête de la branche suivie avance
+        // vers un descendant de l'ancienne, exactement comme une avance rapide.
+        let rm = Remote::new("merge-commit", 5);
+        let sha = |s: &str| CommitSpec::Sha(s.to_string());
+        let fix = rm.branch("infra/web3c/fix1", "Ansible/playbooks/deploy-fix.yml");
+        // `main` avance entre-temps : la fusion est une vraie fusion à deux parents.
+        let main2 = rm.commit("main", "Ansible/playbooks/deploy-main2.yml");
+        let synced = rm.tree.sync("web3c", None, None).unwrap();
+        assert_eq!(synced.head, main2);
+        let out = rm.tree.sync("web3c", None, Some("infra/web3c/fix1")).unwrap();
+        assert_eq!(out.commit, fix);
+        assert_eq!(out.head, main2, "la branche suivie n'a pas bougé");
+
+        // La fusion, puis suppression de la branche source (option GitLab).
+        git(&rm.work, &["checkout", "-q", "main"]);
+        git(&rm.work, &["merge", "-q", "--no-ff", "-m", "Merge branch infra/web3c/fix1", "infra/web3c/fix1"]);
+        git(&rm.work, &["push", "-q", "origin", "main"]);
+        rm.delete_remote_branch("infra/web3c/fix1");
+        let merge = git(&rm.work, &["rev-parse", "HEAD"]);
+        assert_eq!(git(&rm.work, &["rev-list", "--parents", "-n1", &merge]).split(' ').count(), 3, "deux parents");
+
+        // `sync_tree` sur la branche suivie : tête = commit de fusion, sans erreur.
+        let out = rm.tree.sync("web3c", None, None).unwrap();
+        assert_eq!((out.commit.as_str(), out.head.as_str()), (merge.as_str(), merge.as_str()));
+        assert_eq!(rm.tree.head().unwrap(), merge);
+        // Rejouer ne change rien.
+        assert_eq!(rm.tree.sync("web3c", None, None).unwrap().head, merge);
+
+        // Le commit du correctif reste exécutable : il est désormais atteignable
+        // de la branche suivie, la branche source étant supprimée.
+        assert_eq!(rm.tree.resolve_commit("web3c", Some(&sha(&fix))).unwrap(), fix);
+        let tree = rm.tree.exec_tree(&merge).unwrap();
+        assert!(tree.playbooks.join("deploy-fix.yml").is_file());
+        assert!(tree.playbooks.join("deploy-main2.yml").is_file());
+
+        // La référence orpheline part au nettoyage, sans toucher à la permission
+        // acquise par la fusion.
+        let report = rm.tree.prune_orphans().unwrap();
+        assert_eq!(report.refs_removed, vec!["refs/remotes/origin/infra/web3c/fix1".to_string()]);
+        assert!(rm.local_infra_refs().is_empty());
+        assert_eq!(rm.tree.resolve_commit("web3c", Some(&sha(&fix))).unwrap(), fix);
+    }
+
+    #[test]
+    fn a_squash_or_rebase_merge_is_a_fast_forward_too() {
+        let rm = Remote::new("squash", 5);
+        let first = rm.tree.head().unwrap();
+        rm.branch("infra/web3c/fix2", "Ansible/playbooks/deploy-fix.yml");
+        // Fusion « squash » : un seul commit sur main, sans lien avec la branche.
+        let squashed = rm.commit("main", "Ansible/playbooks/deploy-fix.yml");
+        let out = rm.tree.sync("web3c", None, None).unwrap();
+        assert_eq!(out.head, squashed);
+        assert_ne!(out.head, first);
+    }
+
+    #[test]
+    fn orphan_infra_refs_are_pruned_and_only_those() {
+        let rm = Remote::new("orphans", 5);
+        let keep = rm.branch("infra/web3c/keep", "Ansible/playbooks/deploy-keep.yml");
+        let gone = rm.branch("infra/web3c/gone", "Ansible/playbooks/deploy-gone.yml");
+        let other = rm.branch("infra/papanglabs/x", "Ansible/playbooks/deploy-other.yml");
+        git(&rm.work, &["checkout", "-q", "main"]);
+
+        rm.tree.sync("web3c", None, Some("infra/web3c/keep")).unwrap();
+        rm.tree.sync("web3c", None, Some("infra/web3c/gone")).unwrap();
+        // Une branche locale de même famille, laissée par un geste manuel.
+        let clone = rm.tree.config().clone_dir.clone();
+        git(&clone, &["update-ref", "refs/heads/infra/web3c/manual", &keep]);
+        assert_eq!(rm.local_infra_refs().len(), 3);
+
+        assert_eq!(
+            rm.tree.prune_orphans().unwrap().refs_removed,
+            vec!["refs/heads/infra/web3c/manual".to_string()],
+            "la branche locale sans équivalent distant est la seule orpheline"
+        );
+        rm.delete_remote_branch("infra/web3c/gone");
+        let report = rm.tree.prune_orphans().unwrap();
+        assert_eq!(report.refs_removed, vec!["refs/remotes/origin/infra/web3c/gone".to_string()]);
+        assert_eq!(report.refs_error, None);
+        assert_eq!(rm.local_infra_refs(), vec!["refs/remotes/origin/infra/web3c/keep".to_string()]);
+
+        // La branche supprimée n'est plus permise ; celle qui reste l'est.
+        let sha = |s: &String| CommitSpec::Sha(s.clone());
+        assert!(rm.tree.resolve_commit("web3c", Some(&sha(&gone))).is_err());
+        assert_eq!(rm.tree.resolve_commit("web3c", Some(&sha(&keep))).unwrap(), keep);
+
+        // Le nettoyage ne télécharge rien : la branche d'un autre parc, jamais
+        // récupérée ici, n'est pas entrée dans le clone.
+        assert!(!rm.tree.has_commit(&other).unwrap());
+        // Ni la branche suivie ni sa tête ne bougent.
+        assert_eq!(rm.tree.head().unwrap(), git(&rm.bare, &["rev-parse", "main"]));
+    }
+
+    #[test]
+    fn nothing_is_pruned_when_the_remote_cannot_be_read() {
+        let rm = Remote::new("unreachable", 5);
+        rm.branch("infra/web3c/keep", "Ansible/playbooks/deploy-keep.yml");
+        rm.tree.sync("web3c", None, Some("infra/web3c/keep")).unwrap();
+        let clone = rm.tree.config().clone_dir.clone();
+        git(&clone, &["remote", "set-url", "origin", rm.root.join("absent.git").to_str().unwrap()]);
+
+        let report = rm.tree.prune_orphans().unwrap();
+        assert!(report.refs_removed.is_empty(), "{report:?}");
+        assert!(report.refs_error.is_some(), "l'échec est rapporté");
+        assert_eq!(rm.local_infra_refs(), vec!["refs/remotes/origin/infra/web3c/keep".to_string()]);
+    }
+
+    #[test]
+    fn the_cleanup_trims_the_tree_cache_down_to_its_size() {
+        let rm = Remote::new("trees", 5);
+        let mut shas = vec![rm.tree.head().unwrap()];
+        for i in 0..4 {
+            shas.push(rm.commit("main", &format!("Ansible/playbooks/deploy-{i}.yml")));
+        }
+        rm.tree.sync("web3c", None, None).unwrap();
+        for sha in &shas {
+            rm.tree.exec_tree(sha).unwrap();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(rm.tree.cached().len(), 5);
+
+        // Le même clone, relu avec un cache plus petit (réglage changé, redémarrage).
+        let mut cfg = rm.tree.config().clone();
+        cfg.keep = 2;
+        let smaller = GitTree::new(cfg).unwrap();
+        let pin = smaller.pin(&shas[0]);
+        let report = smaller.prune_orphans().unwrap();
+        let cached = smaller.cached();
+        assert!(cached.contains(shas.last().unwrap()), "la tête reste : {cached:?}");
+        assert!(cached.contains(&shas[0]), "un arbre retenu reste : {cached:?}");
+        assert_eq!(report.trees_removed, 5 - cached.len());
+        assert!(cached.len() <= 3, "keep=2 plus l'arbre retenu : {cached:?}");
+        drop(pin);
+        // Les données du parc ne sont pas touchées.
+        assert!(smaller.config().data_dir.join("inventories/web3c_inventory.yml").is_file());
+    }
+
+    #[test]
+    fn the_cleanup_without_a_clone_is_a_configuration_fault() {
+        let root = scratch("prune-noclone");
+        let cfg = GitTreeConfig::new(root.join("none"), root.join("data"), root.join("trees"), "main");
+        let tree = GitTree::new(cfg).unwrap();
+        assert_eq!(kind_of(&tree.prune_orphans().unwrap_err()), Some(FaultKind::NotConfigured));
+    }
+
+    #[test]
+    fn ssh_uses_the_pinned_known_hosts_and_never_trusts_a_new_key() {
+        // Fournisseur quelconque (GitHub, gitlab.com, GitLab auto-hébergé, port
+        // personnalisé) : la clé d'hôte attendue est celle du fichier posé par le
+        // rôle ; le port, lui, vient de l'URL du dépôt, pas d'ici.
+        let mut cfg = GitTreeConfig::new("c".into(), "d".into(), "t".into(), "main");
+        cfg.deploy_key = Some("/k/id".into());
+        cfg.known_hosts = Some("/k/known".into());
+        let tree = GitTree::new(cfg).unwrap();
+        let cmd = tree.command(true).unwrap();
+        let ssh = cmd
+            .get_envs()
+            .find(|(k, _)| *k == "GIT_SSH_COMMAND")
+            .and_then(|(_, v)| v.map(|v| v.to_string_lossy().to_string()))
+            .expect("GIT_SSH_COMMAND");
+        assert!(ssh.contains("-i '/k/id'") && ssh.contains("IdentitiesOnly=yes") && ssh.contains("BatchMode=yes"));
+        assert!(ssh.contains("UserKnownHostsFile=/k/known") && ssh.contains("StrictHostKeyChecking=yes"), "{ssh}");
+        assert!(!ssh.contains("accept-new"));
+        // Hors réseau, pas de ssh du tout.
+        assert!(tree.command(false).unwrap().get_envs().all(|(k, _)| k != "GIT_SSH_COMMAND"));
     }
 }

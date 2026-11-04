@@ -208,6 +208,12 @@ impl Core {
         self.git.get()
     }
 
+    /// Nettoyage périodique de l'arbre git (références `infra/*` orphelines,
+    /// arbres au-delà du cache). `None` : arbre rsync, rien à nettoyer.
+    pub fn prune_git(&self) -> Option<Result<ansible_git::PruneReport>> {
+        self.git.get().map(|git| git.prune_orphans())
+    }
+
     /// Fichiers de l'arbre que `read_tree` / `search_tree` / `describe_playbook`
     /// ne lisent jamais (chemins relatifs à `Ansible/`).
     pub fn set_private_tree_files(&self, files: Vec<String>) {
