@@ -17,6 +17,7 @@ mod auth;
 mod automation;
 mod config;
 mod events;
+mod maintenance;
 mod mcp;
 mod metrics;
 mod state;
@@ -135,6 +136,13 @@ async fn main() -> Result<()> {
                 fleetforge_core::logging::warn("web", format!("arbre git : {e}"));
             }
         });
+    }
+
+    // Arbre git : nettoyage des références `infra/*` orphelines et du cache
+    // d'arbres, au démarrage puis toutes les heures (en arrière-plan : il
+    // interroge le dépôt distant).
+    if config.git_tree.is_some() {
+        maintenance::spawn_git_prune(state.core.clone());
     }
 
     // Rouvre les comptes d'hébergeurs enregistrés : l'état « connecté » ne

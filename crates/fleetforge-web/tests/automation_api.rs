@@ -1369,6 +1369,41 @@ fn git_tree_setup(root: &Path) -> Vec<(String, String)> {
     ]
 }
 
+/// Au démarrage, FleetForge retire les références `infra/*` que le dépôt
+/// distant n'a plus (branche fusionnée puis supprimée) et garde les autres.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_git_tree_prunes_orphan_infra_refs_at_start() {
+    let (am_port, _) = fake_alertmanager().await;
+    let server = start_with(am_port, |root| {
+        let env = git_tree_setup(root);
+        let origin = root.join("origin");
+        let clone = root.join("ansible-git");
+        git(&origin, &["branch", "infra/web3c/live"]);
+        git(&origin, &["branch", "infra/web3c/merged"]);
+        git(
+            &clone,
+            &[
+                "fetch",
+                "-q",
+                "origin",
+                "+refs/heads/infra/web3c/*:refs/remotes/origin/infra/web3c/*",
+            ],
+        );
+        // Supprimée côté serveur depuis (fusion + « supprimer la branche source »).
+        git(&origin, &["branch", "-q", "-D", "infra/web3c/merged"]);
+        env
+    })
+    .await;
+    let clone = server.root.join("ansible-git");
+    let refs = || git(&clone, &["for-each-ref", "--format=%(refname)", "refs/remotes/origin/infra"]);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while refs().contains("merged") {
+        assert!(Instant::now() < deadline, "référence orpheline jamais retirée : {}", refs());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(refs(), "refs/remotes/origin/infra/web3c/live");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_git_tree_runs_one_precise_commit() {
     let (am_port, _) = fake_alertmanager().await;
