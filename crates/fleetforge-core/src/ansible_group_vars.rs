@@ -4,7 +4,6 @@
  * Copyright © 2025 Stéphane VAXELAIRE
  * SPDX-License-Identifier: MIT — see LICENSE
  */
-
 use anyhow::Result;
 use std::path::Path;
 
@@ -40,9 +39,7 @@ pub fn list_group_vars_files(playbooks_path: &str) -> Result<Vec<String>> {
 /// Read a group_vars YAML file and return it as a list of {key, value, type} entries.
 /// Preserves original YAML ordering and represents values as strings for the UI.
 pub fn read_group_vars_file(playbooks_path: &str, filename: &str) -> Result<Vec<GroupVarEntry>> {
-    let path = Path::new(playbooks_path)
-        .join("group_vars")
-        .join(filename);
+    let path = Path::new(playbooks_path).join("group_vars").join(filename);
     let content = std::fs::read_to_string(&path)?;
     if content.trim().is_empty() {
         return Ok(vec![]);
@@ -86,16 +83,36 @@ pub fn write_group_vars_file(
     filename: &str,
     entries: &[GroupVarEntry],
 ) -> Result<()> {
-    let path = Path::new(playbooks_path)
-        .join("group_vars")
-        .join(filename);
+    let path = Path::new(playbooks_path).join("group_vars").join(filename);
     let content = std::fs::read_to_string(&path)?;
 
     let mut lines: Vec<String> = content.lines().map(String::from).collect();
 
+    // Ce que le fichier dit AUJOURD'HUI : une entrée identique n'est pas
+    // réécrite. Réécrire tout ce qu'on relit abîmait le fichier — une chaîne
+    // `"{{ remote_username }}"` redevenait `{{ remote_username }}`, que YAML
+    // lit comme un mappage — et un enregistrement sans modification doit
+    // laisser le fichier à l'octet près.
+    let current: std::collections::HashMap<String, (String, String)> =
+        serde_yaml::from_str::<serde_yaml::Value>(&content)
+            .ok()
+            .and_then(|v| v.as_mapping().cloned())
+            .map(|m| {
+                m.iter()
+                    .filter_map(|(k, v)| Some((k.as_str()?.to_string(), yaml_value_to_string(v))))
+                    .collect()
+            })
+            .unwrap_or_default();
+
     for entry in entries {
         if entry.value_type == VAULT_TYPE {
             continue; // chiffré : hors de portée de l'éditeur
+        }
+        if current
+            .get(&entry.key)
+            .is_some_and(|(v, t)| *v == entry.value && *t == entry.value_type)
+        {
+            continue; // inchangé
         }
         set_key(&mut lines, entry)?;
     }
@@ -121,10 +138,7 @@ fn set_key(lines: &mut Vec<String>, entry: &GroupVarEntry) -> Result<()> {
         Some(start) => {
             // Refuser d'écraser une valeur chiffrée, même si l'appelant a
             // perdu le type en route : c'est le fichier qui fait foi.
-            if lines
-                .get(start)
-                .is_some_and(|l| l.contains("!vault"))
-            {
+            if lines.get(start).is_some_and(|l| l.contains("!vault")) {
                 return Ok(());
             }
             let end = block_end(lines, start);
@@ -151,6 +165,13 @@ fn render_entry(entry: &GroupVarEntry) -> Vec<String> {
             out
         }
         "null" => vec![format!("{}:", entry.key)],
+        // Une chaîne est citée si YAML l'exige (`{{ … }}`, `*`, `: `, `#`…) ;
+        // sérialisée par serde_yaml elle sort telle quelle quand c'est inutile.
+        "string" => {
+            let ser = serde_yaml::to_string(&serde_yaml::Value::String(entry.value.clone()))
+                .unwrap_or_else(|_| entry.value.clone());
+            vec![format!("{}: {}", entry.key, ser.trim_end())]
+        }
         _ => vec![format!("{}: {}", entry.key, entry.value)],
     }
 }
@@ -218,4 +239,54 @@ pub struct GroupVarEntry {
     pub key: String,
     pub value: String,
     pub value_type: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SAMPLE: &str =
+        "# en-tête\nuser: \"{{ remote_username }}\"\nport: 22\n# note\nname: plain\n";
+
+    fn work_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("ff-gv-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("group_vars")).unwrap();
+        std::fs::write(dir.join("group_vars/x.yml"), SAMPLE).unwrap();
+        dir
+    }
+
+    #[test]
+    fn saving_what_was_read_leaves_the_file_byte_identical() {
+        let dir = work_dir("same");
+        let p = dir.to_str().unwrap();
+        let entries = read_group_vars_file(p, "x.yml").unwrap();
+        write_group_vars_file(p, "x.yml", &entries).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("group_vars/x.yml")).unwrap(),
+            SAMPLE
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_changed_string_is_quoted_when_yaml_requires_it() {
+        let dir = work_dir("quote");
+        let p = dir.to_str().unwrap();
+        let mut entries = read_group_vars_file(p, "x.yml").unwrap();
+        for e in &mut entries {
+            if e.key == "name" {
+                e.value = "{{ other }}".into();
+            }
+            if e.key == "port" {
+                e.value = "2222".into();
+            }
+        }
+        write_group_vars_file(p, "x.yml", &entries).unwrap();
+        let after = std::fs::read_to_string(dir.join("group_vars/x.yml")).unwrap();
+        assert!(after.contains("name: '{{ other }}'"), "{after}");
+        assert!(after.contains("port: 2222"));
+        assert!(after.contains("user: \"{{ remote_username }}\""), "{after}");
+        assert!(after.contains("# en-tête") && after.contains("# note"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
