@@ -56,8 +56,12 @@ Retirer ou dater un point une fois fait.
   surveillent. Aucune mise à jour automatique : un rejeu de `deploy-*.yml` installe la dernière version.
 - **Minage** : rentabilité faible sur serveur loué ou machine ordinaire, et minage souvent interdit
   par les hébergeurs — à vérifier avant tout déploiement hors machine à soi.
-- **`xmrig_msr`** (registres MSR) exécute le mineur en root : à n'activer que sciemment, sur une
-  machine physique.
+- **`-e server=physical`** (MSR, pages de 1 Gio, gouverneur CPU `performance`) exécute le mineur en
+  root et change le gouverneur de TOUTE la machine le temps du minage (rendu à l'arrêt) : à
+  réserver à une machine à soi. Non vérifié sur une vraie machine : réservation des pages de
+  1 Gio (`xmrig-tune.sh`), `/2/backends` (pages obtenues, MSR) et alertes `XmrigHugePagesMissing` /
+  `XmrigMsrNotApplied` ; comparer le hashrate avec et sans (`-e xmrig_hugepages=0`, `-e xmrig_msr=false`)
+  pour mesurer le gain réel avant de s'y fier.
 - **Aucun secret côté serveur** : le portefeuille (25 mots) reste sur le poste de l'opérateur, seule
   l'adresse publique est fournie. Le jeton de l'API locale du mineur est tiré une fois sur l'hôte.
 - **Dépôt privé** : ports 18080/18081/18083/18089/18088 au registre, et `monero`/`xmrig` à ajouter

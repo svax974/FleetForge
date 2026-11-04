@@ -8,10 +8,10 @@ Wants=network-online.target
 Type=simple
 User={{ 'root' if xmrig_msr | bool else xmrig_user }}
 ExecStart={{ xmrig_install_dir }}/current/xmrig --config={{ xmrig_config_dir }}/config.json
-{% if xmrig_msr | bool %}
-# `msr` : accès aux registres du processeur (xmrig_msr).
-ExecStartPre=-/sbin/modprobe msr
-{% endif %}
+# Réglages root (gouverneur CPU, pages de 1 Gio, module msr) : `+` = en root même si le mineur ne l'est
+# pas. Le script sort toujours en 0 : un réglage refusé ne doit pas empêcher de miner.
+ExecStartPre=+{{ xmrig_config_dir }}/xmrig-tune.sh start {{ 1 if xmrig_cpu_governor | bool else 0 }} {{ xmrig_1gb_pages_count | int if xmrig_1gb_pages | bool else 0 }} {{ 1 if xmrig_msr | bool else 0 }}
+ExecStopPost=+{{ xmrig_config_dir }}/xmrig-tune.sh stop
 Restart=always
 RestartSec=15
 # Le mineur cède la place à tout le reste de la machine.

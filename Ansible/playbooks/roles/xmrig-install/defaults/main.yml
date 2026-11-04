@@ -44,27 +44,59 @@ xmrig_gpg_fingerprint: "9AC4CEA8E66E35A5C7CDDC1B446A53638BE94409"
 # L'archive statique officielle pour Linux n'existe qu'en x86_64.
 xmrig_required_arch: x86_64
 
-# ── Réglages de minage ─────────────────────────────────────────────────────
-# Part des threads utilisée (`max-threads-hint`). 50 par défaut : sur une machine qui
-# fait autre chose, 100 la fige. Le service tourne en priorité minimale (`Nice=19`,
-# ordonnancement `idle`) : il cède la place au reste, mais la RAM (~2,5 Go) et la chaleur restent.
-xmrig_max_threads_hint: 50
+# ── Profil de machine : `-e server=vps|physical` (OBLIGATOIRE) ───────────────
+# Choisit d'un coup les réglages adaptés à la machine ; chacun reste forçable séparément par
+# son propre `-e xmrig_…=` (la valeur passée l'emporte sur le profil).
+#
+#   vps       machine virtuelle / louée : pages énormes de 2 Mio (réservées et vérifiées),
+#             compactage mémoire avant réservation, 50 % des threads (un hébergeur tolère mal un
+#             CPU saturé), service SANS privilège. Ni MSR (inaccessibles dans une VM), ni
+#             pages de 1 Gio, ni gouverneur CPU (pilotés par l'hôte).
+#   physical  machine à vous : tout ce qui précède, plus registres MSR (+10 à 15 % sur certains
+#             CPU Intel/AMD), pages de 1 Gio si le processeur les gère (détecté, repli sinon),
+#             gouverneur CPU `performance` le temps du minage (restauré à l'arrêt), pages
+#             énormes pour le code JIT, 100 % des threads (le mineur reste en priorité minimale).
+#             Le service tourne alors en ROOT (le MSR l'exige).
+server: ""
+xmrig_server: "{{ server | default('') }}"
+xmrig_profiles:
+  vps:      { msr: false, onegb: false, threads: 50,  governor: false, jit: false }
+  physical: { msr: true,  onegb: auto,  threads: 100, governor: true,  jit: true }
+# Profil effectif ; vide tant que `server` est invalide (validate.yml refuse alors le play).
+xmrig_profile: "{{ xmrig_profiles[xmrig_server] | default(xmrig_profiles.vps) }}"
+
+# ── Réglages de minage (valeurs par défaut = celles du profil) ─────────────
+# Part des threads utilisée (`max-threads-hint`). Le service tourne en priorité minimale
+# (`Nice=19`, ordonnancement `idle`) : il cède la place au reste, mais la RAM (~2,5 Go) et la
+# chaleur restent.
+xmrig_max_threads_hint: "{{ xmrig_profile.threads }}"
 # Pourcentage de temps de minage reversé aux développeurs de XMRig (défaut amont : 1).
 xmrig_donate_level: 1
 # Pages énormes : 1280 pages de 2 Mio par nœud NUMA (doc XMRig) = 2,5 Go réservés.
 # 0 : ne rien réserver (hashrate nettement plus bas).
 xmrig_hugepages: 1280
-xmrig_1gb_pages: false
+# Pages de 1 Gio (profil physical) : `auto` = si le processeur (`pdpe1gb`) et le noyau les gèrent
+# et qu'il y a au moins 6 Go de RAM ; `true` = obligatoire (le play échoue sinon) ; `false` = non.
+# Le jeu de données RandomX (2080 Mio) en demande 3, réservées au démarrage du service et rendues à l'arrêt.
+xmrig_1gb_pages: "{{ xmrig_profile.onegb }}"
+xmrig_1gb_pages_count: 3
+# Pages énormes pour le code JIT de RandomX (petit gain, sur certains processeurs).
+xmrig_hugepages_jit: "{{ xmrig_profile.jit }}"
+# Compactage de la mémoire avant la réservation : sur une machine allumée depuis longtemps la
+# mémoire est fragmentée et le noyau n'accorde qu'une partie des pages demandées.
+xmrig_compact_memory: true
+# Gouverneur CPU `performance` pendant le minage (machine physique : sur une VM il n'existe pas).
+xmrig_cpu_governor: "{{ xmrig_profile.governor }}"
 # Registres MSR (gain de hashrate sur certains CPU Intel/AMD, jusqu'à ~15 %) : exige root et
-# le module noyau `msr`, impossible dans une machine virtuelle. Le service tourne alors en
-# ROOT : à n'activer que sciemment, sur une machine physique à vous.
-xmrig_msr: false
+# le module noyau `msr`, impossible dans une machine virtuelle. XMRig les rétablit à l'arrêt.
+xmrig_msr: "{{ xmrig_profile.msr }}"
 # `auto`, `fast` (2 Go, rapide) ou `light` (256 Mo, très lent : machines à peu de RAM).
 xmrig_randomx_mode: auto
 
 # ── Compte et chemins ──────────────────────────────────────────────────────
 # Compte système dédié sans accès interactif (le mineur n'a besoin d'aucun fichier de srvc) ;
-# root seulement avec `xmrig_msr`. Exception documentée à « srvc pilote ce qu'il déploie » :
+# root seulement avec `xmrig_msr` (profil physical) ; les pages de 1 Gio et le gouverneur sont
+# posés par une étape `ExecStartPre=+` en root, le mineur lui-même reste sans privilège. Exception documentée à « srvc pilote ce qu'il déploie » :
 # srvc administre le service par sudo.
 xmrig_user: xmrig
 xmrig_install_dir: /opt/xmrig

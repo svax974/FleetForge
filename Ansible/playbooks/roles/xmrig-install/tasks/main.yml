@@ -72,6 +72,16 @@
     mode: "0644"
   notify: restart xmrig
 
+# Une mémoire fragmentée (machine allumée depuis longtemps) ne donne qu'une partie des pages
+# demandées : on la compacte AVANT de réserver.
+- name: Compact memory before reserving huge pages
+  ansible.builtin.shell: sync; echo 1 > /proc/sys/vm/compact_memory
+  changed_when: false
+  failed_when: false
+  when:
+    - xmrig_hugepages | int > 0
+    - xmrig_compact_memory | bool
+
 # Réservé au noyau : chaque page fait 2 Mio, 1280 pages = 2,5 Go qui ne servent plus à rien d'autre.
 - name: Reserve huge pages
   ansible.posix.sysctl:
@@ -83,6 +93,25 @@
     reload: true
   when: xmrig_hugepages | int > 0
 
+# Le noyau répond « ok » à sysctl même quand il n'a pu réserver qu'une partie des pages : on relit.
+- name: Read back the reserved huge pages
+  ansible.builtin.command: awk '/^HugePages_Total:/ {print $2}' /proc/meminfo
+  register: xmrig_hp_total
+  changed_when: false
+  check_mode: false
+  when: xmrig_hugepages | int > 0
+
+- name: Warn when the kernel gave fewer huge pages than asked
+  ansible.builtin.debug:
+    msg: >-
+      Pages énormes : {{ xmrig_hp_total.stdout }} réservées sur {{ xmrig_hugepages }} demandées (mémoire
+      fragmentée ou insuffisante). Le hashrate sera nettement plus bas. Redémarrer la machine (la
+      réservation se fait alors sur une mémoire neuve), ou ajouter `hugepages={{ xmrig_hugepages }}` à la
+      ligne de commande du noyau.
+  when:
+    - xmrig_hugepages | int > 0
+    - xmrig_hp_total.stdout | default('0') | int < xmrig_hugepages | int
+
 - name: Load the msr module at boot
   ansible.builtin.copy:
     content: "msr\n"
@@ -91,6 +120,34 @@
     group: root
     mode: "0644"
   when: xmrig_msr | bool
+
+# Réglages root du service (gouverneur CPU, pages de 1 Gio, module msr).
+- name: Deploy the root tuning helper
+  ansible.builtin.copy:
+    src: xmrig-tune.sh
+    dest: "{{ xmrig_config_dir }}/xmrig-tune.sh"
+    owner: root
+    group: root
+    mode: "0755"
+  notify: restart xmrig
+
+# Ce que CE déploiement a demandé : le collecteur de supervision le compare à ce que XMRig a
+# réellement obtenu (pages géantes, MSR). Aucune donnée sensible.
+- name: Record the tuning that was asked for
+  ansible.builtin.copy:
+    content: "{{ xmrig_tuning | to_nice_json }}\n"
+    dest: "{{ xmrig_config_dir }}/tuning.json"
+    owner: root
+    group: root
+    mode: "0644"
+  vars:
+    xmrig_tuning:
+      server: "{{ xmrig_server }}"
+      hugepages: "{{ xmrig_hugepages | int > 0 }}"
+      hugepages_1gb: "{{ xmrig_1gb_pages | bool }}"
+      msr: "{{ xmrig_msr | bool }}"
+      cpu_governor: "{{ xmrig_cpu_governor | bool }}"
+  notify: restart xmrig
 
 - name: Enable and start the miner
   ansible.builtin.systemd:
@@ -117,9 +174,53 @@
   changed_when: false
   no_log: true
 
+# Ce que XMRig a RÉELLEMENT obtenu (jamais ce qu'on a demandé) : pages énormes et MSR. Lues sur
+# `/2/backends` une fois les threads démarrés (l'initialisation du jeu de données prend quelques
+# secondes). Avertissement seulement : le mineur tourne de toute façon, mais plus lentement.
+- name: Read what the miner obtained (huge pages, MSR)
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ xmrig_api_port }}/2/backends"
+    headers:
+      Authorization: "Bearer {{ xmrig_token_raw.content | b64decode | trim }}"
+    return_content: true
+    timeout: 10
+  register: xmrig_backends
+  retries: 18
+  delay: 5
+  until: >-
+    xmrig_backends.status | default(0) == 200
+    and (xmrig_backends.json | default([]) | selectattr('type', 'equalto', 'cpu') | map(attribute='hugepages') | first | default([0, 0]) | last | default(0)) | int > 0
+  failed_when: false
+  changed_when: false
+  check_mode: false
+  no_log: true
+
+- name: Interpret the obtained tuning
+  ansible.builtin.set_fact:
+    xmrig_cpu_backend: "{{ xmrig_backends.json | default([]) | selectattr('type', 'equalto', 'cpu') | first | default({}) }}"
+
+- name: Report huge pages and MSR
+  ansible.builtin.debug:
+    msg:
+      - >-
+        Pages énormes : {{ xmrig_cpu_backend.hugepages[0] | default('?') }}/{{ xmrig_cpu_backend.hugepages[1] | default('?') }}
+        {{ '— OK' if xmrig_cpu_backend.hugepages is defined and xmrig_cpu_backend.hugepages[0] == xmrig_cpu_backend.hugepages[1] and xmrig_cpu_backend.hugepages[1] > 0
+           else '— INCOMPLET : hashrate réduit (voir l’avertissement de réservation, ou redémarrer la machine)' if xmrig_hugepages | int > 0
+           else '(désactivées)' }}
+      - >-
+        MSR : {{ 'appliqués' if xmrig_cpu_backend.msr | default(false) else 'non appliqués' }}
+        {{ '— ATTENDUS mais absents : voir `journalctl -u xmrig | grep -i msr` (Secure Boot / lockdown, module msr)' if xmrig_msr | bool and not xmrig_cpu_backend.msr | default(false) else '' }}
+  when: xmrig_cpu_backend | length > 0
+
+- name: Warn when the miner never reported its backends
+  ansible.builtin.debug:
+    msg: "Le mineur n'a pas rapporté son état (/2/backends) : pages énormes et MSR non vérifiés — journalctl -u xmrig."
+  when: xmrig_cpu_backend | length == 0
+
 - name: Summary
   ansible.builtin.debug:
     msg:
+      - "Profil {{ xmrig_server }} : {{ xmrig_max_threads_hint }} % des threads, pages 2 Mio {{ 'oui' if xmrig_hugepages | int > 0 else 'non' }}, pages 1 Gio {{ 'oui' if xmrig_1gb_pages | bool else 'non' }}, MSR {{ 'oui' if xmrig_msr | bool else 'non' }}, gouverneur performance {{ 'oui' if xmrig_cpu_governor | bool else 'non' }}."
       - "XMRig {{ xmrig_summary.json.version | default(xmrig_resolved_version) }} lancé sur {{ inventory_hostname }} ({{ xmrig_mode }}, {{ xmrig_max_threads_hint }} % des threads, donation {{ xmrig_donate_level }} %)."
       - "Gains crédités à {{ xmrig_wallet | truncate(12, True, '…') }}… ({{ 'pool ' ~ xmrig_pool_url if xmrig_mode == 'pool' else 'nœud ' ~ xmrig_daemon_url }})."
       - "Hashrate et partages : journalctl -u xmrig -f (une ligne par minute), ou la supervision."

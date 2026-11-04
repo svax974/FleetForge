@@ -3,7 +3,7 @@
 # pool, partages, version). Cible Prometheus et ouverture ufw du scrape (9110) : celles
 # de `svcprobe-install`. Tout est tagué `monitoring` — réarmer la supervision ne doit pas
 # imposer de rejouer l'installation.
-#   ./play.sh <parc> deploy-xmrig.yml --limit <hôte> -e xmrig_wallet=<adresse> -e xmrig_mode=<pool|solo> --tags monitoring
+#   ./play.sh <parc> deploy-xmrig.yml --limit <hôte> -e xmrig_wallet=<adresse> -e xmrig_mode=<pool|solo> -e server=<vps|physical> --tags monitoring
 
 - name: Fail early when no Prometheus host is defined
   ansible.builtin.assert:

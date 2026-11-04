@@ -7,6 +7,8 @@
     xmrig_problems: >-
       {{ ([] if xmrig_wallet | string is match('^[48][0-9AB][1-9A-HJ-NP-Za-km-z]{93}$') else
            ['xmrig_wallet : manquant ou invalide (« ' ~ (xmrig_wallet | string | truncate(20, True, '…')) ~ ' ») — adresse Monero PUBLIQUE de 95 caractères commençant par 4 (jamais les 25 mots de la clé)'])
+       + ([] if xmrig_server | string in ['vps', 'physical'] else
+           ['server : manquant ou inconnu (« ' ~ xmrig_server ~ ' ») — vps (machine virtuelle ou louée) ou physical (machine à vous : MSR, pages de 1 Gio, gouverneur CPU)'])
        + ([] if xmrig_mode | string in ['pool', 'solo'] else
            ['xmrig_mode : manquant ou inconnu (« ' ~ xmrig_mode ~ ' ») — pool (minage mutualisé) ou solo (vers votre nœud monerod)'])
        + ([] if xmrig_mode != 'pool' or xmrig_pool_url | string is match('^[A-Za-z0-9.-]+:[0-9]{2,5}$') else
@@ -23,11 +25,14 @@
       Minage en pool (le pool se choisit sur sa page « getting started ») :
         ./play.sh <parc> deploy-xmrig.yml --limit {{ inventory_hostname }} \
           -e xmrig_wallet=<adresse 95 caractères commençant par 4> \
-          -e xmrig_mode=pool -e xmrig_pool_url=pool.exemple.org:443
+          -e xmrig_mode=pool -e xmrig_pool_url=pool.exemple.org:443 -e server=vps
+
+      -e server=vps|physical choisit les optimisations : `vps` pour une machine virtuelle ou louée,
+      `physical` pour une machine à vous (MSR, pages de 1 Gio, gouverneur CPU ; le service tourne alors en root).
 
       Minage solo (vers un nœud monerod synchronisé de ce parc ; famille `monero`) :
         ./play.sh <parc> deploy-xmrig.yml --limit {{ inventory_hostname }} \
-          -e xmrig_wallet=<adresse 95 caractères commençant par 4> -e xmrig_mode=solo
+          -e xmrig_wallet=<adresse 95 caractères commençant par 4> -e xmrig_mode=solo -e server=physical
   when: xmrig_problems | length > 0
 
 - name: Warn about a subaddress

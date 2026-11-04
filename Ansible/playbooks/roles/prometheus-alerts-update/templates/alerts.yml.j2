@@ -1132,7 +1132,43 @@ groups:
           description: >-
             Hashrate 15 min inférieur à la moitié de la moyenne des 24 dernières heures.
             Vérifier la température, la charge de la machine et les pages énormes
-            (`grep -i huge /var/log/syslog`, `journalctl -u xmrig | grep -i "huge pages"`).
+            (`grep -i huge /var/log/syslog`, `journalctl -u xmrig | grep -i "huge pages"`) ;
+            `XmrigHugePagesMissing` / `XmrigMsrNotApplied` en disent la cause la plus fréquente.
+
+      # Pages énormes : le mineur tourne, `service_up` vaut 1, le hashrate paraît « normal » pour
+      # qui n'a pas de référence — mais il manque 20 à 50 %. Série du déploiement : le seuil est
+      # « toutes les pages » (XMRig dit lui-même combien il lui en faut).
+      - alert: XmrigHugePagesMissing
+        expr: >-
+          xmrig_hugepages_ratio < 1
+          and on (instance) xmrig_hugepages_expected == 1
+        for: 15m
+        keep_firing_for: {{ prom_alert_flap_grace }}
+        labels:
+          severity: warning
+        annotations:
+          summary: 'XMRig sans toutes ses pages énormes sur {{ '{{' }} $labels.instance {{ '}}' }}'
+          description: >-
+            Le noyau n'a pas accordé toutes les pages énormes (mémoire fragmentée, réservation
+            perdue, conteneur). Hashrate réduit de 20 à 50 %. `grep HugePages /proc/meminfo`,
+            puis redémarrer la machine ou rejouer le déploiement (compactage mémoire avant réservation).
+
+      # Profil physical : MSR demandés (+10 à 15 %), non appliqués — Secure Boot / lockdown noyau,
+      # module `msr` absent, CPU non reconnu par XMRig.
+      - alert: XmrigMsrNotApplied
+        expr: >-
+          xmrig_msr_applied == 0
+          and on (instance) xmrig_msr_expected == 1
+        for: 15m
+        keep_firing_for: {{ prom_alert_flap_grace }}
+        labels:
+          severity: warning
+        annotations:
+          summary: 'XMRig sans MSR sur {{ '{{' }} $labels.instance {{ '}}' }}'
+          description: >-
+            Les registres MSR étaient demandés (-e server=physical) mais XMRig ne les a pas
+            appliqués : `journalctl -u xmrig | grep -i msr`. Causes usuelles : noyau en lockdown
+            (Secure Boot), module `msr` absent, machine en réalité virtualisée.
 
       - alert: XmrigPoolDisconnected
         expr: xmrig_pool_connected == 0

@@ -25,6 +25,7 @@
     "cpu": {
         "enabled": true,
         "huge-pages": {{ (xmrig_hugepages | int > 0) | to_json }},
+        "huge-pages-jit": {{ (xmrig_hugepages_jit | bool and xmrig_hugepages | int > 0) | to_json }},
         "max-threads-hint": {{ xmrig_max_threads_hint | int }},
         "asm": true
     },

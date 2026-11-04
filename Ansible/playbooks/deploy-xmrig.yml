@@ -4,27 +4,39 @@
 #
 #   ./play.sh <parc> deploy-xmrig.yml --limit <hôte> \
 #       -e xmrig_wallet=<adresse 95 caractères commençant par 4> \
-#       -e xmrig_mode=pool -e xmrig_pool_url=<hôte:port du pool>
+#       -e xmrig_mode=pool -e xmrig_pool_url=<hôte:port du pool> -e server=<vps|physical>
 #   ./play.sh <parc> deploy-xmrig.yml --limit <hôte> \
-#       -e xmrig_wallet=<adresse 4…> -e xmrig_mode=solo        # vers un nœud monerod local synchronisé
+#       -e xmrig_wallet=<adresse 4…> -e xmrig_mode=solo -e server=<vps|physical>   # nœud monerod local synchronisé
 #
 # ── À lire avant de miner ──────────────────────────────────────────────────
 # • XMRig est le mineur RandomX de référence : RandomX est conçu pour les PROCESSEURS (aucun
 #   intérêt des GPU pour XMR). Les réglages qui comptent sont gérés : pages énormes (« jusqu'à
-#   +50 % » d'après la doc de XMRig), MSR (option, machine physique seulement), priorité minimale.
+#   +50 % » d'après la doc de XMRig), MSR (profil physical), priorité minimale.
 # • RENTABILITÉ : sur un serveur loué ou un ordinateur ordinaire, les gains sont presque toujours
 #   inférieurs au coût (électricité, location). À estimer sur un calculateur avant de déployer.
 # • HÉBERGEUR : le minage est souvent INTERDIT par les conditions d'un VPS ou serveur loué
 #   (CPU saturé → suspension). À vérifier chez le vôtre. Le play avertit sur une machine virtuelle.
 # • Installation non furtive : service `xmrig`, processus `xmrig`, rien n'est caché, et 1 % du temps de
 #   minage revient aux développeurs de XMRig (`xmrig_donate_level`, défaut amont).
-# • Un seul mineur par machine, 50 % des threads par défaut (`xmrig_max_threads_hint`).
+# • Un seul mineur par machine, part des threads selon le profil (`xmrig_max_threads_hint`).
 #
 # ── Paramètres OBLIGATOIRES ────────────────────────────────────────────────
 #   xmrig_wallet    adresse Monero PRIMAIRE (95 caractères, 4…) qui reçoit les gains
 #   xmrig_mode      pool (gains réguliers, petits) | solo (un bloc très rare, récompense entière)
 #   xmrig_pool_url  seulement en pool : hôte:port, sans schéma (voir la page « getting started » du pool)
+#   server          vps | physical : active les optimisations adaptées à la machine (ci-dessous)
 # Un paramètre manquant fait échouer le play AVANT tout téléchargement, avec des exemples.
+#
+# ── Optimisations : `-e server=vps|physical` ───────────────────────────────
+#   vps       pages énormes de 2 Mio (compactage mémoire, réservation, relecture), 50 % des threads,
+#             service sans privilège. Ni MSR (VM), ni pages de 1 Gio, ni gouverneur CPU.
+#   physical  idem + registres MSR (+10 à 15 % sur certains CPU), pages de 1 Gio si le CPU les gère
+#             (détecté), gouverneur CPU `performance` (restauré à l'arrêt), JIT en pages énormes,
+#             100 % des threads. Le service tourne en ROOT. Refusé sur une machine virtuelle.
+# Chaque réglage reste forçable à part (`-e xmrig_msr=false`, `-e xmrig_max_threads_hint=70`,
+# `-e xmrig_1gb_pages=false`, `-e xmrig_cpu_governor=false`…) : la valeur passée l'emporte sur le profil.
+# Le play relit ce que XMRig a RÉELLEMENT obtenu (pages énormes, MSR) et l'affiche ; la supervision
+# le surveille (`XmrigHugePagesMissing`, `XmrigMsrNotApplied`).
 #
 # ── Secrets : l'adresse est PUBLIQUE ───────────────────────────────────────
 # Seule l'adresse figure dans la configuration : la clé privée / la phrase de 25 mots de votre

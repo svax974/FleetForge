@@ -59,6 +59,31 @@ metric xmrig_pool_ping_ms gauge "Latence vers le pool." "$(num "$(sj '.connectio
 metric xmrig_shares_accepted_total counter "Partages acceptés depuis le démarrage." "$(num "$(sj '.connection.accepted')")"
 metric xmrig_shares_rejected_total counter "Partages rejetés depuis le démarrage." "$(num "$(sj '.connection.rejected')")"
 
+# ── Optimisations RÉELLEMENT obtenues (pages énormes, MSR) ─────────────────
+# `/2/backends` rapporte ce que XMRig a obtenu du noyau ; `tuning.json` (écrit par le déploiement)
+# dit ce qui était demandé. Un écart n'est visible nulle part ailleurs : le mineur tourne, mais
+# avec 20 à 50 % de hashrate en moins. Rien n'est émis sans réponse exploitable.
+TUNING="${XMRIG_TUNING_FILE:-$(dirname "${TOKEN_FILE}")/tuning.json}"
+BK=$(curl -sS -m 8 -H "Authorization: Bearer ${TOKEN}" "http://127.0.0.1:${PORT}/2/backends" 2>/dev/null)
+CPUB=$(printf '%s' "${BK}" | jq -c 'if type == "array" then (map(select(.type == "cpu")) | first // empty) else empty end' 2>/dev/null)
+if [ -n "${CPUB}" ]; then
+  HP_A=$(printf '%s' "${CPUB}" | jq -r 'if (.hugepages | type) == "array" then .hugepages[0] else empty end' 2>/dev/null)
+  HP_T=$(printf '%s' "${CPUB}" | jq -r 'if (.hugepages | type) == "array" then .hugepages[1] else empty end' 2>/dev/null)
+  if [[ "${HP_A}" =~ ^[0-9]+$ && "${HP_T}" =~ ^[0-9]+$ && "${HP_T}" -gt 0 ]]; then
+    metric xmrig_hugepages_allocated gauge "Pages énormes obtenues par XMRig." "${HP_A}"
+    metric xmrig_hugepages_total gauge "Pages énormes dont XMRig a besoin." "${HP_T}"
+    metric xmrig_hugepages_ratio gauge "Part des pages énormes obtenues (1 = toutes)." "$(awk -v a="${HP_A}" -v t="${HP_T}" 'BEGIN { printf "%.4f", a / t }')"
+  fi
+  MSR_ON=0; [ "$(printf '%s' "${CPUB}" | jq -r '.msr // false' 2>/dev/null)" = "true" ] && MSR_ON=1
+  metric xmrig_msr_applied gauge "1 si les registres MSR sont appliqués." "${MSR_ON}"
+fi
+if [ -s "${TUNING}" ]; then
+  E=0; [ "$(jq -r '.hugepages // false' "${TUNING}" 2>/dev/null)" = "true" ] && E=1
+  metric xmrig_hugepages_expected gauge "1 si le déploiement a demandé des pages énormes." "${E}"
+  E=0; [ "$(jq -r '.msr // false' "${TUNING}" 2>/dev/null)" = "true" ] && E=1
+  metric xmrig_msr_expected gauge "1 si le déploiement a demandé les registres MSR." "${E}"
+fi
+
 # ── Version installée vs dernière version publiée ──────────────────────────
 INSTALLED=$(sj '.version')
 if [[ "${INSTALLED}" =~ ^[0-9]+([.][0-9]+)+$ ]]; then

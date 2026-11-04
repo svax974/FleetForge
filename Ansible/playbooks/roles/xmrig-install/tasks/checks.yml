@@ -45,6 +45,15 @@
     - ansible_memtotal_mb | int < 4000
     - xmrig_randomx_mode != 'light'
 
+- name: Refuse the physical profile in a virtual machine
+  ansible.builtin.assert:
+    that: not (xmrig_server == 'physical' and ansible_virtualization_role | default('host') == 'guest')
+    fail_msg: >-
+      -e server=physical sur une machine virtuelle ({{ ansible_virtualization_type | default('?') }}) :
+      les registres MSR, les pages de 1 Gio et le gouverneur CPU n'y sont pas pilotables. Utiliser
+      -e server=vps.
+    quiet: true
+
 - name: Warn about a virtual machine
   ansible.builtin.debug:
     msg: >-
@@ -58,3 +67,78 @@
     that: not (xmrig_msr | bool and ansible_virtualization_role | default('host') == 'guest')
     fail_msg: "xmrig_msr exige une machine physique : les registres MSR ne sont pas accessibles depuis une machine virtuelle."
     quiet: true
+
+# ── Profil `server` (vps | physical) ───────────────────────────────────────
+- name: Warn about the vps profile on a physical machine
+  ansible.builtin.debug:
+    msg: >-
+      -e server=vps sur une machine qui ne se déclare pas virtuelle : MSR, pages de 1 Gio et gouverneur
+      CPU ne seront PAS activés. Si c'est une machine à vous, relancer avec -e server=physical (jusqu'à
+      +15 % de hashrate supplémentaire).
+  when:
+    - xmrig_server == 'vps'
+    - ansible_virtualization_role | default('host') != 'guest'
+
+- name: Warn about a container
+  ansible.builtin.debug:
+    msg: >-
+      Conteneur ({{ ansible_virtualization_type }}) : /proc/sys est en général en lecture seule, la
+      réservation des pages énormes échouera ou sera sans effet. Le noyau de l'HÔTE doit les réserver.
+  when: ansible_virtualization_type | default('') in ['lxc', 'openvz', 'docker', 'podman', 'systemd-nspawn']
+
+# ── Pages de 1 Gio (profil physical) ───────────────────────────────────────
+- name: Look for 1 GiB page support in the CPU
+  ansible.builtin.command: grep -m1 -c -w pdpe1gb /proc/cpuinfo
+  register: xmrig_cpu_1gb
+  failed_when: false
+  changed_when: false
+  check_mode: false
+
+- name: Look for 1 GiB page support in the kernel
+  ansible.builtin.stat:
+    path: /sys/kernel/mm/hugepages/hugepages-1048576kB
+  register: xmrig_kernel_1gb
+
+- name: Decide on 1 GiB pages
+  ansible.builtin.set_fact:
+    xmrig_1gb_pages: >-
+      {{ xmrig_cpu_1gb.stdout | default('0') | trim == '1'
+         and xmrig_kernel_1gb.stat.exists
+         and ansible_memtotal_mb | int >= 6000 }}
+  when: xmrig_1gb_pages | string | lower == 'auto'
+
+- name: Refuse forced 1 GiB pages the machine cannot give
+  ansible.builtin.assert:
+    that: xmrig_cpu_1gb.stdout | default('0') | trim == '1' and xmrig_kernel_1gb.stat.exists
+    fail_msg: >-
+      xmrig_1gb_pages=true mais cette machine ne gère pas les pages de 1 Gio (processeur sans
+      pdpe1gb ou noyau sans /sys/kernel/mm/hugepages/hugepages-1048576kB).
+    quiet: true
+  when: xmrig_1gb_pages | string | lower in ['true', 'yes', '1']
+
+- name: Report the 1 GiB pages decision
+  ansible.builtin.debug:
+    msg: >-
+      Pages de 1 Gio : {{ 'activées (' ~ xmrig_1gb_pages_count ~ ' réservées au démarrage du service)' if xmrig_1gb_pages | bool else
+      'non activées (processeur sans pdpe1gb, noyau sans hugepages-1048576kB, ou moins de 6 Go de RAM) — pages de 2 Mio seulement' }}.
+  when: xmrig_server == 'physical'
+
+# ── MSR : le noyau en mode « lockdown » refuse l'écriture ──────────────────
+- name: Read the kernel lockdown mode
+  ansible.builtin.command: cat /sys/kernel/security/lockdown
+  register: xmrig_lockdown
+  failed_when: false
+  changed_when: false
+  check_mode: false
+  when: xmrig_msr | bool
+
+- name: Warn when kernel lockdown will block the MSR
+  ansible.builtin.debug:
+    msg: >-
+      Noyau en mode lockdown ({{ xmrig_lockdown.stdout }}) : l'écriture des registres MSR sera refusée
+      (typiquement Secure Boot actif). Le mineur démarrera quand même, mais sans le gain du MSR.
+      Désactiver Secure Boot, ou -e xmrig_msr=false.
+  when:
+    - xmrig_msr | bool
+    - xmrig_lockdown.rc | default(1) == 0
+    - xmrig_lockdown.stdout is not search('[[]none[]]')
