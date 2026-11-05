@@ -1,0 +1,15 @@
+---
+# Ce que `storj_identity_dir` contient. Partagé par identity.yml et storj-purge :
+# une purge pendant la génération n'a aucune identité à rapatrier, ce n'est pas
+# une erreur.
+
+- name: Look for an existing identity
+  ansible.builtin.stat:
+    path: "{{ storj_identity_dir }}/{{ item }}"
+  loop: [ca.cert, ca.key, identity.cert, identity.key]
+  register: storj_identity_files
+
+- name: Remember what the identity directory holds
+  ansible.builtin.set_fact:
+    storj_identity_complete: "{{ storj_identity_files.results | map(attribute='stat.exists') | min }}"
+    storj_identity_any: "{{ storj_identity_files.results | map(attribute='stat.exists') | max }}"

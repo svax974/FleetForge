@@ -24,6 +24,15 @@
   become: true
   tags: [monitoring]
 
+# Sans ceci, une génération lancée par `deploy-storj.yml` continuerait d'occuper
+# tous les cœurs après la désinstallation. `[i]` : voir storj-install/identity.yml.
+- name: Stop any identity generation in progress
+  ansible.builtin.shell: |
+    systemctl stop {{ storj_identity_unit | default('storj-identity') }} 2>/dev/null || true
+    pkill -f '[i]dentity create storagenode' || true
+  become: true
+  changed_when: false
+
 # Watchtower d'abord : sinon il recrée le nœud qu'on vient d'arrêter.
 # `stop_timeout` : l'arrêt gracieux du nœud peut durer jusqu'à 5 minutes.
 - name: Remove the Storj containers

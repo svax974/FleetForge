@@ -26,7 +26,14 @@
 #
 # ── Identité et ce qui est « récupérable » ─────────────────────────────────
 # Storj n'a plus de jeton d'autorisation : le nœud génère son identité (preuve de
-# travail, de quelques heures à plusieurs jours — le play attend) et c'est tout.
+# travail, de quelques heures à plusieurs jours) et c'est tout.
+# DEUX PASSAGES, exception assumée au déploiement en un seul passage (CLAUDE.md) :
+# aucun terminal ne doit rester ouvert des jours. Le premier lance la génération
+# dans une unité systemd de l'hôte et s'arrête SANS erreur ; rejouer ensuite la
+# même commande (paramètres compris) : tant que la génération tourne, elle le dit
+# et s'arrête ; une fois finie, elle termine le déploiement.
+#   Suivi sur l'hôte : systemctl status storj-identity
+#   Pour éviter ce délai : storj_identity_source (identité générée ailleurs).
 # Le nœud ne détient AUCUNE clé de paiement : la clé de `storj_wallet_address` est
 # la vôtre, ni demandée ni créée ici. Rapatriés dans
 # ~/.config/fleetforge/storj/<hôte>/ :
@@ -92,10 +99,22 @@
   roles:
     - storj-install
 
+# Les plays suivants supposent un conteneur démarré : ils ne jouent que sur les
+# hôtes dont l'identité est prête. `tags: always` : un rejeu `--tags monitoring`
+# ne passe pas par l'installation, le fait est absent et l'hôte reste retenu.
+- name: Sélection des hôtes dont l'identité est prête
+  hosts: storj_node_yes
+  gather_facts: false
+  tags: [always]
+  tasks:
+    - name: Group the hosts whose identity is ready
+      ansible.builtin.group_by:
+        key: "storj_ready_{{ 'no' if storj_identity_pending | default(false) | bool else 'yes' }}"
+
 # Vérifie l'exposition RÉELLE (tableau de bord sur 127.0.0.1, P2P publié en TCP
 # et UDP, rien dans DOCKER-USER pour le bloquer) — ne pose aucune règle.
 - name: Contrôle d'exposition
-  hosts: storj_node_yes
+  hosts: storj_ready_yes
   remote_user: "{{ remote_username }}"
   become: true
   roles:
@@ -103,7 +122,7 @@
 
 # ── Supervision (OBLIGATOIRE, voir CLAUDE.md) ──────────────────────────────
 - name: Supervision du nœud
-  hosts: storj_node_yes
+  hosts: storj_ready_yes
   remote_user: "{{ remote_username }}"
   roles:
     - storj-monitoring
@@ -114,7 +133,7 @@
 # Une seule fois par run (premier hôte). `prom_alerts_target` aiguille aussi le
 # handler de rechargement du rôle.
 - name: Règles d'alerte Storj
-  hosts: storj_node_yes
+  hosts: storj_ready_yes
   remote_user: "{{ remote_username }}"
   tags: [alerts, monitoring]
   vars:
@@ -133,14 +152,14 @@
           delegate_to: "{{ prometheus_host }}"
           become: true
           tags: [alerts, monitoring]
-      when: inventory_hostname == groups['storj_node_yes'] | first
+      when: inventory_hostname == groups['storj_ready_yes'] | first
       tags: [alerts, monitoring]
 
 # ── Rappel final ───────────────────────────────────────────────────────────
 # Dernier message du playbook : c'est celui que l'opérateur lit. Ne redit aucun
 # secret, seulement où ils sont.
 - name: Rappel des identifiants
-  hosts: storj_node_yes
+  hosts: storj_ready_yes
   remote_user: "{{ remote_username }}"
   gather_facts: false
   tags: [always]

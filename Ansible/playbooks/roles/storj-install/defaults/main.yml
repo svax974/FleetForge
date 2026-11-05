@@ -70,7 +70,8 @@ storj_skip_space_check: false
 # identity.key : envoyé tel quel, sans génération (restauration, migration).
 # JAMAIS la même identité sur deux nœuds actifs : disqualification.
 storj_identity_source: ""
-storj_identity_timeout: 172800   # secondes (48 h) avant d'abandonner la génération
+# Unité systemd transitoire de la génération : elle survit à la fin du déploiement.
+storj_identity_unit: storj-identity
 storj_identity_url: "https://github.com/storj/storj/releases/latest/download/identity_linux_{{ storj_identity_arch }}.zip"
 storj_identity_arch: >-
   {{ {'x86_64': 'amd64', 'aarch64': 'arm64', 'armv7l': 'arm', 'armv6l': 'arm'}.get(ansible_architecture, 'amd64') }}

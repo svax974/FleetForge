@@ -1,0 +1,213 @@
+---
+# Identité du nœud : ca.cert, ca.key, identity.cert, identity.key dans
+# `storj_identity_dir`, propriété de `remote_username` (Storj déconseille root).
+#
+# Trois cas, dans cet ordre :
+#   1. déjà complète sur l'hôte      → rien (un rejeu ne touche JAMAIS à
+#                                       l'identité d'un nœud existant) ;
+#   2. `storj_identity_source` posé  → copie depuis le poste de contrôle ;
+#   3. sinon                         → génération sur l'hôte (preuve de travail,
+#                                       difficulté 36, de quelques heures à
+#                                       plusieurs jours), détachée du déploiement.
+
+- name: Create the identity directory
+  ansible.builtin.file:
+    path: "{{ storj_identity_dir }}"
+    state: directory
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: "0700"
+
+- name: Look at what the identity directory holds
+  ansible.builtin.include_tasks: identity-state.yml
+
+- name: Nothing is pending until a generation says otherwise
+  ansible.builtin.set_fact:
+    storj_identity_pending: false
+
+# Une identité INCOMPLÈTE ne vient jamais d'une génération réussie (les fichiers
+# sont posés d'un bloc, plus bas) : c'est un copier-coller interrompu à la main.
+# La compléter ou l'écraser en silence serait une décision que ce rôle n'a pas à
+# prendre — un `ca.key` orphelin est peut-être la seule copie.
+- name: Refuse a partial identity
+  ansible.builtin.assert:
+    that: storj_identity_complete | bool or not storj_identity_any | bool
+    fail_msg: >-
+      {{ storj_identity_dir }} contient une identité partielle. La compléter ou
+      la supprimer à la main — ce rôle ne l'écrase pas.
+    quiet: true
+
+- name: Install the identity from the control machine
+  ansible.builtin.copy:
+    src: "{{ storj_identity_source }}/{{ item.name }}"
+    dest: "{{ storj_identity_dir }}/{{ item.name }}"
+    owner: "{{ remote_username }}"
+    group: "{{ remote_username }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - { name: ca.cert, mode: "0644" }
+    - { name: identity.cert, mode: "0644" }
+    - { name: ca.key, mode: "0600" }
+    - { name: identity.key, mode: "0600" }
+  loop_control:
+    label: "{{ item.name }}"
+  no_log: true
+  when:
+    - not storj_identity_complete | bool
+    - storj_identity_source | length > 0
+
+# Unité systemd TRANSITOIRE, et non `async` + `poll` : la preuve de travail dure
+# des heures à des jours, aucun terminal ne doit rester ouvert pour elle. Chaque
+# passage constate où elle en est et repart de là :
+#   en cours  → le play s'arrête sans erreur (`storj_identity_pending`) ;
+#   terminée  → publication de l'identité, puis suite du déploiement ;
+#   ni l'un ni l'autre (premier passage, échec, redémarrage de l'hôte) → lancement.
+# Repartir de zéro ne coûte rien : le temps écoulé ne rapproche pas du résultat.
+- name: Generate the identity on the host
+  when:
+    - not storj_identity_complete | bool
+    - storj_identity_source | length == 0
+  block:
+    - name: Ask systemd whether a generation is running
+      ansible.builtin.command: "systemctl is-active {{ storj_identity_unit }}"
+      register: storj_identity_unit_state
+      changed_when: false
+      failed_when: false
+
+    - name: Check the four generated files
+      ansible.builtin.stat:
+        path: "{{ storj_base_dir }}/identity-gen/out/storagenode/{{ item }}"
+      loop: [ca.cert, ca.key, identity.cert, identity.key]
+      register: storj_identity_generated
+
+    - name: Work out where the generation stands
+      ansible.builtin.set_fact:
+        storj_identity_running: "{{ storj_identity_unit_state.stdout in ['active', 'activating'] }}"
+        storj_identity_finished: >-
+          {{ storj_identity_unit_state.stdout not in ['active', 'activating']
+             and storj_identity_generated.results | map(attribute='stat.exists') | min }}
+
+    - name: Start a generation
+      when:
+        - not storj_identity_running | bool
+        - not storj_identity_finished | bool
+      block:
+        - name: Install the packages the generation needs
+          ansible.builtin.apt:
+            name: [curl, unzip]
+            state: present
+
+        # Le crochet `[i]` : sans lui, `pkill -f` tuerait aussi le shell qui le
+        # lance, dont la ligne de commande contient le motif.
+        - name: Stop any generation an interrupted run left behind
+          ansible.builtin.shell: "pkill -f '[i]dentity create storagenode' || true"
+          changed_when: false
+
+        # Dossier de travail RECRÉÉ à chaque tentative : une génération interrompue
+        # n'a rien produit d'exploitable (rien n'est publié avant la fin).
+        - name: Start from a clean work directory
+          ansible.builtin.file:
+            path: "{{ storj_base_dir }}/identity-gen"
+            state: "{{ item }}"
+            owner: "{{ remote_username }}"
+            group: "{{ remote_username }}"
+            mode: "0700"
+          loop: [absent, directory]
+
+        - name: Download the Storj identity tool
+          ansible.builtin.get_url:
+            url: "{{ storj_identity_url }}"
+            dest: "{{ storj_base_dir }}/identity-gen/identity.zip"
+            owner: "{{ remote_username }}"
+            mode: "0600"
+            timeout: 120
+
+        - name: Unpack the identity tool
+          ansible.builtin.unarchive:
+            src: "{{ storj_base_dir }}/identity-gen/identity.zip"
+            dest: "{{ storj_base_dir }}/identity-gen"
+            remote_src: true
+            owner: "{{ remote_username }}"
+            mode: "0755"
+
+        # La commande écrit sous <identity-dir>/storagenode/. `--concurrency` = nombre
+        # de cœurs (défaut amont : 4) ; `--nice=19` les rend aux services de la machine
+        # dès qu'ils en ont besoin. `--collect` : une unité en échec ne bloque pas le
+        # nom pour le lancement suivant (ses journaux restent lisibles).
+        # `StandardOutput=null` : l'outil écrit sa progression en continu, journald
+        # l'accumulerait et finirait par évincer les journaux des autres services.
+        # Ses erreurs, sur stderr, y restent.
+        - name: Start the generation, detached from this run
+          ansible.builtin.command:
+            argv:
+              - systemd-run
+              - "--unit={{ storj_identity_unit }}"
+              - "--uid={{ remote_username }}"
+              - "--gid={{ remote_username }}"
+              - --nice=19
+              - --collect
+              - --property=StandardOutput=null
+              - "{{ storj_base_dir }}/identity-gen/identity"
+              - create
+              - storagenode
+              - --identity-dir
+              - "{{ storj_base_dir }}/identity-gen/out"
+              - --concurrency
+              - "{{ ansible_processor_vcpus | default(4) }}"
+          changed_when: true
+
+        # Sans ce contrôle, un outil qui échoue aussitôt passerait pour une génération
+        # en cours, à chaque passage.
+        - name: Check that the generation survived its start
+          ansible.builtin.shell: "sleep 5; systemctl is-active {{ storj_identity_unit }}"
+          register: storj_identity_started
+          changed_when: false
+          failed_when: false
+
+        - name: Fail when the generation stopped right away
+          ansible.builtin.assert:
+            that: storj_identity_started.rc == 0
+            fail_msg: >-
+              La génération de l'identité s'est arrêtée aussitôt. Sur l'hôte :
+              journalctl -u {{ storj_identity_unit }} -n 30
+            quiet: true
+
+    - name: Publish a finished generation
+      when: storj_identity_finished | bool
+      block:
+        # Posées seulement ICI, d'un bloc : voir « Refuse a partial identity ».
+        - name: Publish the generated identity
+          ansible.builtin.copy:
+            src: "{{ storj_base_dir }}/identity-gen/out/storagenode/{{ item.name }}"
+            dest: "{{ storj_identity_dir }}/{{ item.name }}"
+            remote_src: true
+            owner: "{{ remote_username }}"
+            group: "{{ remote_username }}"
+            mode: "{{ item.mode }}"
+          loop:
+            - { name: ca.cert, mode: "0644" }
+            - { name: identity.cert, mode: "0644" }
+            - { name: ca.key, mode: "0600" }
+            - { name: identity.key, mode: "0600" }
+          loop_control:
+            label: "{{ item.name }}"
+
+        # `shred` : la clé du dossier de travail ne doit pas survivre en double.
+        - name: Wipe the work directory
+          ansible.builtin.shell: |
+            find {{ storj_base_dir }}/identity-gen -type f -name '*.key' -exec shred -u {} +
+            rm -rf {{ storj_base_dir }}/identity-gen
+          changed_when: true
+
+    - name: Remember that the identity is not ready yet
+      ansible.builtin.set_fact:
+        storj_identity_pending: "{{ not storj_identity_finished | bool }}"
+
+# La clé existe maintenant : la rapatrier tout de suite, avant que le nœud ne
+# démarre. Un disque qui meurt dans la première heure ne doit pas emporter
+# l'identité.
+- name: Back up the new identity to the control machine
+  ansible.builtin.include_tasks: keys.yml
+  when:
+    - not storj_identity_complete | bool
+    - not storj_identity_pending | bool

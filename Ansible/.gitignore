@@ -3,6 +3,8 @@
 # dit qui accède au parc et porte les adresses e-mail des titulaires.
 # Convention : keys/README.md.
 id*
+# Du code, pas une clé : le motif ci-dessus les exclurait du dépôt sans le dire.
+!playbooks/roles/storj-install/tasks/identity*.yml
 keys/*
 !keys/README.md
 

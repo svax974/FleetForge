@@ -7,7 +7,8 @@
 # regénère et repart de zéro. D'où, dans l'ordre :
 #   1. refus sans `-e confirm=yes` ;
 #   2. rapatriement de l'identité sur le poste de contrôle (`storj-install`,
-#      keys.yml) — un échec interrompt la purge AVANT toute suppression ;
+#      keys.yml), si l'hôte en a une — un échec interrompt la purge AVANT toute
+#      suppression ;
 #   3. seulement ensuite, la suppression.
 #
 #   ./play.sh <parc> purge-storj.yml --limit <hôte> -e confirm=yes
@@ -19,11 +20,19 @@
       La purge détruit l'identité du nœud Storj et toutes les données stockées.
       Relancer avec -e confirm=yes (l'identité sera d'abord rapatriée sur ce poste).
 
+- name: Look at what the identity directory holds
+  ansible.builtin.include_role:
+    name: storj-install
+    tasks_from: identity-state
+    public: true   # expose les defaults (chemins) aux tâches suivantes
+
+# Aucune identité publiée (génération jamais finie) : rien à rapatrier. Une identité
+# PARTIELLE passe, elle, par keys.yml, qui refuse : elle est peut-être la seule copie.
 - name: Back up the identity to the control machine first
   ansible.builtin.include_role:
     name: storj-install
     tasks_from: keys
-    public: true   # expose les defaults (chemins) aux tâches suivantes
+  when: storj_identity_any | bool
 
 - name: Run the remove role
   ansible.builtin.include_role:
@@ -60,6 +69,7 @@
   failed_when: false
 
 - name: Where the identity went
+  when: storj_identity_any | bool
   ansible.builtin.debug:
     msg: >-
       Identité sauvegardée dans {{ storj_keys_dir }}/{{ inventory_hostname }}/identity/

@@ -1,7 +1,9 @@
 ---
 # Déploiement complet d'un nœud Storj : contrôles, identité, conteneur, attente
 # du tableau de bord, rapatriement des clés.
-# Rejouable : une identité existante n'est jamais regénérée.
+# Rejouable : une identité existante n'est jamais regénérée, une génération en
+# cours n'est pas dérangée. Le premier passage s'arrête à la génération de
+# l'identité ; le passage suivant, une fois celle-ci finie, termine le déploiement.
 #
 #   ./play.sh <parc> deploy-storj.yml --limit <hôte> \
 #       -e storj_email=<adresse> -e storj_storage_size=2TB \
@@ -12,6 +14,21 @@
 
 - name: Prepare the identity
   ansible.builtin.include_tasks: identity.yml
+
+# Fin normale d'un premier passage, pas une erreur : `deploy-storj.yml` écarte
+# aussi cet hôte des plays suivants, qui supposent un conteneur démarré.
+- name: Stop here while the identity is being generated
+  when: storj_identity_pending | bool
+  block:
+    - name: Say how to continue
+      ansible.builtin.debug:
+        msg:
+          - "Identité en cours de génération sur {{ inventory_hostname }}, sans lien avec ce terminal : il peut être fermé."
+          - "Suivi sur l'hôte : systemctl status {{ storj_identity_unit }} (la génération est finie quand l'unité n'est plus active)."
+          - "Ensuite, rejouer la même commande : elle publie l'identité, la rapatrie et termine le déploiement. Un rejeu trop tôt ne perturbe rien."
+
+    - name: End this play for the host
+      ansible.builtin.meta: end_host
 
 - name: Deploy the node container
   ansible.builtin.include_tasks: node.yml
