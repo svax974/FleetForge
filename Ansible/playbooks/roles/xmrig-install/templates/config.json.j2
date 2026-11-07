@@ -45,7 +45,7 @@
 {% else %}
         {
             "url": "{{ xmrig_pool_url }}",
-            "user": "{{ xmrig_wallet }}",
+            "user": "{{ xmrig_wallet }}{{ '+' ~ (xmrig_pool_diff | int) if (xmrig_pool_diff | int) > 0 else '' }}",
             "pass": "{{ xmrig_worker }}",
             "keepalive": true,
             "tls": {{ xmrig_pool_tls | bool | to_json }}

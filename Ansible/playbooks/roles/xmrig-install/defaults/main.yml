@@ -60,8 +60,8 @@ xmrig_required_arch: x86_64
 server: ""
 xmrig_server: "{{ server | default('') }}"
 xmrig_profiles:
-  vps:      { msr: false, onegb: false, threads: 50,  governor: false, jit: false }
-  physical: { msr: true,  onegb: auto,  threads: 100, governor: true,  jit: true }
+  vps:      { msr: false, onegb: false, threads: 50,  governor: false, jit: false, diff: 10000 }
+  physical: { msr: true,  onegb: auto,  threads: 100, governor: true,  jit: true,  diff: 0 }
 # Profil effectif ; vide tant que `server` est invalide (validate.yml refuse alors le play).
 xmrig_profile: "{{ xmrig_profiles[xmrig_server] | default(xmrig_profiles.vps) }}"
 
@@ -70,6 +70,12 @@ xmrig_profile: "{{ xmrig_profiles[xmrig_server] | default(xmrig_profiles.vps) }}
 # (`Nice=19`, ordonnancement `idle`) : il cède la place au reste, mais la RAM (~2,5 Go) et la
 # chaleur restent.
 xmrig_max_threads_hint: "{{ xmrig_profile.threads }}"
+# Difficulté FIXE demandée au pool (mode pool seulement), 0 = celle du pool. Syntaxe
+# `<adresse>+<difficulté>` (SupportXMR, nanopool…). Un petit processeur (~150 H/s) reçoit sinon
+# une difficulté de 75 000 : une share toutes les 8 minutes, donc un worker affiché « hors ligne »
+# par le tableau de bord du pool entre deux shares. 10 000 ≈ une share par minute à 150 H/s ;
+# les gains ne changent pas (même travail, partagé en plus de shares).
+xmrig_pool_diff: "{{ xmrig_profile.diff | default(0) }}"
 # Pourcentage de temps de minage reversé aux développeurs de XMRig (défaut amont : 1).
 xmrig_donate_level: 1
 # Pages énormes : 1280 pages de 2 Mio par nœud NUMA (doc XMRig) = 2,5 Go réservés.
