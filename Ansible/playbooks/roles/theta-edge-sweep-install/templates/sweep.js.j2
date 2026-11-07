@@ -7,6 +7,10 @@
  * to the destination wallet.
  *
  * Run by cron — output goes to /var/log/theta-edge-sweep.log
+ *
+ * Metrics: after each run, one file for node_exporter's textfile collector
+ * (config.textfile_path). A sweep that stops running or keeps failing produces
+ * no other symptom — the balance just piles up on the node address.
  */
 
 'use strict';
@@ -39,6 +43,12 @@ function buildProvider() {
   return new thetajs.providers.HttpProvider(thetajs.networks.ChainIds.Mainnet);
 }
 
+/**
+ * Sweeps one instance. Resolves to { ok, sent }:
+ *   ok   false when the run could not do its job (keystore, RPC, password,
+ *        transaction); true when it did, including "nothing to send".
+ *   sent TFuel transferred (number), only after a broadcast transaction.
+ */
 async function sweepInstance(instance) {
   log(`--- Instance ${instance.id} ---`);
 
@@ -48,12 +58,12 @@ async function sweepInstance(instance) {
     files = fs.readdirSync(instance.keystore_dir).filter(f => !f.startsWith('.'));
   } catch (err) {
     log(`Instance ${instance.id}: keystore directory not found: ${instance.keystore_dir} — node may not have started yet`);
-    return;
+    return { ok: false };
   }
 
   if (files.length === 0) {
     log(`Instance ${instance.id}: no keystore file found in ${instance.keystore_dir}`);
-    return;
+    return { ok: false };
   }
 
   const keystoreFile = files[0];
@@ -69,7 +79,7 @@ async function sweepInstance(instance) {
     account = await provider.getAccount(address);
   } catch (err) {
     log(`Instance ${instance.id}: failed to query account — ${err.message}`);
-    return;
+    return { ok: false };
   }
 
   const tfuelWei = new BigNumber(account.coins.tfuelwei);
@@ -79,14 +89,14 @@ async function sweepInstance(instance) {
   // 3. Check threshold
   if (tfuelWei.isLessThanOrEqualTo(thresholdWei)) {
     log(`Instance ${instance.id}: below threshold (${config.threshold_tfuel} TFuel) — skipping`);
-    return;
+    return { ok: true };
   }
 
   // 4. Calculate amount to send
   const sendWei = tfuelWei.minus(keepWei).minus(FEE_WEI);
   if (sendWei.isLessThanOrEqualTo(0)) {
     log(`Instance ${instance.id}: nothing to send after keeping ${config.keep_tfuel} TFuel reserve`);
-    return;
+    return { ok: true };
   }
 
   const sendDisplay = sendWei.dividedBy(TEN18).toFixed(4);
@@ -98,7 +108,7 @@ async function sweepInstance(instance) {
     wallet = await thetajs.Wallet.fromEncryptedJson(keystoreJson, config.password);
   } catch (err) {
     log(`Instance ${instance.id}: failed to decrypt keystore — wrong password? (${err.message})`);
-    return;
+    return { ok: false };
   }
   wallet = wallet.connect(provider);
 
@@ -117,23 +127,82 @@ async function sweepInstance(instance) {
     result = await wallet.sendTransaction(tx);
   } catch (err) {
     log(`Instance ${instance.id}: transaction failed — ${err.message}`);
-    return;
+    return { ok: false };
   }
 
   const hash = result.hash || result.tx_hash || JSON.stringify(result);
   log(`Instance ${instance.id}: SUCCESS — tx hash ${hash}`);
+  return { ok: true, sent: sendWei.dividedBy(TEN18).toNumber() };
+}
+
+function readState() {
+  try {
+    return JSON.parse(fs.readFileSync(config.state_path, 'utf8'));
+  } catch (err) {
+    return {};
+  }
+}
+
+/** Writes the state (dates survive between runs) and the textfile metrics. */
+function publish(results) {
+  const now = Math.floor(Date.now() / 1000);
+  const state = readState();
+
+  for (const [id, r] of Object.entries(results)) {
+    const entry = state[id] || {};
+    entry.last_run = now;
+    entry.last_ok = r.ok ? 1 : 0;
+    if (r.ok) entry.last_success = now;
+    if (r.sent !== undefined) {
+      entry.last_transfer = now;
+      entry.last_transfer_tfuel = r.sent;
+    }
+    state[id] = entry;
+  }
+
+  const series = [
+    ['theta_sweep_last_run_timestamp_seconds', 'Date de la dernière exécution du sweep.', 'last_run'],
+    ['theta_sweep_last_run_ok', '1 si la dernière exécution a rempli son rôle, 0 sinon.', 'last_ok'],
+    ['theta_sweep_last_success_timestamp_seconds', 'Date de la dernière exécution réussie du sweep.', 'last_success'],
+    ['theta_sweep_last_transfer_timestamp_seconds', 'Date du dernier transfert de TFuel.', 'last_transfer'],
+    ['theta_sweep_last_transfer_tfuel', 'TFuel envoyés lors du dernier transfert.', 'last_transfer_tfuel'],
+  ];
+
+  let out = '';
+  for (const [name, help, key] of series) {
+    const lines = Object.entries(state)
+      .filter(([, e]) => e[key] !== undefined)
+      .map(([id, e]) => `${name}{theta_instance="${id}"} ${e[key]}`);
+    if (lines.length === 0) continue;
+    out += `# HELP ${name} ${help}\n# TYPE ${name} gauge\n${lines.join('\n')}\n`;
+  }
+
+  try {
+    fs.writeFileSync(config.state_path, JSON.stringify(state), { mode: 0o600 });
+    // Written aside then renamed: node_exporter never reads a half-written file.
+    const tmp = `${config.textfile_path}.tmp`;
+    fs.writeFileSync(tmp, out, { mode: 0o644 });
+    fs.renameSync(tmp, config.textfile_path);
+  } catch (err) {
+    log(`Metrics not written — ${err.message}`);
+  }
 }
 
 async function main() {
   log(`=== Theta Edge Sweep started — destination: ${config.destination} ===`);
 
+  const results = {};
   for (const instance of config.instances) {
     try {
-      await sweepInstance(instance);
+      results[instance.id] = await sweepInstance(instance);
     } catch (err) {
       log(`Instance ${instance.id}: unexpected error — ${err.message}`);
+      results[instance.id] = { ok: false };
     }
   }
+
+  publish(results);
+  if (Object.values(results).some(r => !r.ok)) process.exitCode = 1;
 
   log('=== Sweep complete ===');
 }

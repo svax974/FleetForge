@@ -3,15 +3,16 @@
 # TFuel rewards to theta_wallet whenever the balance exceeds theta_edge_sweep_threshold_tfuel.
 # theta_passwd and theta_wallet are read from group_vars — no extra-vars needed.
 
-- name: Fail if theta_passwd is not set
-  ansible.builtin.fail:
-    msg: "theta_passwd is required. Define it in group_vars."
-  when: theta_passwd is not defined or theta_passwd == ""
+- name: Validate the parameters
+  ansible.builtin.include_tasks: validate.yml
 
-- name: Fail if theta_wallet is not set
-  ansible.builtin.fail:
-    msg: "theta_wallet is required. Define it in group_vars."
-  when: theta_wallet is not defined or theta_wallet == ""
+# `exporter-sys-install` le crée déjà ; sans lui le collecteur `textfile` publie
+# `node_textfile_scrape_error 1` et les métriques du sweep n'apparaissent jamais.
+- name: Create the node_exporter textfile directory
+  ansible.builtin.file:
+    path: "{{ node_exporter_textfile_dir }}"
+    state: directory
+    mode: "0755"
 
 - name: Install Node.js
   ansible.builtin.apt:

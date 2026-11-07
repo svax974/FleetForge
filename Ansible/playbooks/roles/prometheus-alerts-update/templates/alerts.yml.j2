@@ -728,6 +728,39 @@ groups:
             Le nœud est isolé du réseau. Vérifier la sortie Internet du
             conteneur (P2P sortant uniquement, aucun port entrant requis).
 
+      # Transfert du TFuel (`theta-edge-sweep-install`) : cron quotidien dont le
+      # script dépose `theta_sweep_*` dans le collecteur textfile de node_exporter.
+      # Un sweep qui échoue ou ne tourne plus ne produit AUCUN autre symptôme : le
+      # solde s'accumule sur l'adresse du nœud. Les séries n'existent qu'après la
+      # première exécution — contrôle : `count(theta_sweep_last_run_ok)` doit
+      # valoir le nombre d'instances.
+      - alert: ThetaSweepFailing
+        expr: theta_sweep_last_run_ok == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Sweep TFuel en échec sur {{ '{{' }} $labels.instance {{ '}}' }}#{{ '{{' }} $labels.theta_instance {{ '}}' }}'
+          description: >-
+            La dernière exécution du cron n'a pas pu vider l'adresse du nœud
+            (keystore introuvable, RPC Theta injoignable, mot de passe ou
+            transaction refusés). Voir /var/log/theta-edge-sweep.log sur l'hôte.
+
+      # Le cron ne tourne plus (supprimé, Node.js cassé, hôte éteint) : la
+      # dernière réussite vieillit sans que `ThetaSweepFailing` ne voie rien.
+      - alert: ThetaSweepStale
+        expr: >-
+          (time() - theta_sweep_last_success_timestamp_seconds) / 3600
+          > {{ prom_alert_theta_sweep_max_age_hours }}
+        for: 1h
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Aucun sweep réussi depuis {{ '{{' }} $value | humanize {{ '}}' }} h sur {{ '{{' }} $labels.instance {{ '}}' }}#{{ '{{' }} $labels.theta_instance {{ '}}' }}'
+          description: >-
+            Le TFuel n'est plus rapatrié vers `theta_wallet`. Vérifier
+            `crontab -l` (tâche theta-edge-sweep) et le journal du sweep.
+
 {% endif %}
 {% if 'storj' in prom_alert_groups %}
 

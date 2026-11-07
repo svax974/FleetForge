@@ -1,0 +1,27 @@
+---
+# Contrôle des paramètres du sweep, AVANT toute écriture sur l'hôte. Joué par
+# `main.yml` et, en tête de `deploy-theta-edge.yml`, avant l'installation des
+# nœuds : un paramètre manquant ne doit pas laisser un nœud installé sans sweep.
+
+- name: Fail if theta_passwd is not set
+  ansible.builtin.assert:
+    that: theta_passwd is defined and theta_passwd | string | length > 0
+    fail_msg: "theta_passwd est requis (vault, group_vars du parc)."
+    quiet: true
+
+# La destination reçoit TOUT le TFuel des nœuds. Une adresse non quotée dans le
+# YAML (`theta_wallet: 0x64De…`) est lue comme un ENTIER hexadécimal : le script
+# enverrait alors les fonds à une adresse fausse, sans autre symptôme.
+- name: Fail if theta_wallet is not a valid address
+  ansible.builtin.assert:
+    that:
+      - theta_wallet is defined
+      - theta_wallet is string
+      - theta_wallet is match('^0x[0-9a-fA-F]{40}$')
+    fail_msg: >-
+      theta_wallet doit être une adresse Ethereum entre guillemets : 0x + 40
+      hexadécimaux (group_vars du parc). Reçu :
+      « {{ theta_wallet | default('(non défini)') }} »
+      ({{ theta_wallet | default('') | type_debug }}). Sans guillemets, YAML lit un
+      0x… comme un entier.
+    quiet: true

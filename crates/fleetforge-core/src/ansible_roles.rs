@@ -449,7 +449,7 @@ fn get_role_metadata(name: &str) -> (String, String) {
         "theta-edge-purge" => ("Purge noeuds Theta Edge".into(), "Rapatrie d'abord les clés sur le poste, puis supprime instances, exporter, sweep, données et clés. Exige -e confirm=yes.".into()),
         "theta-edge-security" => ("Sécurité noeuds Theta Edge".into(), "Vérifie Docker ≥ 28 et qu'aucun port Theta Edge n'est publié hors 127.0.0.1 (le RPC edgecore rend la mnémonique sans authentification).".into()),
         "theta-edge-monitoring" => ("Supervision noeuds Theta Edge".into(), "Exporter Python par hôte (9601) : theta_edge_up par instance, hauteur, retard sur la chaîne, pairs, soldes TFuel du noeud et du wallet interne. Enregistre la cible node-theta-edge et ouvre le scrape.".into()),
-        "theta-edge-sweep-install" => ("Sweep TFuel Theta Edge".into(), "Installe un script Node.js (cron) qui transfère le TFuel de l'adresse de chaque noeud vers theta_wallet au-delà d'un seuil. Instances : toutes celles de theta_edge_instances.".into()),
+        "theta-edge-sweep-install" => ("Sweep TFuel Theta Edge".into(), "Installe un script Node.js (cron) qui transfère le TFuel de l'adresse de chaque noeud vers theta_wallet au-delà d'un seuil, et publie son état (theta_sweep_*, collecteur textfile) pour les alertes. theta_wallet doit être une adresse 0x… valide. Instances : toutes celles de theta_edge_instances.".into()),
         "theta-edge-sweep-remove" => ("Suppression sweep TFuel".into(), "Supprime le cron et les scripts de sweep TFuel (Node.js et journal conservés).".into()),
         "theta-edge-sweep-purge" => ("Purge sweep TFuel".into(), "Supprime le sweep TFuel et son journal (Node.js conservé).".into()),
 

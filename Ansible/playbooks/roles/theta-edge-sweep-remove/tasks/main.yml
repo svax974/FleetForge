@@ -7,7 +7,14 @@
     name: "theta-edge-sweep"
     state: absent
 
-- name: Remove sweep directory (script, config, node_modules)
+# Sans cela la dernière date de succès vieillit pour toujours et ThetaSweepStale
+# sonne sur un sweep volontairement retiré.
+- name: Remove the sweep metrics
+  ansible.builtin.file:
+    path: "{{ node_exporter_textfile_dir | default('/var/lib/node_exporter/textfile_collector') }}/theta-edge-sweep.prom"
+    state: absent
+
+- name: Remove sweep directory (script, config, state, node_modules)
   ansible.builtin.file:
     path: /opt/theta-edge/sweep
     state: absent

@@ -3,6 +3,8 @@
   "password": "{{ theta_passwd }}",
   "threshold_tfuel": {{ theta_edge_sweep_threshold_tfuel }},
   "keep_tfuel": {{ theta_edge_sweep_keep_tfuel }},
+  "textfile_path": "{{ node_exporter_textfile_dir }}/theta-edge-sweep.prom",
+  "state_path": "/opt/theta-edge/sweep/state.json",
 {% if theta_edge_sweep_rpc_url != "" %}
   "rpc_url": "{{ theta_edge_sweep_rpc_url }}",
 {% endif %}

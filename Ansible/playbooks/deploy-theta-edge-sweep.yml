@@ -4,6 +4,11 @@
 #
 #   ./play.sh web3c deploy-theta-edge-sweep.yml --limit <hôte>
 #
+# Déjà joué par `deploy-theta-edge.yml` (tag `sweep`) : ce playbook ne sert qu'à
+# (re)poser le transfert seul. `theta_wallet` : adresse 0x… ENTRE GUILLEMETS,
+# contrôlée avant toute écriture. Le script publie `theta_sweep_*` (textfile de
+# node_exporter) pour `ThetaSweepFailing` / `ThetaSweepStale` (groupe `theta`).
+#
 # Vide l'adresse du NŒUD de chaque instance (la clé du keystore). Le wallet
 # interne de l'edgecore n'est pas concerné : son solde est suivi par
 # `theta_edge_balance_tfuel{account="wallet"}`.

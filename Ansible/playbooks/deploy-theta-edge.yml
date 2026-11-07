@@ -3,16 +3,28 @@
 #
 #   ./play.sh web3c deploy-theta-edge.yml --limit <hôte>
 #   ./play.sh web3c deploy-theta-edge.yml --limit <hôte> --tags monitoring   # cible seule
+#   ./play.sh web3c deploy-theta-edge.yml --limit <hôte> --tags sweep        # transfert seul
+#   ./play.sh web3c deploy-theta-edge.yml --limit <hôte> --tags alerts       # règles seules
 #   ./play.sh web3c export-theta-edge-keys.yml --limit <hôte>                 # clés seules
 #
 # Prérequis d'inventaire sur l'hôte :
 #   ansible_roles: [theta-edge]      # sans quoi l'hôte est ignoré
 #   theta_edge_instances: <N>        # défaut 1
-# et `theta_passwd` (vault) dans le group_vars du parc.
+# et dans le group_vars du parc : `theta_passwd` (vault) et `theta_wallet`
+# (adresse 0x… ENTRE GUILLEMETS, destination du TFuel). Les deux sont contrôlés
+# AVANT l'installation : un paramètre manquant ne laisse pas un nœud sans sweep.
 #
 # En fin d'installation, les clés de chaque instance sont rapatriées sur CE
 # poste, sous ~/.config/fleetforge/theta-edge/<hôte>/instance<N>/ (voir
 # theta-edge-install/tasks/keys.yml). Le Summary de staking est affiché.
+#
+# Transfert du TFuel : cron quotidien (`theta-edge-sweep-install`) qui vide
+# l'adresse du nœud de chaque instance vers `theta_wallet`. Il publie
+# `theta_sweep_*` (collecteur textfile de node_exporter) ; `ThetaSweepFailing` et
+# `ThetaSweepStale` (groupe `theta`, à déclarer dans `prom_alert_groups`) en
+# surveillent l'exécution. Les séries n'existent qu'APRÈS la première exécution
+# du cron (02:00 par défaut) : avant, ces deux alertes n'ont rien à évaluer.
+# `deploy-theta-edge-sweep.yml` reste utilisable seul.
 #
 # Ce playbook n'existait pas avant le 11/10/2026 alors que l'application le
 # décrivait : les rôles n'avaient jamais été assemblés.
@@ -30,14 +42,57 @@
   remote_user: "{{ remote_username }}"
   become: true
   pre_tasks:
+    # Hôtes qui portent la famille : le play des règles d'alerte les vise.
+    - name: Group the hosts that carry the theta-edge family
+      ansible.builtin.group_by:
+        key: "theta_edge_node_{{ 'yes' if 'theta-edge' in (ansible_roles | default([])) else 'no' }}"
+      tags: [always]
+
     # `hosts: all` + `--limit` oublié ne doit pas installer un nœud partout.
     - name: Skip hosts that do not carry the theta-edge family
       ansible.builtin.meta: end_host
       when: "'theta-edge' not in ansible_roles | default([])"
       tags: [always]
+
+    - name: Check the sweep parameters before installing anything
+      ansible.builtin.include_role:
+        name: theta-edge-sweep-install
+        tasks_from: validate
+        apply:
+          tags: [sweep]
+      tags: [sweep]
   roles:
     - theta-edge-install
     - theta-edge-security
     # Supervision (OBLIGATOIRE, voir CLAUDE.md) : un exporter par hôte (9601),
     # `theta_edge_up` par instance, cible `node-theta-edge`.
     - theta-edge-monitoring
+    - role: theta-edge-sweep-install
+      tags: [sweep]
+
+# Joué DEPUIS le nœud avec `delegate_to` vers la supervision, et non par un play
+# `hosts: prometheus1:monitor` : `--limit <hôte>` exclurait ce dernier, et les
+# alertes ne seraient jamais chargées — sans erreur, donc sans que rien ne le dise.
+# Une seule fois par run (premier hôte).
+- name: Règles d'alerte Theta Edge
+  hosts: theta_edge_node_yes
+  remote_user: "{{ remote_username }}"
+  tags: [alerts, monitoring]
+  vars:
+    prom_alerts_target: "{{ prometheus_host }}"
+  tasks:
+    - name: Fail when the alert group is not enabled for this parc
+      ansible.builtin.assert:
+        that: "'theta' in prom_alert_groups"
+        fail_msg: "`theta` absent de `prom_alert_groups` (group_vars du parc) : règles non chargées."
+      run_once: true
+
+    - name: Load the alert rules on the Prometheus host
+      ansible.builtin.include_role:
+        name: prometheus-alerts-update
+        apply:
+          delegate_to: "{{ prometheus_host }}"
+          become: true
+          tags: [alerts, monitoring]
+      when: inventory_hostname == groups['theta_edge_node_yes'] | first
+      tags: [alerts, monitoring]

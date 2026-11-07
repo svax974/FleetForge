@@ -253,6 +253,10 @@ prom_alert_storj_suspension_score: 0.8
 # Retard toléré sur la hauteur finalisée du réseau. ~6 s par bloc : 100 blocs
 # font une dizaine de minutes, au-delà le nœud ne suit plus.
 prom_alert_theta_lag_blocks: 100
+# Âge maximal du dernier sweep réussi, en heures. Le cron est quotidien
+# (`theta_edge_sweep_schedule`) : 48 h tolèrent une exécution manquée. À relever si
+# le calendrier est espacé.
+prom_alert_theta_sweep_max_age_hours: 48
 
 # ── OpenClaw (groupe `openclaw`) ──────────────────────────────────────────────
 # Âge maximal de la dernière exécution de la sonde des modèles. Trois fois

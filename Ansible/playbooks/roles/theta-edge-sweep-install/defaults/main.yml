@@ -20,5 +20,9 @@ theta_edge_sweep_keep_tfuel: 0.1
 # Cron schedule (default: daily at 02:00)
 theta_edge_sweep_schedule: "0 2 * * *"
 
+# Collecteur `textfile` de node_exporter : le script y dépose ses métriques
+# (`theta_sweep_*`). Même valeur que `exporter-sys-install`, qui crée le répertoire.
+node_exporter_textfile_dir: /var/lib/node_exporter/textfile_collector
+
 # Theta mainnet RPC — leave empty to use theta-js library default
 theta_edge_sweep_rpc_url: ""
