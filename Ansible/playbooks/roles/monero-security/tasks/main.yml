@@ -29,7 +29,7 @@
     that: >-
       monerosec_sockets.stdout_lines
       | select('search', ':(' ~ monerosec_rpc_port ~ '|' ~ monerosec_zmq_port ~ ')( |$)')
-      | reject('search', ' (127[.]0[.]0[.]1|[[]::1[]]):')
+      | reject('search', ' (127[.]0[.]0[.]1|.::1[]]):')
       | list | length == 0
     fail_msg: >-
       Le RPC complet ({{ monerosec_rpc_port }}) ou ZMQ ({{ monerosec_zmq_port }}) écoute au-delà de la boucle

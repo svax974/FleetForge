@@ -5,12 +5,14 @@
   changed_when: false
 
 # `ss` affiche `127.0.0.1:18088` ; 0.0.0.0, `*` ou [::] seraient une écoute publique.
+# Boucle locale IPv6 : `.::1[]]` (le `.` vaut le `[` d'ouverture de `[::1]`). Écrire `[[]::1[]]`
+# est valide mais Python 3.14 le signale (« Possible nested set ») à chaque exécution.
 - name: Fail when the miner API listens beyond loopback
   ansible.builtin.assert:
     that: >-
       xmrigsec_sockets.stdout_lines
       | select('search', ':' ~ xmrigsec_api_port ~ '( |$)')
-      | reject('search', ' (127[.]0[.]0[.]1|[[]::1[]]):')
+      | reject('search', ' (127[.]0[.]0[.]1|.::1[]]):')
       | list | length == 0
     fail_msg: >-
       L'API de XMRig ({{ xmrigsec_api_port }}) écoute au-delà de la boucle locale :

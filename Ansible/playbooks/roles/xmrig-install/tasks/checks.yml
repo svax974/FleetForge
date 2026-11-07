@@ -141,4 +141,4 @@
   when:
     - xmrig_msr | bool
     - xmrig_lockdown.rc | default(1) == 0
-    - xmrig_lockdown.stdout is not search('[[]none[]]')
+    - xmrig_lockdown.stdout is not search('.none[]]')

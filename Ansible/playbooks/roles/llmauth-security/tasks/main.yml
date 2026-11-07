@@ -44,12 +44,12 @@
   ansible.builtin.set_fact:
     llmauth_exposed_published: >-
       {{ llmauth_published.stdout_lines
-         | reject('match', '^(127[.][0-9.]+|[[]::1[]]):')
+         | reject('match', '^(127[.][0-9.]+|.::1[]]):')
          | list }}
     llmauth_exposed_listeners: >-
       {{ llmauth_listeners.stdout_lines
          | map('split') | map(attribute=3)
-         | reject('match', '^(127[.][0-9.]+|[[]::1[]]|[[]::ffff:127[.][0-9.]+[]])(%[^:]+)?:')
+         | reject('match', '^(127[.][0-9.]+|.::1[]]|.::ffff:127[.][0-9.]+[]])(%[^:]+)?:')
          | list }}
 
 - name: Verify the llmauth port is bound to loopback only
