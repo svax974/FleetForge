@@ -75,7 +75,12 @@ ff_api_user: ""
 #           read_tree, search_tree, tree_status) ;
 #   check — des `--check` SEULEMENT (run_ansible_playbook : check imposé,
 #           `check: false` refusé), run_status, syntax_check, le flux d'un run
-#           et la lecture SANS ssh_diagnose ; ni run réel, ni sync_tree ;
+#           et la lecture SANS ssh_diagnose ; ni run réel, ni sync_tree.
+#           `max_hosts` OBLIGATOIRE. Ni `extra_vars` ni `--diff` sauf
+#           `allow_extra_vars: true` (variables SANS défaut du playbook, valeurs
+#           `[A-Za-z0-9][A-Za-z0-9_.,:/@+=-]{0,255}`) / `allow_diff: true` : un
+#           `--check` exécute pour de vrai les tâches `check_mode: false`, dont des
+#           `shell:` qui interpolent des variables sans `| quote` ;
 #   run   — la lecture, plus run_ansible_playbook, run_status, syntax_check,
 #           sync_tree et le flux d'un run (toujours sous `--check` préalable du
 #           MÊME compte, ou d'un compte de son `accept_checks_from`).
@@ -88,11 +93,14 @@ ff_api_user: ""
 #   deny_playbooks: ["*-fleetforge.yml", "setup-server.yml"]   # motifs `*` `?` sur le NOM du playbook,
 #                                                              # y compris ceux qu'il importe
 #   max_hosts: 3     # `limit` obligatoire, groupes développés, jamais `no_limit`
+#   allow_playbooks: ["update-*.yml"]   # liste blanche : seuls ces playbooks se lancent
 # (compte « autonome » du hub : `mode: run` + `deny_playbooks` du noyau + `max_hosts`).
+# Checks sans humain (compte check) : liste blanche courte + tête synchronisée.
 # Un check n'autorise que le run réel du compte qui l'a fait. Un compte `run`
 # peut accepter nommément ceux d'AUTRES comptes check/run de cette liste
 # (passerelle : checks sous un compte `check`, runs réels sous un compte `run`) :
-#     - { user: gw_check, mode: check, deny_playbooks: [...], max_hosts: 3 }
+#     - { user: gw_check, mode: check, deny_playbooks: [...], max_hosts: 3,
+#         allow_playbooks: [...] }
 #     - { user: gw_run, mode: run, deny_playbooks: [...], max_hosts: 3,
 #         accept_checks_from: [gw_check] }
 # `user` : minuscules, chiffres et `_` (il nomme une variable). Le mot de passe

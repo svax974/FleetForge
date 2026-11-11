@@ -33,6 +33,13 @@
         | difference(ff_api_accounts | selectattr('mode', 'defined') | selectattr('mode', 'in', ['check', 'run'])
                      | map(attribute='user') | list)
         | length == 0
+      - item.mode | default('read') != 'check' or item.max_hosts is defined
+      - item.allow_playbooks is not defined or item.allow_playbooks is not string
+      - item.allow_playbooks | default(['x']) | length > 0
+      - item.allow_playbooks | default([]) | reject('match', '^[A-Za-z0-9_.*?-]{1,128}$') | list | length == 0
+      - item.allow_extra_vars | default(false) is boolean
+      - item.allow_diff | default(false) is boolean
+      - not (item.allow_extra_vars | default(false) or item.allow_diff | default(false)) or item.mode | default('read') == 'check'
     fail_msg: >-
       Compte `{{ item.user | default('?') }}` de `ff_api_accounts` invalide :
       `user` en minuscules, chiffres et `_` (il nomme la variable
@@ -41,7 +48,9 @@
       (défaut : [{{ parc_name }}]) ; `deny_playbooks` une liste de motifs
       (lettres, chiffres, _ . - * ?) ; `max_hosts` un entier de 1 à 1000 ;
       `accept_checks_from` (compte run seulement) une liste d'AUTRES comptes
-      de `ff_api_accounts` en mode check ou run.
+      de `ff_api_accounts` en mode check ou run ; un compte check porte
+      `max_hosts` ; `allow_playbooks` une liste NON VIDE de motifs ;
+      `allow_extra_vars` et `allow_diff` des booléens, compte check seulement.
   loop: "{{ ff_api_accounts }}"
   loop_control:
     label: "{{ item.user | default('?') }}"
