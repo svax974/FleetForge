@@ -64,7 +64,7 @@
     quiet: true
 
 - name: Measure what is about to be destroyed
-  ansible.builtin.command: du -sh {{ sync_data_dir }}
+  ansible.builtin.command: du -sh {{ sync_data_dir | quote }}
   become: true
   register: sync_purge_size
   changed_when: false

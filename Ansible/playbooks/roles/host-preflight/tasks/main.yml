@@ -93,7 +93,7 @@
 - name: Check the baseline invariants
   ansible.builtin.shell: |
     missing=""
-    for c in {{ preflight_required_commands | join(' ') }}; do
+    for c in {{ preflight_required_commands | map('quote') | join(' ') }}; do
       command -v "$c" >/dev/null 2>&1 || missing="$missing $c"
     done
     {% if preflight_require_docker %}
@@ -274,8 +274,8 @@
 
 - name: Look for an existing node_exporter target for this MACHINE
   ansible.builtin.shell: >-
-    grep -l '"{{ ansible_host }}:{{ node_exporter_scrape_port }}"'
-    /home/{{ remote_username }}/prometheus/prometheus-configs/exporter/*.json
+    grep -l '"'{{ ansible_host | quote }}:{{ node_exporter_scrape_port | quote }}'"'
+    /home/{{ remote_username | quote }}/prometheus/prometheus-configs/exporter/*.json
     2>/dev/null || true
   args:
     executable: /bin/bash

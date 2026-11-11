@@ -44,7 +44,7 @@
     ff_prune_keep: "{{ (whitelist | default([])) + (groups['proxies'] | default([]) | map('extract', hostvars, 'ansible_host') | list) }}"
 
 - name: Report the effective rules
-  ansible.builtin.shell: "ufw status numbered | grep -F '{{ ff_port }}' || true"
+  ansible.builtin.shell: "ufw status numbered | grep -F {{ ff_port | quote }} || true"
   become: true
   register: ff_ufw
   changed_when: false

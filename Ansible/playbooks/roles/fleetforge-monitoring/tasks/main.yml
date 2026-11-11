@@ -56,8 +56,8 @@
 # les DEUX parcs pendant des semaines, règles chargées et `health=ok`.
 - name: Check that a scrape job exists for this target
   ansible.builtin.shell: >-
-    grep -c "prometheus-configs/{{ ff_job }}/"
-    /home/{{ remote_username }}/prometheus/prometheus.yml || true
+    grep -c prometheus-configs/{{ ff_job | quote }}/
+    /home/{{ remote_username | quote }}/prometheus/prometheus.yml || true
   args:
     executable: /bin/bash
   delegate_to: "{{ prometheus_host }}"

@@ -103,7 +103,7 @@
 - name: Collect the listeners of the Postgres/Redis host ports
   ansible.builtin.shell: >-
     set -o pipefail;
-    ss -ltnH | awk '{print $4}' | grep -E ':({{ llm_proxy_infra_ports | join('|') }})$' || true
+    ss -ltnH | awk '{print $4}' | grep -E {{ (':(' ~ (llm_proxy_infra_ports | join('|')) ~ ')$') | quote }} || true
   args:
     executable: /bin/bash
   register: llm_proxy_infra_listeners

@@ -78,8 +78,8 @@
 # les DEUX parcs pendant des semaines, règles chargées et `health=ok`.
 - name: Check that a scrape job exists for this target
   ansible.builtin.shell: >-
-    grep -c "prometheus-configs/{{ pushgwmon_job }}/"
-    /home/{{ remote_username }}/prometheus/prometheus.yml || true
+    grep -c prometheus-configs/{{ pushgwmon_job | quote }}/
+    /home/{{ remote_username | quote }}/prometheus/prometheus.yml || true
   args:
     executable: /bin/bash
   delegate_to: "{{ prometheus_host }}"
@@ -104,10 +104,20 @@
 # `job` (renommé `exported_job`) et toute règle de fraîcheur filtrée par job
 # est muette. On vérifie qu'il est présent dans le bloc du job, pas seulement
 # quelque part dans le fichier.
+# Le nom du job entre dans un MOTIF awk ci-dessous : le quoting du shell n'y
+# suffit pas (un `/` ou un `{` y écrirait du code awk), d'où cette grammaire.
+- name: Check the scrape job name read into an awk pattern
+  ansible.builtin.assert:
+    that: pushgwmon_job is match('^[A-Za-z0-9_-]{1,64}$')
+    fail_msg: "pushgwmon_job : lettres, chiffres, _ et - seulement (64 au plus)"
+    quiet: true
+  tags: [monitoring]
+
 - name: Check that the scrape job keeps the pushed labels
+  # unquoted-ok: `pushgwmon_job` est dans un programme awk entre apostrophes ; sa grammaire est vérifiée par l'assert précédent.
   ansible.builtin.shell: >-
     awk '/job_name: *.{{ pushgwmon_job }}./{f=1;next} /job_name:/{f=0} f && /honor_labels: *true/{c++} END{print c+0}'
-    /home/{{ remote_username }}/prometheus/prometheus.yml
+    /home/{{ remote_username | quote }}/prometheus/prometheus.yml
   args:
     executable: /bin/bash
   delegate_to: "{{ prometheus_host }}"

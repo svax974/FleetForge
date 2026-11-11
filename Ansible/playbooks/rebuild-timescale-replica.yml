@@ -50,7 +50,7 @@
     - name: Le primaire courant est en marche et inscriptible
       ansible.builtin.command:
         cmd: >-
-          docker exec papangmetrics-timescaledb psql -U {{ rb_user }} -d {{ rb_db }} -Atc
+          docker exec papangmetrics-timescaledb psql -U {{ rb_user | quote }} -d {{ rb_db | quote }} -Atc
           "SELECT pg_is_in_recovery()"
       delegate_to: "{{ tsdb_primary }}"
       run_once: true

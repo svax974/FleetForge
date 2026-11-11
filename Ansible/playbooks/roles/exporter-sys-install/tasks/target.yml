@@ -41,8 +41,8 @@
 
 - name: Look for an existing node_exporter target for this MACHINE
   ansible.builtin.shell: >-
-    grep -l '"{{ exporter_scrape_target }}"'
-    {{ prometheus_home }}/prometheus-configs/exporter/*.json
+    grep -l '"'{{ exporter_scrape_target | quote }}'"'
+    {{ prometheus_home | quote }}/prometheus-configs/exporter/*.json
     2>/dev/null || true
   args:
     executable: /bin/bash

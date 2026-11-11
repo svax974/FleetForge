@@ -34,9 +34,12 @@
   remote_user: "{{ remote_username }}"
   gather_facts: false
   vars:
-    tsha_cmd: "/usr/bin/python3 /home/{{ remote_username }}/timescale-ha/tsha.py --config /home/{{ remote_username }}/timescale-ha/config.json"
+    # Commande en plusieurs mots, découpée par le module command (shlex) : seules ses
+    # parties variables sont protégées.
+    tsha_cmd: "/usr/bin/python3 /home/{{ remote_username | quote }}/timescale-ha/tsha.py --config /home/{{ remote_username | quote }}/timescale-ha/config.json"
   tasks:
     - name: État de la paire, vu de brk1
+      # unquoted-ok: `tsha_cmd` est la commande elle-même, en plusieurs mots (vars: du play, parties variables protégées).
       ansible.builtin.command:
         cmd: "{{ tsha_cmd }} status"
       register: fo_status

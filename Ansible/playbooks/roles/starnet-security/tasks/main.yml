@@ -15,7 +15,7 @@
 # amont écoute en dur sur 127.0.0.1 : ce contrôle garantit qu'une version
 # future ne l'a pas changé sans qu'on le voie.
 - name: Read the sockets bound on the sidecar port
-  ansible.builtin.command: "ss -ltnH 'sport = :{{ starnet_sidecar_port }}'"
+  ansible.builtin.command: "ss -ltnH 'sport = :'{{ starnet_sidecar_port | quote }}"
   become: true
   register: starnet_sidecar_sockets
   changed_when: false
@@ -119,7 +119,7 @@
     - not ansible_check_mode
 
 - name: Report the effective rules
-  ansible.builtin.shell: "ufw status numbered | grep -F '{{ starnet_port }}' || true"
+  ansible.builtin.shell: "ufw status numbered | grep -F {{ starnet_port | quote }} || true"
   become: true
   register: starnet_ufw
   changed_when: false

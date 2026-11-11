@@ -29,7 +29,7 @@
 - name: Check that the port is not published by Docker
   ansible.builtin.shell: >-
     docker ps --format '{% raw %}{{.Ports}}{% endraw %}' 2>/dev/null
-    | grep -c ':{{ llamacppsec_port }}->' || true
+    | grep -c ':'{{ llamacppsec_port | quote }}'->' || true
   args:
     executable: /bin/bash
   register: llamacppsec_docker

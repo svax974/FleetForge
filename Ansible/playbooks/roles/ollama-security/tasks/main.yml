@@ -30,7 +30,7 @@
 - name: Check that Ollama is not published by Docker
   ansible.builtin.shell: >-
     docker ps --format '{% raw %}{{.Ports}}{% endraw %}' 2>/dev/null
-    | grep -c ':{{ ollamasec_port }}->' || true
+    | grep -c ':'{{ ollamasec_port | quote }}'->' || true
   args:
     executable: /bin/bash
   register: ollamasec_docker

@@ -274,7 +274,7 @@
 # service démarré : autant constater ici ce que pipx a réellement posé.
 - name: Check the ansible the application will run
   ansible.builtin.command:
-    cmd: "/home/{{ ff_user }}/.local/bin/ansible-playbook --version"
+    cmd: "/home/{{ ff_user | quote }}/.local/bin/ansible-playbook --version"
   become: true
   become_user: "{{ ff_user }}"
   register: ff_ansible_version

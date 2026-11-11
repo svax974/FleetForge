@@ -675,7 +675,7 @@
 # mis en pause, ni couper une veille qu'il vient d'activer.
 - name: List the automations
   ansible.builtin.command:
-    cmd: "{{ openclaw_binary }} automations list --json"
+    cmd: "{{ openclaw_binary | quote }} automations list --json"
   become: true
   become_user: "{{ openclaw_user }}"
   environment:

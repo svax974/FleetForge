@@ -87,7 +87,7 @@
 - name: Compute the source content hash
   ansible.builtin.shell: |
     set -o pipefail
-    cd '{{ sync_server_build_dir }}' \
+    cd {{ sync_server_build_dir | quote }} \
       && find . -type f | LC_ALL=C sort | xargs sha256sum | sha256sum | cut -c1-12
   args:
     executable: /bin/bash

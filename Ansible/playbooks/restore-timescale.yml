@@ -58,7 +58,7 @@
         - name: Refuser un réplica
           ansible.builtin.command:
             cmd: >-
-              docker exec papangmetrics-timescaledb psql -U {{ tsdb_user }} -d {{ tsdb_db }} -Atc
+              docker exec papangmetrics-timescaledb psql -U {{ tsdb_user | quote }} -d {{ tsdb_db | quote }} -Atc
               "SELECT pg_is_in_recovery()"
           register: restore_recovery
           changed_when: false

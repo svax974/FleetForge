@@ -59,7 +59,7 @@
 # chiffrées, que le templating refuse de relire en JSON.
 - name: Read the host and group names of the other parcs
   ansible.builtin.command:
-    cmd: "ansible-inventory -i {{ item }} --graph"
+    cmd: "ansible-inventory -i {{ item | quote }} --graph"
   loop: "{{ ff_inv_all | difference(ff_inv_own) }}"
   register: ff_other_inv
   changed_when: false

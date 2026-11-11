@@ -62,7 +62,7 @@
   when: "'Status: active' not in pushgwsec_ufw_state.stdout"
 
 - name: Report the effective rules
-  ansible.builtin.shell: "ufw status numbered | grep -F '{{ pushgateway_port }}' || true"
+  ansible.builtin.shell: "ufw status numbered | grep -F {{ pushgateway_port | quote }} || true"
   become: true
   register: pushgwsec_ufw
   changed_when: false

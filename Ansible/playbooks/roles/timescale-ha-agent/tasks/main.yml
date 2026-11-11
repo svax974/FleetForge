@@ -99,7 +99,7 @@
 # même UID, sans quoi HAProxy (utilisateur `haproxy` de l'image) ne peut pas y créer sa socket.
 - name: Read the arbiter user's uid and gid
   ansible.builtin.command:
-    cmd: "id {{ item }} {{ tsha_user }}"
+    cmd: "id {{ item | quote }} {{ tsha_user | quote }}"
   loop: ["-u", "-g"]
   register: tsha_ids
   changed_when: false
@@ -182,7 +182,7 @@
 
 - name: Arbiter status
   ansible.builtin.command:
-    cmd: "/usr/bin/python3 {{ tsha_dir }}/tsha.py --config {{ tsha_dir }}/config.json status"
+    cmd: "/usr/bin/python3 {{ tsha_dir | quote }}/tsha.py --config {{ tsha_dir | quote }}/config.json status"
   register: tsha_status
   changed_when: false
   check_mode: false

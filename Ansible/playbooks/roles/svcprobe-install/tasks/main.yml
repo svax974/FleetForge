@@ -135,8 +135,8 @@
 
 - name: Look for an existing svcprobe target for this MACHINE
   ansible.builtin.shell: >-
-    grep -l '"{{ ansible_host }}:{{ svcprobe_port }}"'
-    /home/{{ remote_username }}/prometheus/prometheus-configs/{{ svcprobe_job }}/*.json
+    grep -l '"'{{ ansible_host | quote }}:{{ svcprobe_port | quote }}'"'
+    /home/{{ remote_username | quote }}/prometheus/prometheus-configs/{{ svcprobe_job | quote }}/*.json
     2>/dev/null || true
   args:
     executable: /bin/bash

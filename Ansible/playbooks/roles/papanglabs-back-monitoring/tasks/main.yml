@@ -100,7 +100,7 @@
 # ignore.
 - name: Read the deployed metrics token
   ansible.builtin.shell:
-    cmd: "grep -E '^METRICS_TOKEN=.+$' {{ pgb_dir }}/back/.env | head -1 | cut -d= -f2-"
+    cmd: "grep -E '^METRICS_TOKEN=.+$' {{ pgb_dir | quote }}/back/.env | head -1 | cut -d= -f2-"
     executable: /bin/bash
   become: true
   register: pgb_deployed_token

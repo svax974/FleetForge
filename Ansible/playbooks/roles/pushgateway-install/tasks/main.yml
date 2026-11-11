@@ -36,7 +36,7 @@
 # les deux.
 - name: Read the installed version
   ansible.builtin.command:
-    cmd: "{{ pushgateway_bin_path }} --version"
+    cmd: "{{ pushgateway_bin_path | quote }} --version"
   register: pushgw_installed
   changed_when: false
   failed_when: false

@@ -174,8 +174,8 @@
 # inexistant sur les DEUX parcs pendant des semaines.
 - name: Check that a scrape job reads each target directory
   ansible.builtin.shell: >-
-    grep -c "prometheus-configs/{{ item.job }}/"
-    {{ aiserver_prometheus_home }}/prometheus.yml || true
+    grep -c prometheus-configs/{{ item.job | quote }}/
+    {{ aiserver_prometheus_home | quote }}/prometheus.yml || true
   args:
     executable: /bin/bash
   delegate_to: "{{ prometheus_host }}"

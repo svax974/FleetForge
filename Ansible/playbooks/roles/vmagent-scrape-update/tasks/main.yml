@@ -48,7 +48,7 @@
 - name: Read the original global scrape interval
   ansible.builtin.shell: |
     set -eu
-    src='{{ _vmagent_backup if _vmagent_backup_stat.stat.exists else _vmagent_file }}'
+    src={{ (_vmagent_backup if _vmagent_backup_stat.stat.exists else _vmagent_file) | quote }}
     grep -m1 -E '^  scrape_interval:' "$src" | sed -E 's/^  scrape_interval: *//; s/ *#.*$//'
   args:
     executable: /bin/bash
@@ -62,7 +62,7 @@
 - name: Read the interval the file carries now
   ansible.builtin.shell: |
     set -eu
-    grep -m1 -E '^  scrape_interval:' '{{ _vmagent_file }}' | sed -E 's/^  scrape_interval: *//; s/ *#.*$//'
+    grep -m1 -E '^  scrape_interval:' {{ _vmagent_file | quote }} | sed -E 's/^  scrape_interval: *//; s/ *#.*$//'
   args:
     executable: /bin/bash
   register: _vmagent_current
