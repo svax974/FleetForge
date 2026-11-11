@@ -10,6 +10,12 @@
 # Prérequis d'inventaire sur l'hôte :
 #   ansible_roles: [theta-edge]      # sans quoi l'hôte est ignoré
 #   theta_edge_instances: <N>        # défaut 1
+# Plafonds par instance (host_vars, voir theta-edge-install/defaults) :
+#   theta_edge_mem_limit: "3g"       # RAM ET swap du conteneur (memswap = mem) ; "" ou 0 = sans plafond
+#   theta_edge_pids_limit: 1024
+# À dimensionner sur la machine : plafond × instances + le reste de l'hôte < RAM.
+# Sans plafond, un job lavita a saturé la RAM et le swap de la machine `ctdapi`
+# (09/11/2026) et fait tomber CTDAPI. Modifier un plafond recrée le conteneur.
 # et dans le group_vars du parc : `theta_passwd` (vault) et `theta_wallet`
 # (adresse 0x… ENTRE GUILLEMETS, destination du TFuel). Les deux sont contrôlés
 # AVANT l'installation : un paramètre manquant ne laisse pas un nœud sans sweep.

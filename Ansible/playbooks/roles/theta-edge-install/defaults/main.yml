@@ -35,3 +35,22 @@ theta_edge_port_step: 10
 # Clés rapatriées sur le POSTE de contrôle à la fin de l'installation
 # (tasks/keys.yml) — hors dépôt, à côté du mot de passe du vault.
 theta_edge_keys_dir: "{{ lookup('env', 'HOME') }}/.config/fleetforge/theta-edge"
+
+# ── Plafonds de ressources PAR INSTANCE ────────────────────────────────────
+# Un job EdgeCloud (« lavita » : question_answering.py) lance des dizaines de
+# workers Python. Le 09/11/2026, sans plafond, une instance est montée à
+# 5,3 Go de RAM et ~700 processus sur la machine partagée de `ctdapi` (7,8 Go) :
+# swap de 16 Go plein, OOM killer, `ctdapi-back` en boucle de redémarrage
+# (526) et toutes les applications qui lisent CTDAPI en 502.
+#
+# Dimensionner PAR HÔTE (host_vars) : plafond d'instance × `theta_edge_instances`
+# + ce que fait tourner le reste de la machine doit rester sous sa RAM. Au-delà
+# du plafond, le noyau tue les workers DU CONTENEUR (jamais les voisins) et le
+# job dégradé échoue ou ralentit, au lieu d'étouffer l'hôte.
+# Une valeur vide (`""`) ou `0` retire le plafond correspondant.
+theta_edge_mem_limit: "3g"
+# Même valeur que la mémoire : aucun swap pour le conteneur. Sans cela il
+# pagine vers le swap de l'hôte et ralentit tous ses voisins avant d'être tué.
+theta_edge_memswap_limit: "{{ theta_edge_mem_limit }}"
+# Garde-fou contre une fourche incontrôlée (~700 pids observés à 90 workers).
+theta_edge_pids_limit: 1024

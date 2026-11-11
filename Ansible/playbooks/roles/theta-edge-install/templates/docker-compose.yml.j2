@@ -3,6 +3,13 @@ services:
     image: {{ theta_edge_image }}
     container_name: theta-edge-{{ theta_edge_id }}
     restart: unless-stopped
+{% if theta_edge_mem_limit | string not in ['', '0'] %}
+    mem_limit: {{ theta_edge_mem_limit }}
+    memswap_limit: {{ theta_edge_memswap_limit }}
+{% endif %}
+{% if theta_edge_pids_limit | string not in ['', '0'] %}
+    pids_limit: {{ theta_edge_pids_limit }}
+{% endif %}
     environment:
       - EDGELAUNCHER_CONFIG_PATH=/edgelauncher/data/mainnet
       - PASSWORD={{ theta_passwd }}
