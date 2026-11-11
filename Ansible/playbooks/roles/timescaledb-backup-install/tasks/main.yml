@@ -109,9 +109,9 @@
 - name: Move the legacy backup into the new layout
   ansible.builtin.shell: >-
     set -o pipefail;
-    dest="{{ tsdb_backup_dest_dir }}/{{ tsdb_db }}-$(date -d @{{ tsdb_legacy_dump.stat.mtime | default(0) | int }} +%Y-%m-%dT%H%M%S).sql.gz";
-    [ -e "$dest" ] || mv "{{ tsdb_backup_legacy_dir }}/{{ tsdb_db }}-latest.sql.gz" "$dest";
-    echo "{{ tsdb_legacy_dump.stat.mtime | default(0) | int }}" > "{{ tsdb_backup_dest_dir }}/last-success"
+    dest={{ tsdb_backup_dest_dir | quote }}"/"{{ tsdb_db | quote }}"-$(date -d @{{ tsdb_legacy_dump.stat.mtime | default(0) | int }} +%Y-%m-%dT%H%M%S).sql.gz";
+    [ -e "$dest" ] || mv {{ tsdb_backup_legacy_dir | quote }}"/"{{ tsdb_db | quote }}"-latest.sql.gz" "$dest";
+    echo "{{ tsdb_legacy_dump.stat.mtime | default(0) | int }}" > {{ tsdb_backup_dest_dir | quote }}"/last-success"
   args:
     executable: /bin/bash
     creates: "{{ tsdb_backup_dest_dir }}/last-success"

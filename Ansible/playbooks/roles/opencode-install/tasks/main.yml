@@ -62,7 +62,7 @@
 # `opencode_version` figé ne redescendrait jamais après une installation en
 # `latest`, et le rôle mentirait sur ce qui tourne réellement.
 - name: Read the installed version
-  ansible.builtin.command: "{{ opencode_binary }} --version"
+  ansible.builtin.command: "{{ opencode_binary | quote }} --version"
   register: opencode_installed
   changed_when: false
   failed_when: false
@@ -184,7 +184,7 @@
   no_log: "{{ opencode_zen_api_key | length > 0 }}"
 
 - name: Verify the binary answers
-  ansible.builtin.command: "{{ opencode_binary }} --version"
+  ansible.builtin.command: "{{ opencode_binary | quote }} --version"
   register: opencode_check
   changed_when: false
 

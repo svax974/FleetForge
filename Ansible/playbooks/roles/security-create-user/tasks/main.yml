@@ -36,7 +36,7 @@
 # Authorize the user to run services
 - name: Authorize user to run services
   ansible.builtin.command:
-    cmd: "loginctl enable-linger {{ remote_username }}"
+    cmd: "loginctl enable-linger {{ remote_username | quote }}"
 
 - name: Authorize the parc keys for "{{ remote_username }}"
   ansible.builtin.include_role:

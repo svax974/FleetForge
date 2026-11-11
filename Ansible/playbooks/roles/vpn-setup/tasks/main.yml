@@ -50,10 +50,10 @@
         dest: /root/pritunl.dump
     - name: Drop DB if exists
       ansible.builtin.command:
-        cmd: mongosh mongodb://localhost:{{ mongodb_port }}/pritunl --eval "db.getSiblingDB('pritunl')"
+        cmd: mongosh mongodb://localhost:{{ mongodb_port | quote }}/pritunl --eval "db.getSiblingDB('pritunl')"
     - name: Import Pritunl dump
       ansible.builtin.command:
-        cmd: mongorestore --nsInclude=pritunl.* mongodb://localhost:{{ mongodb_port }}/pritunl --archive=/root/pritunl.dump
+        cmd: mongorestore --nsInclude=pritunl.* mongodb://localhost:{{ mongodb_port | quote }}/pritunl --archive=/root/pritunl.dump
     - name: Start pritunl service
       ansible.builtin.systemd_service:
         name: pritunl
@@ -65,7 +65,7 @@
     cmd: pritunl set app.redirect_server false
 - name: Update Pritunl config to listen on vpn_tcp_port
   ansible.builtin.command:
-    cmd: pritunl set app.server_port {{ vpn_tcp_port }}
+    cmd: pritunl set app.server_port {{ vpn_tcp_port | quote }}
 
 - name: Prepare MongoDB
   block:

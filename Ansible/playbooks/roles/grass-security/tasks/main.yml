@@ -18,7 +18,7 @@
     quiet: true
 
 - name: List the published ports of the Grass container
-  ansible.builtin.command: "docker port {{ grasssec_container }}"
+  ansible.builtin.command: "docker port {{ grasssec_container | quote }}"
   register: grasssec_ports
   changed_when: false
 

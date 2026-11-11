@@ -120,7 +120,7 @@
     cmd: >-
       set -o pipefail;
       curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs
-      | sh -s -- -y --default-toolchain {{ scripting_rust_toolchain }}
+      | sh -s -- -y --default-toolchain {{ scripting_rust_toolchain | quote }}
     creates: "/home/{{ remote_username }}/.cargo/bin/rustup"
     executable: /bin/bash
   when: "'rust' in scripting_toolchain"

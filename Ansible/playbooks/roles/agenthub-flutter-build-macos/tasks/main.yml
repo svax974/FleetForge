@@ -173,7 +173,7 @@
 # Licences : fichiers dans <sdk>/licenses ; équivalent non interactif de `flutter doctor --android-licenses`.
 # stdin = des « y », lus seulement s'il reste des licences à accepter.
 - name: Accept the Android SDK licenses
-  ansible.builtin.command: "{{ agenthub_macos_sdkmanager }} --sdk_root={{ agenthub_android_sdk_dir }} --licenses"
+  ansible.builtin.command: "{{ agenthub_macos_sdkmanager | quote }} --sdk_root={{ agenthub_android_sdk_dir | quote }} --licenses"
   args:
     stdin: "{{ 'y\n' * 40 }}"
   environment: "{{ agenthub_macos_env }}"
@@ -181,7 +181,7 @@
   changed_when: "'Review licenses' in agenthub_macos_licenses.stdout"
 
 - name: List the installed Android SDK packages
-  ansible.builtin.command: "{{ agenthub_macos_sdkmanager }} --sdk_root={{ agenthub_android_sdk_dir }} --list_installed"
+  ansible.builtin.command: "{{ agenthub_macos_sdkmanager | quote }} --sdk_root={{ agenthub_android_sdk_dir | quote }} --list_installed"
   environment: "{{ agenthub_macos_env }}"
   register: agenthub_macos_sdk_installed
   changed_when: false
@@ -221,14 +221,14 @@
 
 # ── Flutter : SDK Android, JDK, cache ───────────────────────────────────────────────────────────
 - name: Read the Flutter settings
-  ansible.builtin.command: "{{ agenthub_macos_flutter_dir }}/bin/flutter config --list"
+  ansible.builtin.command: "{{ agenthub_macos_flutter_dir | quote }}/bin/flutter config --list"
   environment: "{{ agenthub_macos_env }}"
   register: agenthub_macos_flutter_config
   changed_when: false
   failed_when: false
 
 - name: Point Flutter at the Android SDK and the JDK
-  ansible.builtin.command: "{{ agenthub_macos_flutter_dir }}/bin/flutter config --no-analytics --android-sdk {{ agenthub_android_sdk_dir | quote }} --jdk-dir {{ agenthub_macos_java_home | quote }}"
+  ansible.builtin.command: "{{ agenthub_macos_flutter_dir | quote }}/bin/flutter config --no-analytics --android-sdk {{ agenthub_android_sdk_dir | quote }} --jdk-dir {{ agenthub_macos_java_home | quote }}"
   environment: "{{ agenthub_macos_env }}"
   when: >-
     ('android-sdk: ' ~ agenthub_android_sdk_dir) not in agenthub_macos_flutter_config.stdout
@@ -236,7 +236,7 @@
   changed_when: true
 
 - name: Warm the Flutter cache (iOS, macOS, Android and web artifacts)
-  ansible.builtin.command: "{{ agenthub_macos_flutter_dir }}/bin/flutter precache --ios --macos --android --web"
+  ansible.builtin.command: "{{ agenthub_macos_flutter_dir | quote }}/bin/flutter precache --ios --macos --android --web"
   environment: "{{ agenthub_macos_env }}"
   register: agenthub_macos_precache
   changed_when: "'ownloading' in (agenthub_macos_precache.stdout ~ agenthub_macos_precache.stderr)"
@@ -245,7 +245,7 @@
 # Informatif : flutter doctor signale aussi Chrome, Android Studio, périphériques… sans conséquence pour
 # un build non interactif, et les identités de signature (trousseau) ne sont pas gérées ici.
 - name: Run flutter doctor
-  ansible.builtin.command: "{{ agenthub_macos_flutter_dir }}/bin/flutter doctor -v"
+  ansible.builtin.command: "{{ agenthub_macos_flutter_dir | quote }}/bin/flutter doctor -v"
   environment: "{{ agenthub_macos_env }}"
   register: agenthub_macos_doctor
   changed_when: false

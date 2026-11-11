@@ -7,7 +7,7 @@
   failed_when: ollama_installed.rc != 0
 
 - name: Pull the requested model
-  shell: "ollama pull {{ ollama_model_name }}"
+  shell: "ollama pull {{ ollama_model_name | quote }}"
   register: pull_result
   when: ollama_model_name is defined
 

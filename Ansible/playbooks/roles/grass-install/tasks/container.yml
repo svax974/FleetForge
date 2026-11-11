@@ -3,7 +3,7 @@
 # (session, compte connecté) vit dans `grass_config_dir`.
 
 - name: Read the uid and gid of the service account
-  ansible.builtin.command: "id -{{ item }} {{ remote_username }}"
+  ansible.builtin.command: "id -{{ item | quote }} {{ remote_username | quote }}"
   loop: [u, g]
   register: grass_ids
   changed_when: false

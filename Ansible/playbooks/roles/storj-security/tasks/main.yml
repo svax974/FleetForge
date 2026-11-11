@@ -21,7 +21,7 @@
     quiet: true
 
 - name: List the published ports of the Storj node
-  ansible.builtin.command: "docker port {{ storjsec_container }}"
+  ansible.builtin.command: "docker port {{ storjsec_container | quote }}"
   register: storjsec_ports
   changed_when: false
 

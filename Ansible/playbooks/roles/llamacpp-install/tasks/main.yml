@@ -56,7 +56,7 @@
 # Contrôle immédiat : une bibliothèque manquante ou une glibc trop ancienne se
 # verrait sinon au premier démarrage d'instance, en boucle de redémarrage.
 - name: Check that llama-server runs on this machine
-  ansible.builtin.command: "{{ llamacpp_current_dir }}/llama-server --version"
+  ansible.builtin.command: "{{ llamacpp_current_dir | quote }}/llama-server --version"
   register: llamacpp_version_check
   changed_when: false
 
