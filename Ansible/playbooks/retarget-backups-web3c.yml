@@ -73,7 +73,7 @@
   remote_user: "{{ remote_username }}"
   tasks:
     - name: Interroger la destination via postgres-restore.sh --check
-      ansible.builtin.command: "{{ pgbak_dir }}/postgres-restore.sh --check"
+      ansible.builtin.command: "{{ pgbak_dir | quote }}/postgres-restore.sh --check"
       changed_when: false
       register: tradekong_check
 
@@ -86,7 +86,7 @@
   remote_user: "{{ remote_username }}"
   tasks:
     - name: Interroger la destination via postgres-restore.sh --check
-      ansible.builtin.command: "{{ pgbak_dir }}/postgres-restore.sh --check"
+      ansible.builtin.command: "{{ pgbak_dir | quote }}/postgres-restore.sh --check"
       changed_when: false
       register: ctdapi_check
 
@@ -101,7 +101,7 @@
   gather_facts: false
   tasks:
     - name: Lancer la sauvegarde en tâche de fond
-      ansible.builtin.shell: "{{ pgbak_dir }}/postgres-backup.sh >> {{ pgbak_dir }}/backup.log 2>&1"
+      ansible.builtin.shell: "{{ pgbak_dir | quote }}/postgres-backup.sh >> {{ pgbak_dir | quote }}/backup.log 2>&1"
       async: 3600
       poll: 0
       changed_when: true

@@ -83,7 +83,7 @@
   remote_user: "{{ remote_username }}"
   tasks:
     - name: Interroger la destination via brk-restore.sh --check
-      ansible.builtin.command: "/home/{{ remote_username }}/brk-restore.sh --check"
+      ansible.builtin.command: "/home/{{ remote_username | quote }}/brk-restore.sh --check"
       changed_when: false
       register: brk_check
 
@@ -127,7 +127,7 @@
     # NOUVELLE destination, celle-ci sort sans rien faire. Sur une destination
     # fraîchement repointée il n'y a rien, donc elle part réellement.
     - name: Lancer la sauvegarde en tâche de fond
-      ansible.builtin.shell: "{{ backup_cmd }} >> {{ backup_log }} 2>&1"
+      ansible.builtin.shell: "{{ backup_cmd | quote }} >> {{ backup_log | quote }} 2>&1"
       async: 86400
       poll: 0
       changed_when: true

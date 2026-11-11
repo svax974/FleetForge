@@ -68,8 +68,9 @@
 
         # L'arrêt propre peut durer jusqu'à 5 min sur un primaire chargé : asynchrone, sondage espacé.
         - name: Basculer vers le réplica choisi
+          # unquoted-ok: `tsha_cmd` est la commande elle-même, en plusieurs mots (vars: du play, parties variables protégées).
           ansible.builtin.command:
-            cmd: "{{ tsha_cmd }} switchover --to {{ to }}"
+            cmd: "{{ tsha_cmd }} switchover --to {{ to | quote }}"
           register: fo_switch
           async: 900
           poll: 10
@@ -80,6 +81,7 @@
             msg: "{{ fo_switch.stdout.split('\n') }}"
 
         - name: État après la bascule
+          # unquoted-ok: `tsha_cmd` est la commande elle-même, en plusieurs mots (vars: du play, parties variables protégées).
           ansible.builtin.command:
             cmd: "{{ tsha_cmd }} status"
           register: fo_after

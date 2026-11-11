@@ -94,7 +94,7 @@
         - name: Restaurer
           ansible.builtin.command: >-
             {{ ansible_env.HOME }}/papangmetrics-db/timescaledb-restore.sh --yes
-            {{ ('--file ' ~ dump) if dump is defined else '' }}
+            {{ ('--file ' ~ (dump | quote)) if dump is defined else '' }}
           changed_when: true
           register: tsdb_restore
           when: (confirm | default('')) == 'yes'

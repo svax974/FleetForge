@@ -38,7 +38,7 @@
     - brk-restore
   tasks:
     - name: État des sauvegardes disponibles
-      ansible.builtin.command: "/home/{{ remote_username }}/brk-restore.sh --check"
+      ansible.builtin.command: "/home/{{ remote_username | quote }}/brk-restore.sh --check"
       changed_when: false
       register: brk_restore_check
 
@@ -60,9 +60,9 @@
     # cherche à réparer.
     - name: Restaurer la génération '{{ generation }}'
       ansible.builtin.shell: >-
-        /home/{{ remote_username }}/brk-restore.sh --yes
+        /home/{{ remote_username | quote }}/brk-restore.sh --yes
         {{ '--previous' if generation == 'previous' else '' }}
-        >> /home/{{ remote_username }}/brk-restore.log 2>&1
+        >> /home/{{ remote_username | quote }}/brk-restore.log 2>&1
       async: 172800
       poll: 0
       changed_when: true

@@ -95,7 +95,7 @@
   tags: [dump]
   tasks:
     - name: Dumps disponibles avant l'opération
-      ansible.builtin.command: "/home/{{ remote_username }}/papangmetrics-db/timescaledb-restore.sh --check"
+      ansible.builtin.command: "/home/{{ remote_username | quote }}/papangmetrics-db/timescaledb-restore.sh --check"
       changed_when: false
       register: tsdb_dumps_before
 
@@ -114,8 +114,8 @@
       ansible.builtin.shell:
         cmd: >-
           TSDB_BACKUP_INTERVAL_DAYS=0
-          /home/{{ remote_username }}/papangmetrics-db/timescaledb-backup.sh
-          >> /home/{{ remote_username }}/papangmetrics-db/backup.log 2>&1
+          /home/{{ remote_username | quote }}/papangmetrics-db/timescaledb-backup.sh
+          >> /home/{{ remote_username | quote }}/papangmetrics-db/backup.log 2>&1
         executable: /bin/bash
       async: 21600
       poll: 60
@@ -125,7 +125,7 @@
         - (fresh_dump | default('yes')) == 'yes'
 
     - name: Dernières lignes du journal de dump
-      ansible.builtin.command: "tail -n 5 /home/{{ remote_username }}/papangmetrics-db/backup.log"
+      ansible.builtin.command: "tail -n 5 /home/{{ remote_username | quote }}/papangmetrics-db/backup.log"
       changed_when: false
       register: tsdb_dump_log
       when: (confirm | default('')) == 'yes' and (fresh_dump | default('yes')) == 'yes'
@@ -145,7 +145,7 @@
   tags: [restore]
   tasks:
     - name: Dumps visibles depuis la cible
-      ansible.builtin.command: "/home/{{ remote_username }}/papangmetrics-db/timescaledb-restore.sh --check"
+      ansible.builtin.command: "/home/{{ remote_username | quote }}/papangmetrics-db/timescaledb-restore.sh --check"
       changed_when: false
       register: tsdb_dumps_dst
 
@@ -156,8 +156,8 @@
     - name: Restaurer le dump le plus récent
       ansible.builtin.shell:
         cmd: >-
-          /home/{{ remote_username }}/papangmetrics-db/timescaledb-restore.sh --yes
-          > /home/{{ remote_username }}/papangmetrics-db/restore.log 2>&1
+          /home/{{ remote_username | quote }}/papangmetrics-db/timescaledb-restore.sh --yes
+          > /home/{{ remote_username | quote }}/papangmetrics-db/restore.log 2>&1
         executable: /bin/bash
       async: 21600
       poll: 60
@@ -165,7 +165,7 @@
       when: (confirm | default('')) == 'yes'
 
     - name: Journal de restauration
-      ansible.builtin.command: "tail -n 25 /home/{{ remote_username }}/papangmetrics-db/restore.log"
+      ansible.builtin.command: "tail -n 25 /home/{{ remote_username | quote }}/papangmetrics-db/restore.log"
       changed_when: false
       register: tsdb_restore_log
       when: (confirm | default('')) == 'yes'

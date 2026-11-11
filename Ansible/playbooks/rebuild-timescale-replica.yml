@@ -99,8 +99,8 @@
         - name: Mettre le répertoire de données de côté
           ansible.builtin.command:
             cmd: >-
-              mv /home/{{ remote_username }}/papangmetrics-db/data
-              /home/{{ remote_username }}/papangmetrics-db/data.diverged-{{ rb_ts.stdout }}
+              mv /home/{{ remote_username | quote }}/papangmetrics-db/data
+              /home/{{ remote_username | quote }}/papangmetrics-db/data.diverged-{{ rb_ts.stdout | quote }}
             removes: "/home/{{ remote_username }}/papangmetrics-db/data"
           become: true
 

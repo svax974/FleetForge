@@ -65,7 +65,7 @@
   tags: [db]
   tasks:
     - name: État des dumps disponibles
-      ansible.builtin.command: "/home/{{ remote_username }}/papangmetrics-db/timescaledb-restore.sh --check"
+      ansible.builtin.command: "/home/{{ remote_username | quote }}/papangmetrics-db/timescaledb-restore.sh --check"
       changed_when: false
       register: tsdb_restore_check
 
@@ -75,7 +75,7 @@
 
     - name: Restaurer le plus récent dump
       ansible.builtin.command: >-
-        /home/{{ remote_username }}/papangmetrics-db/timescaledb-restore.sh --yes
+        /home/{{ remote_username | quote }}/papangmetrics-db/timescaledb-restore.sh --yes
       changed_when: true
       register: tsdb_restore
 

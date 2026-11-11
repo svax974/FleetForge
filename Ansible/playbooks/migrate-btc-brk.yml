@@ -89,8 +89,8 @@
   tasks:
     - name: Lancer la migration de la chaîne (rsync, tâche de fond)
       ansible.builtin.shell: >-
-        /home/{{ remote_username }}/btc-migrate.sh
-        >> /home/{{ remote_username }}/btc-migrate.log 2>&1
+        /home/{{ remote_username | quote }}/btc-migrate.sh
+        >> /home/{{ remote_username | quote }}/btc-migrate.log 2>&1
       async: 172800
       poll: 0
       changed_when: true
@@ -126,7 +126,7 @@
     - brk-restore
   tasks:
     - name: État des sauvegardes BRK disponibles
-      ansible.builtin.command: "/home/{{ remote_username }}/brk-restore.sh --check"
+      ansible.builtin.command: "/home/{{ remote_username | quote }}/brk-restore.sh --check"
       changed_when: false
       register: brk_restore_check
 
@@ -137,8 +137,8 @@
     # Async : la restauration transfère jusqu'à ~349 Go et dure des heures.
     - name: Restaurer le magasin BRK (tâche de fond)
       ansible.builtin.shell: >-
-        /home/{{ remote_username }}/brk-restore.sh --yes
-        >> /home/{{ remote_username }}/brk-restore.log 2>&1
+        /home/{{ remote_username | quote }}/brk-restore.sh --yes
+        >> /home/{{ remote_username | quote }}/brk-restore.log 2>&1
       async: 172800
       poll: 0
       changed_when: true
