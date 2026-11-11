@@ -77,7 +77,7 @@
 - name: Restore database
   ansible.builtin.shell: >
     gunzip -c /tmp/wordpress_db_restore.sql.gz |
-    mysql -u{{ wp_dbuser }} -p'{{ wp_dbpass }}' -h{{ wp_dbhost }} {{ wp_dbname }}
+    mysql -u{{ wp_dbuser | quote }} -p{{ wp_dbpass | quote }} -h{{ wp_dbhost | quote }} {{ wp_dbname | quote }}
 
 # --- Cleanup remote temp files ---
 - name: Remove temp restore files from remote

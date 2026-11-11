@@ -52,7 +52,7 @@
 # l'autorisation existerait sur disque et pas dans iptables. Le script est
 # idempotent (purge puis repose les règles de chaque port) — rejouable à volonté.
 - name: Reapply the Docker port rules
-  ansible.builtin.command: "{{ sync_mon_firewall_script }}"
+  ansible.builtin.command: "{{ sync_mon_firewall_script | quote }}"
   become: true
   changed_when: sync_mon_dropin.changed
   tags: [monitoring]

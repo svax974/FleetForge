@@ -77,11 +77,11 @@
   ansible.builtin.command:
     cmd: >-
       certbot certonly --non-interactive --agree-tos
-      -m {{ email }}
+      -m {{ email | quote }}
       --dns-cloudflare
-      --dns-cloudflare-credentials /etc/letsencrypt/cloudflare_{{ item }}.ini
+      --dns-cloudflare-credentials /etc/letsencrypt/cloudflare_{{ item | quote }}.ini
       --dns-cloudflare-propagation-seconds 60
-      -d "*.{{ item }}"
+      -d "*."{{ item | quote }}
     creates: "/etc/letsencrypt/live/{{ item }}/fullchain.pem"
   loop: "{{ domains }}"
 

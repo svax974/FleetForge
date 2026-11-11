@@ -140,7 +140,7 @@
 # dès le déploiement. Le script sort en 0 sans rien faire s'il n'y a pas encore
 # de base.
 - name: Run the backup once to prove the whole chain
-  ansible.builtin.command: "{{ sync_backup_script }}"
+  ansible.builtin.command: "{{ sync_backup_script | quote }}"
   become: true
   changed_when: sync_backup_script_deployed.changed
   when: sync_backup_script_deployed.changed

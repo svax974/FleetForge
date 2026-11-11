@@ -134,7 +134,7 @@
 # elle n'est donc construite qu'une fois.
 - name: Build the back image
   ansible.builtin.command:
-    cmd: docker compose --project-name {{ pgb_project_name }} build back
+    cmd: docker compose --project-name {{ pgb_project_name | quote }} build back
     chdir: "{{ pgb_dir }}"
   become: true
   register: pgb_build

@@ -26,7 +26,7 @@
 # déconnecterait tous les utilisateurs sans que rien ne l'explique.
 - name: Generate the session encryption key on first run
   ansible.builtin.shell:
-    cmd: "umask 077 && openssl rand -base64 18 | tr -d '\\n' > {{ webmail_data_dir }}/des_key"
+    cmd: "umask 077 && openssl rand -base64 18 | tr -d '\\n' > {{ webmail_data_dir | quote }}/des_key"
     creates: "{{ webmail_data_dir }}/des_key"
   become: true
 

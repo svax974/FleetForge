@@ -39,7 +39,7 @@
 
 - name: Build the front bundle
   ansible.builtin.command:
-    cmd: "./node_modules/.bin/vite build{{ ' --mode ' ~ pgf_vite_mode if pgf_vite_mode | length > 0 else '' }}"
+    cmd: "./node_modules/.bin/vite build{{ (' --mode ' ~ (pgf_vite_mode | quote)) if pgf_vite_mode | length > 0 else '' }}"
     chdir: "{{ pgf_src }}/front"
   environment:
     NODE_OPTIONS: "--max-old-space-size=4096"
@@ -58,14 +58,21 @@
 # des valeurs guillemetées et des caractères que le parseur `properties`
 # rendrait différemment de ce que fait le shell, et c'est le shell qui fait foi
 # pour deploy-full.sh. Une seule interprétation, donc un seul comportement.
+- name: Check the env file name (it is read into a shell message)
+  ansible.builtin.assert:
+    that: pgf_env_file is match('^[A-Za-z0-9._/-]+$')
+    fail_msg: "pgf_env_file : un chemin relatif (lettres, chiffres, . _ / -)"
+    quiet: true
+
 - name: Publish to Cloudflare Pages
+  # unquoted-ok: `pgf_env_file` reste dans le message de `${…:?…}` (entre guillemets) ; sa grammaire est vérifiée par l'assert précédent.
   ansible.builtin.shell:
     cmd: |
       set -euo pipefail
       set -a
-      . "{{ pgf_src }}/{{ pgf_env_file }}"
+      . {{ pgf_src | quote }}/{{ pgf_env_file | quote }}
       set +a
-      BRANCH="{{ pgf_branch }}"
+      BRANCH={{ pgf_branch | quote }}
       [ -n "${BRANCH}" ] || BRANCH="${CLOUDFLARE_PAGES_BRANCH:-main}"
       : "${CLOUDFLARE_PAGES_PROJECT:?CLOUDFLARE_PAGES_PROJECT absent de {{ pgf_env_file }}}"
       echo "projet=${CLOUDFLARE_PAGES_PROJECT} branche=${BRANCH}"

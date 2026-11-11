@@ -27,11 +27,11 @@
   ansible.builtin.command:
     cmd: >-
       certbot certonly --non-interactive --agree-tos
-      -m {{ email }}
+      -m {{ email | quote }}
       --dns-cloudflare
-      --dns-cloudflare-credentials /etc/letsencrypt/cloudflare_{{ item }}.ini
+      --dns-cloudflare-credentials /etc/letsencrypt/cloudflare_{{ item | quote }}.ini
       --dns-cloudflare-propagation-seconds 60
-      -d "*.{{ item }}"
+      -d "*."{{ item | quote }}
     creates: "/etc/letsencrypt/live/{{ item }}/fullchain.pem"
   loop: "{{ domains }}"
 
@@ -45,12 +45,12 @@
   ansible.builtin.command:
     cmd: >-
       certbot certonly --non-interactive --agree-tos
-      -m {{ email }}
+      -m {{ email | quote }}
       --dns-cloudflare
-      --dns-cloudflare-credentials /etc/letsencrypt/cloudflare_{{ item }}.ini
+      --dns-cloudflare-credentials /etc/letsencrypt/cloudflare_{{ item | quote }}.ini
       --dns-cloudflare-propagation-seconds 60
-      --cert-name preview.{{ item }}
-      -d "*.preview.{{ item }}"
+      --cert-name preview.{{ item | quote }}
+      -d "*.preview."{{ item | quote }}
     creates: "/etc/letsencrypt/live/preview.{{ item }}/fullchain.pem"
   # Seul le domaine du hub (pas tradekong.app…) : `agenthub_preview_domains` pour le changer.
   # Borné aux domaines du parc (`domains`) : le fichier d'identifiants

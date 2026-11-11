@@ -75,7 +75,7 @@
 
 - name: Apply the database schema
   ansible.builtin.shell:
-    cmd: "sqlite3 {{ mailserver_db }} < {{ mailserver_conf_dir }}/schema.sql"
+    cmd: "sqlite3 {{ mailserver_db | quote }} < {{ mailserver_conf_dir | quote }}/schema.sql"
   changed_when: false
 
 # Fichier d'état complet (hachés seulement, jamais les mots de passe), 0600 :
@@ -92,7 +92,7 @@
 
 - name: Apply the wanted database state
   ansible.builtin.shell:
-    cmd: "sqlite3 {{ mailserver_db }} < {{ mailserver_conf_dir }}/state.sql"
+    cmd: "sqlite3 {{ mailserver_db | quote }} < {{ mailserver_conf_dir | quote }}/state.sql"
   when: mailserver_state.changed
 
 - name: Restrict the database to its readers
@@ -177,9 +177,9 @@
 - name: Generate a DKIM key for each domain
   ansible.builtin.shell:
     cmd: >-
-      rspamadm dkim_keygen -s {{ mailserver_dkim_selector }} -b 2048 -d {{ item.name }}
-      -k /var/lib/rspamd/dkim/{{ item.name }}.{{ mailserver_dkim_selector }}.key
-      > /var/lib/rspamd/dkim/{{ item.name }}.{{ mailserver_dkim_selector }}.txt
+      rspamadm dkim_keygen -s {{ mailserver_dkim_selector | quote }} -b 2048 -d {{ item.name | quote }}
+      -k /var/lib/rspamd/dkim/{{ item.name | quote }}.{{ mailserver_dkim_selector | quote }}.key
+      > /var/lib/rspamd/dkim/{{ item.name | quote }}.{{ mailserver_dkim_selector | quote }}.txt
     creates: "/var/lib/rspamd/dkim/{{ item.name }}.{{ mailserver_dkim_selector }}.key"
   loop: "{{ mailserver_domains }}"
   loop_control:

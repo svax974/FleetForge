@@ -90,15 +90,15 @@
 - name: Request wildcard certificate via RFC2136
   ansible.builtin.command: >-
     certbot certonly --non-interactive --agree-tos
-    --email {{ email }}
+    --email {{ email | quote }}
     --dns-rfc2136
     --dns-rfc2136-credentials /etc/letsencrypt/rfc2136.ini
-    --dns-rfc2136-propagation-seconds {{ bind9_certbot_propagation_seconds }}
-    -d {{ domain_name }} -d *.{{ domain_name }}
+    --dns-rfc2136-propagation-seconds {{ bind9_certbot_propagation_seconds | quote }}
+    -d {{ domain_name | quote }} -d *.{{ domain_name | quote }}
   args:
     creates: "/etc/letsencrypt/live/{{ domain_name }}/fullchain.pem"
 
 - name: Install certificate into nginx if available
   ansible.builtin.command: >-
-    certbot install --nginx --cert-name {{ domain_name }} --non-interactive
+    certbot install --nginx --cert-name {{ domain_name | quote }} --non-interactive
   when: proxy_certs_bind9_has_nginx | bool

@@ -6,8 +6,8 @@
 - name: Start the back containers
   ansible.builtin.command:
     cmd: >-
-      docker compose --project-name {{ pgb_project_name }}
-      up -d --remove-orphans {{ pgb_services | join(' ') }}
+      docker compose --project-name {{ pgb_project_name | quote }}
+      up -d --remove-orphans {{ pgb_services | map('quote') | join(' ') }}
     chdir: "{{ pgb_dir }}"
   become: true
   register: pgb_up
@@ -36,7 +36,7 @@
 # dépendances a été abandonnée en cours de route.
 - name: Collect the container states
   ansible.builtin.command:
-    cmd: docker compose --project-name {{ pgb_project_name }} ps --format '{% raw %}{{.Service}} {{.State}}{% endraw %}'
+    cmd: docker compose --project-name {{ pgb_project_name | quote }} ps --format '{% raw %}{{.Service}} {{.State}}{% endraw %}'
     chdir: "{{ pgb_dir }}"
   become: true
   register: pgb_ps

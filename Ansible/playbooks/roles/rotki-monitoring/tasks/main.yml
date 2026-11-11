@@ -36,7 +36,7 @@
 
 # Le drop-in n'est lu qu'à l'application des règles (script idempotent).
 - name: Reapply the Docker port rules
-  ansible.builtin.command: "{{ rotki_mon_firewall_script }}"
+  ansible.builtin.command: "{{ rotki_mon_firewall_script | quote }}"
   become: true
   changed_when: rotki_mon_dropin.changed
   tags: [monitoring]

@@ -32,7 +32,7 @@
 # tirée UNE FOIS sur l'hôte, puis relue.
 - name: Generate the SearXNG secret key on first run
   ansible.builtin.shell:
-    cmd: "openssl rand -hex 32 > {{ searxng_home }}/secret_key"
+    cmd: "openssl rand -hex 32 > {{ searxng_home | quote }}/secret_key"
     creates: "{{ searxng_home }}/secret_key"
   become: true
 

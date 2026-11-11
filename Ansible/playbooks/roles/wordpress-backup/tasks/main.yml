@@ -16,8 +16,8 @@
 # --- Database dump ---
 - name: Dump WordPress database
   ansible.builtin.shell: >
-    mysqldump -u{{ wp_dbuser }} -p'{{ wp_dbpass }}' -h{{ wp_dbhost }}
-    {{ wp_dbname }} | gzip > /tmp/wordpress_db_{{ wp_backup_ts }}.sql.gz
+    mysqldump -u{{ wp_dbuser | quote }} -p{{ wp_dbpass | quote }} -h{{ wp_dbhost | quote }}
+    {{ wp_dbname | quote }} | gzip > /tmp/wordpress_db_{{ wp_backup_ts | quote }}.sql.gz
   args:
     creates: /tmp/wordpress_db_{{ wp_backup_ts }}.sql.gz
 
