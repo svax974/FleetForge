@@ -16,7 +16,7 @@
 # Le CONTENU est supprimé, puis le dossier s'il le permet (point de montage possible).
 - name: Remove the session data and the build directory
   ansible.builtin.shell: |
-    for d in "{{ grass_config_dir }}" "{{ grass_build_dir }}"; do
+    for d in {{ grass_config_dir | quote }} {{ grass_build_dir | quote }}; do
       [ -d "$d" ] || continue
       find "$d" -mindepth 1 -delete
       rmdir "$d" 2>/dev/null || true
@@ -26,11 +26,11 @@
 # `docker images <nom>` liste TOUTES les étiquettes du dépôt (une par version
 # construite) ; l'ID est supprimé une fois, quel que soit le nombre d'étiquettes.
 - name: List the Grass images
-  ansible.builtin.command: "docker images {{ grass_image }} --format '{{ \"{{\" }}.ID{{ \"}}\" }}'"
+  ansible.builtin.command: "docker images {{ grass_image | quote }} --format '{{ \"{{\" }}.ID{{ \"}}\" }}'"
   register: grass_images
   changed_when: false
 
 - name: Remove the Grass images
-  ansible.builtin.command: "docker rmi -f {{ item }}"
+  ansible.builtin.command: "docker rmi -f {{ item | quote }}"
   loop: "{{ grass_images.stdout_lines | unique }}"
   changed_when: true

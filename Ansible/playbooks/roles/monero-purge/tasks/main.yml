@@ -24,7 +24,7 @@
 # Le CONTENU est supprimé, puis le dossier s'il le permet (disque de données monté ici).
 - name: Remove the blockchain, the configuration and the logs
   ansible.builtin.shell: |
-    for d in "{{ monero_data_dir }}" "{{ monero_config_dir }}" "{{ monero_log_dir }}"; do
+    for d in {{ monero_data_dir | quote }} {{ monero_config_dir | quote }} {{ monero_log_dir | quote }}; do
       [ -d "$d" ] || continue
       find "$d" -mindepth 1 -delete
       rmdir "$d" 2>/dev/null || true

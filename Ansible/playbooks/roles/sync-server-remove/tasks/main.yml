@@ -44,7 +44,7 @@
 # tout de même les règles pour que iptables reflète le disque. Sans effet sur
 # les autres services (le script est idempotent).
 - name: Reapply the Docker port rules
-  ansible.builtin.command: "{{ sync_mon_firewall_script }}"
+  ansible.builtin.command: "{{ sync_mon_firewall_script | quote }}"
   become: true
   changed_when: false
   failed_when: false

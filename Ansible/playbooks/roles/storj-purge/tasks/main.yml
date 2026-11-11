@@ -44,7 +44,7 @@
 # ne peut pas retirer (« Device or resource busy ») après avoir tout effacé.
 - name: Remove the node data, configuration and identity
   ansible.builtin.shell: |
-    for d in "{{ storj_storage_dir }}" "{{ storj_identity_dir }}" "{{ storj_base_dir }}/identity-gen"; do
+    for d in {{ storj_storage_dir | quote }} {{ storj_identity_dir | quote }} {{ storj_base_dir | quote }}"/identity-gen"; do
       [ -d "$d" ] || continue
       find "$d" -mindepth 1 -delete
       rmdir "$d" 2>/dev/null || true
@@ -54,7 +54,7 @@
 # `storj_base_dir` n'est retiré que s'il est vide : il peut être le point de
 # montage d'un disque (ou le parent d'un autre dossier), à ne pas emporter.
 - name: Remove the base directory when empty
-  ansible.builtin.command: "rmdir {{ storj_base_dir }}"
+  ansible.builtin.command: "rmdir {{ storj_base_dir | quote }}"
   register: storj_rmdir
   changed_when: storj_rmdir.rc == 0
   failed_when: false

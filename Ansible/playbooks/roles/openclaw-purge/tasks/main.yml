@@ -42,7 +42,7 @@
 # explicite.
 - name: Disable lingering for srvc
   ansible.builtin.command:
-    cmd: "loginctl disable-linger {{ openclaw_user }}"
+    cmd: "loginctl disable-linger {{ openclaw_user | quote }}"
   become: true
   when: openclaw_disable_linger | bool
   changed_when: true

@@ -49,7 +49,7 @@
 
 - name: Revoke and delete Let's Encrypt certificates for each domain
   ansible.builtin.command:
-    cmd: "certbot delete --non-interactive --cert-name {{ item.name }}"
+    cmd: "certbot delete --non-interactive --cert-name {{ item.name | quote }}"
   loop: "{{ mail_domains }}"
   ignore_errors: yes
 

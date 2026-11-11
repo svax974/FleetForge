@@ -21,7 +21,7 @@
 
 - name: Disable lingering for srvc
   ansible.builtin.command:
-    cmd: "loginctl disable-linger {{ starnet_user }}"
+    cmd: "loginctl disable-linger {{ starnet_user | quote }}"
   become: true
   when: starnet_disable_linger | bool
   changed_when: true

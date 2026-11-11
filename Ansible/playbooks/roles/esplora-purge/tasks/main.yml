@@ -52,7 +52,7 @@
   become: true
 
 - name: Remove the installed-version marker
-  ansible.builtin.shell: "rm -f {{ esplora_home }}/.installed-esplora-*"
+  ansible.builtin.shell: "rm -f {{ esplora_home | quote }}/.installed-esplora-*"
   args:
     executable: /bin/bash
   become: true

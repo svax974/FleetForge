@@ -28,7 +28,7 @@
 # tous les cœurs après la désinstallation. `[i]` : voir storj-install/identity.yml.
 - name: Stop any identity generation in progress
   ansible.builtin.shell: |
-    systemctl stop {{ storj_identity_unit | default('storj-identity') }} 2>/dev/null || true
+    systemctl stop {{ storj_identity_unit | default('storj-identity') | quote }} 2>/dev/null || true
     pkill -f '[i]dentity create storagenode' || true
   become: true
   changed_when: false

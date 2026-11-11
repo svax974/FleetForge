@@ -10,7 +10,7 @@
 - name: Remove the containers with their volumes
   ansible.builtin.command:
     cmd: >-
-      docker compose --project-name {{ pgb_project_name }}
+      docker compose --project-name {{ pgb_project_name | quote }}
       --profile metrics down --remove-orphans -v
     chdir: "{{ pgb_dir }}"
   become: true

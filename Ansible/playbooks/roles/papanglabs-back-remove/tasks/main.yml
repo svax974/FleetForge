@@ -4,7 +4,7 @@
 - name: Stop and remove the containers
   ansible.builtin.command:
     cmd: >-
-      docker compose --project-name {{ pgb_project_name }}
+      docker compose --project-name {{ pgb_project_name | quote }}
       --profile metrics down --remove-orphans
     chdir: "{{ pgb_dir }}"
   become: true
