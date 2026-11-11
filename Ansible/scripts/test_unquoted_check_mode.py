@@ -154,6 +154,35 @@ class ScannerTests(unittest.TestCase):
                 f.write("{% if x %}\nservices: {}\n{% endif %}\n")
             self.assertEqual(scanner.scan(root), [])
 
+    def test_expressions_that_only_yield_constants_or_numbers_pass(self):
+        self.assertEqual(self.scan("""\
+            - name: t
+              ansible.builtin.command: "./run.sh prod{{ ' --migrate' if migrate | bool else '' }} -d {{ (days | int) * 86400 }} {{ hosts | length }}"
+              check_mode: false
+            """), [])
+        self.assertFlags("""\
+            - name: t
+              ansible.builtin.command: "./run.sh {{ flag if migrate else '' }} {{ name * 2 }}"
+              check_mode: false
+            """, "flag", "name")
+
+    def test_command_substitution_reopens_an_unquoted_context(self):
+        self.assertEqual(self.scan("""\
+            - name: t
+              ansible.builtin.shell: 'lsblk -dno ROTA "$(findmnt -no SOURCE -T {{ data_dir | quote }})" | head -n1'
+              check_mode: false
+            """), [])
+        self.assertFlags("""\
+            - name: t
+              ansible.builtin.shell: 'echo "$(date) {{ data_dir | quote }}"'
+              check_mode: false
+            """, 'entre "')
+        self.assertEqual(self.scan("""\
+            - name: t
+              ansible.builtin.command: "./restore.sh --yes {{ ('--file ' ~ (dump | quote)) if dump is defined else '' }}"
+              check_mode: false
+            """), [], "partie variable déjà quotée")
+
     def test_raw_blocks_magic_and_nested_blocks(self):
         self.assertEqual(self.scan("""\
             - name: t

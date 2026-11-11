@@ -84,36 +84,78 @@ def protected(expression):
     )
 
 
+# Filtres dont la sortie est un nombre ou un booléen : inerte dans une ligne de commande.
+INERT_FILTERS = {"int", "float", "bool", "length", "count", "abs", "round"}
+
+
+def flowing(node):
+    """Variables dont la VALEUR peut atteindre la sortie de l'expression.
+
+    Le test d'un `a if t else b`, une comparaison, un test (`is defined`), un filtre
+    numérique ou booléen ne transmettent aucun texte : `{{ ' --migrate' if m else '' }}`
+    ou `{{ (jours | int) * 86400 }}` n'injectent rien ; une partie déjà filtrée par `quote`
+    non plus (`{{ ('--file ' ~ (dump | quote)) if dump is defined else '' }}`). Tout le
+    reste est réputé transmettre.
+    """
+    if isinstance(node, nodes.Name):
+        return {node.name} if node.ctx == "load" else set()
+    if isinstance(node, (nodes.Const, nodes.Test, nodes.Compare, nodes.Not)):
+        return set()
+    if isinstance(node, nodes.CondExpr):
+        return flowing(node.expr1) | (flowing(node.expr2) if node.expr2 is not None else set())
+    if isinstance(node, nodes.Filter) and node.name in INERT_FILTERS | {"quote"}:
+        return set()
+    if isinstance(node, (nodes.Mul, nodes.Div, nodes.FloorDiv, nodes.Mod, nodes.Pow, nodes.Sub)):
+        left, right = flowing(node.left), flowing(node.right)
+        # Un produit de nombres reste un nombre ; une chaîne répétée (`s * 2`) transmet `s`.
+        return left | right
+    found = set()
+    for child in node.iter_child_nodes():
+        found |= flowing(child)
+    return found
+
+
 def settable(expression):
-    """Variables an `-e` could set, read by the expression."""
+    """Variables qu'un `-e` pourrait régler et dont la valeur atteint la ligne de commande."""
     try:
         ast = ENV.parse("{{ " + expression + " }}")
     except jinja2.TemplateSyntaxError:
         return set()
-    return {n.name for n in ast.find_all(nodes.Name) if n.ctx == "load" and not MAGIC.match(n.name)}
+    output = ast.body[0]
+    return {name for node in output.nodes for name in flowing(node) if not MAGIC.match(name)}
 
 
 def quote_states(template):
-    """(expression, shell quote around it) for every `{{ }}` of a command line; raw blocks are literal."""
-    found, state, i = [], None, 0
+    """(expression, shell quote around it) for every `{{ }}` of a command line; raw blocks are literal.
+
+    Une substitution `$( … )` rouvre un contexte sans guillemet, même entre `"…"` :
+    `"$(findmnt -T {{ d | quote }})"` est juste.
+    """
+    found, stack, i = [], [None], 0
     while i < len(template):
         raw = RAW.match(template, i)
         if raw:
             for c in re.sub(r"\{%-?\s*(end)?raw\s*-?%\}", "", raw.group(0)):
-                state = flip(state, c)
+                stack[-1] = flip(stack[-1], c)
             i = raw.end()
         elif template.startswith("{{", i):
             end = template.find("}}", i)
             end = len(template) if end < 0 else end
-            found.append((template[i + 2:end].strip(), state))
+            found.append((template[i + 2:end].strip(), stack[-1]))
             i = end + 2
         elif template.startswith("{%", i):
             end = template.find("%}", i)
             i = len(template) if end < 0 else end + 2
-        elif state != "'" and template[i] == "\\":
+        elif stack[-1] != "'" and template[i] == "\\":
             i += 2
+        elif stack[-1] != "'" and template.startswith("$(", i):
+            stack.append(None)
+            i += 2
+        elif stack[-1] is None and template[i] == ")" and len(stack) > 1:
+            stack.pop()
+            i += 1
         else:
-            state = flip(state, template[i])
+            stack[-1] = flip(stack[-1], template[i])
             i += 1
     return found
 
@@ -124,15 +166,24 @@ def flip(state, c):
     return None if state == c else state
 
 
+def referenced(expression):
+    """Toutes les variables réglables lues par l'expression, protégées ou non."""
+    try:
+        ast = ENV.parse("{{ " + expression + " }}")
+    except jinja2.TemplateSyntaxError:
+        return set()
+    return {n.name for n in ast.find_all(nodes.Name) if n.ctx == "load" and not MAGIC.match(n.name)}
+
+
 def line_problems(template, exempt):
     problems = []
     for expression, state in quote_states(template):
-        names = settable(expression) - exempt
-        if not names:
+        if not referenced(expression) - exempt:
             continue
-        if not protected(expression):
-            problems.append("{{ " + expression + " }} → " + ", ".join(sorted(names)) + " sans | quote")
-        elif state is not None:
+        leaking = set() if protected(expression) else settable(expression) - exempt
+        if leaking:
+            problems.append("{{ " + expression + " }} → " + ", ".join(sorted(leaking)) + " sans | quote")
+        elif state is not None and "quote" in expression:
             problems.append("{{ " + expression + " }} entre " + state + "…" + state + " : les apostrophes de quote y seraient littérales")
     return problems
 
