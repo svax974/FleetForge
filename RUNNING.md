@@ -463,8 +463,29 @@ des `shell:`/`command:` qui interpolent des variables du parc SANS `| quote`, pa
 déléguées à la supervision (`prometheus_host`) ou à la machine de FleetForge
 (`localhost`). Une variable redéfinie par `-e` (précédence maximale) y devient une
 commande, en root : c'est ce que bornent les règles d'`extra_vars` du compte `check`.
-Pour les comptes `run`, les valeurs restent libres (une ligne, sans gabarit) : la
-correction est dans les rôles (`| quote`), pas encore faite (`docs/avant-ouverture-public.md`).
+Pour les comptes `run`, les valeurs restent libres (une ligne, sans gabarit).
+
+**Tâches qu'un `--check` exécute : `| quote` obligatoire** — toute tâche `check_mode: false`
+`shell`/`command`/`raw` écrite en chaîne filtre chaque variable réglable par `quote`,
+appliqué à l'expression ENTIÈRE et HORS de tout guillemet du shell :
+`grep -F {{ port | quote }}`, `'"'{{ host | quote }}:{{ port | quote }}'"'`,
+`/home/{{ user | quote }}/x/*.json` (le joker reste dehors), `{{ (a if c else b) | quote }}`,
+`{{ liste | map('quote') | join(' ') }}` — jamais `"{{ x | quote }}"` ni `'{{ x | quote }}'`.
+`command` en `argv:` (liste) n'est pas interprété par un shell. Exception :
+`# unquoted-ok: <raison>` dans la tâche, la raison citant entre accents graves chaque
+variable exemptée (`tsha_cmd`, commande en plusieurs mots ; `pushgwmon_job`, motif awk
+vérifié par un `assert`). Contrôle : `Ansible/scripts/unquoted_check_mode.py` (PyYAML et
+Jinja2, ceux d'Ansible), tenu par `cargo test -p fleetforge-core --test ansible_quoting`
+(ignoré, en le disant, sans interpréteur qui les ait ; `FLEETFORGE_ANSIBLE_PYTHON` pour
+le désigner) :
+
+```sh
+"$(head -1 "$(command -v ansible)" | cut -c3-)" -I Ansible/scripts/unquoted_check_mode.py Ansible/playbooks
+"$(head -1 "$(command -v ansible)" | cut -c3-)" -I Ansible/scripts/unquoted_check_mode.py --all Ansible/playbooks  # runs réels, pour information
+```
+
+Les autres tâches `shell`/`command` (runs réels) ne sont pas encore tenues à cette règle
+(`--all` : 165 au 11/11/2026) : `docs/avant-ouverture-public.md`.
 
 Une commande hors du mode, un parc hors périmètre (existant ou non : la
 réponse est la même), un `ssh_diagnose` sur un hôte qu'aucun parc du

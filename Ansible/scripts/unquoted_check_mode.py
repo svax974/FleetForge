@@ -1,0 +1,240 @@
+#!/usr/bin/env python3
+#
+# FleetForge
+#
+# Copyright © 2025 Stéphane VAXELAIRE
+# SPDX-License-Identifier: MIT — see LICENSE
+#
+"""Interpolations non protégées dans les tâches qu'un `--check` exécute pour de vrai.
+
+Un `--check` saute les modules, SAUF les tâches `check_mode: false` : leurs `shell:`
+et `command:` tournent sur l'hôte (ou sur l'hôte délégué : supervision, cette machine),
+souvent en root. `-e` l'emporte sur toute autre définition : une variable du parc
+interpolée telle quelle y devient du code shell dès le check. D'où la règle, que ce
+script tient pour `Ansible/playbooks` (code des rôles et playbooks seulement : jamais
+group_vars, host_vars, inventories, keys, parcs, .private, ni un lien) :
+
+  * dans une tâche `check_mode: false` `shell`/`command`/`raw` donnée en CHAÎNE, toute
+    interpolation d'une variable réglable est filtrée par `quote` — le filtre appliqué
+    à l'expression ENTIÈRE (`{{ (a if c else b) | quote }}`, pas `{{ a if c else b | quote }}`),
+    ou `{{ liste | map('quote') | join(' ') }}` — et hors de tout guillemet du shell
+    (`'…'{{ x | quote }}'…'`, jamais `"{{ x | quote }}"`, où les apostrophes de `quote`
+    deviendraient littérales et `$()` s'exécuterait) ;
+  * `command` en `argv:` (liste) n'est pas interprété par un shell : sûr, sauf le script
+    passé à un shell (`sh -c`, `bash -c`) ;
+  * exception explicite : `# unquoted-ok: <raison>` dans la tâche, la raison citant entre
+    accents graves chaque variable exemptée (`tsha_cmd`), et elle seule.
+
+Variables jugées non réglables par l'API d'automatisation : `ansible_*` (refusées), et
+les variables magiques d'Ansible. Sortie : `fichier:ligne [module] …`, code 1 s'il en
+reste. `--all` étend l'inventaire à TOUTES les tâches shell/command (runs réels), pour
+information. Dépendances : PyYAML et Jinja2, celles d'Ansible :
+`$(head -1 "$(command -v ansible)" | cut -c3-) -I Ansible/scripts/unquoted_check_mode.py Ansible/playbooks`.
+"""
+import os
+import re
+import sys
+
+import jinja2
+import yaml
+from jinja2 import nodes
+
+MODULES = {"shell", "command", "raw", "ansible.builtin.shell", "ansible.builtin.command", "ansible.builtin.raw"}
+SHELLS = {"sh", "bash", "/bin/sh", "/bin/bash", "/usr/bin/bash", "dash", "zsh"}
+# Données du parc (jamais lues), et `templates/` / `files/` des rôles : pas des tâches.
+SKIP_DIRS = {"group_vars", "host_vars", "inventories", "keys", "parcs", ".private", ".git", "templates", "files"}
+MAGIC = re.compile(
+    r"^(ansible_\w+|inventory_hostname(_short)?|hostvars|groups|group_names|play_hosts|omit|playbook_dir"
+    r"|role_path|inventory_dir|inventory_file|environment|lookup|query|q|range|dict|lipsum|zip|true|false|none"
+    r"|True|False|None)$"
+)
+EXPR = re.compile(r"\{\{(.*?)\}\}", re.S)
+RAW = re.compile(r"\{%-?\s*raw\s*-?%\}.*?\{%-?\s*endraw\s*-?%\}", re.S)
+EXEMPT = re.compile(r"#\s*unquoted-ok:\s*(.*)")
+ENV = jinja2.Environment()
+
+
+class Finding:
+    def __init__(self, path, line, module, delegate, problems):
+        self.path, self.line, self.module, self.delegate, self.problems = path, line, module, delegate, problems
+
+    def __str__(self):
+        where = f" delegate_to={self.delegate}" if self.delegate else ""
+        lines = [f"{self.path}:{self.line} [{self.module}]{where}"] + [f"    {p}" for p in self.problems]
+        return "\n".join(lines)
+
+
+def scalar(node):
+    return node.value if isinstance(node, yaml.ScalarNode) else None
+
+
+def protected(expression):
+    """`x | quote`, or `list | map('quote') | join(…)`, as the OUTERMOST operation."""
+    try:
+        output = ENV.parse("{{ " + expression + " }}").body[0]
+    except jinja2.TemplateSyntaxError:
+        return False
+    node = output.nodes[0] if isinstance(output, nodes.Output) and len(output.nodes) == 1 else None
+    if isinstance(node, nodes.Filter) and node.name == "quote":
+        return True
+    return (
+        isinstance(node, nodes.Filter) and node.name == "join"
+        and isinstance(node.node, nodes.Filter) and node.node.name == "map"
+        and bool(node.node.args) and isinstance(node.node.args[0], nodes.Const) and node.node.args[0].value == "quote"
+    )
+
+
+def settable(expression):
+    """Variables an `-e` could set, read by the expression."""
+    try:
+        ast = ENV.parse("{{ " + expression + " }}")
+    except jinja2.TemplateSyntaxError:
+        return set()
+    return {n.name for n in ast.find_all(nodes.Name) if n.ctx == "load" and not MAGIC.match(n.name)}
+
+
+def quote_states(template):
+    """(expression, shell quote around it) for every `{{ }}` of a command line; raw blocks are literal."""
+    found, state, i = [], None, 0
+    while i < len(template):
+        raw = RAW.match(template, i)
+        if raw:
+            for c in re.sub(r"\{%-?\s*(end)?raw\s*-?%\}", "", raw.group(0)):
+                state = flip(state, c)
+            i = raw.end()
+        elif template.startswith("{{", i):
+            end = template.find("}}", i)
+            end = len(template) if end < 0 else end
+            found.append((template[i + 2:end].strip(), state))
+            i = end + 2
+        elif template.startswith("{%", i):
+            end = template.find("%}", i)
+            i = len(template) if end < 0 else end + 2
+        elif state != "'" and template[i] == "\\":
+            i += 2
+        else:
+            state = flip(state, template[i])
+            i += 1
+    return found
+
+
+def flip(state, c):
+    if state is None and c in "'\"":
+        return c
+    return None if state == c else state
+
+
+def line_problems(template, exempt):
+    problems = []
+    for expression, state in quote_states(template):
+        names = settable(expression) - exempt
+        if not names:
+            continue
+        if not protected(expression):
+            problems.append("{{ " + expression + " }} → " + ", ".join(sorted(names)) + " sans | quote")
+        elif state is not None:
+            problems.append("{{ " + expression + " }} entre " + state + "…" + state + " : les apostrophes de quote y seraient littérales")
+    return problems
+
+
+def argv_problems(sequence, exempt):
+    items = [n for n in sequence.value]
+    problems = []
+    for index, item in enumerate(items):
+        text = scalar(item) or ""
+        previous = scalar(items[index - 1]) if index else None
+        before_previous = scalar(items[index - 2]) if index > 1 else None
+        if previous == "-c" and before_previous in SHELLS:
+            problems += line_problems(text, exempt)
+    return problems
+
+
+def exemptions(lines, start, end):
+    exempt, problems = set(), []
+    for line in lines[start:end + 1]:
+        match = EXEMPT.search(line)
+        if match:
+            names = set(re.findall(r"`([A-Za-z_][A-Za-z0-9_]*)`", match.group(1)))
+            if not names:
+                problems.append("# unquoted-ok: sans variable citée entre accents graves")
+            exempt |= names
+    return exempt, problems
+
+
+def task_problems(node, lines, everything):
+    keys = {scalar(k): (k, v) for k, v in node.value if scalar(k) is not None}
+    module = next((m for m in keys if m in MODULES), None)
+    if not module:
+        return None
+    check_mode = scalar(keys["check_mode"][1]) if "check_mode" in keys else None
+    if not everything and check_mode not in ("false", "False", "no", "No"):
+        return None
+    key_node, body = keys[module]
+    exempt, problems = exemptions(lines, node.start_mark.line, node.end_mark.line)
+    if isinstance(body, yaml.ScalarNode):
+        problems += line_problems(body.value, exempt)
+    elif isinstance(body, yaml.MappingNode):
+        inner = {scalar(k): v for k, v in body.value}
+        if isinstance(inner.get("cmd"), yaml.ScalarNode):
+            problems += line_problems(inner["cmd"].value, exempt)
+        if isinstance(inner.get("argv"), yaml.SequenceNode):
+            problems += argv_problems(inner["argv"], exempt)
+    if isinstance(keys.get("args", (None, None))[1], yaml.MappingNode):
+        inner = {scalar(k): v for k, v in keys["args"][1].value}
+        if isinstance(inner.get("argv"), yaml.SequenceNode):
+            problems += argv_problems(inner["argv"], exempt)
+    delegate = scalar(keys["delegate_to"][1]) if "delegate_to" in keys else ""
+    return key_node.start_mark.line + 1, module.split(".")[-1], delegate, problems
+
+
+def walk(node, path, lines, everything, out):
+    if isinstance(node, yaml.SequenceNode):
+        for child in node.value:
+            walk(child, path, lines, everything, out)
+        return
+    if not isinstance(node, yaml.MappingNode):
+        return
+    result = task_problems(node, lines, everything)
+    if result and result[3]:
+        out.append(Finding(path, *result))
+    for key, value in node.value:
+        if scalar(key) in ("block", "rescue", "always", "tasks", "pre_tasks", "post_tasks", "handlers"):
+            walk(value, path, lines, everything, out)
+
+
+def scan(root, everything=False):
+    findings = []
+    for directory, subdirs, files in os.walk(root):
+        subdirs[:] = sorted(d for d in subdirs if d not in SKIP_DIRS and not os.path.islink(os.path.join(directory, d)))
+        for name in sorted(files):
+            path = os.path.join(directory, name)
+            if not name.endswith((".yml", ".yaml")) or os.path.islink(path):
+                continue
+            with open(path, encoding="utf-8") as f:
+                text = f.read()
+            try:
+                documents = list(yaml.compose_all(text))
+            except yaml.YAMLError as error:
+                # Un fichier de tâches illisible n'est pas un fichier sûr : il le dit.
+                mark = getattr(error, "problem_mark", None)
+                line = mark.line + 1 if mark else 0
+                findings.append(Finding(os.path.relpath(path, root), line, "yaml", "", [f"YAML illisible : {error}"]))
+                continue
+            for document in documents:
+                walk(document, os.path.relpath(path, root), text.splitlines(), everything, findings)
+    return findings
+
+
+def main(argv):
+    everything = "--all" in argv
+    roots = [a for a in argv if a != "--all"] or ["Ansible/playbooks"]
+    findings = [f for root in roots for f in scan(root, everything)]
+    for finding in findings:
+        print(finding)
+    scope = "tâches shell/command" if everything else "tâches check_mode: false shell/command"
+    print(f"{len(findings)} {scope} avec une interpolation non protégée")
+    return 1 if findings else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

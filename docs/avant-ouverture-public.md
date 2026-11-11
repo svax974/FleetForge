@@ -16,18 +16,33 @@ Lot 6.1 de la passerelle MCP (`fleetforge-gateway`) ; détail dans RUNNING.md, �
 - **`--check` n'est pas sans effet** : connexion et `become` sur les hôtes, tâches
   `check_mode: false` (une centaine dans les rôles) et lookups exécutés pour de vrai.
   À relire avant d'autoriser des checks autonomes.
-- **Injection par `extra_vars` (relecture du 11/11/2026, CRITIQUE)** : 44 tâches
-  `shell`/`command` en `check_mode: false` interpolent des variables du parc sans
-  `| quote` (20 `shell`, dont 7 déléguées à `prometheus_host` ; 24 `command`, dont 2
-  déléguées à `localhost`, la machine de FleetForge, dans `fleetforge-install`, et un faux
-  positif). `-e` l'emporte sur tout : une valeur `9100'; sudo -n …; echo '` y devient
-  une commande root, DÈS le `--check`. Fait : compte `check` sans `extra_vars` par défaut,
-  et sur option seulement des variables sans défaut, en valeurs inertes ; une ligne sans
-  caractère de contrôle pour tous les comptes stricts. **Reste ouvert pour les comptes
-  `run`** (AgentHub admet toute valeur d'une ligne, ≤ 500 caractères : la règle des
-  comptes `check` casserait ses usages) : corriger les rôles (`| quote`, `argv:`) puis un
-  contrôle en CI qui refuse toute nouvelle interpolation non protégée dans ces tâches.
-  Liste exacte : rapport du lot 6.1 (scanner `unquoted_check_mode.py`).
+- **Injection par `extra_vars` (relecture du 11/11/2026, CRITIQUE)** — `-e` l'emporte sur
+  tout : une valeur `9100'; sudo -n …; echo '` interpolée sans `| quote` dans un `shell:`
+  devient une commande root.
+  - **Fermé pour ce qu'un `--check` exécute** (11/11/2026) : les 32 tâches `check_mode:
+    false` `shell`/`command` en chaîne qui interpolaient une variable sans protection sont
+    passées à `| quote` (11 autres étaient déjà en `argv:`, sans shell) ; deux exceptions
+    motivées (`# unquoted-ok:`) : `tsha_cmd` (commande en plusieurs mots, ses parties
+    variables protégées dans sa définition) et `pushgwmon_job` (motif awk, grammaire tenue
+    par un `assert`). Rendu vérifié hors ligne, AUCUNE exécution sur un hôte : même argv
+    qu'avant pour les valeurs des defaults, une seule commande et la valeur en un argument
+    pour les valeurs hostiles. Garde-fou : `Ansible/scripts/unquoted_check_mode.py`, tenu
+    par `cargo test` (RUNNING.md). Comptes `check` : en plus, aucune `extra_vars` par défaut.
+  - **À valider avant tout déploiement** : relecture humaine du diff des rôles, puis un
+    `--check` sur le parc de test (aucun n'existe encore) ; les valeurs réelles des
+    group_vars n'ont pas été lues (vérification faite sur les defaults des rôles et
+    `remote_username: srvc`). Une valeur VIDE change de sens : `''` (un argument vide)
+    au lieu d'aucun mot — aucune variable concernée n'a de défaut vide.
+  - **Reste ouvert : les runs réels** — 165 autres tâches `shell`/`command` interpolent
+    encore sans protection (`unquoted_check_mode.py --all`), exécutées par tout run réel
+    d'un compte `run` (AgentHub admet toute valeur d'une ligne, ≤ 500 caractères ; un run
+    réel autonome n'a pas d'humain avant lui). Proposition, NON appliquée : (1) étendre la
+    règle des valeurs des comptes `check` (`^[A-Za-z0-9][A-Za-z0-9_.,:/@+=-]{0,255}$`) aux
+    comptes `run`, par une option de compte d'abord (`plain_extra_vars: true`), une fois
+    AgentHub aligné (sa validation `infraTypes.ts` et la consigne donnée au modèle) ;
+    (2) passer les 165 tâches à `| quote` par lots, `--all` devenant ensuite le garde-fou.
+    Les valeurs légitimes d'AgentHub hors de cette grammaire (espaces, apostrophes, chemin
+    absolu en tête) seraient alors refusées : à mesurer sur ses runs passés avant de trancher.
 - **`--diff` et secrets** : le caviardage ne reconnaît pas `requirepass xxx`,
   `<password>…</password>`, une ligne htpasswd, un `.pgpass` (`hôte:port:base:user:mdp`).
   `--diff` refusé aux comptes `check` sauf `allow_diff` ; toujours permis aux comptes
