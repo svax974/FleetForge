@@ -25,6 +25,7 @@ import {
 } from '../types'
 import { MachinePower } from './MachinePower'
 import { AlertExclusions } from './AlertExclusions'
+import { ProviderFilter } from './ProviderFilter'
 import { ActionsMenu } from './ActionsMenu'
 import PickerModal, { PickItem } from './PickerModal'
 import AnsibleDeployModal from './AnsibleDeployModal'
@@ -292,6 +293,7 @@ export default function ServersView({ selectedInventory, configMissing, onLaunch
   const [run, setRun] = useState<{ playbook: AnsiblePlaybook; hosts: string[] } | null>(null)
   const [selected, setSelected] = useState<string | null>(null)
   const [query, setQuery] = useState('')
+  const [providers, setProviders] = useState<string[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -372,16 +374,22 @@ export default function ServersView({ selectedInventory, configMissing, onLaunch
       .sort((a: PickItem, b: PickItem) => Number(b.highlight) - Number(a.highlight))
   }
 
+  const providerOptions = useMemo(
+    (): string[] => [...new Set((fleet?.servers ?? []).map((s: Server) => s.provider ?? ''))].sort(),
+    [fleet],
+  )
+
   const servers = useMemo((): Server[] => {
     if (!fleet) return []
     const q = query.trim().toLowerCase()
-    if (!q) return fleet.servers
     return fleet.servers.filter((s: Server) =>
-      s.key.address.toLowerCase().includes(q) ||
-      (s.provider ?? '').toLowerCase().includes(q) ||
-      s.hosts.some((h: string) => h.toLowerCase().includes(q)),
+      (providers.length === 0 || providers.includes(s.provider ?? '')) &&
+      (!q ||
+        s.key.address.toLowerCase().includes(q) ||
+        (s.provider ?? '').toLowerCase().includes(q) ||
+        s.hosts.some((h: string) => h.toLowerCase().includes(q))),
     )
-  }, [fleet, query])
+  }, [fleet, query, providers])
 
   const current = useMemo((): Server | null => {
     if (!fleet) return null
@@ -431,6 +439,7 @@ export default function ServersView({ selectedInventory, configMissing, onLaunch
               className="pl-9 pr-3 py-2 bg-gray-900 border border-gray-700 rounded-lg text-sm text-gray-200 placeholder:text-gray-600 focus:ring-2 focus:ring-primary-500"
             />
           </div>
+          <ProviderFilter options={providerOptions} selected={providers} onChange={setProviders} />
           <button
             onClick={load}
             disabled={loading}
