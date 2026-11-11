@@ -21,9 +21,9 @@
 
 - name: Query node sync state (wait for RPC warmup after restart)
   ansible.builtin.command: >
-    {{ esplora_bitcoin_home }}/bin/bitcoin-cli
-    -datadir={{ esplora_daemon_dir }}
-    -conf={{ esplora_bitcoin_home }}/bitcoin.conf
+    {{ esplora_bitcoin_home | quote }}/bin/bitcoin-cli
+    -datadir={{ esplora_daemon_dir | quote }}
+    -conf={{ esplora_bitcoin_home | quote }}/bitcoin.conf
     getblockchaininfo
   become: true
   become_user: "{{ esplora_user }}"
@@ -82,7 +82,7 @@
 
 - name: "Build electrs {{ esplora_version }} (long — first sync-sized build)"
   ansible.builtin.shell: |
-    source "{{ esplora_home }}/.cargo/env"
+    source {{ esplora_home | quote }}"/.cargo/env"
     cargo build --locked --release
   args:
     chdir: "{{ esplora_src_dir }}"

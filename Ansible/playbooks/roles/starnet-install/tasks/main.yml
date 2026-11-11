@@ -41,7 +41,7 @@
 # déconnexion SSH : le sidecar s'arrêterait à la fin du run Ansible.
 - name: Enable lingering for srvc
   ansible.builtin.command:
-    cmd: "loginctl enable-linger {{ starnet_user }}"
+    cmd: "loginctl enable-linger {{ starnet_user | quote }}"
     creates: "/var/lib/systemd/linger/{{ starnet_user }}"
   become: true
 
@@ -128,7 +128,7 @@
 # package-lock du tag : mêmes versions que la release.
 - name: Install the production dependencies
   ansible.builtin.command:
-    cmd: "{{ starnet_node_dir }}/bin/npm ci --omit=dev --no-audit --no-fund"
+    cmd: "{{ starnet_node_dir | quote }}/bin/npm ci --omit=dev --no-audit --no-fund"
     chdir: "{{ starnet_app_dir }}"
   become: true
   become_user: "{{ starnet_user }}"
@@ -161,7 +161,7 @@
     cmd: >-
       umask 077 &&
       printf 'STARNET_CONNECTOR_ENCRYPTION_KEY=%s\n' "$(openssl rand -hex 32)"
-      > {{ starnet_config_dir }}/connector.env
+      > {{ starnet_config_dir | quote }}/connector.env
     creates: "{{ starnet_config_dir }}/connector.env"
   become: true
   become_user: "{{ starnet_user }}"

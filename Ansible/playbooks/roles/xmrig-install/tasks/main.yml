@@ -34,7 +34,7 @@
 # Tiré UNE fois : un jeton qui change à chaque rejeu casserait la supervision sans que rien
 # ne l'explique. Écrit en 0600 root, dans un fichier à part (le collecteur y lit son jeton).
 - name: Create the API token once
-  ansible.builtin.shell: "umask 077 && openssl rand -hex 24 > {{ xmrig_config_dir }}/api-token"
+  ansible.builtin.shell: "umask 077 && openssl rand -hex 24 > {{ xmrig_config_dir | quote }}/api-token"
   args:
     creates: "{{ xmrig_config_dir }}/api-token"
 

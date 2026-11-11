@@ -73,6 +73,6 @@
   when: storj_identity_source | length > 0
 
 - name: Check that the storage directory is a mount point
-  ansible.builtin.command: "mountpoint -q {{ storj_storage_dir }}"
+  ansible.builtin.command: "mountpoint -q {{ storj_storage_dir | quote }}"
   changed_when: false
   when: storj_require_mount | bool

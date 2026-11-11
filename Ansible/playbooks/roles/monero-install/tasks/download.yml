@@ -40,11 +40,11 @@
         mode: "0700"
 
     - name: Import the signing key into a throwaway keyring
-      ansible.builtin.command: "gpg --batch --quiet --homedir {{ monero_verify_dir.path }}/gnupg --import {{ monero_verify_dir.path }}/signing-key.asc"
+      ansible.builtin.command: "gpg --batch --quiet --homedir {{ monero_verify_dir.path | quote }}/gnupg --import {{ monero_verify_dir.path | quote }}/signing-key.asc"
       changed_when: false
 
     - name: Verify the signature of hashes.txt
-      ansible.builtin.command: "gpg --batch --homedir {{ monero_verify_dir.path }}/gnupg --status-fd 1 --verify {{ monero_verify_dir.path }}/hashes.txt"
+      ansible.builtin.command: "gpg --batch --homedir {{ monero_verify_dir.path | quote }}/gnupg --status-fd 1 --verify {{ monero_verify_dir.path | quote }}/hashes.txt"
       register: monero_gpg_verify
       changed_when: false
       failed_when: false

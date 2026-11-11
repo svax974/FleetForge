@@ -5,7 +5,7 @@
 # l'impose la documentation (`--user $(id -u):$(id -g)`).
 
 - name: Read the uid and gid of the service account
-  ansible.builtin.command: "id -{{ item }} {{ remote_username }}"
+  ansible.builtin.command: "id -{{ item | quote }} {{ remote_username | quote }}"
   loop: [u, g]
   register: storj_ids
   changed_when: false
@@ -32,7 +32,7 @@
 # nœud occupe déjà une partie de l'espace, et un rejeu ne doit pas échouer sur
 # ses propres données.
 - name: Read the free space of the storage filesystem
-  ansible.builtin.command: "df -B1 --output=avail {{ storj_storage_dir }}"
+  ansible.builtin.command: "df -B1 --output=avail {{ storj_storage_dir | quote }}"
   register: storj_df
   changed_when: false
   when: not (storj_config.stat.exists or storj_skip_space_check | bool)

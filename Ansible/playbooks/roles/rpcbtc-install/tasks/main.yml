@@ -57,10 +57,10 @@
     set -e
     mkdir -p ~/bitcoin
     rm -rf ~/bitcoin/bin ~/bitcoin/lib ~/bitcoin/include ~/bitcoin/share
-    cp -a ~/bitcoin-{{ bitcoin_core_version }}/. ~/bitcoin/
-    rm -rf ~/bitcoin-{{ bitcoin_core_version }}
+    cp -a ~/bitcoin-{{ bitcoin_core_version | quote }}/. ~/bitcoin/
+    rm -rf ~/bitcoin-{{ bitcoin_core_version | quote }}
     rm -f ~/bitcoin/.installed-*
-    touch ~/bitcoin/.installed-{{ bitcoin_core_version }}
+    touch ~/bitcoin/.installed-{{ bitcoin_core_version | quote }}
   args:
     executable: /bin/bash
   when: not btc_version_marker.stat.exists
@@ -79,7 +79,7 @@
   template: src=bitcoind.service dest="~/.config/systemd/user/bitcoind.service"
 
 - name: Enable linger so the user service keeps running without an active session
-  ansible.builtin.command: "loginctl enable-linger {{ remote_username }}"
+  ansible.builtin.command: "loginctl enable-linger {{ remote_username | quote }}"
   become: true
   changed_when: false
 

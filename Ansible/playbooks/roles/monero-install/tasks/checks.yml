@@ -39,7 +39,7 @@
 # ── Espace disque ──────────────────────────────────────────────────────────
 # Mesuré sur le système de fichiers qui portera la chaîne (le dossier existe déjà).
 - name: Read the free space of the data filesystem
-  ansible.builtin.command: "df -B1 --output=avail {{ monero_data_dir }}"
+  ansible.builtin.command: "df -B1 --output=avail {{ monero_data_dir | quote }}"
   register: monero_df
   changed_when: false
 
@@ -76,7 +76,7 @@
 # rotatif prend des semaines, contre quelques jours sur SSD (guide officiel : SSD).
 - name: Detect a rotational disk
   ansible.builtin.shell: >-
-    lsblk -dno ROTA "$(findmnt -no SOURCE -T {{ monero_data_dir }})" 2>/dev/null | head -n1 | tr -d ' '
+    lsblk -dno ROTA "$(findmnt -no SOURCE -T {{ monero_data_dir | quote }})" 2>/dev/null | head -n1 | tr -d ' '
   register: monero_rota
   changed_when: false
   failed_when: false

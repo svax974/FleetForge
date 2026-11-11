@@ -69,7 +69,7 @@
     - storj_identity_source | length == 0
   block:
     - name: Ask systemd whether a generation is running
-      ansible.builtin.command: "systemctl is-active {{ storj_identity_unit }}"
+      ansible.builtin.command: "systemctl is-active {{ storj_identity_unit | quote }}"
       register: storj_identity_unit_state
       changed_when: false
       failed_when: false
@@ -159,7 +159,7 @@
         # Sans ce contrôle, un outil qui échoue aussitôt passerait pour une génération
         # en cours, à chaque passage.
         - name: Check that the generation survived its start
-          ansible.builtin.shell: "sleep 5; systemctl is-active {{ storj_identity_unit }}"
+          ansible.builtin.shell: "sleep 5; systemctl is-active {{ storj_identity_unit | quote }}"
           register: storj_identity_started
           changed_when: false
           failed_when: false
@@ -195,8 +195,8 @@
         # `shred` : la clé du dossier de travail ne doit pas survivre en double.
         - name: Wipe the work directory
           ansible.builtin.shell: |
-            find {{ storj_base_dir }}/identity-gen -type f -name '*.key' -exec shred -u {} +
-            rm -rf {{ storj_base_dir }}/identity-gen
+            find {{ storj_base_dir | quote }}/identity-gen -type f -name '*.key' -exec shred -u {} +
+            rm -rf {{ storj_base_dir | quote }}/identity-gen
           changed_when: true
 
     - name: Remember that the identity is not ready yet

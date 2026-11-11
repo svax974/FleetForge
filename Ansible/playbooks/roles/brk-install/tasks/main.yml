@@ -15,9 +15,9 @@
 
 - name: Query node sync state (wait for RPC warmup after restart)
   ansible.builtin.command: >
-    {{ brk_home }}/bitcoin/bin/bitcoin-cli
-    -datadir={{ brk_bitcoindir }}
-    -conf={{ brk_home }}/bitcoin/bitcoin.conf
+    {{ brk_home | quote }}/bitcoin/bin/bitcoin-cli
+    -datadir={{ brk_bitcoindir | quote }}
+    -conf={{ brk_home | quote }}/bitcoin/bitcoin.conf
     getblockchaininfo
   become: true
   become_user: "{{ brk_user }}"
@@ -59,8 +59,8 @@
 
 - name: "Build and install brk_cli {{ brk_version }} (long ~10-20 min first time)"
   ansible.builtin.shell: |
-    source "{{ brk_home }}/.cargo/env"
-    RUSTFLAGS="{{ brk_rustflags }}" cargo install --locked --version {{ brk_version }} brk_cli
+    source {{ brk_home | quote }}"/.cargo/env"
+    RUSTFLAGS={{ brk_rustflags | quote }} cargo install --locked --version {{ brk_version | quote }} brk_cli
   args:
     executable: /bin/bash
   become: true
@@ -81,7 +81,7 @@
   tags: [install]
 
 - name: Verify the installed binary matches brk_version
-  ansible.builtin.command: "{{ brk_home }}/.cargo/bin/brk --version"
+  ansible.builtin.command: "{{ brk_home | quote }}/.cargo/bin/brk --version"
   become: true
   become_user: "{{ brk_user }}"
   register: brk_installed_version
