@@ -37,7 +37,7 @@
     - name: Check that the primary holds this replica's slot
       ansible.builtin.command:
         cmd: >-
-          docker exec papangmetrics-timescaledb psql -U {{ tsdb_user }} -d {{ tsdb_db }} -tAc
+          docker exec papangmetrics-timescaledb psql -U {{ tsdb_user | quote }} -d {{ tsdb_db | quote }} -tAc
           "SELECT count(*) FROM pg_replication_slots WHERE slot_name = '{{ inventory_hostname }}'"
       delegate_to: "{{ tsdb_primary }}"
       register: tsdb_slot_check

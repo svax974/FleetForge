@@ -5,7 +5,7 @@
 
 - name: Wait for PostgreSQL to accept connections
   ansible.builtin.command:
-    cmd: docker exec papangmetrics-timescaledb pg_isready -U {{ tsdb_user }} -d {{ tsdb_db }}
+    cmd: docker exec papangmetrics-timescaledb pg_isready -U {{ tsdb_user | quote }} -d {{ tsdb_db | quote }}
   register: tsdb_ready
   until: tsdb_ready.rc == 0
   retries: 60
@@ -14,7 +14,7 @@
 
 - name: Read the recovery state
   ansible.builtin.command:
-    cmd: docker exec papangmetrics-timescaledb psql -U {{ tsdb_user }} -d {{ tsdb_db }} -tAc "SELECT pg_is_in_recovery()"
+    cmd: docker exec papangmetrics-timescaledb psql -U {{ tsdb_user | quote }} -d {{ tsdb_db | quote }} -tAc "SELECT pg_is_in_recovery()"
   register: tsdb_recovery
   changed_when: false
 

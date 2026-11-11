@@ -16,8 +16,8 @@
 
 - name: Stop, disable and remove the units of the former project name
   ansible.builtin.shell: |
-    systemctl disable --now {{ item.item }} || true
-    rm -f /etc/systemd/system/{{ item.item }}.service
+    systemctl disable --now {{ item.item | quote }} || true
+    rm -f /etc/systemd/system/{{ item.item | quote }}.service
   loop: "{{ ff_legacy_unit_files.results }}"
   loop_control:
     label: "{{ item.item }}"

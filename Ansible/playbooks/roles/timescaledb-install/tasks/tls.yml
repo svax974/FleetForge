@@ -24,7 +24,7 @@
 - name: Check that the server certificate is valid long enough
   ansible.builtin.command:
     cmd: >-
-      openssl x509 -in {{ tsdb_tls_server_dir }}/server.crt -noout
+      openssl x509 -in {{ tsdb_tls_server_dir | quote }}/server.crt -noout
       -checkend {{ (tsdb_tls_min_days_left | int) * 86400 }}
   delegate_to: localhost
   become: false
@@ -44,7 +44,7 @@
 # (papangmetrics-deploy : METRICS_DB_HOST = ansible_host de cette entrée).
 - name: Check that the certificate names this machine's address
   ansible.builtin.command:
-    cmd: openssl x509 -in {{ tsdb_tls_server_dir }}/server.crt -noout -checkip {{ ansible_host }}
+    cmd: openssl x509 -in {{ tsdb_tls_server_dir | quote }}/server.crt -noout -checkip {{ ansible_host }}
   delegate_to: localhost
   become: false
   changed_when: false
@@ -55,7 +55,7 @@
 # jour où il pointera sur ce serveur PapangMetrics échouera à la vérification du nom.
 - name: Check that the certificate names the service hostname
   ansible.builtin.command:
-    cmd: openssl x509 -in {{ tsdb_tls_server_dir }}/server.crt -noout -checkhost {{ tsdb_service_hostname }}
+    cmd: openssl x509 -in {{ tsdb_tls_server_dir | quote }}/server.crt -noout -checkhost {{ tsdb_service_hostname | quote }}
   delegate_to: localhost
   become: false
   changed_when: false

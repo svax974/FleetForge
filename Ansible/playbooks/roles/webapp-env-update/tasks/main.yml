@@ -120,7 +120,8 @@
 
 - name: Save the env files into the vault
   ansible.builtin.command:
-    cmd: ./app-env.sh save {{ webapp_env_app_id }}
+    # Vide : aucun argument, comme avant (quote rendrait un argument vide '').
+    cmd: ./app-env.sh save {{ (webapp_env_app_id | quote) if webapp_env_app_id | length > 0 else '' }}
     chdir: "{{ playbook_dir }}/.."
   delegate_to: localhost
   become: false

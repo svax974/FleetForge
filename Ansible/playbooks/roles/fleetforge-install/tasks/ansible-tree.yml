@@ -228,7 +228,7 @@
 # Les liens de l'ancienne livraison pointaient vers `.private`, retiré ci-dessus.
 - name: Remove the links left dangling
   ansible.builtin.command:
-    cmd: "find {{ ff_ansible_target }} -xtype l -print -delete"
+    cmd: "find {{ ff_ansible_target | quote }} -xtype l -print -delete"
   register: ff_tree_dangling
   changed_when: ff_tree_dangling.stdout | length > 0
   become: true

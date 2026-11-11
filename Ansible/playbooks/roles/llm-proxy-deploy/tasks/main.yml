@@ -15,7 +15,7 @@
 
 - name: Restore the LLM Proxy prod env files from the vault
   ansible.builtin.command:
-    cmd: ./app-env.sh restore {{ llm_proxy_app_env_id }}
+    cmd: ./app-env.sh restore {{ llm_proxy_app_env_id | quote }}
     chdir: "{{ playbook_dir }}/.."
   delegate_to: localhost
   become: false

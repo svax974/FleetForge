@@ -104,7 +104,7 @@
 
 - name: Scan the host keys of the repository the first time
   ansible.builtin.shell:
-    cmd: "ssh-keyscan -t ed25519,ecdsa,rsa {{ ('-p ' ~ ff_ansible_repo_port) if ff_ansible_repo_port | length > 0 else '' }} -H {{ ff_ansible_repo_host | quote }} > {{ ff_ansible_known_hosts_file | quote }}"
+    cmd: "ssh-keyscan -t ed25519,ecdsa,rsa {{ ('-p ' ~ (ff_ansible_repo_port | quote)) if ff_ansible_repo_port | length > 0 else '' }} -H {{ ff_ansible_repo_host | quote }} > {{ ff_ansible_known_hosts_file | quote }}"
     creates: "{{ ff_ansible_known_hosts_file }}"
   become: true
   become_user: "{{ ff_user }}"

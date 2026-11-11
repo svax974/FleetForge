@@ -74,7 +74,7 @@
 # commande lisibles par tous les comptes de la machine.
 - name: Encrypt the new bounded account passwords for the fleet vault
   ansible.builtin.command:
-    cmd: "ansible-vault encrypt_string --stdin-name ff_api_password_{{ item.key }}"
+    cmd: "ansible-vault encrypt_string --stdin-name ff_api_password_{{ item.key | quote }}"
     chdir: "{{ ff_repo_root }}"
     stdin: "{{ item.value }}"
     stdin_add_newline: false
@@ -134,7 +134,7 @@
 # `stdin:` et non un argument de commande, comme pour les autres comptes.
 - name: Hash the bounded account passwords on the machine
   ansible.builtin.command:
-    cmd: "{{ ff_dir }}/target/{{ ff_cargo_profile }}/fleetforge-web hash-password"
+    cmd: "{{ ff_dir | quote }}/target/{{ ff_cargo_profile | quote }}/fleetforge-web hash-password"
     stdin: >-
       {{ (ff_api_new_passwords | default({}))[item.user]
          | default(lookup('ansible.builtin.vars', 'ff_api_password_' ~ item.user, default=''))

@@ -3,10 +3,18 @@
 # `tsdb_slots` — un slot par réplica, nommé comme lui. Idempotent. Partagé par replication.yml
 # (slots des pairs au déploiement) et rebuild-timescale-replica.yml (slot du serveur reconstruit,
 # exécuté en délégation sur le primaire).
+# Les noms entrent dans une requête SQL entre apostrophes : grammaire des slots PostgreSQL.
+- name: Check the replication slot names (they are read into SQL)
+  ansible.builtin.assert:
+    that: tsdb_slots | reject('match', '^[a-z0-9_]{1,63}$') | list | length == 0
+    fail_msg: "tsdb_slots : minuscules, chiffres et _ seulement (63 au plus)"
+    quiet: true
+
 - name: Create the physical replication slots
+  # unquoted-ok: `item` est un nom de slot dans une chaîne SQL, sa grammaire est vérifiée par l'assert précédent.
   ansible.builtin.command:
     cmd: >-
-      docker exec papangmetrics-timescaledb psql -U {{ tsdb_user }} -d {{ tsdb_db }} -tAc
+      docker exec papangmetrics-timescaledb psql -U {{ tsdb_user | quote }} -d {{ tsdb_db | quote }} -tAc
       "SELECT pg_create_physical_replication_slot('{{ item }}') WHERE NOT EXISTS
       (SELECT 1 FROM pg_replication_slots WHERE slot_name = '{{ item }}')"
   loop: "{{ tsdb_slots }}"

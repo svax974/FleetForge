@@ -114,7 +114,7 @@
 
 - name: Install the rust toolchain (as {{ ff_user }})
   ansible.builtin.shell: |
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain {{ ff_rust_toolchain }}
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain {{ ff_rust_toolchain | quote }}
   args:
     creates: "/home/{{ ff_user }}/.rustup"
   become: true
@@ -221,8 +221,8 @@
 # ── Construction du serveur ────────────────────────────────────────────────
 - name: "Build fleetforge-web ({{ ff_cargo_profile }}, long ~10-20 min the first time)"
   ansible.builtin.shell: |
-    source "/home/{{ ff_user }}/.cargo/env"
-    cargo build --{{ ff_cargo_profile }} -p fleetforge-web
+    source "/home/"{{ ff_user | quote }}"/.cargo/env"
+    cargo build --{{ ff_cargo_profile | quote }} -p fleetforge-web
   args:
     chdir: "{{ ff_dir }}"
     executable: /bin/bash
@@ -299,7 +299,7 @@
 # par tous les comptes de la machine.
 - name: Hash the web password on the machine
   ansible.builtin.command:
-    cmd: "{{ ff_dir }}/target/{{ ff_cargo_profile }}/fleetforge-web hash-password"
+    cmd: "{{ ff_dir | quote }}/target/{{ ff_cargo_profile | quote }}/fleetforge-web hash-password"
     stdin: "{{ ff_web_password }}"
     stdin_add_newline: false
   become: true
@@ -312,7 +312,7 @@
 # Compte d'automatisation (AgentHub) : même traitement, empreinte seule.
 - name: Hash the automation password on the machine
   ansible.builtin.command:
-    cmd: "{{ ff_dir }}/target/{{ ff_cargo_profile }}/fleetforge-web hash-password"
+    cmd: "{{ ff_dir | quote }}/target/{{ ff_cargo_profile | quote }}/fleetforge-web hash-password"
     stdin: "{{ ff_api_password }}"
     stdin_add_newline: false
   become: true
