@@ -25,9 +25,11 @@
 
 use anyhow::anyhow;
 use fleetforge_core::ansible_output;
-use fleetforge_core::automation::{validate_extra_vars, validate_run_id, validate_tags};
+use fleetforge_core::automation::{is_plain_value, validate_extra_vars, validate_run_id, validate_tags};
 use fleetforge_core::redact::redact_text;
-use fleetforge_core::{ro_gate, AnsibleRun, Fault, FaultKind, LockPolicy, PlaybookRequest, PreparedRun, RunOptions, RunSelection};
+use fleetforge_core::{
+    ro_gate, AnsibleRun, Fault, FaultKind, LockPolicy, PlaybookRequest, PreparedRun, RunIdPolicy, RunOptions, RunSelection,
+};
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -274,22 +276,23 @@ fn fingerprint(
 /// bornés par `max_hosts`).
 ///
 /// Pour le compte d'automatisation, en plus : `deny_playbooks` (le playbook et
-/// ceux qu'il importe) et `max_hosts` (`limit` obligatoire, groupes développés)
-/// de son périmètre sont appliqués avant tout. Un compte `check` est toujours
-/// tenu à ces règles strictes, et ne lance que des `--check` ([`run_options`]).
+/// ceux qu'il importe), `allow_playbooks` et `max_hosts` (`limit` obligatoire,
+/// groupes développés) de son périmètre sont appliqués avant tout. Un compte
+/// `check` est toujours tenu à ces règles strictes, ne lance que des `--check`
+/// ([`run_options`]) et n'admet d'`extra_vars` que sur option
+/// ([`check_account_values`], [`check_account_names`]).
 ///
 /// `run_id` et `label` sont ceux de l'appelant quand il les donne (une
-/// passerelle impose ainsi les siens) : `run_id_in_use` tant qu'un run EN
-/// COURS porte cet identifiant ; celui d'un run terminé est réutilisable, et
-/// le nouveau run remplace l'ancien au registre.
+/// passerelle impose ainsi les siens). `run_id_in_use` : pour l'automatisation,
+/// tant qu'un run du registre porte cet identifiant, terminé ou non — un
+/// nouvel essai ne relance jamais ; pour l'opérateur, tant qu'il est en cours.
 ///
 /// `detach: true` rend la main dès le run inscrit (`{ run_id, state }`) ; sans
 /// lui, la réponse attend la fin du run (comportement du frontal). Dans les
 /// deux cas le run se termine et se clôt même si le client se déconnecte.
 async fn run_playbook(state: &AppState, role: Role, scope: &Scope, p: &Params) -> ApiResult {
-    let strict = role == Role::Automation || scope.check_only();
     let playbook: String = p.first(&["playbookPath", "playbook"])?;
-    let inventory: String = p.first(&["inventoryPath", "parc"])?;
+    let parc: String = p.first(&["inventoryPath", "parc"])?;
     let limit: Option<Vec<String>> = p.first_opt(&["limitHosts", "limit"])?;
     let tags: Vec<String> = p.opt("tags")?.unwrap_or_default();
     let skip_tags: Vec<String> = p.opt("skip_tags")?.unwrap_or_default();
@@ -300,16 +303,46 @@ async fn run_playbook(state: &AppState, role: Role, scope: &Scope, p: &Params) -
     let options = run_options(scope, p)?;
     let detach: bool = p.opt("detach")?.unwrap_or(false);
     let label: String = p.opt("label")?.unwrap_or_else(|| playbook.clone());
+    let request = LaunchRequest { playbook, parc, limit, tags, skip_tags, commit, no_limit, extra, id, options, detach, label };
+    start_playbook(state, role, scope, request).await
+}
 
+/// Un lancement tel que l'appelant l'a demandé : arguments lus, rien de validé.
+struct LaunchRequest {
+    playbook: String,
+    parc: String,
+    limit: Option<Vec<String>>,
+    tags: Vec<String>,
+    skip_tags: Vec<String>,
+    commit: Option<String>,
+    no_limit: bool,
+    extra: HashMap<String, String>,
+    id: String,
+    options: RunOptions,
+    detach: bool,
+    label: String,
+}
+
+/// Valide un lancement, l'inscrit et l'exécute.
+///
+/// La barrière du compte `check` vient EN TÊTE, sur les options reçues, sans
+/// présumer de leur calcul : quoi que fasse [`run_options`], rien ne part sans
+/// `--check` pour ce compte. `options` n'est plus modifié ensuite.
+async fn start_playbook(state: &AppState, role: Role, scope: &Scope, request: LaunchRequest) -> ApiResult {
+    ensure_check_only(scope, request.options)?;
+    let LaunchRequest { mut playbook, parc: inventory, limit, mut tags, mut skip_tags, mut commit, no_limit, extra, id, options, detach, label } =
+        request;
+    let strict = role == Role::Automation || scope.check_only();
     let core = state.core.clone();
     let mut print = None;
-    let (mut tags, mut skip_tags, mut commit) = (tags, skip_tags, commit);
-    let mut playbook = playbook;
     if strict {
         within(scope, &inventory)?;
         // Un NOM de parc, jamais un chemin de fichier d'inventaire.
         core.parc_by_name(&inventory)?;
         validate_extra_vars(&extra, true)?;
+        if scope.check_only() {
+            check_account_values(scope, &extra)?;
+        }
         tags = validate_tags(&tags, "tags")?;
         skip_tags = validate_tags(&skip_tags, "skip_tags")?;
         let limited = limit.as_ref().is_some_and(|l| !l.is_empty());
@@ -337,6 +370,16 @@ async fn run_playbook(state: &AppState, role: Role, scope: &Scope, p: &Params) -
             .into());
         }
         playbook = chain.first().cloned().unwrap_or(playbook);
+        if !scope.allows(base_name(&playbook)) {
+            return Err(anyhow!(Fault::new(
+                FaultKind::ForbiddenPlaybook,
+                format!("playbook hors de la liste blanche de ce compte (allow_playbooks) : {playbook}"),
+            ))
+            .into());
+        }
+        if scope.check_only() && !extra.is_empty() {
+            check_account_names(state, &inventory, &playbook, &commit, &extra).await?;
+        }
         let fp = fingerprint(&inventory, &playbook, &limit, &extra, &tags, &skip_tags, &commit, no_limit);
         if !options.check && !state.checks.is_fresh(scope.check_owners(), &fp) {
             return Err(anyhow!(Fault::new(
@@ -350,9 +393,6 @@ async fn run_playbook(state: &AppState, role: Role, scope: &Scope, p: &Params) -
         print = options.check.then(|| (scope.owner.clone(), fp));
     }
 
-    // Dernière barrière avant l'inscription et le lancement, indépendante de
-    // la façon dont `options` a été calculé plus haut.
-    ensure_check_only(scope, options)?;
     let run_parc = inventory.clone();
     let req = PlaybookRequest {
         id,
@@ -363,6 +403,10 @@ async fn run_playbook(state: &AppState, role: Role, scope: &Scope, p: &Params) -
         extra_vars: extra,
     };
     let lock = if strict { LockPolicy::Try } else { LockPolicy::Wait };
+    // L'automatisation ne reprend jamais un identifiant encore au registre :
+    // ni nouvel essai qui relance, ni entrée d'un run d'autrui remplacée — et
+    // donc ni parc de `run_parcs` réécrit sous un run qui n'est pas le sien.
+    let ids = if strict { RunIdPolicy::Unique } else { RunIdPolicy::ReplaceFinished };
     // Validation complète (inventaire, `--limit`) et inscription au registre
     // — sous-processus possibles, hors du fil asynchrone —, puis lancement.
     // Le tout dans une tâche à part : un client qui se déconnecte entre les
@@ -370,8 +414,8 @@ async fn run_playbook(state: &AppState, role: Role, scope: &Scope, p: &Params) -
     let shared = state.clone();
     let selection = RunSelection { tags, skip_tags, no_limit, commit };
     let (run_id, running) = tokio::spawn(async move {
-        let prepared = tokio::task::spawn_blocking(move || core.prepare_playbook_with(req, options, selection, lock))
-            .await??;
+        let prepared =
+            tokio::task::spawn_blocking(move || core.prepare_playbook_with(req, options, selection, lock, ids)).await??;
         let run_id = prepared.id().to_string();
         // Avant le lancement : un `run_status` immédiat doit déjà le trouver.
         shared.run_parcs.record(&run_id, &run_parc);
@@ -406,7 +450,9 @@ async fn run_playbook(state: &AppState, role: Role, scope: &Scope, p: &Params) -
 /// un check — l'appelant qui demandait un run réel doit savoir qu'il n'a pas
 /// eu lieu. Les variables qui pourraient désarmer `--check` (`ansible_*`,
 /// dont `ansible_check_mode`) sont refusées par la validation stricte, à
-/// laquelle ce compte est toujours tenu.
+/// laquelle ce compte est toujours tenu. `diff: true` lui est refusé sans
+/// `allow_diff` : la sortie montrerait le contenu des fichiers que le run
+/// changerait, que le caviardage ne couvre pas tout.
 fn run_options(scope: &Scope, p: &Params) -> Result<RunOptions, ApiError> {
     let check: Option<bool> = p.opt("check")?;
     let diff: bool = p.opt("diff")?.unwrap_or(false);
@@ -418,16 +464,65 @@ fn run_options(scope: &Scope, p: &Params) -> Result<RunOptions, ApiError> {
             "run réel refusé : ce compte ne lance que des --check (check: false interdit)".to_string(),
         ));
     }
+    if diff && !scope.allow_diff {
+        return Err(ApiError::forbidden("--diff refusé à ce compte (allow_diff)".to_string()));
+    }
     Ok(RunOptions { check: true, diff })
 }
 
 /// Un compte `check` n'inscrit jamais un run sans `--check`, quel que soit le
-/// chemin suivi jusque-là : seconde barrière, juste avant le lancement.
+/// chemin suivi jusque-là.
 fn ensure_check_only(scope: &Scope, options: RunOptions) -> Result<(), ApiError> {
     if scope.check_only() && !options.check {
         return Err(ApiError::forbidden("run réel refusé : ce compte ne lance que des --check".to_string()));
     }
     Ok(())
+}
+
+/// `extra_vars` d'un compte `check`, première moitié : refusées sans
+/// `allow_extra_vars` (`403`), et des valeurs INERTES dans une ligne de
+/// commande avec ([`is_plain_value`], `400`).
+///
+/// Pourquoi : un `--check` exécute pour de vrai les tâches `check_mode: false`,
+/// dont des `shell:` qui interpolent une variable sans `| quote` — parfois
+/// déléguées à la supervision ou à cette machine même. Une variable du parc
+/// redéfinie par `-e` (précédence maximale) y devient une commande, en root.
+fn check_account_values(scope: &Scope, extra: &HashMap<String, String>) -> Result<(), ApiError> {
+    if extra.is_empty() {
+        return Ok(());
+    }
+    if !scope.allow_extra_vars {
+        return Err(ApiError::forbidden("extra_vars refusées à ce compte (allow_extra_vars)".to_string()));
+    }
+    match extra.iter().find(|(_, value)| !is_plain_value(value)) {
+        Some((key, _)) => Err(ApiError::invalid(format!(
+            "valeur refusée pour {key} : ^[A-Za-z0-9][A-Za-z0-9_.,:/@+=-]{{0,255}}$ attendu pour ce compte"
+        ))),
+        None => Ok(()),
+    }
+}
+
+/// `extra_vars` d'un compte `check`, seconde moitié : seulement des variables
+/// que le playbook attend SANS défaut (`vars` de `describe_playbook`, dans
+/// l'arbre de ce commit). Jamais une variable qu'un défaut de rôle, un
+/// `vars:` ou un group_vars définit : ce compte complète, il ne redéfinit pas.
+async fn check_account_names(
+    state: &AppState,
+    parc: &str,
+    playbook: &str,
+    commit: &Option<String>,
+    extra: &HashMap<String, String>,
+) -> Result<(), ApiError> {
+    let (core, parc, playbook, commit) = (state.core.clone(), parc.to_string(), playbook.to_string(), commit.clone());
+    let described =
+        tokio::task::spawn_blocking(move || core.describe_playbook(&parc, &playbook, commit.as_deref())).await??;
+    match extra.keys().find(|key| !described.description.vars.contains(*key)) {
+        Some(key) => Err(ApiError::forbidden(format!(
+            "extra_vars : {key} n'est pas une variable que le playbook attend sans défaut \
+             (describe_playbook, vars) — ce compte ne redéfinit aucune variable"
+        ))),
+        None => Ok(()),
+    }
 }
 
 /// Nom de fichier d'un playbook (`sub/x.yml` → `x.yml`).
@@ -686,8 +781,12 @@ mod tests {
         assert_eq!(options(&check, json!({})), Ok(forced), "check absent : imposé");
         assert_eq!(options(&check, json!({ "check": null })), Ok(forced));
         assert_eq!(options(&check, json!({ "check": true })), Ok(forced));
-        assert_eq!(options(&check, json!({ "check": true, "diff": true })), Ok(RunOptions { check: true, diff: true }));
+        assert_eq!(options(&check, json!({ "check": true, "diff": false })), Ok(forced));
+        assert_eq!(options(&check, json!({ "check": true, "diff": true })), Err("forbidden"), "--diff : sur option");
+        let with_diff = Scope { allow_diff: true, ..check.clone() };
+        assert_eq!(options(&with_diff, json!({ "diff": true })), Ok(RunOptions { check: true, diff: true }));
         assert_eq!(options(&check, json!({ "check": false })), Err("forbidden"), "refusé, pas ignoré");
+        assert_eq!(options(&with_diff, json!({ "check": false, "diff": true })), Err("forbidden"));
         assert_eq!(options(&check, json!({ "check": "false" })), Err("invalid_argument"));
         assert_eq!(options(&check, json!({ "check": 0 })), Err("invalid_argument"));
         // Seconde barrière : quelles que soient les options, pas de run sans --check.
@@ -701,7 +800,63 @@ mod tests {
             assert_eq!(options(&scope, json!({})), Ok(RunOptions::default()), "run réel par défaut, comme avant");
             assert_eq!(options(&scope, json!({ "check": false })), Ok(RunOptions::default()));
             assert_eq!(options(&scope, json!({ "check": true })), Ok(RunOptions { check: true, diff: false }));
+            assert_eq!(options(&scope, json!({ "diff": true })), Ok(RunOptions { check: false, diff: true }));
             assert!(ensure_check_only(&scope, RunOptions::default()).is_ok());
+        }
+    }
+
+    /// Un lancement que rien n'atteindra : parc au nom invalide, refusé avant
+    /// toute lecture d'inventaire si la barrière manquait.
+    fn unreachable_launch(options: RunOptions) -> LaunchRequest {
+        LaunchRequest {
+            playbook: "deploy-x.yml".into(),
+            parc: "../nowhere".into(),
+            limit: None,
+            tags: vec![],
+            skip_tags: vec![],
+            commit: None,
+            no_limit: false,
+            extra: HashMap::new(),
+            id: "t-1".into(),
+            options,
+            detach: true,
+            label: "t".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_launch_itself_refuses_a_real_run_to_a_check_account() {
+        // Options FORGÉES (check: false), comme si `run_options` avait cédé :
+        // `start_playbook` refuse en tête. Sans cette barrière, la requête irait
+        // jusqu'au parc et répondrait `invalid_argument`.
+        let state = AppState::for_tests();
+        let check = Scope { mode: crate::config::Mode::Check, max_hosts: Some(1), ..Scope::everything() };
+        let refused = start_playbook(&state, Role::Automation, &check, unreachable_launch(RunOptions::default())).await;
+        assert_eq!(refused.map(|_| ()).map_err(|e| e.code()), Err("forbidden"));
+        let refused = start_playbook(&state, Role::Operator, &check, unreachable_launch(RunOptions::default())).await;
+        assert_eq!(refused.map(|_| ()).map_err(|e| e.code()), Err("forbidden"), "quel que soit le rôle");
+        // Témoin : avec --check, la même requête passe la barrière et bute sur le parc.
+        let checked = RunOptions { check: true, diff: false };
+        let further = start_playbook(&state, Role::Automation, &check, unreachable_launch(checked)).await;
+        assert_eq!(further.map(|_| ()).map_err(|e| e.code()), Err("invalid_argument"));
+        assert!(state.core.runs().all().is_empty(), "rien d'inscrit");
+    }
+
+    #[test]
+    fn a_check_account_takes_extra_vars_only_on_option_and_only_plain() {
+        let vars = |k: &str, v: &str| HashMap::from([(k.to_string(), v.to_string())]);
+        let check = Scope { mode: crate::config::Mode::Check, ..Scope::everything() };
+        let code = |scope: &Scope, extra: HashMap<String, String>| check_account_values(scope, &extra).map_err(|e| e.code());
+        assert_eq!(code(&check, HashMap::new()), Ok(()));
+        assert_eq!(code(&check, vars("model_name", "qwen3-8b")), Err("forbidden"), "sans allow_extra_vars");
+        let allowed = Scope { allow_extra_vars: true, ..check };
+        assert_eq!(code(&allowed, vars("model_name", "qwen3-8b")), Ok(()));
+        let long = "a".repeat(257);
+        for bad in [
+            "a'; id", "9100'; sudo -n touch /tmp/x; echo '", "$(id)", "`id`", "a|b", "a&b", "a;b", "a b", "/etc/passwd",
+            "-rf", long.as_str(),
+        ] {
+            assert_eq!(code(&allowed, vars("node_exporter_scrape_port", bad)), Err("invalid_argument"), "{bad:?}");
         }
     }
 

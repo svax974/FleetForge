@@ -207,7 +207,14 @@ pub fn validate_run_id(id: &str) -> Result<()> {
 ///     (`ansible_ssh_common_args=-o ProxyCommand=…` exécute une commande sur
 ///     CETTE machine) ;
 ///   • aucun délimiteur Jinja — une valeur d'extra-var est rendue par Ansible,
-///     `{{ lookup('pipe', …) }}` y exécuterait une commande locale.
+///     `{{ lookup('pipe', …) }}` y exécuterait une commande locale ;
+///   • une seule ligne, sans caractère de contrôle (la tabulation exceptée) :
+///     un saut de ligne ajoute une directive au fichier qu'un gabarit écrit
+///     (unité systemd, sudoers…). Même règle que les valeurs d'AgentHub.
+///
+/// Ce n'est PAS une protection contre l'injection dans un `shell:` qui
+/// interpole la variable sans `| quote` : apostrophes, `;`, `$()` passent.
+/// Le compte `check` est tenu plus court ([`is_plain_value`]).
 pub fn validate_extra_vars(vars: &HashMap<String, String>, strict: bool) -> Result<()> {
     for (key, value) in vars {
         let identifier = key
@@ -234,8 +241,25 @@ pub fn validate_extra_vars(vars: &HashMap<String, String>, strict: bool) -> Resu
                 format!("valeur refusée pour {key} (gabarit Jinja ou trop longue)"),
             );
         }
+        if value.chars().any(|c| c.is_ascii_control() && c != '\t') {
+            return fail(
+                FaultKind::InvalidArgument,
+                format!("valeur refusée pour {key} (une seule ligne, sans caractère de contrôle)"),
+            );
+        }
     }
     Ok(())
+}
+
+/// Valeur d'extra-var inerte dans une ligne de commande, quel que soit le
+/// guillemet qui l'entoure — ou son absence : `^[A-Za-z0-9][A-Za-z0-9_.,:/@+=-]{0,255}$`.
+/// Ni espace, ni apostrophe, ni guillemet, ni `$`, `` ` ``, `;`, `|`, `&`,
+/// `<`, `>`, `\`, joker ; jamais en tête un `-` (option) ni un `/` (chemin
+/// absolu). Exigée des comptes `check` : leur `--check` exécute pour de vrai
+/// les tâches `check_mode: false`, dont des `shell:` qui interpolent sans
+/// `| quote`.
+pub fn is_plain_value(value: &str) -> bool {
+    is_token(value, 256, "_.,:/@+=-")
 }
 
 /// Étiquettes (`tags`, `skip_tags`) transmises à Ansible.
@@ -661,6 +685,29 @@ mod tests {
         assert!(validate_extra_vars(&vars("ANSIBLE_BECOME", "x"), true).is_err());
         assert!(validate_extra_vars(&vars("x", "{{ lookup('pipe','id') }}"), true).is_err());
         assert!(validate_extra_vars(&vars("x", "{% if %}"), true).is_err());
+        // Une ligne : ce qu'AgentHub accepte passe, rien de plus.
+        for bad in ["a\nExecStartPre=/bin/id", "a\rb", "a\u{1b}[2J", "a\u{7f}"] {
+            assert!(validate_extra_vars(&vars("x", bad), true).is_err(), "{bad:?}");
+            assert!(validate_extra_vars(&vars("x", bad), false).is_ok(), "l'opérateur : inchangé");
+        }
+        for good in ["a\tb", "l'hôte du parc", "/var/log", "x; y"] {
+            assert!(validate_extra_vars(&vars("x", good), true).is_ok(), "{good:?}");
+        }
+    }
+
+    #[test]
+    fn a_plain_value_is_inert_in_a_command_line() {
+        for good in ["qwen3-8b", "9100", "a.b_c,d:e/f@g+h=i-j", "Qwen3/x.gguf", "0"] {
+            assert!(is_plain_value(good), "{good:?}");
+        }
+        let long = "a".repeat(257);
+        for bad in [
+            "", "9100'; sudo -n touch /tmp/x; echo '", "a'; id", "$(id)", "`id`", "a|b", "a&b", "a;b",
+            "a b", "a\nb", "a\"b", "a\\b", "a>b", "a*", "-rf", "/etc/passwd", "~root", long.as_str(),
+        ] {
+            assert!(!is_plain_value(bad), "{bad:?}");
+        }
+        assert!(is_plain_value(&"a".repeat(256)));
     }
 
     #[test]

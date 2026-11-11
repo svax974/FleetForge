@@ -683,6 +683,45 @@ mod tests {
         assert!(err.message.contains("inventoryPath"), "message : {}", err.message);
     }
 
+    /// `dispatch` lui-même, derrière le filtre d'entrée : sur un état en
+    /// mémoire, avec des commandes sans effet hors de cet état si la barrière
+    /// manquait (aucune n'écrit un fichier ni ne lance Ansible).
+    #[tokio::test]
+    async fn dispatch_refuses_operator_commands_to_an_automation_account() {
+        let state = AppState::for_tests();
+        let call = |role: Role, scope: Scope, command: &str, body: &str| {
+            dispatch(
+                State(state.clone()),
+                Some(Extension(role)),
+                Some(Extension(Arc::new(scope))),
+                Path(command.to_string()),
+                body.to_string(),
+            )
+        };
+        let check = || Scope { mode: crate::config::Mode::Check, max_hosts: Some(1), ..Scope::everything() };
+        let operator_only = [
+            ("get_active_runs", ""),
+            ("get_run_handle", r#"{"runId":"x"}"#),
+            ("clear_finished_runs", ""),
+            ("get_models", ""),
+            ("set_inventories_path", r#"{"path":"/nonexistent"}"#),
+        ];
+        for (command, body) in operator_only {
+            for scope in [check(), Scope::everything()] {
+                let mode = scope.mode;
+                let refused = call(Role::Automation, scope, command, body).await.map(|_| ()).map_err(|e| e.code);
+                assert_eq!(refused, Err("forbidden"), "{command} ({mode:?})");
+            }
+        }
+        // Témoin : l'opérateur, lui, les atteint.
+        for (command, body) in operator_only {
+            assert!(call(Role::Operator, Scope::everything(), command, body).await.is_ok(), "{command}");
+        }
+        // Et le compte check garde ses commandes (refus métier, pas de mode).
+        let answered = call(Role::Automation, check(), "run_status", r#"{"run_id":"nope"}"#).await.map(|_| ()).map_err(|e| e.code);
+        assert_eq!(answered, Err("unknown_run"));
+    }
+
     #[test]
     fn the_command_list_has_no_duplicate() {
         let mut sorted = COMMANDS.to_vec();

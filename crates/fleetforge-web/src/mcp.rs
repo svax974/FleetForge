@@ -59,8 +59,8 @@ precise commit (tree_status, sync_tree). run_ansible_playbook is gated: a real r
 limit, extra_vars, tags, skip_tags, commit, no_limit) completed with check: true less than \
 one hour ago under the same account (or an account it accepts), and a parc runs one playbook \
 at a time (code run_busy). An account may be bounded further: forbidden_playbook \
-(deny_playbooks) and too_many_hosts (max_hosts). An account in check mode only dry-runs: \
-check is forced to true and check: false is refused (code forbidden). \
+(deny_playbooks, allow_playbooks) and too_many_hosts (max_hosts). An account in check mode \
+only dry-runs: check is forced to true and check: false is refused (code forbidden). \
 Outputs are redacted. A refusal is a tool error whose text is a JSON object \
 {\"error\": <message>, \"code\": <stable code>}.";
 
@@ -360,7 +360,10 @@ static TOOLS: LazyLock<Vec<Tool>> = LazyLock::new(|| {
              code check_required unless the SAME launch (parc, playbook, limit, extra_vars, tags, skip_tags, \
              resolved commit, no_limit) completed with check: true less than one hour ago, under the same \
              account or an account it accepts. An account in check mode only dry-runs: check is forced to \
-             true, check: false is refused (code forbidden). One run per parc \
+             true, check: false is refused (code forbidden), and so are diff and extra_vars unless its \
+             configuration allows them (then only variables describe_playbook lists in vars, with plain values \
+             ^[A-Za-z0-9][A-Za-z0-9_.,:/@+=-]{0,255}$). A run_id still in the run registry, even of a finished \
+             run, is refused (run_id_in_use): a retry never runs twice. One run per parc \
              at a time (code run_busy). limit names hosts or groups of the parc, no pattern; with no limit \
              at all the playbook targets its own hosts. no_limit: true states that explicitly (needed by \
              playbooks whose describe_playbook says needs_no_limit); it excludes limit and is refused for an \

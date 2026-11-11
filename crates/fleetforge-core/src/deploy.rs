@@ -12,6 +12,7 @@
 //! lancé depuis une interface était invisible depuis l'autre. Il vit ici.
 
 use crate::database::Database;
+use crate::fault::FaultKind;
 use crate::models::{AnsibleRun, ServerService};
 use crate::service_tracker;
 use anyhow::Result;
@@ -100,6 +101,31 @@ pub struct RunSelection {
     pub commit: Option<String>,
 }
 
+/// Ce qu'un identifiant de run déjà au registre interdit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunIdPolicy {
+    /// Seul un run EN COURS bloque l'identifiant ; celui d'un run terminé est
+    /// repris et le nouveau run le remplace (interfaces humaines).
+    ReplaceFinished,
+    /// Tout run encore au registre le bloque (API d'automatisation) : un
+    /// nouvel essai avec le même identifiant ne relance jamais, et nul ne
+    /// remplace l'entrée d'un run qu'il n'a pas lancé.
+    Unique,
+}
+
+impl RunIdPolicy {
+    fn refuses(self, run: &RunHandle) -> bool {
+        self == RunIdPolicy::Unique || run.is_running()
+    }
+
+    fn message(self, id: &str) -> String {
+        match self {
+            RunIdPolicy::ReplaceFinished => format!("un run en cours porte déjà l'identifiant {id}"),
+            RunIdPolicy::Unique => format!("un run du registre porte déjà l'identifiant {id}"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RunStatus {
@@ -185,7 +211,43 @@ impl RunRegistry {
         hosts: &[String],
         options: RunOptions,
     ) {
-        let handle = RunHandle {
+        let handle = Self::handle(id, label, kind, roles, hosts, options);
+        let mut runs = self.runs.write().unwrap();
+        runs.retain(|r| r.id != id);
+        runs.push(handle);
+    }
+
+    /// [`Self::start_with`], refusé (`RunIdInUse`) si l'identifiant est pris
+    /// selon `ids` — contrôle et inscription sous le MÊME verrou : deux
+    /// lancements simultanés du même identifiant n'en inscrivent qu'un.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_start_with(
+        &self,
+        id: &str,
+        label: &str,
+        kind: RunKind,
+        roles: &[String],
+        hosts: &[String],
+        options: RunOptions,
+        ids: RunIdPolicy,
+    ) -> anyhow::Result<()> {
+        let mut runs = self.runs.write().unwrap();
+        if let Some(taken) = runs.iter().find(|r| r.id == id && ids.refuses(r)) {
+            return crate::fault::fail(FaultKind::RunIdInUse, ids.message(&taken.id));
+        }
+        runs.retain(|r| r.id != id);
+        runs.push(Self::handle(id, label, kind, roles, hosts, options));
+        Ok(())
+    }
+
+    /// L'identifiant est-il pris selon `ids` ? Contrôle rapide, avant toute
+    /// validation coûteuse ; l'inscription le refait sous verrou.
+    pub fn id_taken(&self, id: &str, ids: RunIdPolicy) -> bool {
+        self.runs.read().unwrap().iter().any(|r| r.id == id && ids.refuses(r))
+    }
+
+    fn handle(id: &str, label: &str, kind: RunKind, roles: &[String], hosts: &[String], options: RunOptions) -> RunHandle {
+        RunHandle {
             id: id.to_string(),
             label: label.to_string(),
             kind,
@@ -200,10 +262,7 @@ impl RunRegistry {
             commit: None,
             tags: Vec::new(),
             skip_tags: Vec::new(),
-        };
-        let mut runs = self.runs.write().unwrap();
-        runs.retain(|r| r.id != id);
-        runs.push(handle);
+        }
     }
 
     /// Consigne la sélection d'un run déjà inscrit (commit, étiquettes).
@@ -490,6 +549,46 @@ mod tests {
         assert_eq!((run.status, run.exit_code), (RunStatus::Failed, Some(2)));
         assert!(run.options.check);
         assert!(!reg.is_running("r1"));
+    }
+
+    #[test]
+    fn a_unique_run_id_is_refused_while_the_registry_holds_it() {
+        let reg = RunRegistry::new();
+        let opts = RunOptions::default();
+        let start = |id: &str, ids| reg.try_start_with(id, "x", RunKind::Playbook, &[], &[], opts, ids);
+        assert!(start("r1", RunIdPolicy::Unique).is_ok());
+        for ids in [RunIdPolicy::Unique, RunIdPolicy::ReplaceFinished] {
+            assert!(reg.id_taken("r1", ids), "en cours : pris pour tous");
+            let err = start("r1", ids).unwrap_err();
+            assert_eq!(crate::fault::kind_of(&err), Some(FaultKind::RunIdInUse));
+        }
+        reg.finish_with("r1", RunStatus::Success, Some(0));
+        assert!(reg.id_taken("r1", RunIdPolicy::Unique) && !reg.id_taken("r1", RunIdPolicy::ReplaceFinished));
+        assert!(start("r1", RunIdPolicy::Unique).is_err(), "terminé : toujours pris pour l'automatisation");
+        assert_eq!(reg.get("r1").unwrap().status, RunStatus::Success, "l'entrée n'est pas remplacée");
+        assert!(start("r1", RunIdPolicy::ReplaceFinished).is_ok(), "les interfaces humaines le reprennent");
+        assert!(reg.is_running("r1"));
+        reg.clear_finished();
+        assert_eq!(reg.all().len(), 1);
+    }
+
+    #[test]
+    fn concurrent_starts_of_one_id_register_it_once() {
+        let reg = RunRegistry::new();
+        let wins: usize = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..16)
+                .map(|_| {
+                    let reg = reg.clone();
+                    s.spawn(move || {
+                        reg.try_start_with("same", "x", RunKind::Playbook, &[], &[], RunOptions::default(), RunIdPolicy::Unique)
+                            .is_ok() as usize
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).sum()
+        });
+        assert_eq!(wins, 1);
+        assert_eq!(reg.all().len(), 1);
     }
 
     #[test]

@@ -76,6 +76,19 @@ impl AppState {
     pub fn runs_failed(&self) -> u64 {
         self.counters.failed.load(Ordering::Relaxed)
     }
+
+    /// État sur une base en mémoire, sans arbre ni clé : pour les tests, qui ne
+    /// touchent ni la base du poste, ni un inventaire, ni une machine.
+    #[cfg(test)]
+    pub fn for_tests() -> Self {
+        let ro_gate = RoGateConfig {
+            key: "/nonexistent/ro-key".into(),
+            user: "nobody".into(),
+            known_hosts: "/nonexistent/known_hosts".into(),
+            timeout: Duration::from_secs(5),
+        };
+        Self::new(Core::in_memory().expect("base en mémoire"), ro_gate)
+    }
 }
 
 /// Durée pendant laquelle un `--check` autorise le run réel correspondant.

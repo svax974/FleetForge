@@ -14,13 +14,29 @@ Lot 6.1 de la passerelle MCP (`fleetforge-gateway`) ; détail dans RUNNING.md, �
   `sync_tree`. Le plan du lot 6 (§ 2.4) donnait `sync_tree` au compte `ffg-check` : la
   passerelle le passe par son compte `run`, ou on l'ajoute à `CHECK_COMMANDS` (une ligne).
 - **`--check` n'est pas sans effet** : connexion et `become` sur les hôtes, tâches
-  `check_mode: false` (une centaine dans les rôles, sondes en lecture par convention) et
-  lookups exécutés pour de vrai. À relire avant d'autoriser des checks autonomes.
-- **`run_id` d'un run terminé réutilisable** : `run_id_in_use` ne protège que pendant le
-  run ; un nouvel essai après sa fin relance le playbook et remplace l'entrée du registre.
-  Proposition : refuser tout identifiant encore au registre pour l'automatisation
-  (AgentHub compatible : un identifiant par run). Non fait : change le comportement des
-  comptes `run` existants.
+  `check_mode: false` (une centaine dans les rôles) et lookups exécutés pour de vrai.
+  À relire avant d'autoriser des checks autonomes.
+- **Injection par `extra_vars` (relecture du 11/11/2026, CRITIQUE)** : 44 tâches
+  `shell`/`command` en `check_mode: false` interpolent des variables du parc sans
+  `| quote` (20 `shell`, dont 7 déléguées à `prometheus_host` ; 24 `command`, dont 2
+  déléguées à `localhost`, la machine de FleetForge, dans `fleetforge-install`, et un faux
+  positif). `-e` l'emporte sur tout : une valeur `9100'; sudo -n …; echo '` y devient
+  une commande root, DÈS le `--check`. Fait : compte `check` sans `extra_vars` par défaut,
+  et sur option seulement des variables sans défaut, en valeurs inertes ; une ligne sans
+  caractère de contrôle pour tous les comptes stricts. **Reste ouvert pour les comptes
+  `run`** (AgentHub admet toute valeur d'une ligne, ≤ 500 caractères : la règle des
+  comptes `check` casserait ses usages) : corriger les rôles (`| quote`, `argv:`) puis un
+  contrôle en CI qui refuse toute nouvelle interpolation non protégée dans ces tâches.
+  Liste exacte : rapport du lot 6.1 (scanner `unquoted_check_mode.py`).
+- **`--diff` et secrets** : le caviardage ne reconnaît pas `requirepass xxx`,
+  `<password>…</password>`, une ligne htpasswd, un `.pgpass` (`hôte:port:base:user:mdp`).
+  `--diff` refusé aux comptes `check` sauf `allow_diff` ; toujours permis aux comptes
+  `run` (AgentHub l'envoie à chaque run) : sortie potentiellement sensible chez le
+  fournisseur du modèle.
+- **`run_id`** : fait — l'automatisation ne reprend plus un identifiant encore au registre
+  (contrôle atomique). Changement pour les comptes `run` : un nouvel essai après la fin du
+  premier répond `409 run_id_in_use` au lieu de relancer (le faux FleetForge d'AgentHub
+  l'imposait déjà).
 - **Un check n'est pas consommé** : il autorise autant de runs réels que voulu pendant
   une heure (au même compte ou à ceux qui l'acceptent) ; l'usage unique reste à la passerelle.
 - **`run_status` borné au parc seulement** : un compte voit les runs des autres comptes de

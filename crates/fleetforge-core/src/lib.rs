@@ -53,7 +53,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 pub use ansible_group_vars::GroupVarEntry;
 pub use database::Database;
-pub use deploy::{DeployRequest, PlaybookRequest, RunGuard, RunHandle, RunOptions, RunRegistry, RunSelection};
+pub use deploy::{DeployRequest, PlaybookRequest, RunGuard, RunHandle, RunIdPolicy, RunOptions, RunRegistry, RunSelection};
 pub use fault::{Fault, FaultKind};
 pub use metrics::{Probe, ProbeScope, PrometheusClient, PrometheusConfig};
 pub use model::{Fleet, Health, MachineKey, ProviderKind, Server};
@@ -189,7 +189,17 @@ impl PreparedRun {
 
 impl Core {
     pub fn new() -> Result<Self> {
-        let db = Database::new()?;
+        Self::with_database(Database::new()?)
+    }
+
+    /// Cœur sur une base en mémoire, vide, et aucun arbre : pour les tests des
+    /// façades, qui ne doivent ni lire ni écrire la base du poste.
+    #[doc(hidden)]
+    pub fn in_memory() -> Result<Self> {
+        Self::with_database(Database::in_memory()?)
+    }
+
+    fn with_database(db: Database) -> Result<Self> {
         Ok(Self {
             db: Mutex::new(db),
             runs: RunRegistry::new(),
@@ -826,7 +836,7 @@ impl Core {
         options: RunOptions,
         lock: LockPolicy,
     ) -> Result<PreparedRun> {
-        self.prepare_playbook_with(req, options, RunSelection::default(), lock)
+        self.prepare_playbook_with(req, options, RunSelection::default(), lock, RunIdPolicy::ReplaceFinished)
     }
 
     /// [`Self::prepare_playbook`] avec une sélection : étiquettes et commit.
@@ -834,16 +844,21 @@ impl Core {
     /// En mode git, le playbook est cherché dans l'arbre du commit
     /// (`selection.commit`, sinon la tête synchronisée), que le run retient
     /// jusqu'à sa fin ; le commit exécuté est consigné au registre.
+    ///
+    /// `ids` : un identifiant déjà au registre est refusé (`RunIdInUse`) s'il
+    /// est en cours, ou toujours (`RunIdPolicy::Unique`) — contrôlé tôt, puis
+    /// de nouveau à l'inscription, sous le verrou du registre.
     pub fn prepare_playbook_with(
         &self,
         mut req: PlaybookRequest,
         options: RunOptions,
         mut selection: RunSelection,
         lock: LockPolicy,
+        ids: RunIdPolicy,
     ) -> Result<PreparedRun> {
         automation::validate_run_id(&req.id)?;
-        if self.runs.is_running(&req.id) {
-            return fault::fail(FaultKind::RunIdInUse, format!("un run en cours porte déjà l'identifiant {}", req.id));
+        if self.runs.id_taken(&req.id, ids) {
+            return fault::fail(FaultKind::RunIdInUse, format!("un run du registre porte déjà l'identifiant {}", req.id));
         }
         automation::validate_extra_vars(&req.extra_vars, false)?;
         selection.tags = automation::validate_tags(&selection.tags, "tags")?;
@@ -872,14 +887,15 @@ impl Core {
 
         let label = if options.check { format!("[check] {}", req.label) } else { req.label.clone() };
         let display_hosts = req.limit_hosts.clone().unwrap_or_default();
-        self.runs.start_with(
+        self.runs.try_start_with(
             &req.id,
             &label,
             deploy::RunKind::Playbook,
             &[],
             &display_hosts,
             options,
-        );
+            ids,
+        )?;
         self.runs.annotate(&req.id, &selection);
         Ok(PreparedRun { req, parc, options, selection, view, guard })
     }

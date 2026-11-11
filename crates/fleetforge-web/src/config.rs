@@ -111,6 +111,16 @@ pub struct Scope {
     /// des runs réels d'une passerelle dont les checks passent par un compte
     /// `check`. Vide : ses propres checks seulement.
     pub accept_checks_from: Vec<String>,
+    /// Liste blanche (motifs `*`, `?`) des playbooks que `run_ansible_playbook`
+    /// accepte de ce compte (`forbidden_playbook` sinon). `None` : pas de liste.
+    pub allow_playbooks: Option<Vec<String>>,
+    /// Compte `check` : `extra_vars` admises — seulement les variables qu'aucun
+    /// défaut ne définit (`vars` de `describe_playbook`), en valeurs inertes
+    /// (`automation::is_plain_value`). Sans elle, aucune.
+    pub allow_extra_vars: bool,
+    /// Compte `check` : `--diff` admis. Sans lui, refusé : la sortie montrerait
+    /// le contenu des fichiers modifiés, que le caviardage ne couvre pas tout.
+    pub allow_diff: bool,
 }
 
 impl Scope {
@@ -123,6 +133,9 @@ impl Scope {
             max_hosts: None,
             owner: String::new(),
             accept_checks_from: Vec::new(),
+            allow_playbooks: None,
+            allow_extra_vars: false,
+            allow_diff: false,
         }
     }
 
@@ -148,19 +161,13 @@ impl Scope {
     }
 
     /// Ce playbook (nom de fichier) est-il interdit à ce compte ?
-    ///
-    /// `x.yaml` et `x.yml` sont un même playbook pour Ansible : un motif en
-    /// `.yml` couvre aussi la forme `.yaml`, et inversement.
     pub fn denies(&self, playbook: &str) -> bool {
-        let other = match (playbook.strip_suffix(".yaml"), playbook.strip_suffix(".yml")) {
-            (Some(stem), _) => Some(format!("{stem}.yml")),
-            (_, Some(stem)) => Some(format!("{stem}.yaml")),
-            _ => None,
-        };
-        self.deny_playbooks.iter().any(|p| {
-            fleetforge_core::automation::glob_match(p, playbook)
-                || other.as_deref().is_some_and(|o| fleetforge_core::automation::glob_match(p, o))
-        })
+        matches_playbook(&self.deny_playbooks, playbook)
+    }
+
+    /// Ce playbook (nom de fichier) est-il dans la liste blanche du compte, s'il en a une ?
+    pub fn allows(&self, playbook: &str) -> bool {
+        self.allow_playbooks.as_ref().is_none_or(|patterns| matches_playbook(patterns, playbook))
     }
 
     pub fn covers(&self, parc: &str) -> bool {
@@ -171,6 +178,22 @@ impl Scope {
     pub fn may(&self, command: &str) -> bool {
         crate::auth::commands(self.mode).contains(&command)
     }
+}
+
+/// L'un des motifs couvre-t-il ce nom de playbook ?
+///
+/// `x.yaml` et `x.yml` sont un même playbook pour Ansible : un motif en
+/// `.yml` couvre aussi la forme `.yaml`, et inversement.
+fn matches_playbook(patterns: &[String], playbook: &str) -> bool {
+    let other = match (playbook.strip_suffix(".yaml"), playbook.strip_suffix(".yml")) {
+        (Some(stem), _) => Some(format!("{stem}.yml")),
+        (_, Some(stem)) => Some(format!("{stem}.yaml")),
+        _ => None,
+    };
+    patterns.iter().any(|p| {
+        fleetforge_core::automation::glob_match(p, playbook)
+            || other.as_deref().is_some_and(|o| fleetforge_core::automation::glob_match(p, o))
+    })
 }
 
 pub struct Account {
@@ -294,6 +317,15 @@ struct AccountEntry {
     /// de celui-ci — compte `run` seulement.
     #[serde(default)]
     accept_checks_from: Vec<String>,
+    /// Liste blanche des playbooks lançables (motifs), non vide.
+    #[serde(default)]
+    allow_playbooks: Option<Vec<String>>,
+    /// Compte `check` seulement : `extra_vars` admises (sous conditions).
+    #[serde(default)]
+    allow_extra_vars: bool,
+    /// Compte `check` seulement : `--diff` admis.
+    #[serde(default)]
+    allow_diff: bool,
 }
 
 /// Comptes bornés, lus dans un fichier JSON (`FLEETFORGE_API_ACCOUNTS_FILE`,
@@ -304,7 +336,7 @@ struct AccountEntry {
 ///  { "user": "autonomous", "password_hash": "$argon2id$…", "parcs": ["web3c"], "mode": "run",
 ///    "deny_playbooks": ["*-fleetforge.yml"], "max_hosts": 3 },
 ///  { "user": "gw_check", "password_hash": "$argon2id$…", "parcs": ["web3c"], "mode": "check",
-///    "deny_playbooks": ["*-fleetforge.yml"], "max_hosts": 3 },
+///    "deny_playbooks": ["*-fleetforge.yml"], "max_hosts": 3, "allow_playbooks": ["update-*.yml"] },
 ///  { "user": "gw_run", "password_hash": "$argon2id$…", "parcs": ["web3c"], "mode": "run",
 ///    "deny_playbooks": ["*-fleetforge.yml"], "max_hosts": 3, "accept_checks_from": ["gw_check"] }]
 /// ```
@@ -354,6 +386,23 @@ fn accounts_from_file(path: &Path) -> Result<Vec<Account>> {
             if !e.accept_checks_from.is_empty() && e.mode != Mode::Run {
                 bail!("{shown} : accept_checks_from de {} réservé à un compte run", e.user);
             }
+            // Un compte `check` lance des `--check` sans humain dans la boucle :
+            // son rayon d'action doit être borné et connu.
+            if e.mode == Mode::Check && e.max_hosts.is_none() {
+                bail!("{shown} : max_hosts obligatoire pour le compte check {}", e.user);
+            }
+            if (e.allow_extra_vars || e.allow_diff) && e.mode != Mode::Check {
+                bail!("{shown} : allow_extra_vars et allow_diff de {} réservés à un compte check", e.user);
+            }
+            if let Some(patterns) = &e.allow_playbooks {
+                if patterns.is_empty() {
+                    bail!("{shown} : allow_playbooks de {} vide (retirer la clé pour ne pas filtrer)", e.user);
+                }
+                for pattern in patterns {
+                    fleetforge_core::automation::validate_glob(pattern)
+                        .with_context(|| format!("{shown} : compte {}", e.user))?;
+                }
+            }
             let mut accept_checks_from = e.accept_checks_from;
             accept_checks_from.sort_unstable();
             accept_checks_from.dedup();
@@ -365,6 +414,9 @@ fn accounts_from_file(path: &Path) -> Result<Vec<Account>> {
                     max_hosts: e.max_hosts,
                     owner: e.user.clone(),
                     accept_checks_from,
+                    allow_playbooks: e.allow_playbooks,
+                    allow_extra_vars: e.allow_extra_vars,
+                    allow_diff: e.allow_diff,
                 }),
                 user: e.user,
                 secret: Secret::Hash(e.password_hash),
@@ -499,6 +551,16 @@ mod tests {
                 ..Scope::everything_for(user)
             }),
         }
+    }
+
+    #[test]
+    fn a_whitelist_allows_only_its_playbooks_in_both_extensions() {
+        let open = bounded(&[], None);
+        assert!(open.allows("anything.yml"), "sans liste : tout");
+        let listed = Scope { allow_playbooks: Some(vec!["update-*.yml".into(), "deploy-demo.yaml".into()]), ..open };
+        assert!(listed.allows("update-proxy.yml") && listed.allows("update-proxy.yaml"));
+        assert!(listed.allows("deploy-demo.yml"), "même playbook pour Ansible");
+        assert!(!listed.allows("deploy-fleetforge.yml") && !listed.allows("remove-demo.yml"));
     }
 
     #[test]

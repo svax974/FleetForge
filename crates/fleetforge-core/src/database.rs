@@ -17,6 +17,13 @@ impl Database {
         Ok(db)
     }
 
+    /// Base en mémoire, vide : pour les tests, jamais le fichier du poste.
+    pub fn in_memory() -> Result<Self> {
+        let db = Database { conn: Connection::open_in_memory()? };
+        db.init_tables()?;
+        Ok(db)
+    }
+
     fn get_db_path() -> Result<PathBuf> {
         let mut path = crate::paths::data_dir();
         std::fs::create_dir_all(&path)?;

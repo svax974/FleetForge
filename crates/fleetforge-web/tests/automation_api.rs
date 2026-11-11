@@ -1582,7 +1582,13 @@ fn a_flawed_bound_refuses_to_start() {
     refuses_accounts(entry(json!({ "max_hosts": -1 })), 0o600, "comptes illisibles");
 
     // `accept_checks_from` : d'autres comptes d'automatisation qui lancent des checks.
-    let other = |user: &str, mode: &str| json!({ "user": user, "password_hash": hash, "parcs": ["web3c"], "mode": mode });
+    let other = |user: &str, mode: &str| {
+        let mut account = json!({ "user": user, "password_hash": hash, "parcs": ["web3c"], "mode": mode });
+        if mode == "check" {
+            account["max_hosts"] = json!(2);
+        }
+        account
+    };
     let with_source = |source: &str, other_account: Value| {
         let mut runner = entry(json!({ "accept_checks_from": [source] }));
         runner.as_array_mut().unwrap().push(other_account);
@@ -1596,6 +1602,19 @@ fn a_flawed_bound_refuses_to_start() {
     checker["accept_checks_from"] = json!(["b"]);
     refuses_accounts(json!([checker, other("b", "run")]), 0o600, "réservé à un compte run");
     refuses_accounts(json!([other("a", "dry-run")]), 0o600, "comptes illisibles");
+
+    // Compte `check` : borné en hôtes ; ses options n'appartiennent qu'à lui.
+    let check_entry = |extra: Value| {
+        let mut e = json!({ "user": "a", "password_hash": hash, "parcs": ["web3c"], "mode": "check", "max_hosts": 2 });
+        e.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        json!([e])
+    };
+    refuses_accounts(check_entry(json!({ "max_hosts": null })), 0o600, "max_hosts obligatoire");
+    refuses_accounts(entry(json!({ "allow_extra_vars": true })), 0o600, "réservés à un compte check");
+    refuses_accounts(entry(json!({ "allow_diff": true })), 0o600, "réservés à un compte check");
+    refuses_accounts(check_entry(json!({ "allow_playbooks": [] })), 0o600, "allow_playbooks");
+    refuses_accounts(check_entry(json!({ "allow_playbooks": ["../x.yml"] })), 0o600, "motif de playbook invalide");
+    refuses_accounts(check_entry(json!({ "allow_extra_vars": "yes" })), 0o600, "comptes illisibles");
 }
 
 // ═══ Mode `check` : des dry-runs, jamais un run réel ════════════════════════
@@ -1630,7 +1649,7 @@ async fn a_check_account_only_dry_runs_and_its_checks_unlock_only_who_accepts_th
     let forbidden = |(status, body): (StatusCode, Value)| status == StatusCode::FORBIDDEN && code(&body) == "forbidden";
     let launch = |extra: Value| {
         let mut body = json!({
-            "parc": "web3c", "playbook": "deploy-demo.yml", "limit": ["proxy1"], "extra_vars": { "x": "1" }, "detach": true
+            "parc": "web3c", "playbook": "deploy-demo.yml", "limit": ["proxy1"], "detach": true
         });
         body.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
         body
@@ -1756,4 +1775,127 @@ async fn a_check_account_only_dry_runs_and_its_checks_unlock_only_who_accepts_th
     assert_eq!(api.wait_run_mcp(CHECKER, started["run_id"].as_str().unwrap()).await["check"], json!(true));
     let new_lines: Vec<String> = api.stub_log().lines().skip(runs_before).map(String::from).collect();
     assert!(new_lines.len() == 1 && new_lines[0].contains("--check"), "{new_lines:?}");
+}
+
+// ═══ Mode `check` : ni injection par extra_vars, ni --diff, ni run_id d'autrui ═
+
+const CHECKER_VARS: (&str, &str) = ("verif_vars", "mot-de-passe-verif-vars");
+const CHECKER_PL: (&str, &str) = ("verif_pl", "mot-de-passe-verif-pl");
+
+/// Le défaut que relève la relecture : une tâche `shell` en `check_mode: false`
+/// (exécutée pour de vrai par un `--check`) qui interpole une variable du parc
+/// sans `| quote`. Le bouchon d'Ansible ne l'exécute pas ; c'est la porte qui
+/// doit refuser ce qui l'armerait.
+fn write_vars_fixture(ansible: &Path) {
+    write(&ansible.join("playbooks/deploy-vars.yml"), "---\n- hosts: proxies\n  roles: [vars-install]\n");
+    write(&ansible.join("playbooks/roles/vars-install/defaults/main.yml"), "---\nnode_exporter_scrape_port: 9100\n");
+    write(
+        &ansible.join("playbooks/roles/vars-install/tasks/main.yml"),
+        "---\n- name: Probe the target\n  ansible.builtin.shell: \"grep -l ':{{ node_exporter_scrape_port }}' /dev/null; \
+         echo {{ model_name }}\"\n  check_mode: false\n  changed_when: false\n",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_check_account_cannot_arm_a_shell_task_nor_diff_nor_take_a_run_id() {
+    let (am_port, _) = fake_alertmanager().await;
+    let checker = gateway_accounts()[0].clone();
+    let accounts = json!([
+        checker,
+        {
+            "user": CHECKER_VARS.0, "password_hash": hash_with_binary(CHECKER_VARS.1), "parcs": ["web3c"], "mode": "check",
+            "max_hosts": 2, "allow_extra_vars": true, "allow_diff": true, "allow_playbooks": ["deploy-*.yml"]
+        },
+        {
+            "user": CHECKER_PL.0, "password_hash": hash_with_binary(CHECKER_PL.1), "parcs": ["papanglabs"], "mode": "check",
+            "max_hosts": 2
+        }
+    ]);
+    let server = start_with(am_port, |root| {
+        let ansible = root.join("ansible");
+        write(&ansible.join("inventories/papanglabs_inventory.yml"), SECOND_INVENTORY);
+        write(&ansible.join("playbooks/group_vars/papanglabs.yml"), "parc_name: papanglabs\n");
+        write_vars_fixture(&ansible);
+        let file = accounts_file(root, accounts);
+        vec![("FLEETFORGE_API_ACCOUNTS_FILE".into(), file.display().to_string())]
+    })
+    .await;
+    let api = Api { http: Client::new(), server: &server };
+    let launch = |playbook: &str, extra: Value| {
+        let mut body = json!({ "parc": "web3c", "playbook": playbook, "limit": ["proxy1"], "detach": true });
+        body.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        body
+    };
+    let with_vars = |vars: Value| launch("deploy-vars.yml", json!({ "extra_vars": vars }));
+    let last_line = || api.stub_log().lines().last().unwrap_or_default().to_string();
+
+    // Ce que le playbook attend sans défaut : model_name ; le port a un défaut de rôle.
+    let (status, described) =
+        api.call(CHECKER_VARS, "describe_playbook", json!({ "parc": "web3c", "playbook": "deploy-vars.yml" })).await;
+    assert_eq!((status, described["vars"].clone()), (StatusCode::OK, json!(["model_name"])), "{described}");
+
+    // ── Sans allow_extra_vars : aucune variable, même inerte ──────────────
+    for vars in [
+        json!({ "model_name": "qwen3-8b" }),
+        json!({ "x": "a'; id" }),
+        json!({ "node_exporter_scrape_port": "9100'; sudo -n touch /tmp/ff_check_pwned; echo '" }),
+    ] {
+        let (status, body) = api.call(CHECKER, "run_ansible_playbook", with_vars(vars.clone())).await;
+        assert_eq!((status, code(&body)), (StatusCode::FORBIDDEN, "forbidden"), "{vars} → {body}");
+    }
+
+    // ── Avec : des valeurs inertes seulement… ─────────────────────────────
+    let long = "a".repeat(257);
+    for value in [
+        "a'; id", "9100'; sudo -n touch /tmp/ff_check_pwned; echo '", "a\nb", "$(id)", "`id`", "a|b", "a&b", "a;b",
+        "a b", "/etc/passwd", "-rf", long.as_str(),
+    ] {
+        let (status, body) = api.call(CHECKER_VARS, "run_ansible_playbook", with_vars(json!({ "model_name": value }))).await;
+        assert_eq!((status, code(&body)), (StatusCode::BAD_REQUEST, "invalid_argument"), "{value:?} → {body}");
+    }
+    // … et des variables attendues sans défaut : jamais en redéfinir une, même inerte.
+    for vars in [
+        json!({ "node_exporter_scrape_port": "9101" }),
+        json!({ "unknown_var": "x" }),
+        json!({ "model_name": "qwen3-8b", "parc_name": "web3c" }),
+    ] {
+        let (status, body) = api.call(CHECKER_VARS, "run_ansible_playbook", with_vars(vars.clone())).await;
+        assert_eq!((status, code(&body)), (StatusCode::FORBIDDEN, "forbidden"), "{vars} → {body}");
+    }
+    assert!(api.stub_log().is_empty(), "aucun refus ne doit atteindre ansible-playbook : {}", api.stub_log());
+    let (status, started) = api.call(CHECKER_VARS, "run_ansible_playbook", with_vars(json!({ "model_name": "qwen3-8b" }))).await;
+    assert_eq!(status, StatusCode::OK, "{started}");
+    api.wait_run_as(CHECKER_VARS, started["run_id"].as_str().unwrap()).await;
+    let last = last_line();
+    assert!(last.contains("--check") && last.contains(r#"-e {"model_name":"qwen3-8b"}"#), "{last}");
+
+    // ── --diff : sur option seulement ─────────────────────────────────────
+    let (status, body) = api.call(CHECKER, "run_ansible_playbook", launch("deploy-demo.yml", json!({ "diff": true }))).await;
+    assert_eq!((status, code(&body)), (StatusCode::FORBIDDEN, "forbidden"), "{body}");
+    let (status, started) = api.call(CHECKER_VARS, "run_ansible_playbook", launch("deploy-demo.yml", json!({ "diff": true }))).await;
+    assert_eq!(status, StatusCode::OK, "{started}");
+    api.wait_run_as(CHECKER_VARS, started["run_id"].as_str().unwrap()).await;
+    let last = last_line();
+    assert!(last.contains("--check") && last.contains("--diff"), "{last}");
+
+    // ── Liste blanche ─────────────────────────────────────────────────────
+    let (status, body) = api.call(CHECKER_VARS, "run_ansible_playbook", launch("remove-demo.yml", json!({}))).await;
+    assert_eq!((status, code(&body)), (StatusCode::FORBIDDEN, "forbidden_playbook"), "{body}");
+
+    // ── run_id : celui d'un run terminé ne se reprend pas, d'un parc à l'autre ─
+    let (status, shared) = api.agent("run_ansible_playbook", launch("deploy-demo.yml", json!({ "check": true, "run_id": "shared-1" }))).await;
+    assert_eq!(status, StatusCode::OK, "{shared}");
+    let before = api.wait_run("shared-1").await;
+    let taken = json!({ "parc": "papanglabs", "playbook": "deploy-demo.yml", "limit": ["vpn1"], "detach": true, "run_id": "shared-1" });
+    let (status, body) = api.call(CHECKER_PL, "run_ansible_playbook", taken.clone()).await;
+    assert_eq!((status, code(&body)), (StatusCode::CONFLICT, "run_id_in_use"), "{body}");
+    let after = api.wait_run("shared-1").await;
+    assert_eq!((after["started_at"].clone(), after["label"].clone()), (before["started_at"].clone(), before["label"].clone()));
+    // Les comptes run non plus : un nouvel essai ne relance jamais.
+    let (status, body) = api.agent("run_ansible_playbook", launch("deploy-demo.yml", json!({ "check": true, "run_id": "shared-1" }))).await;
+    assert_eq!((status, code(&body)), (StatusCode::CONFLICT, "run_id_in_use"), "{body}");
+    let (status, fresh) = api.call(CHECKER_PL, "run_ansible_playbook", json!({ "parc": "papanglabs", "playbook": "deploy-demo.yml", "limit": ["vpn1"], "detach": true, "run_id": "fresh-1" })).await;
+    assert_eq!(status, StatusCode::OK, "{fresh}");
+    api.wait_run_as(CHECKER_PL, "fresh-1").await;
+    assert!(api.stub_log().lines().all(|l| l.contains("--check")), "{}", api.stub_log());
 }
