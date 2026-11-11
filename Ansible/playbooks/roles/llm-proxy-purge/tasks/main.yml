@@ -32,11 +32,11 @@
   ansible.builtin.shell: |
     set -euo pipefail
     {
-      for p in {{ llm_proxy_project_name }}-back-{{ ansible_host | replace('.', '-') }} {{ llm_proxy_project_name }}-front-{{ ansible_host | replace('.', '-') }}; do
+      for p in {{ llm_proxy_project_name | quote }}-back-{{ ansible_host | replace('.', '-') }} {{ llm_proxy_project_name | quote }}-front-{{ ansible_host | replace('.', '-') }}; do
         docker volume ls -q --filter "label=com.docker.compose.project=${p}"
       done
-      if docker volume inspect "{{ llm_proxy_project_name }}_postgres_data" >/dev/null 2>&1; then
-        echo "{{ llm_proxy_project_name }}_postgres_data"
+      if docker volume inspect {{ llm_proxy_project_name | quote }}"_postgres_data" >/dev/null 2>&1; then
+        echo {{ llm_proxy_project_name | quote }}"_postgres_data"
       fi
     } | sort -u
   args:
@@ -58,11 +58,18 @@
 # Images construites sur l'hôte (contexte Docker SSH) : `<PROJECT_NAME>_back`,
 # l'image du front nommée d'après son projet compose, l'image de base
 # `<project>-nestcli:*`. Même filtre de préfixe que les volumes.
+# Le nom entre dans le motif `grep -E '^<nom>[_-]'` qui désigne ce qui est SUPPRIMÉ.
+- name: Check the project name (it becomes a purge pattern)
+  ansible.builtin.assert:
+    that: llm_proxy_project_name is match('^[a-z0-9][a-z0-9_-]{0,62}$')
+    fail_msg: "llm_proxy_project_name : minuscules, chiffres, _ et - seulement"
+    quiet: true
+
 - name: List the LLM Proxy images
   ansible.builtin.shell: |
     set -euo pipefail
     docker images --format '{% raw %}{{.Repository}}:{{.Tag}}{% endraw %}' \
-      | grep -E '^{{ llm_proxy_project_name }}[_-]' || true
+      | grep -E '^'{{ llm_proxy_project_name | quote }}'[_-]' || true
   args:
     executable: /bin/bash
   become: true

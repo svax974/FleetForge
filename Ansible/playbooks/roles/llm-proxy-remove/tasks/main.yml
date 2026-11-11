@@ -60,7 +60,7 @@
 - name: Remove every container left in the LLM Proxy compose projects
   ansible.builtin.shell: |
     set -euo pipefail
-    for p in {{ llm_proxy_project_name }}-back-{{ ansible_host | replace('.', '-') }} {{ llm_proxy_project_name }}-front-{{ ansible_host | replace('.', '-') }}; do
+    for p in {{ llm_proxy_project_name | quote }}-back-{{ ansible_host | replace('.', '-') }} {{ llm_proxy_project_name | quote }}-front-{{ ansible_host | replace('.', '-') }}; do
       ids=$(docker ps -aq --filter "label=com.docker.compose.project=${p}")
       if [ -n "${ids}" ]; then
         docker rm -f ${ids} >/dev/null

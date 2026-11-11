@@ -34,12 +34,20 @@
   ansible.builtin.set_fact:
     agenthub_purge_projects: "{{ [agenthub_project_name] + agenthub_legacy_project_names }}"
 
+# Ces noms deviennent des motifs (`grep -E '^(a|b)[_-]'`) qui désignent ce que la purge
+# SUPPRIME : hors de la grammaire des projets compose, un nom (`.*`) y viserait tout.
+- name: Check the AgentHub project names (they become purge patterns)
+  ansible.builtin.assert:
+    that: agenthub_purge_projects | reject('match', '^[a-z0-9][a-z0-9_-]{0,62}$') | list | length == 0
+    fail_msg: "Noms de projet compose attendus (minuscules, chiffres, _ et -) : {{ agenthub_purge_projects | join(', ') }}"
+    quiet: true
+
 - name: List the AgentHub volumes
   ansible.builtin.shell: |
     set -euo pipefail
     host={{ ansible_host | replace('.', '-') }}
     {
-      for name in {{ agenthub_purge_projects | join(' ') }}; do
+      for name in {{ agenthub_purge_projects | map('quote') | join(' ') }}; do
         for p in "${name}-back-${host}" "${name}-front-${host}"; do
           docker volume ls -q --filter "label=com.docker.compose.project=${p}"
         done
@@ -71,7 +79,7 @@
   ansible.builtin.shell: |
     set -euo pipefail
     docker images --format '{% raw %}{{.Repository}}:{{.Tag}}{% endraw %}' \
-      | grep -E '^({{ agenthub_purge_projects | join('|') }})[_-]' || true
+      | grep -E {{ ('^(' ~ (agenthub_purge_projects | join('|')) ~ ')[_-]') | quote }} || true
   args:
     executable: /bin/bash
   become: true

@@ -22,12 +22,19 @@
   become: true
   failed_when: false
 
+# Le port entre dans un motif awk (`$0 ~ p`) qui désigne les règles SUPPRIMÉES.
+- name: Check the port (it becomes a rule-removal pattern)
+  ansible.builtin.assert:
+    that: searxng_port | string is match('^[0-9]{1,5}$')
+    fail_msg: "searxng_port : un numéro de port"
+    quiet: true
+
 - name: Flush the SearXNG rules from DOCKER-USER
   ansible.builtin.shell: |
     set -uo pipefail
     while true; do
       N=$(iptables -L DOCKER-USER --line-numbers -n 2>/dev/null \
-          | awk -v p="dpt:{{ searxng_port }}" '$0 ~ p {print $1; exit}')
+          | awk -v p=dpt:{{ searxng_port | quote }} '$0 ~ p {print $1; exit}')
       [ -z "${N}" ] && break
       iptables -D DOCKER-USER "${N}"
     done

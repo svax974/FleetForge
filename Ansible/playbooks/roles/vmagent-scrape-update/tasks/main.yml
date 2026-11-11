@@ -86,10 +86,24 @@
   when: vmagent_scrape_mode == 'fast'
   tags: [vmagent]
 
+# La durée entre dans un programme sed (`s/…/\1 <durée>/`), où un `/` ou un `;` écrirait
+# du code sed (la commande `e` exécute) : grammaire des durées Prometheus. Même
+# définition que la tâche suivante.
+- name: Check the target interval (it is read into a sed program)
+  ansible.builtin.assert:
+    that: _vmagent_target is match('^([0-9]+(ms|s|m|h|d|w|y))+$')
+    fail_msg: "Intervalle attendu sous la forme 10s, 1m30s… : {{ _vmagent_target }}"
+    quiet: true
+  vars:
+    _vmagent_target: "{{ vmagent_fast_scrape_interval if vmagent_scrape_mode == 'fast' else (_vmagent_original.stdout | trim) }}"
+  when: vmagent_scrape_mode in ['fast', 'normal']
+  tags: [vmagent]
+
 - name: Write the target interval in place
+  # unquoted-ok: `_vmagent_target` est dans un programme sed entre apostrophes ; sa grammaire est vérifiée par l'assert précédent.
   ansible.builtin.shell: |
     set -eu
-    file='{{ _vmagent_file }}'
+    file={{ _vmagent_file | quote }}
     tmp="$(mktemp)"
     sed -E 's/^(  scrape_interval:).*/\1 {{ _vmagent_target }}/' "$file" > "$tmp"
     if cmp -s "$tmp" "$file"; then echo unchanged; else cat "$tmp" > "$file"; echo changed; fi

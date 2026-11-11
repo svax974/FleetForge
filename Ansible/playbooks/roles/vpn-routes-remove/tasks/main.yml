@@ -2,6 +2,7 @@
 # Remove VPN routing rules added by vpn-routes-install.
 
 - name: Flush iptables VPN forwarding rules
+  # unquoted-ok: `item` est l'une des commandes littérales de `loop:` ci-dessous, en plusieurs mots.
   ansible.builtin.command: "{{ item }}"
   loop:
     - iptables -F FORWARD

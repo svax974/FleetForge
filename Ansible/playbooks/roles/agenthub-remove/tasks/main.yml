@@ -68,7 +68,7 @@
 - name: Remove every container left in the AgentHub compose projects
   ansible.builtin.shell: |
     set -euo pipefail
-    for p in {{ agenthub_project_name }}-back-{{ ansible_host | replace('.', '-') }} {{ agenthub_project_name }}-front-{{ ansible_host | replace('.', '-') }}; do
+    for p in {{ agenthub_project_name | quote }}-back-{{ ansible_host | replace('.', '-') }} {{ agenthub_project_name | quote }}-front-{{ ansible_host | replace('.', '-') }}; do
       ids=$(docker ps -aq --filter "label=com.docker.compose.project=${p}")
       if [ -n "${ids}" ]; then
         docker rm -f ${ids} >/dev/null
@@ -85,10 +85,18 @@
 # clean-remote.sh retire, mais que celui-ci ne vise que sur la machine en
 # service (voir plus haut). Balayage par NOM EXACT, sur l'hôte lui-même : le
 # préfixe `<PROJECT_NAME>_` n'appartient qu'à cette application.
+# Le nom entre dans le filtre `name=^<nom>_…` (expression régulière de Docker) qui
+# désigne ce qui est SUPPRIMÉ : grammaire des projets compose, rien d'autre.
+- name: Check the project name (it becomes a removal pattern)
+  ansible.builtin.assert:
+    that: agenthub_project_name is match('^[a-z0-9][a-z0-9_-]{0,62}$')
+    fail_msg: "agenthub_project_name : minuscules, chiffres, _ et - seulement"
+    quiet: true
+
 - name: Remove the AgentHub containers named after the project
   ansible.builtin.shell: |
     set -euo pipefail
-    ids=$(docker ps -aq --filter "name=^{{ agenthub_project_name }}_(front|back|back_lb|postgres|redis|vmagent)$")
+    ids=$(docker ps -aq --filter "name=^"{{ agenthub_project_name | quote }}"_(front|back|back_lb|postgres|redis|vmagent)$")
     if [ -n "${ids}" ]; then
       docker rm -f ${ids} >/dev/null
       echo "removed ${ids}"

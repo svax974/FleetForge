@@ -20,7 +20,7 @@
     for tool in iptables ip6tables; do
       command -v "${tool}" >/dev/null 2>&1 || continue
       while n=$("${tool}" -L DOCKER-USER --line-numbers -n 2>/dev/null \
-                | awk -v t="{{ aiserver_fw_tag }}" 'index($0, t) && !d {print $1; d=1}'); [ -n "${n}" ]; do
+                | awk -v t={{ aiserver_fw_tag | quote }} 'index($0, t) && !d {print $1; d=1}'); [ -n "${n}" ]; do
         "${tool}" -D DOCKER-USER "${n}" || break
         echo flushed
       done
