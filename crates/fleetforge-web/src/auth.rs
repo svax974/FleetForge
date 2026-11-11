@@ -15,9 +15,11 @@
 //!
 //! Deux sortes de comptes : l'opérateur (tout) et l'automatisation (AgentHub,
 //! OpenClaw…), cantonnée à [`AUTOMATION_COMMANDS`] et au flux d'un run, et
-//! bornée par son périmètre ([`Scope`] : ses parcs, lecture ou pilotage). Le
-//! rôle et le périmètre reconnus sont déposés dans les extensions de la
-//! requête ([`Role`], `Arc<Scope>`), où les lisent l'API et le serveur MCP.
+//! bornée par son périmètre ([`Scope`] : ses parcs, lecture, vérification ou
+//! pilotage). Le rôle et le périmètre reconnus sont déposés dans les
+//! extensions de la requête ([`Role`], `Arc<Scope>`), où les lisent l'API et
+//! le serveur MCP — qui refont le tri par mode (`automation::serve`) : ce
+//! filtre d'entrée n'est pas la seule barrière.
 //!
 //! `/metrics` et `/healthz` en sont exemptés : ils sont scrapés par Prometheus,
 //! qui n'a pas d'identifiants ici, et restreints par ufw à sa seule adresse.
@@ -74,9 +76,30 @@ pub const READ_COMMANDS: &[&str] = &[
     "tree_status",
 ];
 
+/// Commandes d'un compte en VÉRIFICATION (`mode: check`) : des `--check`
+/// (`run_ansible_playbook`, où `check` est imposé et `check: false` refusé),
+/// leur état et `syntax_check`, plus la lecture SANS `ssh_diagnose` (une
+/// commande sur un hôte, verbe `http` compris : un GET local de la machine).
+/// Pas de `sync_tree` : il avance la tête synchronisée pour tous les comptes.
+/// Le flux d'un run lui est ouvert (`automation_may`).
+pub const CHECK_COMMANDS: &[&str] = &[
+    "list_hosts",
+    "list_playbooks",
+    "alertmanager_alerts",
+    "query_prometheus",
+    "describe_playbook",
+    "read_tree",
+    "search_tree",
+    "tree_status",
+    "run_ansible_playbook",
+    "run_status",
+    "syntax_check",
+];
+
 pub fn commands(mode: Mode) -> &'static [&'static str] {
     match mode {
         Mode::Read => READ_COMMANDS,
+        Mode::Check => CHECK_COMMANDS,
         Mode::Run => AUTOMATION_COMMANDS,
     }
 }
@@ -93,7 +116,7 @@ pub fn is_mcp(path: &str) -> bool {
 }
 
 /// Ce qu'un compte d'automatisation peut atteindre : une commande de son mode,
-/// le flux SSE d'un run (pilotage seulement), ou le serveur MCP.
+/// le flux SSE d'un run (vérification et pilotage), ou le serveur MCP.
 fn automation_may(method: &Method, path: &str, mode: Mode) -> bool {
     if is_mcp(path) {
         return true;
@@ -103,7 +126,7 @@ fn automation_may(method: &Method, path: &str, mode: Mode) -> bool {
             return commands(mode).contains(&command);
         }
     }
-    mode == Mode::Run
+    mode != Mode::Read
         && method == Method::GET
         && path
             .strip_prefix("/api/events/")
@@ -156,9 +179,9 @@ pub async fn middleware(
         return refusal(
             StatusCode::FORBIDDEN,
             "forbidden",
-            match account.scope.mode {
-                Mode::Run => "commande réservée à l'opérateur",
-                Mode::Read => "commande hors du mode du compte (lecture seule)",
+            &match account.scope.mode {
+                Mode::Run => "commande réservée à l'opérateur".to_string(),
+                mode => format!("commande hors du mode du compte ({})", mode.describe()),
             },
         );
     }
@@ -357,5 +380,40 @@ mod tests {
         let mut runs: Vec<&str> = AUTOMATION_COMMANDS.iter().copied().filter(|c| !READ_COMMANDS.contains(c)).collect();
         runs.sort_unstable();
         assert_eq!(runs, ["run_ansible_playbook", "run_status", "sync_tree", "syntax_check"]);
+    }
+
+    #[test]
+    fn the_check_commands_are_the_run_commands_without_host_commands_nor_tree_writes() {
+        let mut missing: Vec<&str> = AUTOMATION_COMMANDS.iter().copied().filter(|c| !CHECK_COMMANDS.contains(c)).collect();
+        missing.sort_unstable();
+        assert_eq!(missing, ["ssh_diagnose", "sync_tree"]);
+        assert!(CHECK_COMMANDS.iter().all(|c| AUTOMATION_COMMANDS.contains(c)), "rien hors de l'automatisation");
+        // Même ordre que AUTOMATION_COMMANDS : `tools/list` les rend dans cet ordre.
+        let ordered: Vec<&str> = AUTOMATION_COMMANDS.iter().copied().filter(|c| CHECK_COMMANDS.contains(c)).collect();
+        assert_eq!(ordered, CHECK_COMMANDS);
+    }
+
+    #[test]
+    fn a_check_account_reaches_dry_runs_and_reads_only() {
+        for command in ["list_hosts", "read_tree", "tree_status", "run_ansible_playbook", "run_status", "syntax_check"] {
+            assert!(automation_may(&Method::POST, &format!("/api/{command}"), Mode::Check), "{command}");
+        }
+        assert!(automation_may(&Method::GET, "/api/events/run-1", Mode::Check), "flux d'un run (lecture)");
+        assert!(automation_may(&Method::POST, "/mcp", Mode::Check), "le tri des outils se fait dans mcp.rs");
+        for (method, path) in [
+            (Method::POST, "/api/ssh_diagnose"),
+            (Method::POST, "/api/sync_tree"),
+            (Method::POST, "/api/run_ansible_deploy"),
+            (Method::POST, "/api/get_run_handle"),
+            (Method::POST, "/api/clear_finished_runs"),
+            (Method::POST, "/api/write_group_vars_file"),
+            (Method::POST, "/api/set_host_alert_exclusions"),
+            (Method::POST, "/api/power_instance"),
+            (Method::GET, "/api/run_ansible_playbook"),
+            (Method::GET, "/api/events/a/b"),
+            (Method::GET, "/"),
+        ] {
+            assert!(!automation_may(&method, path, Mode::Check), "{method} {path}");
+        }
     }
 }

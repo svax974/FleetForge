@@ -14,7 +14,9 @@
 //! y est tenu plus court que l'opérateur :
 //!   • un parc se désigne par son NOM, jamais par un chemin de fichier ;
 //!   • aucune variable `ansible_*`, aucun gabarit Jinja dans une valeur ;
-//!   • un run réel exige le `--check` du même lancement (`state::CheckLedger`) ;
+//!   • un run réel exige le `--check` du même lancement, fait par le même
+//!     compte ou par un compte qu'il accepte (`state::CheckLedger`) ;
+//!   • un compte `check` ne lance QUE des `--check` ([`run_options`]) ;
 //!   • un parc occupé répond `run_busy` au lieu d'attendre ;
 //!   • les sorties rendues sont caviardées (`fleetforge_core::redact`).
 //!
@@ -50,7 +52,7 @@ const MAX_TAIL_LINES: usize = 500;
 /// parc ou l'hôte refusé existe.
 pub async fn serve(state: &AppState, role: Role, scope: &Scope, command: &str, p: &Params) -> ApiResult {
     if !scope.may(command) {
-        return Err(ApiError::forbidden(format!("{command} : hors du mode du compte (lecture seule)")));
+        return Err(ApiError::forbidden(format!("{command} : hors du mode du compte ({})", scope.mode.describe())));
     }
     match command {
         "list_hosts" => list_hosts(state, scope, p).await,
@@ -273,13 +275,19 @@ fn fingerprint(
 ///
 /// Pour le compte d'automatisation, en plus : `deny_playbooks` (le playbook et
 /// ceux qu'il importe) et `max_hosts` (`limit` obligatoire, groupes développés)
-/// de son périmètre sont appliqués avant tout.
+/// de son périmètre sont appliqués avant tout. Un compte `check` est toujours
+/// tenu à ces règles strictes, et ne lance que des `--check` ([`run_options`]).
+///
+/// `run_id` et `label` sont ceux de l'appelant quand il les donne (une
+/// passerelle impose ainsi les siens) : `run_id_in_use` tant qu'un run EN
+/// COURS porte cet identifiant ; celui d'un run terminé est réutilisable, et
+/// le nouveau run remplace l'ancien au registre.
 ///
 /// `detach: true` rend la main dès le run inscrit (`{ run_id, state }`) ; sans
 /// lui, la réponse attend la fin du run (comportement du frontal). Dans les
 /// deux cas le run se termine et se clôt même si le client se déconnecte.
 async fn run_playbook(state: &AppState, role: Role, scope: &Scope, p: &Params) -> ApiResult {
-    let strict = role == Role::Automation;
+    let strict = role == Role::Automation || scope.check_only();
     let playbook: String = p.first(&["playbookPath", "playbook"])?;
     let inventory: String = p.first(&["inventoryPath", "parc"])?;
     let limit: Option<Vec<String>> = p.first_opt(&["limitHosts", "limit"])?;
@@ -289,10 +297,7 @@ async fn run_playbook(state: &AppState, role: Role, scope: &Scope, p: &Params) -
     let no_limit: bool = p.opt("no_limit")?.unwrap_or(false);
     let extra: HashMap<String, String> = p.first_opt(&["extraVars", "extra_vars"])?.unwrap_or_default();
     let id: String = p.first_opt(&["deployId", "run_id"])?.unwrap_or_else(generated_run_id);
-    let options = RunOptions {
-        check: p.opt("check")?.unwrap_or(false),
-        diff: p.opt("diff")?.unwrap_or(false),
-    };
+    let options = run_options(scope, p)?;
     let detach: bool = p.opt("detach")?.unwrap_or(false);
     let label: String = p.opt("label")?.unwrap_or_else(|| playbook.clone());
 
@@ -333,17 +338,21 @@ async fn run_playbook(state: &AppState, role: Role, scope: &Scope, p: &Params) -
         }
         playbook = chain.first().cloned().unwrap_or(playbook);
         let fp = fingerprint(&inventory, &playbook, &limit, &extra, &tags, &skip_tags, &commit, no_limit);
-        if !options.check && !state.checks.is_fresh(&fp) {
+        if !options.check && !state.checks.is_fresh(scope.check_owners(), &fp) {
             return Err(anyhow!(Fault::new(
                 FaultKind::CheckRequired,
                 "run réel refusé : lancer d'abord le même playbook avec check: true \
-                 (même parc, même limit, mêmes variables, mêmes tags, même commit), il y a moins d'une heure",
+                 (même parc, même limit, mêmes variables, mêmes tags, même commit), il y a moins d'une heure, \
+                 sous ce compte (ou un compte de son accept_checks_from)",
             ))
             .into());
         }
-        print = options.check.then_some(fp);
+        print = options.check.then(|| (scope.owner.clone(), fp));
     }
 
+    // Dernière barrière avant l'inscription et le lancement, indépendante de
+    // la façon dont `options` a été calculé plus haut.
+    ensure_check_only(scope, options)?;
     let run_parc = inventory.clone();
     let req = PlaybookRequest {
         id,
@@ -388,6 +397,37 @@ async fn run_playbook(state: &AppState, role: Role, scope: &Scope, p: &Params) -
     value["run_id"] = json!(run_id);
     value["commit"] = json!(state.core.runs().get(&run_id).and_then(|r| r.commit));
     ok(value)
+}
+
+/// `check` et `diff` d'un lancement.
+///
+/// Un compte `check` ne lance QUE des `--check` : `check` absent vaut `true` ;
+/// `check: false` est refusé (`403 forbidden`) plutôt que ramené en silence à
+/// un check — l'appelant qui demandait un run réel doit savoir qu'il n'a pas
+/// eu lieu. Les variables qui pourraient désarmer `--check` (`ansible_*`,
+/// dont `ansible_check_mode`) sont refusées par la validation stricte, à
+/// laquelle ce compte est toujours tenu.
+fn run_options(scope: &Scope, p: &Params) -> Result<RunOptions, ApiError> {
+    let check: Option<bool> = p.opt("check")?;
+    let diff: bool = p.opt("diff")?.unwrap_or(false);
+    if !scope.check_only() {
+        return Ok(RunOptions { check: check.unwrap_or(false), diff });
+    }
+    if check == Some(false) {
+        return Err(ApiError::forbidden(
+            "run réel refusé : ce compte ne lance que des --check (check: false interdit)".to_string(),
+        ));
+    }
+    Ok(RunOptions { check: true, diff })
+}
+
+/// Un compte `check` n'inscrit jamais un run sans `--check`, quel que soit le
+/// chemin suivi jusque-là : seconde barrière, juste avant le lancement.
+fn ensure_check_only(scope: &Scope, options: RunOptions) -> Result<(), ApiError> {
+    if scope.check_only() && !options.check {
+        return Err(ApiError::forbidden("run réel refusé : ce compte ne lance que des --check".to_string()));
+    }
+    Ok(())
 }
 
 /// Nom de fichier d'un playbook (`sub/x.yml` → `x.yml`).
@@ -532,14 +572,15 @@ async fn sync_tree(state: &AppState, scope: &Scope, p: &Params) -> ApiResult {
 }
 
 /// Exécute un run préparé sur un fil dédié, puis le clôt : flux SSE fermé,
-/// compteurs, et `--check` consigné quand il a réellement tourné.
+/// compteurs, et `--check` consigné — au nom du compte qui l'a lancé
+/// (`check_print` : compte, empreinte) — quand il a réellement tourné.
 ///
 /// Tâche détachée et non `await` dans la requête : un client qui se
 /// déconnecte ne doit pas laisser un flux ouvert sur un run terminé.
 fn launch(
     state: AppState,
     prepared: PreparedRun,
-    check_print: Option<String>,
+    check_print: Option<(String, String)>,
 ) -> tokio::task::JoinHandle<anyhow::Result<AnsibleRun>> {
     tokio::spawn(async move {
         let id = prepared.id().to_string();
@@ -548,11 +589,11 @@ fn launch(
         let outcome = tokio::task::spawn_blocking(move || core.execute_playbook(prepared, sink))
             .await
             .unwrap_or_else(|e| Err(anyhow!("run interrompu : {e}")));
-        if let (Some(print), Ok(run)) = (&check_print, &outcome) {
+        if let (Some((owner, print)), Ok(run)) = (&check_print, &outcome) {
             // Ansible a tourné jusqu'au bout (code connu) : le résultat du
             // check, bon ou mauvais, est sous les yeux de l'humain qui choisit.
             if run.exit_code.is_some() {
-                state.checks.record(print);
+                state.checks.record(owner, print);
             }
         }
         crate::api::settle(&state, &id, outcome)
@@ -632,6 +673,36 @@ mod tests {
         assert_eq!(v, json!({ "a": ["password=[REDACTED]", { "b": "ok" }], "n": 3 }));
         let sha = "0123456789abcdef0123456789abcdef01234567";
         assert_eq!(redacted(json!({ "commit": sha, "x": sha })), json!({ "commit": sha, "x": "[REDACTED-HEX]" }));
+    }
+
+    fn options(scope: &Scope, body: serde_json::Value) -> Result<RunOptions, &'static str> {
+        run_options(scope, &Params::new(body)).map_err(|e| e.code())
+    }
+
+    #[test]
+    fn a_check_account_always_runs_with_check_and_never_without() {
+        let check = Scope { mode: crate::config::Mode::Check, ..Scope::everything() };
+        let forced = RunOptions { check: true, diff: false };
+        assert_eq!(options(&check, json!({})), Ok(forced), "check absent : imposé");
+        assert_eq!(options(&check, json!({ "check": null })), Ok(forced));
+        assert_eq!(options(&check, json!({ "check": true })), Ok(forced));
+        assert_eq!(options(&check, json!({ "check": true, "diff": true })), Ok(RunOptions { check: true, diff: true }));
+        assert_eq!(options(&check, json!({ "check": false })), Err("forbidden"), "refusé, pas ignoré");
+        assert_eq!(options(&check, json!({ "check": "false" })), Err("invalid_argument"));
+        assert_eq!(options(&check, json!({ "check": 0 })), Err("invalid_argument"));
+        // Seconde barrière : quelles que soient les options, pas de run sans --check.
+        assert!(ensure_check_only(&check, forced).is_ok());
+        assert_eq!(ensure_check_only(&check, RunOptions::default()).map_err(|e| e.code()), Err("forbidden"));
+    }
+
+    #[test]
+    fn other_accounts_keep_their_run_options() {
+        for scope in [Scope::everything(), Scope { mode: crate::config::Mode::Read, ..Scope::everything() }] {
+            assert_eq!(options(&scope, json!({})), Ok(RunOptions::default()), "run réel par défaut, comme avant");
+            assert_eq!(options(&scope, json!({ "check": false })), Ok(RunOptions::default()));
+            assert_eq!(options(&scope, json!({ "check": true })), Ok(RunOptions { check: true, diff: false }));
+            assert!(ensure_check_only(&scope, RunOptions::default()).is_ok());
+        }
     }
 
     #[test]

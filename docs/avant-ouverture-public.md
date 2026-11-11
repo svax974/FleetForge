@@ -3,6 +3,33 @@
 Points à traiter ou à revoir avant la mise en production ou la distribution.
 Retirer ou dater un point une fois fait.
 
+## API d'automatisation : mode `check` et checks par compte (ajouté le 11/11/2026)
+
+Lot 6.1 de la passerelle MCP (`fleetforge-gateway`) ; détail dans RUNNING.md, « API d'automatisation ».
+
+- **Revue humaine obligatoire** avant tout compte `check` en production : `auth.rs`
+  (`CHECK_COMMANDS`), `automation.rs` (`run_options`, `ensure_check_only`), `state.rs`
+  (`CheckLedger` par compte), `config.rs` (`accept_checks_from`).
+- **Périmètre du mode `check` à confirmer** : ni `ssh_diagnose` (verbe `http` compris) ni
+  `sync_tree`. Le plan du lot 6 (§ 2.4) donnait `sync_tree` au compte `ffg-check` : la
+  passerelle le passe par son compte `run`, ou on l'ajoute à `CHECK_COMMANDS` (une ligne).
+- **`--check` n'est pas sans effet** : connexion et `become` sur les hôtes, tâches
+  `check_mode: false` (une centaine dans les rôles, sondes en lecture par convention) et
+  lookups exécutés pour de vrai. À relire avant d'autoriser des checks autonomes.
+- **`run_id` d'un run terminé réutilisable** : `run_id_in_use` ne protège que pendant le
+  run ; un nouvel essai après sa fin relance le playbook et remplace l'entrée du registre.
+  Proposition : refuser tout identifiant encore au registre pour l'automatisation
+  (AgentHub compatible : un identifiant par run). Non fait : change le comportement des
+  comptes `run` existants.
+- **Un check n'est pas consommé** : il autorise autant de runs réels que voulu pendant
+  une heure (au même compte ou à ceux qui l'acceptent) ; l'usage unique reste à la passerelle.
+- **`run_status` borné au parc seulement** : un compte voit les runs des autres comptes de
+  ses parcs (opérateur compris). La propriété des runs reste à la passerelle.
+- **Registre des checks et des runs en mémoire** : tout redémarrage de `fleetforge-web` les
+  vide (`check_required`, `unknown_run`).
+- **Noms des comptes déployés par `fleetforge-install`** : `[a-z][a-z0-9_]` — `ffg_check`,
+  `ffg_run`, et non `ffg-check` comme dans le plan.
+
 ## Nœud Storj (ajouté le 04/11/2026)
 
 - **Premier déploiement réel à observer** : `deploy-storj.yml` n'a été testé que par

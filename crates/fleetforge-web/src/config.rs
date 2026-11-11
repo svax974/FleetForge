@@ -52,16 +52,35 @@ pub enum Role {
     Automation,
 }
 
-/// Lecture seule ou pilotage : ce qu'un compte d'automatisation peut lancer.
+/// Lecture seule, vérification ou pilotage : ce qu'un compte d'automatisation
+/// peut lancer. Du moins au plus puissant pour les runs : `read` n'en lance
+/// aucun, `check` que des `--check`, `run` aussi des runs réels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Mode {
     /// `auth::READ_COMMANDS` : inventaire, playbooks, alertes, Prometheus,
     /// diagnostic lecture seule.
     Read,
+    /// `auth::CHECK_COMMANDS` : des runs en `--check` SEULEMENT (`check`
+    /// imposé, `check: false` refusé), leur état, leur flux, `syntax_check`,
+    /// et la lecture sans `ssh_diagnose`. Ni run réel, ni `sync_tree` (la
+    /// tête synchronisée vaut pour tous les comptes), ni commande sur un hôte
+    /// hors d'un `--check`. Le compte des dry-runs d'une passerelle.
+    Check,
     /// Tout `auth::AUTOMATION_COMMANDS` : la lecture, plus les runs de
     /// playbook (`run_ansible_playbook`, `run_status`, flux d'un run).
     Run,
+}
+
+impl Mode {
+    /// Le mode en clair, pour les refus.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Mode::Read => "lecture seule",
+            Mode::Check => "vérification seule : --check",
+            Mode::Run => "pilotage",
+        }
+    }
 }
 
 /// Périmètre d'un compte : les parcs qu'il atteint et son mode.
@@ -83,17 +102,49 @@ pub struct Scope {
     /// Hôtes au plus visés par un run de ce compte (`too_many_hosts`) ; `limit`
     /// devient obligatoire et `no_limit` refusé. `None` : pas de borne.
     pub max_hosts: Option<usize>,
+    /// Compte sous lequel ses `--check` sont consignés (`state::CheckLedger`) :
+    /// un check n'autorise que le run réel du compte qui l'a fait. Vide : le
+    /// serveur sans authentification (boucle locale), seul appelant possible.
+    pub owner: String,
+    /// Autres comptes dont les `--check` autorisent aussi les runs réels de
+    /// celui-ci (`accept_checks_from`, compte `run` seulement) : le compte
+    /// des runs réels d'une passerelle dont les checks passent par un compte
+    /// `check`. Vide : ses propres checks seulement.
+    pub accept_checks_from: Vec<String>,
 }
 
 impl Scope {
     /// Tout : l'opérateur, le compte hérité, l'absence d'authentification.
     pub fn everything() -> Self {
-        Self { parcs: None, mode: Mode::Run, deny_playbooks: Vec::new(), max_hosts: None }
+        Self {
+            parcs: None,
+            mode: Mode::Run,
+            deny_playbooks: Vec::new(),
+            max_hosts: None,
+            owner: String::new(),
+            accept_checks_from: Vec::new(),
+        }
+    }
+
+    /// Tout, pour le compte nommé (opérateur, compte hérité).
+    fn everything_for(owner: &str) -> Self {
+        Self { owner: owner.to_string(), ..Self::everything() }
     }
 
     /// Rien : une requête qui n'est pas passée par l'authentification.
     pub fn nothing() -> Self {
-        Self { parcs: Some(BTreeSet::new()), mode: Mode::Read, deny_playbooks: Vec::new(), max_hosts: None }
+        Self { parcs: Some(BTreeSet::new()), mode: Mode::Read, ..Self::everything() }
+    }
+
+    /// Ce compte ne lance que des `--check` (mode `check`).
+    pub fn check_only(&self) -> bool {
+        self.mode == Mode::Check
+    }
+
+    /// Comptes dont un `--check` récent autorise le run réel de celui-ci : lui-même,
+    /// puis ceux qu'il accepte (`accept_checks_from`).
+    pub fn check_owners(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.owner.as_str()).chain(self.accept_checks_from.iter().map(String::as_str))
     }
 
     /// Ce playbook (nom de fichier) est-il interdit à ce compte ?
@@ -162,7 +213,8 @@ impl Config {
 
         let mut accounts = Vec::new();
         if let (Some(user), Some(secret)) = (env("FLEETFORGE_WEB_USER"), secret_of("FLEETFORGE_WEB")) {
-            accounts.push(Account { user, secret, role: Role::Operator, scope: Arc::new(Scope::everything()) });
+            let scope = Arc::new(Scope::everything_for(&user));
+            accounts.push(Account { user, secret, role: Role::Operator, scope });
         }
 
         // Compte d'automatisation hérité (AgentHub) : pilotage, tous les
@@ -174,12 +226,8 @@ impl Config {
                 if accounts.iter().any(|a| a.user == user) {
                     bail!("FLEETFORGE_API_USER doit différer de FLEETFORGE_WEB_USER ({user})");
                 }
-                accounts.push(Account {
-                    user,
-                    secret,
-                    role: Role::Automation,
-                    scope: Arc::new(Scope::everything()),
-                });
+                let scope = Arc::new(Scope::everything_for(&user));
+                accounts.push(Account { user, secret, role: Role::Automation, scope });
             }
             (None, None) => {}
             _ => bail!(
@@ -196,6 +244,7 @@ impl Config {
                 }
                 accounts.push(account);
             }
+            validate_check_sources(&accounts).with_context(|| path.clone())?;
         }
 
         // Cette application lance des playbooks Ansible sur tout le parc, avec
@@ -241,6 +290,10 @@ struct AccountEntry {
     /// Hôtes au plus visés par un run.
     #[serde(default)]
     max_hosts: Option<usize>,
+    /// Comptes (`check` ou `run`) dont les `--check` autorisent les runs réels
+    /// de celui-ci — compte `run` seulement.
+    #[serde(default)]
+    accept_checks_from: Vec<String>,
 }
 
 /// Comptes bornés, lus dans un fichier JSON (`FLEETFORGE_API_ACCOUNTS_FILE`,
@@ -249,7 +302,11 @@ struct AccountEntry {
 /// ```json
 /// [{ "user": "agenthub", "password_hash": "$argon2id$…", "parcs": ["web3c"], "mode": "read" },
 ///  { "user": "autonomous", "password_hash": "$argon2id$…", "parcs": ["web3c"], "mode": "run",
-///    "deny_playbooks": ["*-fleetforge.yml"], "max_hosts": 3 }]
+///    "deny_playbooks": ["*-fleetforge.yml"], "max_hosts": 3 },
+///  { "user": "gw_check", "password_hash": "$argon2id$…", "parcs": ["web3c"], "mode": "check",
+///    "deny_playbooks": ["*-fleetforge.yml"], "max_hosts": 3 },
+///  { "user": "gw_run", "password_hash": "$argon2id$…", "parcs": ["web3c"], "mode": "run",
+///    "deny_playbooks": ["*-fleetforge.yml"], "max_hosts": 3, "accept_checks_from": ["gw_check"] }]
 /// ```
 ///
 /// Tout défaut refuse le démarrage plutôt qu'un compte : un fichier ignoré
@@ -294,19 +351,51 @@ fn accounts_from_file(path: &Path) -> Result<Vec<Account>> {
             if e.max_hosts.is_some_and(|n| !(1..=1000).contains(&n)) {
                 bail!("{shown} : max_hosts de {} hors de 1..=1000", e.user);
             }
+            if !e.accept_checks_from.is_empty() && e.mode != Mode::Run {
+                bail!("{shown} : accept_checks_from de {} réservé à un compte run", e.user);
+            }
+            let mut accept_checks_from = e.accept_checks_from;
+            accept_checks_from.sort_unstable();
+            accept_checks_from.dedup();
             Ok(Account {
-                user: e.user,
-                secret: Secret::Hash(e.password_hash),
-                role: Role::Automation,
                 scope: Arc::new(Scope {
                     parcs: Some(e.parcs.into_iter().collect()),
                     mode: e.mode,
                     deny_playbooks: e.deny_playbooks,
                     max_hosts: e.max_hosts,
+                    owner: e.user.clone(),
+                    accept_checks_from,
                 }),
+                user: e.user,
+                secret: Secret::Hash(e.password_hash),
+                role: Role::Automation,
             })
         })
         .collect()
+}
+
+/// `accept_checks_from` : chaque nom désigne un AUTRE compte d'automatisation
+/// qui peut lancer un `--check` (mode `check` ou `run`). Un nom inconnu refuse
+/// le démarrage : compte retiré ou faute de frappe, le run réel resterait sinon
+/// refusé `check_required` sans que rien n'en désigne la cause — et un compte
+/// créé plus tard sous ce nom hériterait d'une confiance qu'on ne lui a pas
+/// donnée.
+fn validate_check_sources(accounts: &[Account]) -> Result<()> {
+    for account in accounts {
+        for source in &account.scope.accept_checks_from {
+            let valid = accounts.iter().any(|a| {
+                &a.user == source && a.user != account.user && a.role == Role::Automation && a.scope.mode != Mode::Read
+            });
+            if !valid {
+                bail!(
+                    "compte {} : accept_checks_from nomme « {source} », qui n'est pas un autre compte \
+                     d'automatisation en mode check ou run",
+                    account.user
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Secret d'un compte : `<PRÉFIXE>_PASSWORD_HASH`, à défaut `<PRÉFIXE>_PASSWORD`.
@@ -393,9 +482,70 @@ mod tests {
     fn bounded(deny: &[&str], max_hosts: Option<usize>) -> Scope {
         Scope {
             parcs: Some(["web3c".to_string()].into()),
-            mode: Mode::Run,
             deny_playbooks: deny.iter().map(|s| s.to_string()).collect(),
             max_hosts,
+            ..Scope::everything_for("pilote")
+        }
+    }
+
+    fn automation(user: &str, mode: Mode, accept: &[&str]) -> Account {
+        Account {
+            user: user.into(),
+            secret: Secret::Plain("x".into()),
+            role: Role::Automation,
+            scope: Arc::new(Scope {
+                mode,
+                accept_checks_from: accept.iter().map(|s| s.to_string()).collect(),
+                ..Scope::everything_for(user)
+            }),
+        }
+    }
+
+    #[test]
+    fn the_check_mode_is_read_from_the_accounts_file() {
+        let modes: Vec<Mode> = serde_json::from_str(r#"["read", "check", "run"]"#).unwrap();
+        assert_eq!(modes, [Mode::Read, Mode::Check, Mode::Run]);
+        assert!(serde_json::from_str::<Mode>(r#""Check""#).is_err(), "casse exacte");
+        assert!(serde_json::from_str::<Mode>(r#""dry-run""#).is_err());
+    }
+
+    #[test]
+    fn only_a_check_account_is_check_only() {
+        let check = Scope { mode: Mode::Check, ..bounded(&[], Some(3)) };
+        assert!(check.check_only());
+        assert!(!bounded(&[], None).check_only());
+        assert!(!Scope::everything().check_only());
+        assert!(!Scope::nothing().check_only());
+    }
+
+    #[test]
+    fn a_scope_accepts_its_own_checks_then_those_it_names() {
+        let own = Scope::everything_for("agenthub");
+        assert_eq!(own.check_owners().collect::<Vec<_>>(), ["agenthub"]);
+        let gateway = Scope { accept_checks_from: vec!["gw_check".into()], ..Scope::everything_for("gw_run") };
+        assert_eq!(gateway.check_owners().collect::<Vec<_>>(), ["gw_run", "gw_check"]);
+        // Sans authentification : un seul appelant, sans nom.
+        assert_eq!(Scope::everything().check_owners().collect::<Vec<_>>(), [""]);
+    }
+
+    #[test]
+    fn accepted_check_sources_must_be_other_check_capable_accounts() {
+        let with = |runner: Account| {
+            let operator = Account { role: Role::Operator, ..automation("operateur", Mode::Run, &[]) };
+            let accounts =
+                [operator, automation("gw_check", Mode::Check, &[]), automation("lecteur", Mode::Read, &[]), runner];
+            validate_check_sources(&accounts)
+        };
+        assert!(with(automation("gw_run", Mode::Run, &["gw_check"])).is_ok());
+        assert!(with(automation("gw_run", Mode::Run, &[])).is_ok());
+        for (accept, why) in [
+            ("ghost", "compte inconnu"),
+            ("gw_run", "lui-même"),
+            ("lecteur", "compte en lecture : il ne lance aucun check"),
+            ("operateur", "l'opérateur n'est pas un compte d'automatisation"),
+        ] {
+            let err = with(automation("gw_run", Mode::Run, &[accept])).unwrap_err().to_string();
+            assert!(err.contains(accept), "{why} : {err}");
         }
     }
 

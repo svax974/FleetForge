@@ -25,7 +25,7 @@ pub struct AppState {
     pub started: Instant,
     /// Diagnostic lecture seule (`ssh_diagnose`).
     pub ro_gate: Arc<RoGateConfig>,
-    /// `--check` récents du compte d'automatisation.
+    /// `--check` récents de l'automatisation, par compte.
     pub checks: CheckLedger,
     /// Parc de chaque run de playbook, pour borner `run_status` et le flux
     /// d'un run au périmètre d'un compte.
@@ -81,30 +81,36 @@ impl AppState {
 /// Durée pendant laquelle un `--check` autorise le run réel correspondant.
 pub const CHECK_VALIDITY: Duration = Duration::from_secs(60 * 60);
 
-/// `--check` récents du compte d'automatisation, par empreinte de lancement
-/// (parc, playbook, `--limit`, variables).
+/// `--check` récents de l'automatisation, par COMPTE et par empreinte de
+/// lancement (parc, playbook, `--limit`, variables, étiquettes, commit).
 ///
 /// Décision D9 d'AgentHub, tenue ICI et pas seulement chez l'appelant : un
 /// run réel lancé par l'automatisation exige le `--check` du MÊME lancement,
 /// achevé depuis moins de [`CHECK_VALIDITY`]. Un modèle qui sauterait l'étape
 /// — consigne mal suivie, injection dans une alerte — est arrêté à la porte
 /// d'exécution, là où il ne peut pas la contourner.
+///
+/// Le check est celui du compte qui lance le run réel (`Scope::owner`), ou
+/// d'un compte qu'il accepte nommément (`Scope::accept_checks_from`) : le
+/// check d'un client n'autorise pas le run réel d'un autre client du même parc.
 #[derive(Clone, Default)]
-pub struct CheckLedger(Arc<Mutex<HashMap<String, Instant>>>);
+pub struct CheckLedger(Arc<Mutex<HashMap<(String, String), Instant>>>);
 
 impl CheckLedger {
-    pub fn record(&self, fingerprint: &str) {
+    /// Consigne le check achevé de `owner`, le compte qui l'a lancé.
+    pub fn record(&self, owner: &str, fingerprint: &str) {
         let mut done = self.0.lock().unwrap_or_else(|e| e.into_inner());
         done.retain(|_, at| at.elapsed() < CHECK_VALIDITY);
-        done.insert(fingerprint.to_string(), Instant::now());
+        done.insert((owner.to_string(), fingerprint.to_string()), Instant::now());
     }
 
-    pub fn is_fresh(&self, fingerprint: &str) -> bool {
-        self.0
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(fingerprint)
-            .is_some_and(|at| at.elapsed() < CHECK_VALIDITY)
+    /// Un check récent de ce lancement, fait par l'un de ces comptes ?
+    pub fn is_fresh<'a>(&self, owners: impl IntoIterator<Item = &'a str>, fingerprint: &str) -> bool {
+        let done = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        owners.into_iter().any(|owner| {
+            done.get(&(owner.to_string(), fingerprint.to_string()))
+                .is_some_and(|at| at.elapsed() < CHECK_VALIDITY)
+        })
     }
 }
 
@@ -146,9 +152,21 @@ mod tests {
     #[test]
     fn a_check_unlocks_only_its_own_launch() {
         let ledger = CheckLedger::default();
-        assert!(!ledger.is_fresh("web3c|deploy-x.yml"));
-        ledger.record("web3c|deploy-x.yml");
-        assert!(ledger.is_fresh("web3c|deploy-x.yml"));
-        assert!(!ledger.is_fresh("web3c|deploy-y.yml"));
+        assert!(!ledger.is_fresh(["agenthub"], "web3c|deploy-x.yml"));
+        ledger.record("agenthub", "web3c|deploy-x.yml");
+        assert!(ledger.is_fresh(["agenthub"], "web3c|deploy-x.yml"));
+        assert!(!ledger.is_fresh(["agenthub"], "web3c|deploy-y.yml"));
+    }
+
+    #[test]
+    fn a_check_unlocks_only_the_accounts_that_accept_it() {
+        let ledger = CheckLedger::default();
+        ledger.record("gw_check", "web3c|deploy-x.yml");
+        assert!(!ledger.is_fresh(["agenthub"], "web3c|deploy-x.yml"), "autre compte");
+        assert!(!ledger.is_fresh(["gw_run"], "web3c|deploy-x.yml"), "sans accept_checks_from");
+        assert!(!ledger.is_fresh(std::iter::empty(), "web3c|deploy-x.yml"));
+        assert!(ledger.is_fresh(["gw_run", "gw_check"], "web3c|deploy-x.yml"), "accept_checks_from: [gw_check]");
+        // Le compte sans nom (serveur sans authentification) n'est pas un joker.
+        assert!(!ledger.is_fresh([""], "web3c|deploy-x.yml"));
     }
 }

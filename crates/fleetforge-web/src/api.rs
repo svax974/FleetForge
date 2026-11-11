@@ -214,6 +214,13 @@ pub async fn dispatch(
     // l'authentification : traitée comme la moins privilégiée.
     let role = role.map_or(Role::Automation, |Extension(r)| r);
     let scope = scope.map_or_else(|| Arc::new(Scope::nothing()), |Extension(s)| s);
+    // Seconde barrière derrière `auth::middleware` : un compte
+    // d'automatisation n'atteint que les commandes de son mode — jamais une
+    // écriture, un réglage ou un run de l'opérateur —, même si le filtrage
+    // d'entrée venait à changer.
+    if role == Role::Automation && !scope.may(&command) {
+        return Err(ApiError::forbidden(format!("{command} : hors du mode du compte ({})", scope.mode.describe())));
+    }
     // Corps lu en texte plutôt que par l'extracteur `Json` : une commande sans
     // argument est appelée avec un corps vide, que `Json` rejetterait avant
     // même d'arriver ici — l'erreur parlerait alors de désérialisation là où le

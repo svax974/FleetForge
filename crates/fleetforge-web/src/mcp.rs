@@ -57,8 +57,10 @@ parc data or vault files) and, when the tree is served from git, every run start
 precise commit (tree_status, sync_tree). run_ansible_playbook is gated: a real run \
 (check: false) is refused with code check_required unless the SAME launch (parc, playbook, \
 limit, extra_vars, tags, skip_tags, commit, no_limit) completed with check: true less than \
-one hour ago, and a parc runs one playbook at a time (code run_busy). An account may be \
-bounded further: forbidden_playbook (deny_playbooks) and too_many_hosts (max_hosts). \
+one hour ago under the same account (or an account it accepts), and a parc runs one playbook \
+at a time (code run_busy). An account may be bounded further: forbidden_playbook \
+(deny_playbooks) and too_many_hosts (max_hosts). An account in check mode only dry-runs: \
+check is forced to true and check: false is refused (code forbidden). \
 Outputs are redacted. A refusal is a tool error whose text is a JSON object \
 {\"error\": <message>, \"code\": <stable code>}.";
 
@@ -356,7 +358,9 @@ static TOOLS: LazyLock<Vec<Tool>> = LazyLock::new(|| {
             "run_ansible_playbook",
             "Run a playbook of the Ansible tree on a parc. A real run (check: false) is refused with \
              code check_required unless the SAME launch (parc, playbook, limit, extra_vars, tags, skip_tags, \
-             resolved commit, no_limit) completed with check: true less than one hour ago. One run per parc \
+             resolved commit, no_limit) completed with check: true less than one hour ago, under the same \
+             account or an account it accepts. An account in check mode only dry-runs: check is forced to \
+             true, check: false is refused (code forbidden). One run per parc \
              at a time (code run_busy). limit names hosts or groups of the parc, no pattern; with no limit \
              at all the playbook targets its own hosts. no_limit: true states that explicitly (needed by \
              playbooks whose describe_playbook says needs_no_limit); it excludes limit and is refused for an \
@@ -383,7 +387,7 @@ static TOOLS: LazyLock<Vec<Tool>> = LazyLock::new(|| {
                         "additionalProperties": { "type": "string" },
                         "description": "Extra variables (-e), string values."
                     },
-                    "check": { "type": "boolean", "description": "Dry run (--check). Default false." },
+                    "check": { "type": "boolean", "description": "Dry run (--check). Default false; always true for an account in check mode." },
                     "diff": { "type": "boolean", "description": "Show file differences (--diff). Default false." },
                     "detach": { "type": "boolean", "description": "Answer as soon as the run is registered. Default true." },
                     "run_id": { "type": "string", "description": "Run identifier to use. Generated when absent." },
@@ -485,8 +489,18 @@ mod tests {
     }
 
     #[test]
+    fn a_check_account_sees_the_check_tools_only() {
+        let check = Scope { mode: crate::config::Mode::Check, ..Scope::everything() };
+        let visible: Vec<&str> = TOOLS.iter().map(|t| t.name.as_ref()).filter(|n| check.may(n)).collect();
+        assert_eq!(visible, crate::auth::CHECK_COMMANDS);
+        for hidden in ["ssh_diagnose", "sync_tree"] {
+            assert!(!visible.contains(&hidden), "{hidden}");
+        }
+    }
+
+    #[test]
     fn a_read_account_sees_the_read_tools_only() {
-        let read = Scope { parcs: None, mode: crate::config::Mode::Read, deny_playbooks: vec![], max_hosts: None };
+        let read = Scope { mode: crate::config::Mode::Read, ..Scope::everything() };
         let visible: Vec<&str> = TOOLS.iter().map(|t| t.name.as_ref()).filter(|n| read.may(n)).collect();
         assert_eq!(visible, crate::auth::READ_COMMANDS);
         for run_only in ["run_ansible_playbook", "run_status", "syntax_check", "sync_tree"] {

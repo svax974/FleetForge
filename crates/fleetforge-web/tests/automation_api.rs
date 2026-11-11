@@ -1580,4 +1580,180 @@ fn a_flawed_bound_refuses_to_start() {
     refuses_accounts(entry(json!({ "max_hosts": 0 })), 0o600, "max_hosts");
     refuses_accounts(entry(json!({ "max_hosts": 5000 })), 0o600, "max_hosts");
     refuses_accounts(entry(json!({ "max_hosts": -1 })), 0o600, "comptes illisibles");
+
+    // `accept_checks_from` : d'autres comptes d'automatisation qui lancent des checks.
+    let other = |user: &str, mode: &str| json!({ "user": user, "password_hash": hash, "parcs": ["web3c"], "mode": mode });
+    let with_source = |source: &str, other_account: Value| {
+        let mut runner = entry(json!({ "accept_checks_from": [source] }));
+        runner.as_array_mut().unwrap().push(other_account);
+        runner
+    };
+    refuses_accounts(with_source("ghost", other("b", "check")), 0o600, "ghost");
+    refuses_accounts(with_source("a", other("b", "check")), 0o600, "accept_checks_from");
+    refuses_accounts(with_source("b", other("b", "read")), 0o600, "accept_checks_from");
+    refuses_accounts(with_source(OPERATOR.0, other("b", "check")), 0o600, "accept_checks_from");
+    let mut checker = other("a", "check");
+    checker["accept_checks_from"] = json!(["b"]);
+    refuses_accounts(json!([checker, other("b", "run")]), 0o600, "réservé à un compte run");
+    refuses_accounts(json!([other("a", "dry-run")]), 0o600, "comptes illisibles");
+}
+
+// ═══ Mode `check` : des dry-runs, jamais un run réel ════════════════════════
+
+const CHECKER: (&str, &str) = ("verif", "mot-de-passe-verif");
+const GATED: (&str, &str) = ("pilote_gw", "mot-de-passe-pilote-gw");
+
+/// Le compte `check` d'une passerelle et son compte `run`, qui accepte ses checks.
+fn gateway_accounts() -> Value {
+    json!([
+        {
+            "user": CHECKER.0, "password_hash": hash_with_binary(CHECKER.1), "parcs": ["web3c"], "mode": "check",
+            "deny_playbooks": ["update-security-*.yml"], "max_hosts": 2
+        },
+        {
+            "user": GATED.0, "password_hash": hash_with_binary(GATED.1), "parcs": ["web3c"], "mode": "run",
+            "accept_checks_from": [CHECKER.0]
+        }
+    ])
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_check_account_only_dry_runs_and_its_checks_unlock_only_who_accepts_them() {
+    let (am_port, _) = fake_alertmanager().await;
+    let accounts = gateway_accounts();
+    let server = start_with(am_port, |root| {
+        let file = accounts_file(root, accounts);
+        vec![("FLEETFORGE_API_ACCOUNTS_FILE".into(), file.display().to_string())]
+    })
+    .await;
+    let api = Api { http: Client::new(), server: &server };
+    let forbidden = |(status, body): (StatusCode, Value)| status == StatusCode::FORBIDDEN && code(&body) == "forbidden";
+    let launch = |extra: Value| {
+        let mut body = json!({
+            "parc": "web3c", "playbook": "deploy-demo.yml", "limit": ["proxy1"], "extra_vars": { "x": "1" }, "detach": true
+        });
+        body.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        body
+    };
+    let every_launch_was_a_check = || {
+        let log = api.stub_log();
+        log.lines().all(|l| l.contains("--check")) && !log.is_empty()
+    };
+
+    // ── Lecture ouverte, sauf ssh_diagnose ────────────────────────────────
+    for (command, body) in [
+        ("list_hosts", json!({ "parc": "web3c" })),
+        ("list_playbooks", json!({})),
+        ("tree_status", json!({ "parc": "web3c" })),
+        ("describe_playbook", json!({ "parc": "web3c", "playbook": "deploy-demo.yml" })),
+        ("read_tree", json!({ "parc": "web3c", "path": "" })),
+    ] {
+        let (status, answer) = api.call(CHECKER, command, body).await;
+        assert_eq!(status, StatusCode::OK, "{command} → {answer}");
+    }
+
+    // ── Tout le reste : refusé avant d'atteindre quoi que ce soit ─────────
+    for (command, body) in [
+        ("ssh_diagnose", json!({ "host": "proxy1", "verb": "system" })),
+        ("ssh_diagnose", json!({ "host": "proxy1", "verb": "http", "args": ["9090", "/api/v1/status"] })),
+        ("ssh_diagnose", json!({ "host": "proxy1", "verb": "http 9090 /" })),
+        ("sync_tree", json!({ "parc": "web3c" })),
+        ("run_ansible_deploy", json!({ "deployId": "d1", "roles": ["demo-install"], "inventoryPath": "web3c", "hosts": ["proxy1"] })),
+        ("get_run_handle", json!({ "runId": "x" })),
+        ("get_active_runs", json!({})),
+        ("clear_finished_runs", json!({})),
+        ("write_group_vars_file", json!({ "filename": "web3c.yml", "entries": [] })),
+        ("set_inventories_path", json!({ "path": "/tmp" })),
+        ("set_host_alert_exclusions", json!({ "inventoryPath": "web3c", "host": "proxy1", "alerts": [] })),
+        ("list_hosts", json!({ "parc": "papanglabs" })),
+    ] {
+        let answer = api.call(CHECKER, command, body.clone()).await;
+        assert!(forbidden(answer.clone()), "{command} {body} → {answer:?}");
+    }
+    // Un run réel, ou ce qui désarmerait --check : refusé.
+    let (status, body) = api.call(CHECKER, "run_ansible_playbook", launch(json!({ "check": false }))).await;
+    assert_eq!((status, code(&body)), (StatusCode::FORBIDDEN, "forbidden"), "{body}");
+    for (extra, expected) in [
+        (json!({ "check": "false" }), "invalid_argument"),
+        (json!({ "check": 0 }), "invalid_argument"),
+        (json!({ "extra_vars": { "ansible_check_mode": "false" } }), "invalid_argument"),
+        (json!({ "extra_vars": { "x": "{{ lookup('pipe', 'id') }}" } }), "invalid_argument"),
+        // Ses bornes valent pour ses checks.
+        (json!({ "playbook": "update-security-ssh.yml" }), "forbidden_playbook"),
+        (json!({ "limit": ["all"] }), "too_many_hosts"),
+        (json!({ "no_limit": true, "limit": null }), "too_many_hosts"),
+        (json!({ "parc": "papanglabs" }), "forbidden"),
+    ] {
+        let (_, answer) = api.call(CHECKER, "run_ansible_playbook", launch(extra.clone())).await;
+        assert_eq!(code(&answer), expected, "{extra} → {answer}");
+    }
+    assert!(api.stub_log().is_empty(), "aucun refus ne doit atteindre ansible-playbook : {}", api.stub_log());
+
+    // ── Sans `check` : un --check quand même ──────────────────────────────
+    let (status, started) = api.call(CHECKER, "run_ansible_playbook", launch(json!({}))).await;
+    assert_eq!(status, StatusCode::OK, "{started}");
+    assert_eq!(started["check"], json!(true), "{started}");
+    let check_id = started["run_id"].as_str().unwrap().to_string();
+    let done = api.wait_run_as(CHECKER, &check_id).await;
+    assert_eq!((done["state"].clone(), done["check"].clone()), (json!("success"), json!(true)), "{done}");
+    assert!(done["label"].as_str().unwrap().starts_with("[check]"), "{done}");
+    assert!(every_launch_was_a_check(), "{}", api.stub_log());
+    let sse = api.http.get(format!("{}/api/events/{check_id}", server.base)).basic_auth(CHECKER.0, Some(CHECKER.1)).send().await.unwrap();
+    assert_eq!(sse.status(), StatusCode::OK, "le flux de son run se lit");
+
+    // Son propre check récent ne lui ouvre pas pour autant le run réel.
+    let (status, body) = api.call(CHECKER, "run_ansible_playbook", launch(json!({ "check": false }))).await;
+    assert_eq!((status, code(&body)), (StatusCode::FORBIDDEN, "forbidden"), "{body}");
+
+    // ── Le check n'appartient qu'à qui l'accepte ──────────────────────────
+    // Le compte hérité couvre tout le parc, mais n'accepte que ses propres checks.
+    let (status, body) = api.agent("run_ansible_playbook", launch(json!({}))).await;
+    assert_eq!((status, code(&body)), (StatusCode::CONFLICT, "check_required"), "{body}");
+    assert!(every_launch_was_a_check(), "{}", api.stub_log());
+    // Le compte run qui l'accepte nommément : le run réel passe.
+    let (status, real) = api.call(GATED, "run_ansible_playbook", launch(json!({}))).await;
+    assert_eq!(status, StatusCode::OK, "{real}");
+    assert_eq!(real["check"], json!(false));
+    assert_eq!(api.wait_run_as(GATED, real["run_id"].as_str().unwrap()).await["state"], "success");
+    let last = api.stub_log().lines().last().unwrap().to_string();
+    assert!(last.contains("--limit proxy1") && !last.contains("--check"), "{last}");
+
+    // Dans l'autre sens : le check d'un autre compte n'ouvre rien au compte de la passerelle.
+    let other_launch = launch(json!({ "limit": ["proxy2"] }));
+    let (status, other) = api.agent("run_ansible_playbook", launch(json!({ "limit": ["proxy2"], "check": true }))).await;
+    assert_eq!(status, StatusCode::OK, "{other}");
+    api.wait_run(other["run_id"].as_str().unwrap()).await;
+    let (status, body) = api.call(GATED, "run_ansible_playbook", other_launch.clone()).await;
+    assert_eq!((status, code(&body)), (StatusCode::CONFLICT, "check_required"), "{body}");
+    let (status, own) = api.agent("run_ansible_playbook", other_launch).await;
+    assert_eq!(status, StatusCode::OK, "le compte hérité garde l'usage de ses propres checks : {own}");
+    api.wait_run(own["run_id"].as_str().unwrap()).await;
+
+    // ── Même chose par MCP ────────────────────────────────────────────────
+    let listed = api.rpc(CHECKER, "tools/list", json!({})).await;
+    let names: Vec<&str> = listed["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+    assert_eq!(
+        names,
+        [
+            "list_hosts", "list_playbooks", "alertmanager_alerts", "query_prometheus", "describe_playbook",
+            "read_tree", "search_tree", "tree_status", "run_ansible_playbook", "run_status", "syntax_check"
+        ]
+    );
+    let runs_before = api.stub_log().lines().count();
+    for (name, arguments) in [
+        ("run_ansible_playbook", json!({ "parc": "web3c", "playbook": "deploy-demo.yml", "limit": ["proxy1"], "check": false })),
+        ("ssh_diagnose", json!({ "host": "proxy1", "verb": "http 9090 /" })),
+        ("sync_tree", json!({ "parc": "web3c" })),
+    ] {
+        let (failed, error) = api.tool(CHECKER, name, arguments.clone()).await;
+        assert!(failed && error["code"] == "forbidden", "{name} {arguments} → {error}");
+    }
+    let (failed, started) = api
+        .tool(CHECKER, "run_ansible_playbook", json!({ "parc": "web3c", "playbook": "deploy-demo.yml", "limit": ["proxy1"] }))
+        .await;
+    assert!(!failed, "{started}");
+    assert_eq!((started["state"].clone(), started["check"].clone()), (json!("running"), json!(true)), "détaché, en --check");
+    assert_eq!(api.wait_run_mcp(CHECKER, started["run_id"].as_str().unwrap()).await["check"], json!(true));
+    let new_lines: Vec<String> = api.stub_log().lines().skip(runs_before).map(String::from).collect();
+    assert!(new_lines.len() == 1 && new_lines[0].contains("--check"), "{new_lines:?}");
 }

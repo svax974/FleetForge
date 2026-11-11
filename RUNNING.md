@@ -431,9 +431,24 @@ serveur MCP :
 - `read` : `list_hosts`, `list_playbooks`, `alertmanager_alerts`,
   `query_prometheus`, `ssh_diagnose`, et la lecture du CODE de l'arbre :
   `describe_playbook`, `read_tree`, `search_tree`, `tree_status` ;
+- `check` : des `--check` **seulement** — `run_ansible_playbook` y lance toujours
+  `--check` (`check` absent : posé ; `check: false` : `403 forbidden`, jamais
+  ramené en silence) —, plus `run_status`, `syntax_check`, le flux d'un run et la
+  lecture **sans** `ssh_diagnose` (une commande sur un hôte, verbe `http` compris).
+  Ni run réel, ni `sync_tree` (il avance la tête synchronisée de TOUS les comptes).
+  Le compte des dry-runs d'une passerelle : volé, il ne lance aucun run réel. Les
+  règles strictes (`ansible_*` refusées, dont `ansible_check_mode`), `deny_playbooks`
+  et `max_hosts` valent pour ses checks ;
 - `run` : la lecture, plus `run_ansible_playbook`, `run_status`, `syntax_check`,
   `sync_tree` et le flux `GET /api/events/<run_id>` (ces quatre-là ne sont
   **jamais** relayés au poste, `fleetForgePure.ts` côté AgentHub).
+
+Le tri par mode est tenu trois fois : à l'entrée (`auth.rs`), à la porte commune
+de l'API REST et du MCP (`automation::serve`), et dans l'aiguillage des commandes
+(`api.rs`) ; le `--check` d'un compte `check` est imposé puis revérifié juste avant
+l'inscription du run (`automation.rs`). Un `--check` n'est pas sans effet pour
+autant : Ansible se connecte aux hôtes (`become`) et y exécute les tâches marquées
+`check_mode: false` (sondes en lecture par convention de ce dépôt) et les lookups.
 
 Une commande hors du mode, un parc hors périmètre (existant ou non : la
 réponse est la même), un `ssh_diagnose` sur un hôte qu'aucun parc du
@@ -448,9 +463,22 @@ démarrage :
   { "user": "agenthub", "password_hash": "$argon2id$…", "parcs": ["web3c"], "mode": "read" },
   { "user": "openclaw", "password_hash": "$argon2id$…", "parcs": ["web3c"], "mode": "read" },
   { "user": "autonome", "password_hash": "$argon2id$…", "parcs": ["web3c"], "mode": "run",
-    "deny_playbooks": ["*-fleetforge.yml", "setup-server.yml"], "max_hosts": 3 }
+    "deny_playbooks": ["*-fleetforge.yml", "setup-server.yml"], "max_hosts": 3 },
+  { "user": "gw_check", "password_hash": "$argon2id$…", "parcs": ["web3c"], "mode": "check",
+    "deny_playbooks": ["*-fleetforge.yml", "setup-server.yml"], "max_hosts": 3 },
+  { "user": "gw_run", "password_hash": "$argon2id$…", "parcs": ["web3c"], "mode": "run",
+    "deny_playbooks": ["*-fleetforge.yml", "setup-server.yml"], "max_hosts": 3,
+    "accept_checks_from": ["gw_check"] }
 ]
 ```
+
+**Un check appartient au compte qui l'a lancé** : il n'autorise que le run réel de
+ce compte (registre `CheckLedger`, en mémoire, par compte et par empreinte). Le
+check d'AgentHub n'ouvre rien à un autre client du même parc, ni l'inverse. Seul un
+compte `run` peut accepter NOMMÉMENT ceux d'autres comptes `check` ou `run`
+(`accept_checks_from`) : une passerelle qui fait ses checks sous `gw_check` et ses
+runs réels sous `gw_run`. Un nom qui n'est pas un autre compte d'automatisation
+`check`/`run` (inconnu, lui-même, `read`, l'opérateur) refuse le démarrage.
 
 Deux bornes facultatives, tenues par `run_ansible_playbook` avant tout (le compte
 « autonome » du hub est un compte `run` avec ces deux bornes) :
@@ -464,8 +492,10 @@ Deux bornes facultatives, tenues par `run_ansible_playbook` avant tout (le compt
   de `limit` sont développés par l'inventaire (`all`, l'organisation, un groupe, un
   hôte ; sans doublon) : au-delà, `403 too_many_hosts`.
 
-Par le déploiement : `ff_api_accounts: [{ user, parcs?, mode, deny_playbooks?, max_hosts? }]` dans
-`playbooks/group_vars/<parc>.yml` (`parcs` : `[<parc_name>]` par défaut) ; le
+Par le déploiement : `ff_api_accounts: [{ user, parcs?, mode, deny_playbooks?, max_hosts?,
+accept_checks_from? }]` dans `playbooks/group_vars/<parc>.yml` (`mode` : `read` par défaut,
+`check` ou `run` ; `parcs` : `[<parc_name>]` par défaut ; `user` en minuscules, chiffres
+et `_` — `gw_check`, pas `gw-check` —, il nomme une variable du vault) ; le
 mot de passe de chacun, `ff_api_password_<user>`, est tiré au premier passage
 et chiffré dans ce même fichier (à committer), la machine n'en reçoit que les
 empreintes. Le compte hérité `FLEETFORGE_API_USER` (`ff_api_user`) reste un
@@ -503,7 +533,11 @@ l'authentification basique y circulerait en clair.
 - passer une variable `ansible_*` ou une valeur contenant un gabarit Jinja ;
 - lancer un run réel sans le `--check` du MÊME lancement (parc, playbook,
   limit, variables, tags, skip_tags, **commit résolu**, no_limit) achevé depuis moins
-  d'une heure → `409 check_required` ;
+  d'une heure, sous ce compte ou un compte de son `accept_checks_from`
+  → `409 check_required` (un check ne se consomme pas : il en autorise plusieurs
+  pendant l'heure) ;
+- en mode `check` : lancer un run réel (`check: false` → `403 forbidden`),
+  `ssh_diagnose`, `sync_tree` ;
 - lire autre chose que du code : `read_tree` / `search_tree` / `describe_playbook` ne
   voient que `playbooks/` (voir plus bas), jamais un inventaire, un group_vars, un
   host_vars, une clé, une donnée de parc ni un fichier vault ;
@@ -540,11 +574,20 @@ l'authentification basique y circulerait en clair.
 Détails :
 - `run_ansible_playbook` accepte aussi la forme du frontal (`inventoryPath`,
   `playbookPath`, `limitHosts`, `extraVars`, `deployId`). Sans `run_id`, le
-  serveur en fabrique un (`api-<ms>-<n>`). Le run se termine et se clôt même
+  serveur en fabrique un (`api-<ms>-<n>`) ; fourni, il est pris tel quel (lettres, chiffres,
+  `_ . : -`, 128 au plus) :
+  une passerelle impose ainsi le sien. `409 run_id_in_use` seulement tant qu'un run EN
+  COURS le porte : celui d'un run terminé se réutilise, et le nouveau run REMPLACE
+  l'ancien au registre (`run_status`, flux) — un nouvel essai envoyé après la fin du
+  premier relance donc le playbook. `label` est libre (affichage seul, préfixé `[check]`
+  pour un check). `detach` vaut `false` par défaut en REST (la réponse attend la fin du
+  run) et `true` par MCP. Le run se termine et se clôt même
   si le client se déconnecte ; sa sortie en direct reste
   `GET /api/events/<run_id>` (SSE, événement `end` à la fin).
 - `run_status` lit le registre en mémoire : un run oublié (redémarrage du
   service, « vider les runs terminés » côté opérateur) répond `unknown_run`.
+  Un compte borné y voit tout run lancé sur l'un de SES parcs, quel que soit le compte
+  qui l'a lancé (opérateur compris) : le parc est la seule borne, pas le lanceur.
   `recap` et `failures` sont tirés de la sortie ENTIÈRE du run (callback par défaut
   d'Ansible : PLAY RECAP et lignes `fatal:`/`failed:`, formes ≤ 2.18 et 2.19+, `--check`
   compris), pas de ses seules dernières lignes : `recap` est vide tant que le run n'a pas
