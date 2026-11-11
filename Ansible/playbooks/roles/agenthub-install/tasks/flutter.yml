@@ -124,7 +124,8 @@
   changed_when: "'ownloading' in (agenthub_flutter_precache.stdout ~ agenthub_flutter_precache.stderr)"
 
 - name: Report the Flutter version
-  ansible.builtin.command: runuser -l {{ agenthub_flutter_user }} -c '{{ agenthub_flutter_dir }}/bin/flutter --version --machine'
+  # Le script de `-c` est relu par le shell de l'utilisateur : le chemin y est quoté, puis le script entier.
+  ansible.builtin.command: runuser -l {{ agenthub_flutter_user | quote }} -c {{ ((agenthub_flutter_dir | quote) ~ '/bin/flutter --version --machine') | quote }}
   register: agenthub_flutter_version
   changed_when: false
   become: true

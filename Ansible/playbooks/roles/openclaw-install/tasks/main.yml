@@ -82,7 +82,7 @@
 # distribué, sans que rien ne l'explique.
 - name: Generate the gateway token on first run
   ansible.builtin.shell:
-    cmd: "umask 077 && openssl rand -hex 32 > {{ openclaw_home }}/.gateway_token"
+    cmd: "umask 077 && openssl rand -hex 32 > {{ openclaw_home | quote }}/.gateway_token"
     creates: "{{ openclaw_home }}/.gateway_token"
   become: true
   become_user: "{{ openclaw_user }}"
@@ -113,9 +113,9 @@
 - name: Run the non-interactive onboarding
   ansible.builtin.command:
     cmd: >-
-      {{ openclaw_binary }} onboard --non-interactive --accept-risk --skip-health
+      {{ openclaw_binary | quote }} onboard --non-interactive --accept-risk --skip-health
       --mode local
-      --auth-choice {{ openclaw_auth_choice }}
+      --auth-choice {{ openclaw_auth_choice | quote }}
       --secret-input-mode ref
       --gateway-auth token
       --gateway-token-ref-env OPENCLAW_GATEWAY_TOKEN
@@ -151,7 +151,7 @@
 
 - name: Apply the gateway token
   ansible.builtin.command:
-    cmd: "{{ openclaw_binary }} config set --batch-file {{ openclaw_home }}/.gateway-token-batch.json"
+    cmd: "{{ openclaw_binary | quote }} config set --batch-file {{ openclaw_home | quote }}/.gateway-token-batch.json"
     chdir: "{{ openclaw_home }}"
   become: true
   become_user: "{{ openclaw_user }}"
@@ -179,11 +179,11 @@
 - name: Configure the trusted reverse-proxy source, bind address and Control UI origin
   ansible.builtin.command:
     cmd: >-
-      {{ openclaw_binary }} config set --batch-json
-      '{{ [{"path": "gateway.trustedProxies", "value": openclaw_trusted_proxies},
+      {{ openclaw_binary | quote }} config set --batch-json
+      {{ [{"path": "gateway.trustedProxies", "value": openclaw_trusted_proxies},
            {"path": "gateway.bind", "value": openclaw_gateway_bind},
            {"path": "gateway.port", "value": openclaw_port | int},
-           {"path": "gateway.controlUi.allowedOrigins", "value": openclaw_control_ui_allowed_origins}] | to_json }}'
+           {"path": "gateway.controlUi.allowedOrigins", "value": openclaw_control_ui_allowed_origins}] | to_json | quote }}
     chdir: "{{ openclaw_home }}"
   become: true
   become_user: "{{ openclaw_user }}"
@@ -200,12 +200,12 @@
 - name: Configure the memory search embeddings
   ansible.builtin.command:
     cmd: >-
-      {{ openclaw_binary }} config set --batch-json
-      '{{ ([{"path": "memory.search.provider", "value": openclaw_memory_search_provider},
+      {{ openclaw_binary | quote }} config set --batch-json
+      {{ ([{"path": "memory.search.provider", "value": openclaw_memory_search_provider},
             {"path": "memory.search.model", "value": openclaw_memory_search_model},
             {"path": "memory.search.fallback", "value": openclaw_memory_search_fallback}]
            + ([{"path": "memory.search.remote.baseUrl", "value": openclaw_memory_search_base_url}]
-              if openclaw_memory_search_base_url | length > 0 else [])) | to_json }}'
+              if openclaw_memory_search_base_url | length > 0 else [])) | to_json | quote }}
     chdir: "{{ openclaw_home }}"
   become: true
   become_user: "{{ openclaw_user }}"
@@ -220,9 +220,9 @@
 - name: Configure background model work (Skill Workshop review, exec exit wake)
   ansible.builtin.command:
     cmd: >-
-      {{ openclaw_binary }} config set --batch-json
-      '{{ [{"path": "skills.workshop.autonomous.mode", "value": openclaw_skill_workshop_mode},
-           {"path": "tools.exec.notifyOnExit", "value": openclaw_exec_notify_on_exit | bool}] | to_json }}'
+      {{ openclaw_binary | quote }} config set --batch-json
+      {{ [{"path": "skills.workshop.autonomous.mode", "value": openclaw_skill_workshop_mode},
+           {"path": "tools.exec.notifyOnExit", "value": openclaw_exec_notify_on_exit | bool}] | to_json | quote }}
     chdir: "{{ openclaw_home }}"
   become: true
   become_user: "{{ openclaw_user }}"
@@ -236,11 +236,11 @@
 - name: Configure the default and utility models
   ansible.builtin.command:
     cmd: >-
-      {{ openclaw_binary }} config set --batch-json
-      '{{ (([{"path": "agents.defaults.model", "value": openclaw_default_model}]
+      {{ openclaw_binary | quote }} config set --batch-json
+      {{ (([{"path": "agents.defaults.model", "value": openclaw_default_model}]
              if openclaw_default_model | length > 0 else [])
            + ([{"path": "agents.defaults.utilityModel", "value": openclaw_utility_model}]
-              if openclaw_utility_model | length > 0 else [])) | to_json }}'
+              if openclaw_utility_model | length > 0 else [])) | to_json | quote }}
     chdir: "{{ openclaw_home }}"
   become: true
   become_user: "{{ openclaw_user }}"
@@ -276,7 +276,7 @@
 - name: Configure the custom model provider
   ansible.builtin.command:
     cmd: >-
-      {{ openclaw_binary }} config set --batch-file {{ openclaw_home }}/.provider-batch.json
+      {{ openclaw_binary | quote }} config set --batch-file {{ openclaw_home | quote }}/.provider-batch.json
       --strict-json --merge
     chdir: "{{ openclaw_home }}"
   become: true
@@ -316,7 +316,7 @@
 - name: Configure the Telegram channel
   ansible.builtin.command:
     cmd: >-
-      {{ openclaw_binary }} config set --batch-file {{ openclaw_home }}/.telegram-batch.json
+      {{ openclaw_binary | quote }} config set --batch-file {{ openclaw_home | quote }}/.telegram-batch.json
       --strict-json
     chdir: "{{ openclaw_home }}"
   become: true
@@ -356,7 +356,7 @@
 - name: Configure the heartbeat route and prompt
   ansible.builtin.command:
     cmd: >-
-      {{ openclaw_binary }} config set --batch-file {{ openclaw_home }}/.heartbeat-batch.json
+      {{ openclaw_binary | quote }} config set --batch-file {{ openclaw_home | quote }}/.heartbeat-batch.json
       --strict-json
     chdir: "{{ openclaw_home }}"
   become: true
@@ -451,9 +451,9 @@
 - name: Create the watch agent
   ansible.builtin.command:
     cmd: >-
-      {{ openclaw_binary }} agents add {{ openclaw_watch_agent }}
-      --workspace {{ openclaw_watch_workspace }} --non-interactive
-      {{ ('--model ' ~ openclaw_fleetwatch_model) if openclaw_fleetwatch_model | length > 0 else '' }}
+      {{ openclaw_binary | quote }} agents add {{ openclaw_watch_agent | quote }}
+      --workspace {{ openclaw_watch_workspace | quote }} --non-interactive
+      {{ ('--model ' ~ (openclaw_fleetwatch_model | quote)) if openclaw_fleetwatch_model | length > 0 else '' }}
     chdir: "{{ openclaw_home }}"
     creates: "{{ openclaw_prefix }}/agents/{{ openclaw_watch_agent }}"
   become: true
@@ -506,7 +506,7 @@
 - name: Register the FleetForge MCP server
   ansible.builtin.command:
     cmd: >-
-      {{ openclaw_binary }} config set --batch-json
+      {{ openclaw_binary | quote }} config set --batch-json
       '{{ [{"path": "mcp.servers." ~ openclaw_fleetforge_mcp_name,
             "value": {"url": openclaw_fleetforge_url ~ "/mcp",
                       "transport": "streamable-http",
@@ -528,7 +528,7 @@
 # sort en 1 quand le chemin n'existe pas.
 - name: Look for a FleetForge MCP server left by the fleetforge source
   ansible.builtin.command:
-    cmd: "{{ openclaw_binary }} config get mcp.servers.{{ openclaw_fleetforge_mcp_name }} --json"
+    cmd: "{{ openclaw_binary | quote }} config get mcp.servers.{{ openclaw_fleetforge_mcp_name | quote }} --json"
     chdir: "{{ openclaw_home }}"
   become: true
   become_user: "{{ openclaw_user }}"
@@ -541,7 +541,7 @@
 
 - name: Remove the FleetForge MCP server
   ansible.builtin.command:
-    cmd: "{{ openclaw_binary }} config unset mcp.servers.{{ openclaw_fleetforge_mcp_name }}"
+    cmd: "{{ openclaw_binary | quote }} config unset mcp.servers.{{ openclaw_fleetforge_mcp_name | quote }}"
     chdir: "{{ openclaw_home }}"
   become: true
   become_user: "{{ openclaw_user }}"
@@ -573,7 +573,7 @@
          else ['exec', 'process', 'read'] + openclaw_watch_prometheus_tools }}
   ansible.builtin.command:
     cmd: >-
-      {{ openclaw_binary }} config set --batch-json
+      {{ openclaw_binary | quote }} config set --batch-json
       '{{ [{"path": "agents.entries." ~ openclaw_watch_agent ~ ".tools",
             "value": {"profile": "minimal",
                       "alsoAllow": watch_tools,
@@ -596,7 +596,7 @@
 # `<instance> <mot> …` — aucun argument en option, ni caractère de shell.
 - name: Read the exec approvals document
   ansible.builtin.command:
-    cmd: "{{ openclaw_binary }} approvals get --json"
+    cmd: "{{ openclaw_binary | quote }} approvals get --json"
     chdir: "{{ openclaw_home }}"
   become: true
   become_user: "{{ openclaw_user }}"
@@ -620,7 +620,7 @@
         - pattern: "{{ openclaw_fleet_ssh }}"
           argPattern: "{{ arg_pattern }}"
   ansible.builtin.command:
-    cmd: "{{ openclaw_binary }} approvals set --stdin"
+    cmd: "{{ openclaw_binary | quote }} approvals set --stdin"
     stdin: "{{ approvals | combine({'agents': {openclaw_watch_agent: desired}}, recursive=True) | to_json }}"
     chdir: "{{ openclaw_home }}"
   become: true
@@ -658,7 +658,7 @@
 
 - name: Disable the native LLM heartbeat
   ansible.builtin.command:
-    cmd: "{{ openclaw_binary }} config set agents.defaults.heartbeat.every 0m"
+    cmd: "{{ openclaw_binary | quote }} config set agents.defaults.heartbeat.every 0m"
     chdir: "{{ openclaw_home }}"
   become: true
   become_user: "{{ openclaw_user }}"
@@ -687,10 +687,11 @@
 - name: Create the fleet-watch automation (once, paused unless openclaw_fleetwatch_enabled)
   ansible.builtin.command:
     cmd: >-
-      {{ openclaw_binary }} automations add --name fleet-watch
-      --declaration-key fleet-watch --every {{ openclaw_fleetwatch_every }}
-      --command "python3 {{ openclaw_home }}/.openclaw/bin/fleet-watch.py {{ openclaw_home }}/.openclaw/bin/fleet-watch.json"
-      --timeout-seconds {{ openclaw_fleetwatch_timeout + 120 }} --no-deliver
+      {{ openclaw_binary | quote }} automations add --name fleet-watch
+      --declaration-key fleet-watch --every {{ openclaw_fleetwatch_every | quote }}
+      --command {{ ('python3 ' ~ ((openclaw_home ~ '/.openclaw/bin/fleet-watch.py') | quote) ~ ' '
+                    ~ ((openclaw_home ~ '/.openclaw/bin/fleet-watch.json') | quote)) | quote }}
+      --timeout-seconds {{ (openclaw_fleetwatch_timeout + 120) | quote }} --no-deliver
       {{ '' if openclaw_fleetwatch_enabled | bool else '--disabled' }}
   become: true
   become_user: "{{ openclaw_user }}"
@@ -709,7 +710,7 @@
 # présent dans l'environnement de CET appel précis (constaté le 09/09/2026).
 - name: Install the systemd --user unit
   ansible.builtin.command:
-    cmd: "{{ openclaw_binary }} gateway install"
+    cmd: "{{ openclaw_binary | quote }} gateway install"
     creates: "{{ openclaw_home }}/.config/systemd/user/openclaw-gateway.service"
   become: true
   become_user: "{{ openclaw_user }}"
@@ -776,7 +777,7 @@
 
 - name: Enable lingering for srvc
   ansible.builtin.command:
-    cmd: "loginctl enable-linger {{ openclaw_user }}"
+    cmd: "loginctl enable-linger {{ openclaw_user | quote }}"
     creates: "/var/lib/systemd/linger/{{ openclaw_user }}"
   become: true
 
