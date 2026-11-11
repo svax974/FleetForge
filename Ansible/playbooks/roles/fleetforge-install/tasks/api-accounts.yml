@@ -15,7 +15,7 @@
     that:
       - item.user is defined
       - item.user is match('^[a-z][a-z0-9_]{0,31}$')
-      - item.mode | default('read') in ['read', 'run']
+      - item.mode | default('read') in ['read', 'check', 'run']
       - item.parcs | default([parc_name]) is not string
       - item.parcs | default([parc_name]) | length > 0
       - item.user not in [ff_web_user, ff_api_user]
@@ -25,13 +25,23 @@
       - item.max_hosts | default(1) | int >= 1
       - item.max_hosts | default(1) | int <= 1000
       - ff_api_accounts | selectattr('user', 'defined') | map(attribute='user') | select('equalto', item.user) | list | length == 1
+      - item.accept_checks_from | default([]) is not string
+      - item.accept_checks_from | default([]) | length == 0 or item.mode | default('read') == 'run'
+      - item.user not in item.accept_checks_from | default([])
+      - >-
+        item.accept_checks_from | default([])
+        | difference(ff_api_accounts | selectattr('mode', 'defined') | selectattr('mode', 'in', ['check', 'run'])
+                     | map(attribute='user') | list)
+        | length == 0
     fail_msg: >-
       Compte `{{ item.user | default('?') }}` de `ff_api_accounts` invalide :
       `user` en minuscules, chiffres et `_` (il nomme la variable
       `ff_api_password_<user>`), unique, distinct de `ff_web_user` et de
-      `ff_api_user` ; `mode` read ou run ; `parcs` une liste non vide
+      `ff_api_user` ; `mode` read, check ou run ; `parcs` une liste non vide
       (défaut : [{{ parc_name }}]) ; `deny_playbooks` une liste de motifs
-      (lettres, chiffres, _ . - * ?) ; `max_hosts` un entier de 1 à 1000.
+      (lettres, chiffres, _ . - * ?) ; `max_hosts` un entier de 1 à 1000 ;
+      `accept_checks_from` (compte run seulement) une liste d'AUTRES comptes
+      de `ff_api_accounts` en mode check ou run.
   loop: "{{ ff_api_accounts }}"
   loop_control:
     label: "{{ item.user | default('?') }}"

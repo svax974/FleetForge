@@ -12,6 +12,7 @@
     } -%}
 {%- if account.deny_playbooks is defined -%}{%- set _ = entry.update({'deny_playbooks': account.deny_playbooks}) -%}{%- endif -%}
 {%- if account.max_hosts is defined -%}{%- set _ = entry.update({'max_hosts': account.max_hosts | int}) -%}{%- endif -%}
+{%- if account.accept_checks_from is defined -%}{%- set _ = entry.update({'accept_checks_from': account.accept_checks_from}) -%}{%- endif -%}
 {%- set ns.accounts = ns.accounts + [entry] -%}
 {%- endfor -%}
 {{ ns.accounts | to_nice_json }}

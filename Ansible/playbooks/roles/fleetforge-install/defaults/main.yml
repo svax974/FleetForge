@@ -70,11 +70,15 @@ ff_api_user: ""
 # ── Comptes d'automatisation bornés — FACULTATIF ───────────────────────────
 # Un compte par client (AgentHub, OpenClaw…), chacun cantonné à SES parcs et
 # à un mode, tenu à l'identique par l'API REST et le serveur MCP (`/mcp`) :
-#   read — list_hosts, list_playbooks, alertmanager_alerts, query_prometheus,
-#          ssh_diagnose, et la lecture du CODE de l'arbre (describe_playbook,
-#          read_tree, search_tree, tree_status) ;
-#   run  — la lecture, plus run_ansible_playbook, run_status, syntax_check,
-#          sync_tree et le flux d'un run (toujours sous `--check` préalable).
+#   read  — list_hosts, list_playbooks, alertmanager_alerts, query_prometheus,
+#           ssh_diagnose, et la lecture du CODE de l'arbre (describe_playbook,
+#           read_tree, search_tree, tree_status) ;
+#   check — des `--check` SEULEMENT (run_ansible_playbook : check imposé,
+#           `check: false` refusé), run_status, syntax_check, le flux d'un run
+#           et la lecture SANS ssh_diagnose ; ni run réel, ni sync_tree ;
+#   run   — la lecture, plus run_ansible_playbook, run_status, syntax_check,
+#           sync_tree et le flux d'un run (toujours sous `--check` préalable du
+#           MÊME compte, ou d'un compte de son `accept_checks_from`).
 # Un parc hors périmètre, un hôte d'un autre parc, un run d'un autre parc :
 # `403 forbidden`. Dans le group_vars du parc :
 #   ff_api_accounts:
@@ -85,6 +89,12 @@ ff_api_user: ""
 #                                                              # y compris ceux qu'il importe
 #   max_hosts: 3     # `limit` obligatoire, groupes développés, jamais `no_limit`
 # (compte « autonome » du hub : `mode: run` + `deny_playbooks` du noyau + `max_hosts`).
+# Un check n'autorise que le run réel du compte qui l'a fait. Un compte `run`
+# peut accepter nommément ceux d'AUTRES comptes check/run de cette liste
+# (passerelle : checks sous un compte `check`, runs réels sous un compte `run`) :
+#     - { user: gw_check, mode: check, deny_playbooks: [...], max_hosts: 3 }
+#     - { user: gw_run, mode: run, deny_playbooks: [...], max_hosts: 3,
+#         accept_checks_from: [gw_check] }
 # `user` : minuscules, chiffres et `_` (il nomme une variable). Le mot de passe
 # de chacun, `ff_api_password_<user>`, est tiré au PREMIER déploiement et
 # chiffré dans playbooks/group_vars/<parc>.yml (à committer), comme
