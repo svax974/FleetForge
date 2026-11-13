@@ -78,7 +78,7 @@
   ansible.builtin.known_hosts:
     path: "{{ ansible_env.HOME }}/.ssh/known_hosts"
     name: "[{{ tsdb_backup_dest_addr }}]:{{ tsdb_backup_dest_port }}"
-    key: "{{ lookup('pipe', 'ssh-keyscan -p ' ~ tsdb_backup_dest_port ~ ' -t ed25519 ' ~ tsdb_backup_dest_addr ~ ' 2>/dev/null | grep -v \"^#\"') }}"
+    key: "{{ lookup('pipe', 'ssh-keyscan -p ' ~ (tsdb_backup_dest_port | quote) ~ ' -t ed25519 ' ~ (tsdb_backup_dest_addr | quote) ~ ' 2>/dev/null | grep -v \"^#\"') }}"
     state: present
   when: not (tsdb_backup_is_local | bool)
   tags: [retarget]

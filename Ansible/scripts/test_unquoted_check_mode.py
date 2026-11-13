@@ -183,6 +183,21 @@ class ScannerTests(unittest.TestCase):
               check_mode: false
             """), [], "partie variable déjà quotée")
 
+    def test_a_pipe_lookup_runs_on_the_control_node_and_must_quote(self):
+        # Relecture du 11/11/2026 (C2) : sept `ssh-keyscan` construits ainsi.
+        finding = self.assertFlags("""\
+            - name: t
+              ansible.builtin.known_hosts:
+                key: "{{ lookup('pipe', 'ssh-keyscan -p ' ~ dest_port ~ ' -t ed25519 ' ~ hostvars[item].ansible_host) }}"
+            """, "lookup pipe", "dest_port", "item")
+        self.assertEqual(finding.module, "lookup")
+        self.assertEqual(self.scan("""\
+            - name: t
+              ansible.builtin.known_hosts:
+                key: "{{ lookup('pipe', 'ssh-keyscan -p ' ~ (dest_port | quote) ~ ' ' ~ (hostvars[item].ansible_host | quote)) }}"
+                name: "{{ lookup('pipe', 'hostname') }} {{ lookup('env', 'USER') }}"
+            """), [])
+
     def test_raw_blocks_magic_and_nested_blocks(self):
         self.assertEqual(self.scan("""\
             - name: t

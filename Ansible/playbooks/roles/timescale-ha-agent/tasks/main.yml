@@ -83,7 +83,7 @@
   ansible.builtin.known_hosts:
     path: "{{ tsha_known_hosts }}"
     name: "[{{ hostvars[item].ansible_host }}]:{{ ssh_custom_port }}"
-    key: "{{ lookup('pipe', 'ssh-keyscan -p ' ~ ssh_custom_port ~ ' -t ed25519 ' ~ hostvars[item].ansible_host ~ ' 2>/dev/null | grep -v \"^#\"') }}"
+    key: "{{ lookup('pipe', 'ssh-keyscan -p ' ~ (ssh_custom_port | quote) ~ ' -t ed25519 ' ~ (hostvars[item].ansible_host | quote) ~ ' 2>/dev/null | grep -v \"^#\"') }}"
     state: present
   loop: "{{ tsha_servers }}"
 

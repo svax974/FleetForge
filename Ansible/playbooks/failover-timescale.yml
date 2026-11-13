@@ -34,14 +34,13 @@
   remote_user: "{{ remote_username }}"
   gather_facts: false
   vars:
-    # Commande en plusieurs mots, découpée par le module command (shlex) : seules ses
-    # parties variables sont protégées.
-    tsha_cmd: "/usr/bin/python3 /home/{{ remote_username | quote }}/timescale-ha/tsha.py --config /home/{{ remote_username | quote }}/timescale-ha/config.json"
+    # Répertoire de l'arbitre : les commandes sont en `argv:` (aucun shell, aucun
+    # découpage), jamais une ligne de commande en variable qu'un `-e` remplacerait.
+    fo_tsha_dir: "/home/{{ remote_username }}/timescale-ha"
   tasks:
     - name: État de la paire, vu de brk1
-      # unquoted-ok: `tsha_cmd` est la commande elle-même, en plusieurs mots (vars: du play, parties variables protégées).
       ansible.builtin.command:
-        cmd: "{{ tsha_cmd }} status"
+        argv: [/usr/bin/python3, "{{ fo_tsha_dir }}/tsha.py", --config, "{{ fo_tsha_dir }}/config.json", status]
       register: fo_status
       changed_when: false
       check_mode: false
@@ -68,9 +67,8 @@
 
         # L'arrêt propre peut durer jusqu'à 5 min sur un primaire chargé : asynchrone, sondage espacé.
         - name: Basculer vers le réplica choisi
-          # unquoted-ok: `tsha_cmd` est la commande elle-même, en plusieurs mots (vars: du play, parties variables protégées).
           ansible.builtin.command:
-            cmd: "{{ tsha_cmd }} switchover --to {{ to | quote }}"
+            argv: [/usr/bin/python3, "{{ fo_tsha_dir }}/tsha.py", --config, "{{ fo_tsha_dir }}/config.json", switchover, --to, "{{ to }}"]
           register: fo_switch
           async: 900
           poll: 10
@@ -81,9 +79,8 @@
             msg: "{{ fo_switch.stdout.split('\n') }}"
 
         - name: État après la bascule
-          # unquoted-ok: `tsha_cmd` est la commande elle-même, en plusieurs mots (vars: du play, parties variables protégées).
           ansible.builtin.command:
-            cmd: "{{ tsha_cmd }} status"
+            argv: [/usr/bin/python3, "{{ fo_tsha_dir }}/tsha.py", --config, "{{ fo_tsha_dir }}/config.json", status]
           register: fo_after
           changed_when: false
 

@@ -70,7 +70,7 @@
   ansible.builtin.known_hosts:
     path: "{{ sync_backup_known_hosts }}"
     name: "[{{ sync_backup_dest_addr }}]:{{ sync_backup_dest_port }}"
-    key: "{{ lookup('pipe', 'ssh-keyscan -p ' ~ sync_backup_dest_port ~ ' -t ed25519 ' ~ sync_backup_dest_addr ~ ' 2>/dev/null | grep -v \"^#\"') }}"
+    key: "{{ lookup('pipe', 'ssh-keyscan -p ' ~ (sync_backup_dest_port | quote) ~ ' -t ed25519 ' ~ (sync_backup_dest_addr | quote) ~ ' 2>/dev/null | grep -v \"^#\"') }}"
     state: present
   become: true
   tags: [retarget]

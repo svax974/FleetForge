@@ -72,7 +72,7 @@
       ansible.builtin.known_hosts:
         path: "/home/{{ remote_username }}/.ssh/known_hosts"
         name: "[{{ btc_migrate_src_addr }}]:{{ btc_migrate_src_port }}"
-        key: "{{ lookup('pipe', 'ssh-keyscan -p ' ~ btc_migrate_src_port ~ ' -t ed25519 ' ~ btc_migrate_src_addr ~ ' 2>/dev/null | grep -v \"^#\"') }}"
+        key: "{{ lookup('pipe', 'ssh-keyscan -p ' ~ (btc_migrate_src_port | quote) ~ ' -t ed25519 ' ~ (btc_migrate_src_addr | quote) ~ ' 2>/dev/null | grep -v \"^#\"') }}"
         state: present
       become: true
       become_user: "{{ remote_username }}"

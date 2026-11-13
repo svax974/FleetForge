@@ -60,6 +60,23 @@
   loop_control:
     label: "{{ item.name }}"
 
+# Les volumes deviennent `-v <volume>:/models` d'un conteneur root, et les noms de
+# fichiers des chemins écrits sous /models : un `-e` y monterait l'hôte (`/:/models`)
+# ou écrirait hors du volume (`../`). Volumes NOMMÉS, chemins relatifs sans `..`.
+- name: Check the model volumes and file paths (they become mounts and written paths)
+  ansible.builtin.assert:
+    that:
+      - (aiserver_llm_models_volume ~ '') is match('^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$')
+      - (aiserver_comfyui_models_volume ~ '') is match('^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$')
+      - >-
+        (aiserver_llm_files | default([]) | map(attribute='filename') | list
+         + aiserver_comfyui_files | default([]) | map(attribute='filename') | list
+         + aiserver_comfyui_files | default([]) | map(attribute='subdir') | list
+         + aiserver_comfyui_files | default([]) | map(attribute='dest_name') | list)
+        | reject('match', '^(?!/)(?!.*[.][.])[A-Za-z0-9_./+-]{1,255}$') | list | length == 0
+    fail_msg: "Volume nommé (lettres, chiffres, _ . -) et chemins relatifs sans `..` attendus"
+    quiet: true
+
 - name: Ensure the data volumes exist
   community.docker.docker_volume:
     name: "{{ item }}"

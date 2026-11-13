@@ -5,16 +5,17 @@
 # Copyright © 2025 Stéphane VAXELAIRE
 # SPDX-License-Identifier: MIT — see LICENSE
 #
-"""Interpolations non protégées dans les tâches qu'un `--check` exécute pour de vrai.
+"""Interpolations non protégées dans les tâches shell/command/raw des rôles et playbooks.
 
-Un `--check` saute les modules, SAUF les tâches `check_mode: false` : leurs `shell:`
-et `command:` tournent sur l'hôte (ou sur l'hôte délégué : supervision, cette machine),
-souvent en root. `-e` l'emporte sur toute autre définition : une variable du parc
-interpolée telle quelle y devient du code shell dès le check. D'où la règle, que ce
-script tient pour `Ansible/playbooks` (code des rôles et playbooks seulement : jamais
-group_vars, host_vars, inventories, keys, parcs, .private, ni un lien) :
+`-e` (l'API d'automatisation) l'emporte sur toute autre définition : une variable du parc
+interpolée telle quelle dans un `shell:` y devient du code, souvent en root, sur l'hôte ou
+sur l'hôte délégué (supervision, cette machine) — dès le `--check` pour une tâche
+`check_mode: false`, au run réel pour les autres. D'où la règle, que ce script tient pour
+`Ansible/playbooks` (code des rôles et playbooks seulement : jamais group_vars, host_vars,
+inventories, keys, parcs, .private, ni un lien) :
 
-  * dans une tâche `check_mode: false` `shell`/`command`/`raw` donnée en CHAÎNE, toute
+  * dans une tâche `shell`/`command`/`raw` donnée en CHAÎNE (avec `--all`, la règle tenue
+    par `cargo test` ; sans, les seules tâches `check_mode: false`), toute
     interpolation d'une variable réglable est filtrée par `quote` — le filtre appliqué
     à l'expression ENTIÈRE (`{{ (a if c else b) | quote }}`, pas `{{ a if c else b | quote }}`),
     ou `{{ liste | map('quote') | join(' ') }}` — et hors de tout guillemet du shell
@@ -27,9 +28,10 @@ group_vars, host_vars, inventories, keys, parcs, .private, ni un lien) :
 
 Variables jugées non réglables par l'API d'automatisation : `ansible_*` (refusées), et
 les variables magiques d'Ansible. Sortie : `fichier:ligne [module] …`, code 1 s'il en
-reste. `--all` étend l'inventaire à TOUTES les tâches shell/command (runs réels), pour
-information. Dépendances : PyYAML et Jinja2, celles d'Ansible :
-`$(head -1 "$(command -v ansible)" | cut -c3-) -I Ansible/scripts/unquoted_check_mode.py Ansible/playbooks`.
+reste. Hors de portée : les gabarits (`templates/*.j2`) et les autres modules qui finissent
+dans un shell (`cron`, `script`, `expect`, commande d'un conteneur…). Dépendances : PyYAML
+et Jinja2, celles d'Ansible :
+`$(head -1 "$(command -v ansible)" | cut -c3-) -I Ansible/scripts/unquoted_check_mode.py --all Ansible/playbooks`.
 """
 import os
 import re
@@ -253,6 +255,45 @@ def walk(node, path, lines, everything, out):
             walk(value, path, lines, everything, out)
 
 
+PIPE_PLUGINS = {"pipe", "ansible.builtin.pipe"}
+
+
+def pipe_problems(expression):
+    """`lookup('pipe', <commande>)` / `query('pipe', …)` : la commande part dans un shell DE
+    CETTE MACHINE (le nœud de contrôle), toute variable qui l'atteint passe par `quote`."""
+    try:
+        ast = ENV.parse("{{ " + expression + " }}")
+    except jinja2.TemplateSyntaxError:
+        return []
+    problems = []
+    for call in ast.find_all(nodes.Call):
+        name = call.node.name if isinstance(call.node, nodes.Name) else None
+        if name not in ("lookup", "query", "q") or len(call.args) < 2:
+            continue
+        plugin = call.args[0]
+        if not (isinstance(plugin, nodes.Const) and plugin.value in PIPE_PLUGINS):
+            continue
+        for arg in call.args[1:]:
+            leaking = {n for n in flowing(arg) if not MAGIC.match(n)}
+            if leaking:
+                problems.append("lookup pipe : " + ", ".join(sorted(leaking)) + " sans | quote")
+    return problems
+
+
+def pipe_walk(node, path, out):
+    """Every string of a task file, whatever the module: pipe lookups run on the control node."""
+    if isinstance(node, yaml.ScalarNode):
+        problems = [p for expr in EXPR.findall(RAW.sub("", node.value or "")) for p in pipe_problems(expr)]
+        if problems:
+            out.append(Finding(path, node.start_mark.line + 1, "lookup", "", problems))
+    elif isinstance(node, yaml.SequenceNode):
+        for child in node.value:
+            pipe_walk(child, path, out)
+    elif isinstance(node, yaml.MappingNode):
+        for _, value in node.value:
+            pipe_walk(value, path, out)
+
+
 def scan(root, everything=False):
     findings = []
     for directory, subdirs, files in os.walk(root):
@@ -273,6 +314,7 @@ def scan(root, everything=False):
                 continue
             for document in documents:
                 walk(document, os.path.relpath(path, root), text.splitlines(), everything, findings)
+                pipe_walk(document, os.path.relpath(path, root), findings)
     return findings
 
 
