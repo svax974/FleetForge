@@ -21,28 +21,46 @@ Lot 6.1 de la passerelle MCP (`fleetforge-gateway`) ; détail dans RUNNING.md, �
   devient une commande root.
   - **Fermé pour ce qu'un `--check` exécute** (11/11/2026) : les 32 tâches `check_mode:
     false` `shell`/`command` en chaîne qui interpolaient une variable sans protection sont
-    passées à `| quote` (11 autres étaient déjà en `argv:`, sans shell) ; deux exceptions
-    motivées (`# unquoted-ok:`) : `tsha_cmd` (commande en plusieurs mots, ses parties
-    variables protégées dans sa définition) et `pushgwmon_job` (motif awk, grammaire tenue
-    par un `assert`). Rendu vérifié hors ligne, AUCUNE exécution sur un hôte : même argv
+    passées à `| quote` (11 autres étaient déjà en `argv:`, sans shell) ; exception motivée
+    (`# unquoted-ok:`) : `pushgwmon_job` (motif awk, grammaire tenue par un `assert`).
+    Rendu vérifié hors ligne, AUCUNE exécution sur un hôte : même argv
     qu'avant pour les valeurs des defaults, une seule commande et la valeur en un argument
     pour les valeurs hostiles. Garde-fou : `Ansible/scripts/unquoted_check_mode.py`, tenu
     par `cargo test` (RUNNING.md). Comptes `check` : en plus, aucune `extra_vars` par défaut.
-  - **À valider avant tout déploiement** : relecture humaine du diff des rôles, puis un
-    `--check` sur le parc de test (aucun n'existe encore) ; les valeurs réelles des
-    group_vars n'ont pas été lues (vérification faite sur les defaults des rôles et
-    `remote_username: srvc`). Une valeur VIDE change de sens : `''` (un argument vide)
-    au lieu d'aucun mot — aucune variable concernée n'a de défaut vide.
-  - **Reste ouvert : les runs réels** — 165 autres tâches `shell`/`command` interpolent
-    encore sans protection (`unquoted_check_mode.py --all`), exécutées par tout run réel
-    d'un compte `run` (AgentHub admet toute valeur d'une ligne, ≤ 500 caractères ; un run
-    réel autonome n'a pas d'humain avant lui). Proposition, NON appliquée : (1) étendre la
-    règle des valeurs des comptes `check` (`^[A-Za-z0-9][A-Za-z0-9_.,:/@+=-]{0,255}$`) aux
-    comptes `run`, par une option de compte d'abord (`plain_extra_vars: true`), une fois
-    AgentHub aligné (sa validation `infraTypes.ts` et la consigne donnée au modèle) ;
-    (2) passer les 165 tâches à `| quote` par lots, `--all` devenant ensuite le garde-fou.
-    Les valeurs légitimes d'AgentHub hors de cette grammaire (espaces, apostrophes, chemin
-    absolu en tête) seraient alors refusées : à mesurer sur ses runs passés avant de trancher.
+  - **Fermé aussi pour les runs réels** (11/11/2026, lots 2 à 9) : les 161 autres tâches
+    `shell`/`command` en chaîne qui interpolaient une variable sans protection sont passées
+    à `| quote` (fragments d'option, listes, double quoting pour `runuser -c` et
+    `automations add --command`) ; 8 `assert` tiennent la grammaire des valeurs lues dans
+    un programme (motifs de purge `grep -E`/filtre Docker, ports d'un motif awk, durée d'un
+    programme sed, noms de slots SQL, nom de fichier d'un message `${…:?…}`). Garde-fou :
+    `unquoted_check_mode.py --all`, tenu par `cargo test` — 0 interpolation non protégée.
+    Relecture indépendante (bloquants corrigés le 14/11/2026) : `tsha_cmd` (ligne de
+    commande en variable, qu'un `-e` remplaçait) et `vpn-routes-remove` passés en `argv:` ;
+    les 7 `lookup('pipe', 'ssh-keyscan …')` (shell du NŒUD DE CONTRÔLE) quotent leurs
+    variables et le scanner les contrôle ; `aiserver-install` vérifie que ses volumes sont
+    NOMMÉS et ses chemins de modèles relatifs sans `..` (un `-e` montait l'hôte dans un
+    conteneur root ou écrivait hors du volume).
+  - **À valider avant tout déploiement** : relecture humaine du diff des rôles (9 commits),
+    puis un `--check` et un run sur le parc de test (aucun n'existe encore) ; les valeurs
+    réelles des group_vars n'ont pas été lues (vérification faite sur les defaults des rôles,
+    `remote_username: srvc` et des jetons bénins pour le reste). Une valeur VIDE d'une
+    variable sans défaut vide connu change de sens : `''` (un argument vide) au lieu
+    d'aucun mot — seul `webapp_env_app_id` (défaut vide) était concerné, conservé à
+    l'identique. Les `assert` ajoutés refusent désormais une valeur hors grammaire qui
+    passait avant (nom de projet compose, port, durée, nom de slot, chemin de fichier).
+  - **Hors de portée du contrôle** : gabarits (`templates/*.j2` : scripts, unités systemd,
+    crontabs qui interpolent des variables) et autres modules qui finissent dans un shell
+    (`cron`, `script`, `expect`, commande de conteneur). Un `-e` y reste une injection
+    possible : à inventorier de la même façon. Motifs `grep -E` sans effet destructeur :
+    seul le quoting du shell est fait (une valeur y change ce qui est compté, rien d'autre).
+  - **Comptes `run`** : la règle des valeurs des comptes `check`
+    (`^[A-Za-z0-9][A-Za-z0-9_.,:/@+=-]{0,255}$`) reste NON appliquée. Proposition : une
+    option de compte `plain_extra_vars: true`, posée sur les comptes qui n'ont pas besoin
+    de valeurs libres (passerelle), puis sur AgentHub une fois sa validation (`infraTypes.ts`)
+    et la consigne donnée au modèle alignées — défense en profondeur pour les gabarits et
+    modules hors de portée. Les valeurs légitimes d'AgentHub hors de cette grammaire
+    (espaces, apostrophes, chemin absolu en tête) seraient refusées : à mesurer sur ses runs
+    passés avant de trancher.
 - **`--diff` et secrets** : le caviardage ne reconnaît pas `requirepass xxx`,
   `<password>…</password>`, une ligne htpasswd, un `.pgpass` (`hôte:port:base:user:mdp`).
   `--diff` refusé aux comptes `check` sauf `allow_diff` ; toujours permis aux comptes

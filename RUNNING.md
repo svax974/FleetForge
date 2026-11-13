@@ -465,27 +465,37 @@ déléguées à la supervision (`prometheus_host`) ou à la machine de FleetForg
 commande, en root : c'est ce que bornent les règles d'`extra_vars` du compte `check`.
 Pour les comptes `run`, les valeurs restent libres (une ligne, sans gabarit).
 
-**Tâches qu'un `--check` exécute : `| quote` obligatoire** — toute tâche `check_mode: false`
-`shell`/`command`/`raw` écrite en chaîne filtre chaque variable réglable par `quote`,
-appliqué à l'expression ENTIÈRE et HORS de tout guillemet du shell :
+**Tâches `shell`/`command`/`raw` : `| quote` obligatoire** — toute tâche écrite en chaîne
+(qu'un `--check` l'exécute — `check_mode: false` — ou seulement un run réel) filtre chaque
+variable réglable par `quote`, appliqué à l'expression ENTIÈRE et HORS de tout guillemet
+du shell :
 `grep -F {{ port | quote }}`, `'"'{{ host | quote }}:{{ port | quote }}'"'`,
 `/home/{{ user | quote }}/x/*.json` (le joker reste dehors), `{{ (a if c else b) | quote }}`,
-`{{ liste | map('quote') | join(' ') }}` — jamais `"{{ x | quote }}"` ni `'{{ x | quote }}'`.
-`command` en `argv:` (liste) n'est pas interprété par un shell. Exception :
+`{{ liste | map('quote') | join(' ') }}`, la valeur DANS un fragment d'option
+(`{{ ('--file ' ~ (dump | quote)) if dump is defined else '' }}`), deux fois quand un second
+shell relit la ligne (`runuser -c {{ ((dir | quote) ~ '/bin/x') | quote }}`) — jamais
+`"{{ x | quote }}"` ni `'{{ x | quote }}'`. Un argument facultatif vide ne doit pas devenir
+`''` : `{{ (x | quote) if x | length > 0 else '' }}`. `command` en `argv:` (liste) n'est pas
+interprété par un shell. Une valeur lue dans un PROGRAMME (awk, sed, motif `grep -E` ou
+filtre Docker qui désigne ce qu'on supprime, SQL, message `${…:?…}`) : le quoting du shell
+n'y suffit pas, sa grammaire est vérifiée par un `assert` juste avant. Exception :
 `# unquoted-ok: <raison>` dans la tâche, la raison citant entre accents graves chaque
-variable exemptée (`tsha_cmd`, commande en plusieurs mots ; `pushgwmon_job`, motif awk
-vérifié par un `assert`). Contrôle : `Ansible/scripts/unquoted_check_mode.py` (PyYAML et
-Jinja2, ceux d'Ansible), tenu par `cargo test -p fleetforge-core --test ansible_quoting`
-(ignoré, en le disant, sans interpréteur qui les ait ; `FLEETFORGE_ANSIBLE_PYTHON` pour
-le désigner) :
+variable exemptée — seulement des valeurs tenues par un `assert` (`pushgwmon_job`,
+`_vmagent_target`, `item` des slots PostgreSQL, `pgf_env_file`). Jamais une ligne de commande
+en variable (un `-e` la remplacerait) : `argv:` (`failover-timescale.yml`, `vpn-routes-remove`).
+Un `lookup('pipe', …)` s'exécute dans un shell du NŒUD DE CONTRÔLE : chaque variable de sa
+commande passe aussi par `quote` (`'ssh-keyscan -p ' ~ (port | quote) ~ …`). Contrôle :
+`Ansible/scripts/unquoted_check_mode.py --all` (PyYAML et Jinja2, ceux d'Ansible), tenu par
+`cargo test -p fleetforge-core --test ansible_quoting` (ignoré, en le disant, sans
+interpréteur qui les ait ; `FLEETFORGE_ANSIBLE_PYTHON` pour le désigner) :
 
 ```sh
-"$(head -1 "$(command -v ansible)" | cut -c3-)" -I Ansible/scripts/unquoted_check_mode.py Ansible/playbooks
-"$(head -1 "$(command -v ansible)" | cut -c3-)" -I Ansible/scripts/unquoted_check_mode.py --all Ansible/playbooks  # runs réels, pour information
+"$(head -1 "$(command -v ansible)" | cut -c3-)" -I Ansible/scripts/unquoted_check_mode.py --all Ansible/playbooks
 ```
 
-Les autres tâches `shell`/`command` (runs réels) ne sont pas encore tenues à cette règle
-(`--all` : 165 au 11/11/2026) : `docs/avant-ouverture-public.md`.
+Hors de portée du contrôle : les gabarits (`templates/*.j2`, scripts et unités qui
+interpolent des variables) et les autres modules qui finissent dans un shell (`cron`,
+`script`, `expect`, commande d'un conteneur).
 
 Une commande hors du mode, un parc hors périmètre (existant ou non : la
 réponse est la même), un `ssh_diagnose` sur un hôte qu'aucun parc du

@@ -5,13 +5,14 @@
  * SPDX-License-Identifier: MIT — see LICENSE
  */
 
-//! Aucune tâche qu'un `--check` exécute pour de vrai (`check_mode: false`) n'interpole
-//! une variable réglable sans `| quote` (`Ansible/scripts/unquoted_check_mode.py`).
+//! Aucune tâche `shell`/`command`/`raw` n'interpole une variable réglable sans `| quote`
+//! (`Ansible/scripts/unquoted_check_mode.py --all`).
 //!
 //! Un compte d'automatisation passe des `extra_vars`, qui l'emportent sur toute autre
-//! définition : une interpolation nue dans un `shell:` y devient une commande, en root,
-//! dès le check — avant tout humain. Le scanner est en Python (PyYAML, Jinja2 : ceux
-//! d'Ansible) ; sans interpréteur qui les ait, ce test s'efface en le disant.
+//! définition : une interpolation nue dans un `shell:` y devient une commande, en root —
+//! dès le `--check` pour une tâche `check_mode: false`, au run réel pour les autres. Le
+//! scanner est en Python (PyYAML, Jinja2 : ceux d'Ansible) ; sans interpréteur qui les
+//! ait, ce test s'efface en le disant.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -45,7 +46,7 @@ fn run(python: &str, script: &Path, args: &[&Path]) -> (bool, String) {
 }
 
 #[test]
-fn no_check_mode_false_task_interpolates_an_unquoted_variable() {
+fn no_shell_or_command_task_interpolates_an_unquoted_variable() {
     let Some(python) = python() else {
         eprintln!("PyYAML et Jinja2 introuvables (FLEETFORGE_ANSIBLE_PYTHON) : test ignoré");
         return;
@@ -53,6 +54,7 @@ fn no_check_mode_false_task_interpolates_an_unquoted_variable() {
     let scripts = ansible_dir().join("scripts");
     let (ok, out) = run(&python, &scripts.join("test_unquoted_check_mode.py"), &[]);
     assert!(ok, "tests du scanner :\n{out}");
-    let (ok, out) = run(&python, &scripts.join("unquoted_check_mode.py"), &[&ansible_dir().join("playbooks")]);
+    let all = Path::new("--all");
+    let (ok, out) = run(&python, &scripts.join("unquoted_check_mode.py"), &[all, &ansible_dir().join("playbooks")]);
     assert!(ok, "interpolations non protégées (`| quote`, ou `# unquoted-ok: `variable` raison`) :\n{out}");
 }
