@@ -3,6 +3,14 @@
 # Voir defaults/main.yml pour le choix d'une installation système plutôt que du
 # script officiel, qui écrit dans le HOME et réécrit les fichiers de shell.
 
+# `-e` l'emporte sur l'inventaire : `opencode_binary` est le programme lancé.
+- name: Check the opencode binary is a plain absolute path
+  ansible.builtin.assert:
+    that: opencode_binary is match('^/[A-Za-z0-9._/-]*$')
+    fail_msg: "opencode_binary : chemin absolu sans espace ni métacaractère ({{ opencode_binary }})."
+    quiet: true
+  tags: [always]
+
 - name: Install the packages needed to fetch the release
   ansible.builtin.apt:
     name: "{{ opencode_packages }}"

@@ -7,6 +7,15 @@
 # La clé n'est exigée que pour `openclaw_auth_choice: openai-api-key` ; avec
 # `skip` (ou tout autre choix) elle est facultative et le fournisseur se règle
 # ensuite dans OpenClaw.
+# `-e` l'emporte sur l'inventaire : `openclaw_binary` est le programme lancé par une vingtaine de
+# tâches (dont l'onboarding, qui reçoit les secrets dans son environnement).
+- name: Check the OpenClaw binary is a plain absolute path
+  ansible.builtin.assert:
+    that: openclaw_binary is match('^/[A-Za-z0-9._/-]*$')
+    fail_msg: "openclaw_binary : chemin absolu sans espace ni métacaractère ({{ openclaw_binary }})."
+    quiet: true
+  tags: [always]
+
 - name: Fail early when the provider key is missing
   ansible.builtin.assert:
     that:

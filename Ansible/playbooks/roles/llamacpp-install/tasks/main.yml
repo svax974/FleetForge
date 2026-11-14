@@ -9,6 +9,14 @@
 
 # Les bibliothèques CPU sont liées à OpenMP (libgomp), absent d'une Ubuntu
 # minimale. libssl3 et libstdc++ font partie du socle.
+# `-e` l'emporte sur l'inventaire : `llamacpp_current_dir` désigne le llama-server lancé.
+- name: Check the release directory is a plain absolute path
+  ansible.builtin.assert:
+    that: llamacpp_current_dir is match('^/[A-Za-z0-9._/-]*$')
+    fail_msg: "llamacpp_current_dir : chemin absolu sans espace ni métacaractère ({{ llamacpp_current_dir }})."
+    quiet: true
+  tags: [always]
+
 - name: Install runtime dependencies
   ansible.builtin.apt:
     name:

@@ -3,6 +3,15 @@
 # volontairement laissé de côté. Additif et idempotent : rien ici ne touche aux autres paquets,
 # conteneurs ou services de cette machine partagée.
 
+# `-e` l'emporte sur l'inventaire : `agenthub_flutter_dir` désigne le flutter lancé (root, puis le
+# runner) et le point de départ d'un find — chemin absolu sans métacaractère, jamais une option.
+- name: Check the Flutter directory is a plain absolute path
+  ansible.builtin.assert:
+    that: agenthub_flutter_dir is match('^/[A-Za-z0-9._/-]*$')
+    fail_msg: "agenthub_flutter_dir : chemin absolu sans espace ni métacaractère ({{ agenthub_flutter_dir }})."
+    quiet: true
+  tags: [always]
+
 # Outils de base de Flutter (curl git unzip xz-utils zip libglu1-mesa) + chaîne de build Linux desktop
 # (clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev libstdc++-12-dev), telles que listées
 # par https://docs.flutter.dev/platform-integration/linux/install-linux/install-linux-from-linux.
@@ -117,7 +126,8 @@
       - -l
       - "{{ agenthub_flutter_user }}"
       - -c
-      - "{{ agenthub_flutter_dir }}/bin/flutter config --no-analytics && {{ agenthub_flutter_dir }}/bin/flutter precache --linux"
+      # Script relu par le shell de l'utilisateur : le chemin y est quoté.
+      - "{{ agenthub_flutter_dir | quote }}/bin/flutter config --no-analytics && {{ agenthub_flutter_dir | quote }}/bin/flutter precache --linux"
   become: true
   register: agenthub_flutter_precache
   # Le premier passage télécharge, les suivants n'impriment rien de tel.

@@ -9,6 +9,14 @@
 # nœud partiellement synchronisé (IBD en cours) produirait un index partiel ou
 # faux, indiscernable d'un index complet tant qu'on ne l'a pas comparé à la
 # chaîne réelle.
+# `-e` l'emporte sur l'inventaire : `esplora_bitcoin_home` désigne le bitcoin-cli lancé.
+- name: Check the bitcoin home is a plain absolute path
+  ansible.builtin.assert:
+    that: esplora_bitcoin_home is match('^/[A-Za-z0-9._/-]*$')
+    fail_msg: "esplora_bitcoin_home : chemin absolu sans espace ni métacaractère ({{ esplora_bitcoin_home }})."
+    quiet: true
+  tags: [always]
+
 - name: Check bitcoin-cli is present (node deployed?)
   ansible.builtin.stat:
     path: "{{ esplora_bitcoin_home }}/bin/bitcoin-cli"

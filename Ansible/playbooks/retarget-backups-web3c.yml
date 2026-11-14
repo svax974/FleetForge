@@ -72,6 +72,13 @@
   hosts: tradekong
   remote_user: "{{ remote_username }}"
   tasks:
+    # `pgbak_dir` désigne le script lancé (`-e` l'emporte).
+    - name: Répertoire de sauvegarde simple
+      ansible.builtin.assert:
+        that: pgbak_dir is match('^/[A-Za-z0-9._/-]*$')
+        fail_msg: "pgbak_dir : chemin absolu sans espace ni métacaractère."
+        quiet: true
+
     - name: Interroger la destination via postgres-restore.sh --check
       ansible.builtin.command: "{{ pgbak_dir | quote }}/postgres-restore.sh --check"
       changed_when: false
@@ -85,6 +92,13 @@
   hosts: ctdapi
   remote_user: "{{ remote_username }}"
   tasks:
+    # `pgbak_dir` désigne le script lancé (`-e` l'emporte).
+    - name: Répertoire de sauvegarde simple
+      ansible.builtin.assert:
+        that: pgbak_dir is match('^/[A-Za-z0-9._/-]*$')
+        fail_msg: "pgbak_dir : chemin absolu sans espace ni métacaractère."
+        quiet: true
+
     - name: Interroger la destination via postgres-restore.sh --check
       ansible.builtin.command: "{{ pgbak_dir | quote }}/postgres-restore.sh --check"
       changed_when: false
@@ -100,6 +114,14 @@
   remote_user: "{{ remote_username }}"
   gather_facts: false
   tasks:
+    # `pgbak_dir` désigne le script lancé (`-e` l'emporte).
+    - name: Répertoire de sauvegarde simple
+      ansible.builtin.assert:
+        that: pgbak_dir is match('^/[A-Za-z0-9._/-]*$')
+        fail_msg: "pgbak_dir : chemin absolu sans espace ni métacaractère."
+        quiet: true
+      when: run_now | default(false) | bool
+
     - name: Lancer la sauvegarde en tâche de fond
       ansible.builtin.shell: "{{ pgbak_dir | quote }}/postgres-backup.sh >> {{ pgbak_dir | quote }}/backup.log 2>&1"
       async: 3600

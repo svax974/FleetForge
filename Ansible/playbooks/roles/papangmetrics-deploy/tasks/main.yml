@@ -7,6 +7,14 @@
 # une API sans admin utilisable (hash vide), avec /metrics ouvert (jeton vide)
 # ou un JWT admin forgeable (secret court). Génération et chiffrement :
 # PapangWorkspace/docs/security/ROTATION_RUNBOOK_2026-10-18.md.
+# `-e` l'emporte sur l'inventaire : `pm_dir` désigne le script lancé par cron.
+- name: Check the code directory is a plain absolute path
+  ansible.builtin.assert:
+    that: pm_dir is match('^/[A-Za-z0-9._/-]*$')
+    fail_msg: "pm_dir : chemin absolu sans espace ni métacaractère ({{ pm_dir }})."
+    quiet: true
+  tags: [always]
+
 - name: Fail early when a PapangMetrics secret is missing from the vault
   ansible.builtin.assert:
     that:
@@ -249,6 +257,6 @@
   ansible.builtin.cron:
     name: "papangmetrics disk-watchdog"
     minute: "*/2"
-    job: "{{ pm_dir }}/scripts/disk-watchdog.sh"
+    job: "{{ pm_dir | quote }}/scripts/disk-watchdog.sh"
     user: "{{ pm_user }}"
   become: true

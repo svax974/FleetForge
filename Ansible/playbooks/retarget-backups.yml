@@ -82,6 +82,13 @@
   hosts: brk1
   remote_user: "{{ remote_username }}"
   tasks:
+    # `remote_username` compose le chemin du script lancé (`-e` l'emporte).
+    - name: Compte de service simple
+      ansible.builtin.assert:
+        that: remote_username is match('^[a-z_][a-z0-9_-]*$')
+        fail_msg: "remote_username : nom de compte simple attendu."
+        quiet: true
+
     - name: Interroger la destination via brk-restore.sh --check
       ansible.builtin.command: "/home/{{ remote_username | quote }}/brk-restore.sh --check"
       changed_when: false
@@ -109,16 +116,16 @@
   hosts: brk1:timescale1
   remote_user: "{{ remote_username }}"
   gather_facts: false
-  vars:
-    backup_cmd: >-
-      {{ '/home/' ~ remote_username ~ '/brk-backup.sh'
-         if inventory_hostname == 'brk1'
-         else '/home/' ~ remote_username ~ '/papangmetrics-db/timescaledb-backup.sh' }}
-    backup_log: >-
-      {{ '/home/' ~ remote_username ~ '/brk-backup.log'
-         if inventory_hostname == 'brk1'
-         else '/home/' ~ remote_username ~ '/papangmetrics-db/backup.log' }}
   tasks:
+    # Le programme et son journal sont écrits dans la tâche, pas dans des variables de play :
+    # un `-e backup_cmd=…` aurait choisi ce qui est lancé.
+    - name: Compte de service simple
+      ansible.builtin.assert:
+        that: remote_username is match('^[a-z_][a-z0-9_-]*$')
+        fail_msg: "remote_username : nom de compte simple attendu."
+        quiet: true
+      when: run_now | default(false) | bool
+
     # `async` sans `poll` : la sauvegarde BRK dure des heures. Ansible la lance
     # et rend la main ; le suivi se fait par le journal et par la métrique
     # backup_last_success_timestamp_seconds.
@@ -127,7 +134,9 @@
     # NOUVELLE destination, celle-ci sort sans rien faire. Sur une destination
     # fraîchement repointée il n'y a rien, donc elle part réellement.
     - name: Lancer la sauvegarde en tâche de fond
-      ansible.builtin.shell: "{{ backup_cmd | quote }} >> {{ backup_log | quote }} 2>&1"
+      ansible.builtin.shell: >-
+        /home/{{ remote_username | quote }}/{{ 'brk-backup.sh' if inventory_hostname == 'brk1' else 'papangmetrics-db/timescaledb-backup.sh' }}
+        >> /home/{{ remote_username | quote }}/{{ 'brk-backup.log' if inventory_hostname == 'brk1' else 'papangmetrics-db/backup.log' }} 2>&1
       async: 86400
       poll: 0
       changed_when: true
@@ -135,7 +144,9 @@
 
     - name: Rappel de suivi
       ansible.builtin.debug:
-        msg: "Sauvegarde lancée en tâche de fond. Suivi : tail -f {{ backup_log }}"
+        msg: >-
+          Sauvegarde lancée en tâche de fond. Suivi : tail -f /home/{{ remote_username }}/{{ 'brk-backup.log'
+          if inventory_hostname == 'brk1' else 'papangmetrics-db/backup.log' }}
       when: run_now | default(false) | bool
 
 # ── Nettoyage de l'ancienne destination (optionnel) ────────────────────────

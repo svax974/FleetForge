@@ -3,6 +3,18 @@
 # defaults/main.yml et README.md. Idempotent ; sudo (become) seulement pour Xcode et le lien JVM.
 # Rejouable seul : ./play.sh <parc> deploy-agenthub-flutter-build.yml --tags macos -K
 
+# `-e` l'emporte sur l'inventaire : ces chemins désignent les programmes lancés (sdkmanager,
+# flutter) et le point de départ d'un find — chemin absolu sans métacaractère, jamais une option.
+- name: Check the tool paths are plain absolute paths
+  ansible.builtin.assert:
+    that:
+      - agenthub_macos_sdkmanager is match('^/[A-Za-z0-9._/-]*$')
+      - agenthub_macos_flutter_dir is match('^/[A-Za-z0-9._/-]*$')
+      - agenthub_android_sdk_dir is match('^/[A-Za-z0-9._/-]*$')
+    fail_msg: "agenthub_macos_sdkmanager, agenthub_macos_flutter_dir, agenthub_android_sdk_dir : chemins absolus sans espace ni métacaractère."
+    quiet: true
+  tags: [always]
+
 - name: Set the environment shared by the build commands
   ansible.builtin.set_fact:
     agenthub_macos_env:

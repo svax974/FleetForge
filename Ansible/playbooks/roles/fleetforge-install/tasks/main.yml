@@ -6,6 +6,20 @@
 # existe côté contrôle — sans lui le serveur refuse de démarrer, et il vaut
 # mieux le dire ici qu'après vingt minutes de compilation.
 
+# `-e` l'emporte sur l'inventaire : ces valeurs composent le chemin des programmes lancés
+# (fleetforge-web, ansible-playbook) et le point de départ d'un find — chemin absolu ou nom
+# simple, sans métacaractère, jamais une option.
+- name: Check the paths and names that compose a program path
+  ansible.builtin.assert:
+    that:
+      - ff_dir is match('^/[A-Za-z0-9._/-]*$')
+      - ff_ansible_target is match('^/[A-Za-z0-9._/-]*$')
+      - ff_user is match('^[a-z_][a-z0-9_-]*$')
+      - ff_cargo_profile is match('^[A-Za-z0-9_][A-Za-z0-9_-]*$')
+    fail_msg: "ff_dir, ff_ansible_target : chemins absolus sans métacaractère ; ff_user, ff_cargo_profile : noms simples."
+    quiet: true
+  tags: [always]
+
 # ── Contrôles sur le poste de contrôle ─────────────────────────────────────
 - name: Look for the built frontend on the control machine
   ansible.builtin.stat:

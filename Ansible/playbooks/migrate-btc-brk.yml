@@ -44,6 +44,13 @@
   hosts: "{{ dst_host }}"
   remote_user: "{{ remote_username }}"
   tags: [always]
+  pre_tasks:
+    # `remote_username` compose le chemin des scripts lancés plus bas (`-e` l'emporte).
+    - name: Compte de service simple
+      ansible.builtin.assert:
+        that: remote_username is match('^[a-z_][a-z0-9_-]*$')
+        fail_msg: "remote_username : nom de compte simple attendu."
+        quiet: true
   roles:
     - role: host-preflight
       preflight_require_docker: false

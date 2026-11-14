@@ -34,6 +34,13 @@
     generation: current
   # Rend l'hôte capable de restaurer (clé/pare-feu/known_hosts/script) avant les
   # tâches ci-dessous — idempotent sur brk1, bootstrap sur un hôte neuf.
+  pre_tasks:
+    # `remote_username` compose le chemin du script lancé plus bas (`-e` l'emporte).
+    - name: Compte de service simple
+      ansible.builtin.assert:
+        that: remote_username is match('^[a-z_][a-z0-9_-]*$')
+        fail_msg: "remote_username : nom de compte simple attendu."
+        quiet: true
   roles:
     - brk-restore
   tasks:
