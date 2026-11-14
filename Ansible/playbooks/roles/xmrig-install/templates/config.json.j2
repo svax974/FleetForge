@@ -6,7 +6,7 @@
     "http": {
         "enabled": true,
         "host": "127.0.0.1",
-        "port": {{ xmrig_api_port }},
+        "port": {{ xmrig_api_port | int }},
         "access-token": "{{ xmrig_api_token }}",
         "restricted": true
     },

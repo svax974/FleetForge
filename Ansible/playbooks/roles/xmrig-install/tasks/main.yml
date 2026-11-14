@@ -162,7 +162,7 @@
 # L'API répond dès que le mineur est lancé, avant la première connexion au pool.
 - name: Wait for the miner API
   ansible.builtin.uri:
-    url: "http://127.0.0.1:{{ xmrig_api_port }}/2/summary"
+    url: "http://127.0.0.1:{{ xmrig_api_port | int }}/2/summary"
     headers:
       Authorization: "Bearer {{ xmrig_token_raw.content | b64decode | trim }}"
     return_content: true
@@ -179,7 +179,7 @@
 # secondes). Avertissement seulement : le mineur tourne de toute façon, mais plus lentement.
 - name: Read what the miner obtained (huge pages, MSR)
   ansible.builtin.uri:
-    url: "http://127.0.0.1:{{ xmrig_api_port }}/2/backends"
+    url: "http://127.0.0.1:{{ xmrig_api_port | int }}/2/backends"
     headers:
       Authorization: "Bearer {{ xmrig_token_raw.content | b64decode | trim }}"
     return_content: true
