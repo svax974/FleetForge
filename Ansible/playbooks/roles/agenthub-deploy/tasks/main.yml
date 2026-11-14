@@ -109,8 +109,8 @@
 # de ton équipe » réduite au LLM direct). grep -q : aucune valeur n'est affichée.
 - name: Check the auto-provisioning switches of the prod back/.env
   ansible.builtin.shell: >-
-    grep -Eq '^RUNNER_PROVISION=["]?1' {{ (agenthub_src ~ agenthub_back_env_file) | quote }}
-    && grep -Eq '^BOOTSTRAP_API_KEY=["]?[^"[:space:]]' {{ (agenthub_src ~ agenthub_back_env_file) | quote }}
+    grep -Eq -- '^RUNNER_PROVISION=["]?1' {{ (agenthub_src ~ agenthub_back_env_file) | quote }}
+    && grep -Eq -- '^BOOTSTRAP_API_KEY=["]?[^"[:space:]]' {{ (agenthub_src ~ agenthub_back_env_file) | quote }}
   delegate_to: localhost
   become: false
   register: agenthub_env_switches

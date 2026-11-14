@@ -31,6 +31,13 @@
   ansible.builtin.set_fact:
     ff_tree: "{{ (ff_src ~ '/Ansible') | realpath }}"
 
+# Un `-e ff_tree` l'emporte sur ce fait : c'est le point de départ d'un find sur CE poste.
+- name: Check the Ansible tree is a plain absolute path
+  ansible.builtin.assert:
+    that: ff_tree is match('^/[A-Za-z0-9._/-]*$')
+    fail_msg: "ff_tree : chemin absolu sans espace ni métacaractère ({{ ff_tree }})."
+    quiet: true
+
 # ── Quels inventaires sont ceux de CE parc ─────────────────────────────────
 # Même définition que `fleetforge-core::parc` : l'union de `<parc>.yml` et de
 # `<parc>_*.yml`.

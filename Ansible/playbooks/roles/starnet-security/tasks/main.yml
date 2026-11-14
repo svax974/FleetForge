@@ -119,7 +119,7 @@
     - not ansible_check_mode
 
 - name: Report the effective rules
-  ansible.builtin.shell: "ufw status numbered | grep -F {{ starnet_port | quote }} || true"
+  ansible.builtin.shell: "ufw status numbered | grep -F -- {{ starnet_port | quote }} || true"
   become: true
   register: starnet_ufw
   changed_when: false

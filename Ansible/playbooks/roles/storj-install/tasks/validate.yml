@@ -3,6 +3,14 @@
 # l'identité dure des heures, échouer sur un e-mail manquant après elle serait
 # une punition.
 
+# `-e` l'emporte sur l'inventaire : `storj_base_dir` est le point de départ d'un find et
+# l'argument d'un `rm -rf` — chemin absolu sans métacaractère, jamais une option.
+- name: Check the base directory is a plain absolute path
+  ansible.builtin.assert:
+    that: storj_base_dir is match('^/[A-Za-z0-9._/-]*$')
+    fail_msg: "storj_base_dir : chemin absolu sans espace ni métacaractère ({{ storj_base_dir }})."
+    quiet: true
+
 # Les paramètres indispensables sont contrôlés EN BLOC : tous les
 # problèmes sont listés d'un coup, avec une ligne de commande complète en
 # exemple, plutôt qu'un échec par paramètre à corriger un à un.

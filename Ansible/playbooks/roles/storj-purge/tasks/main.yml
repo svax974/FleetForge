@@ -54,7 +54,7 @@
 # `storj_base_dir` n'est retiré que s'il est vide : il peut être le point de
 # montage d'un disque (ou le parent d'un autre dossier), à ne pas emporter.
 - name: Remove the base directory when empty
-  ansible.builtin.command: "rmdir {{ storj_base_dir | quote }}"
+  ansible.builtin.command: "rmdir -- {{ storj_base_dir | quote }}"
   register: storj_rmdir
   changed_when: storj_rmdir.rc == 0
   failed_when: false

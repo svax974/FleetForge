@@ -29,6 +29,7 @@
       - --exclude=/logs
       - --exclude=/outputs
       - --exclude=/env_deploy.py
+      - --
       - "{{ scripting_repo_dirs[scripting_instance.source_repo] }}/"
       - "{{ scripting_install_dir }}/{{ scripting_instance.name }}/"
   register: scripting_rsync

@@ -62,7 +62,7 @@
 - name: Read the interval the file carries now
   ansible.builtin.shell: |
     set -eu
-    grep -m1 -E '^  scrape_interval:' {{ _vmagent_file | quote }} | sed -E 's/^  scrape_interval: *//; s/ *#.*$//'
+    grep -m1 -E -- '^  scrape_interval:' {{ _vmagent_file | quote }} | sed -E 's/^  scrape_interval: *//; s/ *#.*$//'
   args:
     executable: /bin/bash
   register: _vmagent_current
@@ -80,7 +80,7 @@
 
 - name: Save the original configuration next to it (once)
   ansible.builtin.command:
-    argv: [cp, -p, "{{ _vmagent_file }}", "{{ _vmagent_backup }}"]
+    argv: [cp, -p, --, "{{ _vmagent_file }}", "{{ _vmagent_backup }}"]
     creates: "{{ _vmagent_backup }}"
   become: true
   when: vmagent_scrape_mode == 'fast'

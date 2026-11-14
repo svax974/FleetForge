@@ -11,7 +11,7 @@
   ansible.builtin.shell: |
     if [ -d {{ preflight_legacy_state_dir | quote }} ] && [ ! -e {{ preflight_state_dir | quote }} ]; then
       mkdir -p "$(dirname {{ preflight_state_dir | quote }})"
-      mv {{ preflight_legacy_state_dir | quote }} {{ preflight_state_dir | quote }}
+      mv -- {{ preflight_legacy_state_dir | quote }} {{ preflight_state_dir | quote }}
       rmdir "$(dirname {{ preflight_legacy_state_dir | quote }})" 2>/dev/null || true
       echo moved
     fi

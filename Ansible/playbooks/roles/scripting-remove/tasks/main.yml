@@ -56,7 +56,16 @@
 # configuration et sorties vivent à la racine des mêmes répertoires que le
 # code, une suppression du répertoire entier les emporterait.
 # `.git` et `venv` partent avec le code (le lien venv d'une instance aussi).
+# Chaque répertoire est le point de départ d'un `find … -exec rm -rf` : une valeur `-…` y serait
+# une expression de find, pas un chemin.
+- name: Check the repository directories are absolute paths
+  ansible.builtin.assert:
+    that: scripting_repos | map(attribute='dest') | reject('match', '^/.+') | list | length == 0
+    fail_msg: "scripting_repos[].dest : chemins absolus attendus."
+    quiet: true
+
 - name: Remove the code, keeping configuration, logs and outputs
+  # argument-ok: `item` est un `dest` de scripting_repos (assert précédent) ou scripting_install_dir/<nom> (assert en tête).
   ansible.builtin.shell:
     cmd: >-
       [ -d {{ item | quote }} ] || exit 0;

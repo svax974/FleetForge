@@ -8,6 +8,14 @@
 # Configuration du parc dans chaque dépôt, ses copies dans chaque instance
 # d'autodéploiement (rsync conserve les droits, mais une copie faite à la main
 # ne le ferait pas) et les identifiants GCP.
+# `scripting_install_dir` est le point de départ d'un find : une valeur `-…` y serait une expression.
+- name: Check the installation directory
+  ansible.builtin.assert:
+    that: scripting_install_dir is match('^/.+')
+    fail_msg: "scripting_install_dir : chemin absolu attendu ({{ scripting_install_dir }})."
+    quiet: true
+  tags: [always]
+
 - name: List the secret files
   ansible.builtin.set_fact:
     scripting_secret_files: >-
