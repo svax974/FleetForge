@@ -13,6 +13,12 @@
 //! dès le `--check` pour une tâche `check_mode: false`, au run réel pour les autres. Le
 //! scanner est en Python (PyYAML, Jinja2 : ceux d'Ansible) ; sans interpréteur qui les
 //! ait, ce test s'efface en le disant.
+//!
+//! Le même scanner tient ce que `quote` ne couvre pas : une variable en tête d'un argument
+//! de `rm`/`du`/`grep`… (option), dans le premier mot d'une commande (programme), dans la
+//! base d'un `psql -d` (chaîne de connexion), dans un `delegate_to` (autre machine) — sauf
+//! `--`, `assert` de grammaire du rôle ou garde `x in groups['all']`. Plus les `cron`,
+//! `script`, `expect`, `docker_container_exec` et les scripts de `runuser -c`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -56,5 +62,9 @@ fn no_shell_or_command_task_interpolates_an_unquoted_variable() {
     assert!(ok, "tests du scanner :\n{out}");
     let all = Path::new("--all");
     let (ok, out) = run(&python, &scripts.join("unquoted_check_mode.py"), &[all, &ansible_dir().join("playbooks")]);
-    assert!(ok, "interpolations non protégées (`| quote`, ou `# unquoted-ok: `variable` raison`) :\n{out}");
+    assert!(
+        ok,
+        "interpolations non protégées (`| quote`, `--`, `assert` de grammaire, garde de `delegate_to`, \
+         ou `# unquoted-ok:`/`# argument-ok:`/`# program-ok:`/`# delegate-ok: `variable` raison`) :\n{out}"
+    );
 }

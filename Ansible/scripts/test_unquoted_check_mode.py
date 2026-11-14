@@ -35,7 +35,7 @@ FIXED = """\
     grep -l '"'{{ ansible_host | quote }}:{{ node_exporter_scrape_port | quote }}'"'
     /home/{{ remote_username | quote }}/prometheus/prometheus-configs/exporter/*.json
     2>/dev/null || true
-  delegate_to: "{{ prometheus_host }}"
+  delegate_to: "{{ prometheus_host if prometheus_host in groups['all'] else undef(hint='not in the inventory') }}"
   check_mode: false
 """
 
@@ -82,7 +82,7 @@ class ScannerTests(unittest.TestCase):
             """, "sans | quote")
         self.assertEqual(self.scan("""\
             - name: t
-              ansible.builtin.shell: "cat {{ (a if c else b) | quote }} && for c in {{ cmds | map('quote') | join(' ') }}; do :; done"
+              ansible.builtin.shell: "cat -- {{ (a if c else b) | quote }} && for c in {{ cmds | map('quote') | join(' ') }}; do :; done"
               check_mode: false
             """), [])
         self.assertFlags("""\
@@ -121,6 +121,7 @@ class ScannerTests(unittest.TestCase):
         exempted = """\
             - name: t
               # unquoted-ok: `tsha_cmd` est la commande elle-même, en plusieurs mots.
+              # program-ok: `tsha_cmd` (même raison : l'exception de quoting ne couvre pas le programme).
               ansible.builtin.command:
                 cmd: "{{ tsha_cmd }} status {{ other }}"
               check_mode: false
@@ -211,6 +212,293 @@ class ScannerTests(unittest.TestCase):
                   ansible.builtin.shell: "grep -F '{{ port }}' f"
                   check_mode: false
             """, "port")
+
+
+ABS = "^/[A-Za-z0-9._/-]*$"
+
+
+class ArgumentProgramConnectionDelegationTests(unittest.TestCase):
+    """Ce que `quote` ne couvre pas : option, programme, chaîne de connexion, délégation."""
+
+    def scan(self, files):
+        with tempfile.TemporaryDirectory() as root:
+            for path, content in files.items():
+                os.makedirs(os.path.dirname(os.path.join(root, path)), exist_ok=True)
+                with open(os.path.join(root, path), "w", encoding="utf-8") as f:
+                    f.write("---\n" + textwrap.dedent(content))
+            return [str(f) for f in scanner.scan(root, True)]
+
+    def task(self, body, asserts=""):
+        return self.scan({"roles/demo/tasks/main.yml": textwrap.dedent(asserts) + textwrap.dedent(body)})
+
+    def assertFlagged(self, body, *fragments, asserts=""):
+        findings = self.task(body, asserts)
+        self.assertEqual(len(findings), 1, findings or body)
+        for fragment in fragments:
+            self.assertIn(fragment, findings[0])
+
+    def assertClean(self, body, asserts="", why=""):
+        self.assertEqual(self.task(body, asserts), [], why or body)
+
+    @staticmethod
+    def check(that):
+        return f"""\
+            - name: grammar
+              ansible.builtin.assert:
+                that: {that}
+            """
+
+    # ── Option ────────────────────────────────────────────────────────────
+    def test_a_quoted_value_can_still_be_an_option(self):
+        # `quote('-rf')` vaut `-rf` : rm, du, grep… le lisent comme une option.
+        self.assertFlagged("""\
+            - name: t
+              ansible.builtin.command: "rm -rf {{ data_dir | quote }}"
+            """, "argument de rm", "data_dir")
+        self.assertFlagged("""\
+            - name: t
+              ansible.builtin.command:
+                argv: [du, -sh, "{{ data_dir }}"]
+            """, "argument de du")
+        self.assertFlagged("""\
+            - name: t
+              ansible.builtin.shell: "ufw status | grep -F {{ port | quote }} || true"
+            """, "argument de grep", "port")
+
+    def test_double_dash_a_literal_prefix_or_a_held_grammar_closes_it(self):
+        self.assertClean("""\
+            - name: t
+              ansible.builtin.command: "rm -rf -- {{ data_dir | quote }}"
+            """)
+        self.assertClean("""\
+            - name: t
+              ansible.builtin.command:
+                argv: [cp, -p, --, "{{ a }}", "{{ b }}"]
+            """)
+        self.assertClean("""\
+            - name: t
+              ansible.builtin.command: "rm -f /var/lib/{{ name | quote }} {{ ('/srv/' ~ other) | quote }}"
+            """, why="le mot commence par un littéral")
+        self.assertClean("""\
+            - name: t
+              ansible.builtin.command: "tar -C {{ dir | quote }} -xzf {{ archive | quote }} {{ '/etc' }}"
+            """, why="valeurs d'options (-C, -f)")
+        self.assertClean("""\
+            - name: t
+              ansible.builtin.command: "rm -rf {{ data_dir | quote }}"
+            """, asserts=self.check(f"data_dir is match('{ABS}')"))
+
+    def test_a_grammar_that_lets_a_dash_through_holds_nothing(self):
+        for pattern in (".*", "^.+$", "[-a-z/]+", "^[-/a-z]+$", "-?/"):
+            self.assertFlagged("""\
+                - name: t
+                  ansible.builtin.command: "rm -rf {{ data_dir | quote }}"
+                """, "data_dir", asserts=self.check(f"data_dir is match('{pattern}')"))
+
+    def test_an_assert_of_another_role_holds_nothing(self):
+        findings = self.scan({
+            "roles/a/tasks/main.yml": self.check(f"data_dir is match('{ABS}')"),
+            "roles/b/tasks/main.yml": """\
+                - name: t
+                  ansible.builtin.command: "rm -rf {{ data_dir | quote }}"
+                """,
+        })
+        self.assertEqual(len(findings), 1)
+        self.assertIn("roles/b/", findings[0])
+
+    def test_a_fail_under_a_negated_grammar_holds_too(self):
+        self.assertClean("""\
+            - name: t
+              ansible.builtin.command: "du -sh {{ data_dir | quote }}"
+            """, asserts=f"""\
+            - name: refuse
+              ansible.builtin.fail:
+                msg: bad
+              when: data_dir is not match('{ABS}')
+            """)
+
+    def test_find_starting_points_ignore_double_dash_and_exec_is_a_command(self):
+        self.assertFlagged("""\
+            - name: t
+              ansible.builtin.command: "find -- {{ d | quote }} -mindepth 1 -delete"
+            """, "point de départ de find")
+        self.assertFlagged("""\
+            - name: t
+              ansible.builtin.command: "find /srv -type f -exec chown {{ owner | quote }} {} +"
+            """, "argument de chown", "owner")
+        self.assertClean("""\
+            - name: t
+              ansible.builtin.command: "find {{ d | quote }} -name {{ pattern | quote }} -print"
+            """, asserts=self.check(f"d is match('^/.+')"))
+
+    # ── Programme ─────────────────────────────────────────────────────────
+    def test_a_variable_that_names_the_program(self):
+        self.assertFlagged("""\
+            - name: t
+              ansible.builtin.command: "{{ tool_bin | quote }} --version"
+            """, "programme", "tool_bin")
+        self.assertFlagged("""\
+            - name: t
+              ansible.builtin.command:
+                argv: ["{{ tool_bin }}", --version]
+            """, "programme")
+        self.assertFlagged("""\
+            - name: t
+              ansible.builtin.shell: "set -e; sudo -u srvc {{ home | quote }}/bin/run.sh"
+            """, "programme", "home")
+        self.assertFlagged("""\
+            - name: t
+              ansible.builtin.command: "/home/{{ user | quote }}/restore.sh --check"
+            """, "programme", "user")
+        # Une grammaire sans `-` en tête ne suffit pas : `^/.+` admet `/bin/sh -c …`.
+        self.assertFlagged("""\
+            - name: t
+              ansible.builtin.command: "{{ tool_bin | quote }} --version"
+            """, "programme", asserts=self.check("tool_bin is match('^/.+')"))
+        self.assertClean("""\
+            - name: t
+              ansible.builtin.command: "{{ tool_bin | quote }} --version"
+            """, asserts=self.check(f"tool_bin is match('{ABS}')"))
+        self.assertClean("""\
+            - name: t
+              ansible.builtin.command: "/home/{{ user | quote }}/restore.sh --check"
+            """, asserts=self.check("user is match('^[a-z_][a-z0-9_-]*$')"))
+        self.assertClean("""\
+            - name: t
+              ansible.builtin.command: "sudo -u {{ user | quote }} /usr/bin/id"
+            """, why="valeur de l'option -u, pas le programme")
+
+    def test_a_cron_job_is_a_shell_line(self):
+        self.assertFlagged("""\
+            - name: t
+              ansible.builtin.cron:
+                name: backup
+                job: "{{ backup_dir }}/backup.sh >> {{ backup_dir }}/backup.log 2>&1"
+            """, "[cron]", "sans | quote", "programme")
+        self.assertClean("""\
+            - name: t
+              ansible.builtin.cron:
+                name: backup
+                job: "{{ backup_dir | quote }}/backup.sh >> {{ backup_dir | quote }}/backup.log 2>&1"
+            """, asserts=self.check(f"backup_dir is match('{ABS}')"))
+
+    def test_runuser_c_reads_a_shell_script(self):
+        self.assertFlagged("""\
+            - name: t
+              ansible.builtin.command:
+                argv: [runuser, -l, agents, -c, "{{ tool_dir }}/bin/tool precache"]
+            """, "sans | quote", "programme")
+
+    def test_heredocs_redirections_and_substitutions(self):
+        self.assertClean("""\
+            - name: t
+              ansible.builtin.shell: |
+                cat > /etc/x.conf <<'EOF'
+                rm -rf {{ not_a_command | quote }}
+                EOF
+                echo done 2>&1 >/dev/null
+            """, why="contenu d'un heredoc, pas une commande")
+        self.assertFlagged("""\
+            - name: t
+              ansible.builtin.shell: 'echo "$(rm -rf {{ d | quote }})"'
+            """, "argument de rm")
+
+    # ── Chaîne de connexion ───────────────────────────────────────────────
+    def test_psql_database_is_a_connection_string(self):
+        body = """\
+            - name: t
+              ansible.builtin.command: >-
+                docker exec db psql -U {{ db_user | quote }} -d {{ db_name | quote }} -tAc "SELECT 1"
+            """
+        self.assertFlagged(body, "psql", "db_name")
+        self.assertClean(body, asserts=self.check("db_name is match('^[A-Za-z0-9_][A-Za-z0-9_.-]*$')"))
+        # Une grammaire de chemin admet `host=…` ? Non, mais `^[a-z=]+$` oui.
+        self.assertFlagged(body, "db_name", asserts=self.check("db_name is match('^[a-z= ]+$')"))
+        self.assertFlagged("""\
+            - name: t
+              ansible.builtin.command:
+                argv: [pg_basebackup, -d, "host={{ primary }} port=5432 user=replicator", -D, /data]
+            """, "chaîne de connexion", "primary")
+        self.assertFlagged("""\
+            - name: t
+              ansible.builtin.shell: "PGPASSWORD={{ db_pass | quote }} pg_dump -h db -U app app > /tmp/x"
+            """, "PGPASSWORD", "environment")
+
+    # ── Délégation ────────────────────────────────────────────────────────
+    def test_a_delegate_must_be_an_inventory_host(self):
+        self.assertFlagged("""\
+            - name: t
+              ansible.builtin.file: {path: /x, state: absent}
+              delegate_to: "{{ prometheus_host }}"
+            """, "delegate_to", "prometheus_host")
+        guarded = """\
+            - name: t
+              ansible.builtin.file: {path: /x, state: absent}
+              delegate_to: "{{ prometheus_host if prometheus_host in groups['all'] else undef(hint='x') }}"
+            """
+        self.assertClean(guarded)
+        self.assertClean("""\
+            - name: t
+              ansible.builtin.file: {path: /x, state: absent}
+              delegate_to: localhost
+            """)
+        self.assertClean("""\
+            - name: t
+              ansible.builtin.file: {path: /x, state: absent}
+              delegate_to: "{{ prometheus_host }}"
+              when: prometheus_host is defined and prometheus_host in groups['all']
+            """, why="la tâche ne part que vers l'inventaire")
+        self.assertClean("""\
+            - name: t
+              ansible.builtin.file: {path: /x, state: absent}
+              delegate_to: "{{ prometheus_host }}"
+            """, asserts=self.check("prometheus_host in groups['all']"))
+
+    def test_hostvars_or_a_fallback_value_is_not_a_guard(self):
+        # `'localhost' in hostvars` est vrai : la tâche partirait sur CETTE machine.
+        for delegate in ("{{ h if h in hostvars else undef(hint='x') }}", "{{ h if h in groups['all'] else 'monitor' }}",
+                         "{{ h if other in groups['all'] else undef(hint='x') }}"):
+            self.assertFlagged(f"""\
+                - name: t
+                  ansible.builtin.file: {{path: /x, state: absent}}
+                  delegate_to: "{delegate}"
+                """, "delegate_to")
+        self.assertFlagged("""\
+            - name: t
+              ansible.builtin.file: {path: /x, state: absent}
+              delegate_to: "{{ h }}"
+              when: h in hostvars
+            """, "delegate_to")
+        self.assertFlagged("""\
+            - name: t
+              ansible.builtin.file: {path: /x, state: absent}
+              delegate_to: "{{ h }}"
+            """, "delegate_to", asserts=self.check("h in hostvars"))
+
+    def test_exemptions_name_their_variables(self):
+        self.assertClean("""\
+            - name: t
+              # delegate-ok: `h` vient de groups['backups'] (boucle).
+              ansible.builtin.file: {path: /x, state: absent}
+              delegate_to: "{{ h }}"
+            """)
+        self.assertClean("""\
+            - name: t
+              # argument-ok: `d` est tenu par l'assert du play appelant.
+              ansible.builtin.command: "rm -rf {{ d | quote }}"
+            """)
+        self.assertFlagged("""\
+            - name: t
+              # argument-ok: parce que.
+              ansible.builtin.command: "rm -rf {{ d | quote }}"
+            """, "sans variable citée")
+
+    def test_the_grammars_used_in_the_roles_hold_what_they_claim(self):
+        self.assertEqual(scanner.grammar_kinds("match", ABS), {"no_dash", "word", "dbname", "program"})
+        self.assertEqual(scanner.grammar_kinds("match", "^[A-Za-z0-9_][A-Za-z0-9_.-]*$"), {"no_dash", "word", "dbname"})
+        self.assertEqual(scanner.grammar_kinds("match", "^/.+"), {"no_dash"})
+        self.assertEqual(scanner.grammar_kinds("search", "[a-z]+"), set())
+        self.assertEqual(scanner.grammar_kinds("match", "("), set())
 
 
 if __name__ == "__main__":
