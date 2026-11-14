@@ -53,7 +53,7 @@
     user: "{{ pgbak_dest_user }}"
     state: absent
     key: "{{ pgbak_pubkey.content | b64decode | trim }}"
-  delegate_to: "{{ pgbak_dest_host }}"
+  delegate_to: "{{ pgbak_dest_host if pgbak_dest_host in groups['all'] else undef(hint='pgbak_dest_host: not an inventory host') }}"
   become: true
   when: pgbak_pubkey.content is defined
 
@@ -61,5 +61,5 @@
   ansible.builtin.file:
     path: "{{ pgbak_dest_dir }}"
     state: absent
-  delegate_to: "{{ pgbak_dest_host }}"
+  delegate_to: "{{ pgbak_dest_host if pgbak_dest_host in groups['all'] else undef(hint='pgbak_dest_host: not an inventory host') }}"
   become: true

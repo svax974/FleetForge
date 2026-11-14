@@ -33,7 +33,7 @@
 - name: Read the last successful backup date on the destination
   ansible.builtin.slurp:
     src: "{{ sync_backup_dir }}/last-success"
-  delegate_to: "{{ sync_backup_dest_host }}"
+  delegate_to: "{{ sync_backup_dest_host if sync_backup_dest_host in groups['all'] else undef(hint='sync_backup_dest_host: not an inventory host') }}"
   become: true
   register: sync_purge_last_backup
   failed_when: false
@@ -64,7 +64,7 @@
     quiet: true
 
 - name: Measure what is about to be destroyed
-  ansible.builtin.command: du -sh {{ sync_data_dir | quote }}
+  ansible.builtin.command: du -sh -- {{ sync_data_dir | quote }}
   become: true
   register: sync_purge_size
   changed_when: false

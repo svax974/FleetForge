@@ -5,6 +5,14 @@
 # la destination peut être la machine elle-même — c'est le cas aujourd'hui — et
 # le script est alors rendu sans SSH.
 
+# `-e` l'emporte sur l'inventaire : `tsdb_dir` désigne le script lancé par cron.
+- name: Check the database directory is a plain absolute path
+  ansible.builtin.assert:
+    that: tsdb_dir is match('^/[A-Za-z0-9._/-]*$')
+    fail_msg: "tsdb_dir : chemin absolu sans espace ni métacaractère ({{ tsdb_dir }})."
+    quiet: true
+  tags: [always]
+
 - name: Fail if the backup destination is not in the inventory
   ansible.builtin.fail:
     msg: >-
@@ -36,7 +44,7 @@
     state: present
     key: "{{ tsdb_backup_key.public_key }}"
     comment: "{{ inventory_hostname }}-tsdb-backup"
-  delegate_to: "{{ tsdb_backup_dest_host }}"
+  delegate_to: "{{ tsdb_backup_dest_host if tsdb_backup_dest_host in groups['all'] else undef(hint='tsdb_backup_dest_host: not an inventory host') }}"
   become: true
   when: not (tsdb_backup_is_local | bool)
   tags: [retarget]
@@ -48,7 +56,7 @@
     from_ip: "{{ ansible_host }}"
     port: "{{ ssh_custom_port }}"
     comment: "backup source {{ inventory_hostname }} - ssh push"
-  delegate_to: "{{ tsdb_backup_dest_host }}"
+  delegate_to: "{{ tsdb_backup_dest_host if tsdb_backup_dest_host in groups['all'] else undef(hint='tsdb_backup_dest_host: not an inventory host') }}"
   become: true
   when: not (tsdb_backup_is_local | bool)
   tags: [retarget]
@@ -69,7 +77,7 @@
     owner: root
     group: root
     mode: '0644'
-  delegate_to: "{{ tsdb_backup_dest_host }}"
+  delegate_to: "{{ tsdb_backup_dest_host if tsdb_backup_dest_host in groups['all'] else undef(hint='tsdb_backup_dest_host: not an inventory host') }}"
   become: true
   when: not (tsdb_backup_is_local | bool)
   tags: [retarget]
@@ -92,7 +100,7 @@
     owner: "{{ tsdb_backup_dest_user }}"
     group: "{{ tsdb_backup_dest_user }}"
     mode: '0750'
-  delegate_to: "{{ tsdb_backup_dest_host }}"
+  delegate_to: "{{ tsdb_backup_dest_host if tsdb_backup_dest_host in groups['all'] else undef(hint='tsdb_backup_dest_host: not an inventory host') }}"
   become: true
   tags: [retarget]
 
@@ -110,7 +118,7 @@
   ansible.builtin.shell: >-
     set -o pipefail;
     dest={{ tsdb_backup_dest_dir | quote }}"/"{{ tsdb_db | quote }}"-$(date -d @{{ tsdb_legacy_dump.stat.mtime | default(0) | int }} +%Y-%m-%dT%H%M%S).sql.gz";
-    [ -e "$dest" ] || mv {{ tsdb_backup_legacy_dir | quote }}"/"{{ tsdb_db | quote }}"-latest.sql.gz" "$dest";
+    [ -e "$dest" ] || mv -- {{ tsdb_backup_legacy_dir | quote }}"/"{{ tsdb_db | quote }}"-latest.sql.gz" "$dest";
     echo "{{ tsdb_legacy_dump.stat.mtime | default(0) | int }}" > {{ tsdb_backup_dest_dir | quote }}"/last-success"
   args:
     executable: /bin/bash
@@ -152,7 +160,7 @@
     name: "papangmetrics-timescaledb backup"
     hour: "{{ tsdb_backup_cron_hour }}"
     minute: "0"
-    job: "{{ tsdb_dir }}/timescaledb-backup.sh >> {{ tsdb_dir }}/backup.log 2>&1"
+    job: "{{ tsdb_dir | quote }}/timescaledb-backup.sh >> {{ tsdb_dir | quote }}/backup.log 2>&1"
     state: "{{ 'present' if tsdb_backup_enabled | bool else 'absent' }}"
   tags: [retarget]
 

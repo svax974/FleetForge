@@ -20,7 +20,7 @@
     owner: "{{ remote_username }}"
     group: "{{ remote_username }}"
     mode: "0755"
-  delegate_to: "{{ prometheus_host }}"
+  delegate_to: "{{ prometheus_host if prometheus_host in groups['all'] else undef(hint='prometheus_host: not an inventory host') }}"
   remote_user: "{{ remote_username }}"
   tags: [monitoring]
 
@@ -41,12 +41,12 @@
 
 - name: Look for an existing node_exporter target for this MACHINE
   ansible.builtin.shell: >-
-    grep -l '"'{{ exporter_scrape_target | quote }}'"'
+    grep -l -- '"'{{ exporter_scrape_target | quote }}'"'
     {{ prometheus_home | quote }}/prometheus-configs/exporter/*.json
     2>/dev/null || true
   args:
     executable: /bin/bash
-  delegate_to: "{{ prometheus_host }}"
+  delegate_to: "{{ prometheus_host if prometheus_host in groups['all'] else undef(hint='prometheus_host: not an inventory host') }}"
   remote_user: "{{ remote_username }}"
   register: exporter_existing_target
   changed_when: false
@@ -63,7 +63,7 @@
     owner: "{{ remote_username }}"
     group: "{{ remote_username }}"
     mode: "0644"
-  delegate_to: "{{ prometheus_host }}"
+  delegate_to: "{{ prometheus_host if prometheus_host in groups['all'] else undef(hint='prometheus_host: not an inventory host') }}"
   remote_user: "{{ remote_username }}"
   notify: reload prometheus
   when: >-

@@ -142,7 +142,7 @@
       ansible.builtin.include_role:
         name: prometheus-alerts-update
         apply:
-          delegate_to: "{{ prometheus_host }}"
+          delegate_to: "{{ prometheus_host if prometheus_host in groups['all'] else undef(hint='prometheus_host: not an inventory host') }}"
           become: true
           tags: [alerts, monitoring]
       when: inventory_hostname == groups['xmrig_node_yes'] | first

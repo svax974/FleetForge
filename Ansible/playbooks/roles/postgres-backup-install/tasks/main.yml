@@ -3,6 +3,14 @@
 # Calqué sur `timescaledb-backup-install`, sans branche locale (voir
 # defaults/main.yml) : la destination est toujours une machine distincte.
 
+# `-e` l'emporte sur l'inventaire : `pgbak_dir` désigne le script lancé par cron.
+- name: Check the backup directory is a plain absolute path
+  ansible.builtin.assert:
+    that: pgbak_dir is match('^/[A-Za-z0-9._/-]*$')
+    fail_msg: "pgbak_dir : chemin absolu sans espace ni métacaractère ({{ pgbak_dir }})."
+    quiet: true
+  tags: [always]
+
 - name: Fail if the backup destination is not in the inventory
   ansible.builtin.fail:
     msg: >-
@@ -30,7 +38,7 @@
     state: present
     key: "{{ pgbak_key.public_key }}"
     comment: "{{ inventory_hostname }}-{{ pgbak_name }}-backup"
-  delegate_to: "{{ pgbak_dest_host }}"
+  delegate_to: "{{ pgbak_dest_host if pgbak_dest_host in groups['all'] else undef(hint='pgbak_dest_host: not an inventory host') }}"
   become: true
   tags: [retarget]
 
@@ -41,7 +49,7 @@
     from_ip: "{{ ansible_host }}"
     port: "{{ pgbak_dest_port }}"
     comment: "backup source {{ inventory_hostname }} - ssh push"
-  delegate_to: "{{ pgbak_dest_host }}"
+  delegate_to: "{{ pgbak_dest_host if pgbak_dest_host in groups['all'] else undef(hint='pgbak_dest_host: not an inventory host') }}"
   become: true
   tags: [retarget]
 
@@ -62,7 +70,7 @@
     owner: "{{ pgbak_dest_user }}"
     group: "{{ pgbak_dest_user }}"
     mode: '0750'
-  delegate_to: "{{ pgbak_dest_host }}"
+  delegate_to: "{{ pgbak_dest_host if pgbak_dest_host in groups['all'] else undef(hint='pgbak_dest_host: not an inventory host') }}"
   become: true
   tags: [retarget]
 
@@ -108,7 +116,7 @@
     name: "{{ pgbak_name }} postgres backup"
     hour: "{{ pgbak_cron_hour }}"
     minute: "{{ pgbak_cron_minute | default('0') }}"
-    job: "{{ pgbak_dir }}/postgres-backup.sh >> {{ pgbak_dir }}/backup.log 2>&1"
+    job: "{{ pgbak_dir | quote }}/postgres-backup.sh >> {{ pgbak_dir | quote }}/backup.log 2>&1"
 
 - name: Rotate the backup log
   ansible.builtin.copy:

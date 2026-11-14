@@ -49,7 +49,7 @@
     key: "{{ tsha_key.public_key }}"
     comment: "{{ inventory_hostname }}-timescale-ha"
     key_options: 'restrict,command="/home/{{ remote_username }}/papangmetrics-db/timescaledb-ha-remote.sh"'
-  delegate_to: "{{ item }}"
+  delegate_to: "{{ item if item in groups['all'] else undef(hint='delegate_to: not an inventory host') }}"
   loop: "{{ tsha_servers }}"
   become: true
 
@@ -60,7 +60,7 @@
     from_ip: "{{ ansible_host }}"
     port: "{{ ssh_custom_port }}"
     comment: "timescale-ha arbiter {{ inventory_hostname }} - ssh"
-  delegate_to: "{{ item }}"
+  delegate_to: "{{ item if item in groups['all'] else undef(hint='delegate_to: not an inventory host') }}"
   loop: "{{ tsha_servers }}"
   become: true
 
@@ -75,7 +75,7 @@
     owner: root
     group: root
     mode: '0644'
-  delegate_to: "{{ item }}"
+  delegate_to: "{{ item if item in groups['all'] else undef(hint='delegate_to: not an inventory host') }}"
   loop: "{{ tsha_servers }}"
   become: true
 

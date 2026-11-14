@@ -100,7 +100,7 @@
 # ignore.
 - name: Read the deployed metrics token
   ansible.builtin.shell:
-    cmd: "grep -E '^METRICS_TOKEN=.+$' {{ pgb_dir | quote }}/back/.env | head -1 | cut -d= -f2-"
+    cmd: "grep -E -- '^METRICS_TOKEN=.+$' {{ pgb_dir | quote }}/back/.env | head -1 | cut -d= -f2-"
     executable: /bin/bash
   become: true
   register: pgb_deployed_token
@@ -162,7 +162,7 @@
     password: "{{ prometheus_pass | default(omit) }}"
     force_basic_auth: true
     return_content: true
-  delegate_to: "{{ item }}"
+  delegate_to: "{{ item if item in groups['all'] else undef(hint='delegate_to: not an inventory host') }}"
   loop: "{{ pgb_prometheus_hosts | default([]) }}"
   register: pgb_rw_flags
   failed_when: false

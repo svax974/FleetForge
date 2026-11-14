@@ -89,7 +89,7 @@
     owner: "{{ remote_username }}"
     group: "{{ remote_username }}"
     mode: "0755"
-  delegate_to: "{{ prometheus_host }}"
+  delegate_to: "{{ prometheus_host if prometheus_host in groups['all'] else undef(hint='prometheus_host: not an inventory host') }}"
   tags: [monitoring]
 
 - name: Deploy dmarc Prometheus target file on monitoring host
@@ -99,7 +99,7 @@
     owner: "{{ remote_username }}"
     group: "{{ remote_username }}"
     mode: "0644"
-  delegate_to: "{{ prometheus_host }}"
+  delegate_to: "{{ prometheus_host if prometheus_host in groups['all'] else undef(hint='prometheus_host: not an inventory host') }}"
   notify: reload prometheus
   tags: [monitoring]
 

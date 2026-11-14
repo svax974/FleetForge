@@ -33,7 +33,7 @@
   ansible.builtin.file:
     path: "{{ prometheus_home }}/prometheus-configs/exporter/{{ inventory_hostname }}.json"
     state: absent
-  delegate_to: "{{ prometheus_host }}"
+  delegate_to: "{{ prometheus_host if prometheus_host in groups['all'] else undef(hint='prometheus_host: not an inventory host') }}"
   ignore_errors: true
 
 - name: Reload Prometheus container
@@ -41,5 +41,5 @@
     name: prometheus
     state: started
     restart: yes
-  delegate_to: "{{ prometheus_host }}"
+  delegate_to: "{{ prometheus_host if prometheus_host in groups['all'] else undef(hint='prometheus_host: not an inventory host') }}"
   ignore_errors: true

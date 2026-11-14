@@ -34,7 +34,7 @@
     owner: "{{ remote_username }}"
     group: "{{ remote_username }}"
     mode: '0755'
-  delegate_to: "{{ prometheus_host }}"
+  delegate_to: "{{ prometheus_host if prometheus_host in groups['all'] else undef(hint='prometheus_host: not an inventory host') }}"
   become: true
   tags: [monitoring]
 
@@ -45,7 +45,7 @@
     owner: "{{ remote_username }}"
     group: "{{ remote_username }}"
     mode: '0644'
-  delegate_to: "{{ prometheus_host }}"
+  delegate_to: "{{ prometheus_host if prometheus_host in groups['all'] else undef(hint='prometheus_host: not an inventory host') }}"
   become: true
   tags: [monitoring]
 
@@ -60,7 +60,7 @@
     /home/{{ remote_username | quote }}/prometheus/prometheus.yml || true
   args:
     executable: /bin/bash
-  delegate_to: "{{ prometheus_host }}"
+  delegate_to: "{{ prometheus_host if prometheus_host in groups['all'] else undef(hint='prometheus_host: not an inventory host') }}"
   register: ff_job_declared
   changed_when: false
   check_mode: false

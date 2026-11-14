@@ -51,7 +51,7 @@
   ansible.builtin.find:
     paths: "/home/{{ remote_username }}/prometheus/prometheus-configs/node-llamacpp"
     patterns: "{{ inventory_hostname }}-[0-9]*.json"
-  delegate_to: "{{ prometheus_host }}"
+  delegate_to: "{{ prometheus_host if prometheus_host in groups['all'] else undef(hint='prometheus_host: not an inventory host') }}"
   register: llamacpp_targets
 
 - name: Remove the Prometheus targets
@@ -59,7 +59,7 @@
     path: "{{ item.path }}"
     state: absent
   loop: "{{ llamacpp_targets.files }}"
-  delegate_to: "{{ prometheus_host }}"
+  delegate_to: "{{ prometheus_host if prometheus_host in groups['all'] else undef(hint='prometheus_host: not an inventory host') }}"
 
 # `/usr/local/bin/llama-server` et `src/` : emplacements de l'ancien rôle, qui
 # compilait depuis les sources.

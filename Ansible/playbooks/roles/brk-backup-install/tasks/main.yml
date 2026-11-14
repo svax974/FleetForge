@@ -8,6 +8,14 @@
 
 # ── Garde-fous ─────────────────────────────────────────────────────────────
 
+# `-e` l'emporte sur l'inventaire : `brk_home` désigne le script lancé par cron (root).
+- name: Check the BRK home is a plain absolute path
+  ansible.builtin.assert:
+    that: brk_home is match('^/[A-Za-z0-9._/-]*$')
+    fail_msg: "brk_home : chemin absolu sans espace ni métacaractère ({{ brk_home }})."
+    quiet: true
+  tags: [always]
+
 - name: Fail if the backup destination is not in the inventory
   ansible.builtin.fail:
     msg: >-
@@ -60,7 +68,7 @@
     state: present
     key: "{{ brk_backup_key.public_key }}"
     comment: "{{ inventory_hostname }}-brk-backup"
-  delegate_to: "{{ brk_backup_dest_host }}"
+  delegate_to: "{{ brk_backup_dest_host if brk_backup_dest_host in groups['all'] else undef(hint='brk_backup_dest_host: not an inventory host') }}"
   become: true
   tags: [retarget]
 
@@ -78,7 +86,7 @@
     from_ip: "{{ ansible_host }}"
     port: "{{ ssh_custom_port }}"
     comment: "backup source {{ inventory_hostname }} - ssh push"
-  delegate_to: "{{ brk_backup_dest_host }}"
+  delegate_to: "{{ brk_backup_dest_host if brk_backup_dest_host in groups['all'] else undef(hint='brk_backup_dest_host: not an inventory host') }}"
   become: true
   tags: [retarget]
 
@@ -102,7 +110,7 @@
     owner: root
     group: root
     mode: '0644'
-  delegate_to: "{{ brk_backup_dest_host }}"
+  delegate_to: "{{ brk_backup_dest_host if brk_backup_dest_host in groups['all'] else undef(hint='brk_backup_dest_host: not an inventory host') }}"
   become: true
   tags: [retarget]
 
@@ -113,7 +121,7 @@
     owner: "{{ brk_backup_dest_user }}"
     group: "{{ brk_backup_dest_user }}"
     mode: '0750'
-  delegate_to: "{{ brk_backup_dest_host }}"
+  delegate_to: "{{ brk_backup_dest_host if brk_backup_dest_host in groups['all'] else undef(hint='brk_backup_dest_host: not an inventory host') }}"
   become: true
   tags: [retarget]
 
@@ -170,7 +178,7 @@
     weekday: "{{ brk_backup_cron_weekday }}"
     hour: "{{ brk_backup_cron_hour }}"
     minute: "0"
-    job: "{{ brk_home }}/brk-backup.sh >> {{ brk_home }}/brk-backup.log 2>&1"
+    job: "{{ brk_home | quote }}/brk-backup.sh >> {{ brk_home | quote }}/brk-backup.log 2>&1"
     user: "{{ brk_user }}"
   become: true
 

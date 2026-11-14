@@ -75,7 +75,8 @@
   delegate_to: "{{ prometheus_host }}"
   become: true
   loop: [node-llamacpp, aiserver-comfyui, aiserver-dcgm]
-  when: prometheus_host is defined and prometheus_host in hostvars
+  # Un hôte d'inventaire seulement (`hostvars` admettrait `localhost`), sinon rien à retirer.
+  when: prometheus_host is defined and prometheus_host in groups['all']
   tags: [monitoring]
 
 - name: Report what is kept

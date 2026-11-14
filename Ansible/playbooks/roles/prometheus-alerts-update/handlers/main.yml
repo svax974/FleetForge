@@ -5,7 +5,7 @@
 # tâche qui le notifie : sans ceci il redémarrerait un conteneur `prometheus`
 # sur l'hôte du service, pas sur la supervision.
 - name: reload prometheus
-  delegate_to: "{{ prom_alerts_target | default(inventory_hostname) }}"
+  delegate_to: "{{ (prom_alerts_target | default(inventory_hostname)) if (prom_alerts_target | default(inventory_hostname)) in groups['all'] else undef(hint='prom_alerts_target: not an inventory host') }}"
   community.docker.docker_container:
     name: prometheus
     state: started

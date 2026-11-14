@@ -17,6 +17,6 @@
     executable: /bin/bash
   register: prometheus_reload
   changed_when: "'restarted' in prometheus_reload.stdout"
-  delegate_to: "{{ prometheus_host }}"
+  delegate_to: "{{ prometheus_host if prometheus_host in groups['all'] else undef(hint='prometheus_host: not an inventory host') }}"
   remote_user: "{{ remote_username }}"
   ignore_unreachable: true

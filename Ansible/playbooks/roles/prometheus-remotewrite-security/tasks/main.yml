@@ -11,7 +11,7 @@
     group: root
     mode: '0644'
   become: true
-  delegate_to: "{{ item }}"
+  delegate_to: "{{ item if item in groups['all'] else undef(hint='delegate_to: not an inventory host') }}"
   loop: "{{ prwsec_prometheus_hosts }}"
   when:
     - prwsec_source != hostvars[item].ansible_host
@@ -29,7 +29,7 @@
     name: docker-ports-firewall
     state: restarted
   become: true
-  delegate_to: "{{ item.item }}"
+  delegate_to: "{{ item.item if item.item in groups['all'] else undef(hint='delegate_to: not an inventory host') }}"
   loop: "{{ prwsec_dropin.results | default([]) | selectattr('changed', 'defined') | selectattr('changed') | list }}"
   loop_control:
     label: "{{ item.item }}"

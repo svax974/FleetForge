@@ -82,7 +82,7 @@
     path: "/home/{{ remote_username }}/prometheus/prometheus-configs/{{ item }}/{{ inventory_hostname }}.json"
     state: absent
   loop: [postfix, rspamd]
-  delegate_to: "{{ prometheus_host }}"
+  delegate_to: "{{ prometheus_host if prometheus_host in groups['all'] else undef(hint='prometheus_host: not an inventory host') }}"
   become: true
   tags: [monitoring]
 

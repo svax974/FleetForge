@@ -13,7 +13,7 @@
       {{ alertmanager_silence_body | combine({
            'id': alertmanager_silence_id,
            'endsAt': '%Y-%m-%dT%H:%M:%SZ' | strftime(now().timestamp() | int + alertmanager_silence_tail_minutes * 60, utc=true)}) }}
-  delegate_to: "{{ alertmanager_host }}"
+  delegate_to: "{{ alertmanager_host if alertmanager_host in groups['all'] else undef(hint='alertmanager_host: not an inventory host') }}"
   register: alertmanager_unsilence
   failed_when: false
   when: alertmanager_silence_id is defined

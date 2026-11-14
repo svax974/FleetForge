@@ -5,6 +5,14 @@
 # `sync-server-purge`. Aucune autre instance de la machine partagée n'est
 # touchée (le filtrage DOCKER-USER, l'image et les sources sont communs).
 
+# `-e` l'emporte sur l'inventaire : le script de pare-feu est lancé en root.
+- name: Check the firewall script is a plain absolute path
+  ansible.builtin.assert:
+    that: sync_mon_firewall_script is match('^/[A-Za-z0-9._/-]*$')
+    fail_msg: "sync_mon_firewall_script : chemin absolu sans espace ni métacaractère."
+    quiet: true
+  tags: [always]
+
 - name: Stop and remove the sync container
   community.docker.docker_container:
     name: "{{ sync_container }}"
@@ -28,7 +36,7 @@
   ansible.builtin.file:
     path: "/home/{{ remote_username }}/prometheus/prometheus-configs/{{ sync_mon_job }}/{{ inventory_hostname }}.json"
     state: absent
-  delegate_to: "{{ prometheus_host }}"
+  delegate_to: "{{ prometheus_host if prometheus_host in groups['all'] else undef(hint='prometheus_host: not an inventory host') }}"
   become: true
   tags: [monitoring]
 

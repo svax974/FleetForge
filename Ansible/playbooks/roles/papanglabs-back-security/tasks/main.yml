@@ -29,7 +29,7 @@
     from_ip: "{{ ansible_host }}"
     port: "{{ item.port }}"
     comment: "{{ item.name }} - back {{ inventory_hostname }}"
-  delegate_to: "{{ item.host }}"
+  delegate_to: "{{ item.host if item.host in groups['all'] else undef(hint='delegate_to: not an inventory host') }}"
   become: true
   loop: "{{ pgb_upstream_services }}"
   loop_control:

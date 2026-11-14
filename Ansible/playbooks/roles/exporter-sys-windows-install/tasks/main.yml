@@ -88,7 +88,7 @@
     owner: "{{ remote_username }}"
     group: "{{ remote_username }}"
     mode: "0755"
-  delegate_to: "{{ prometheus_host }}"
+  delegate_to: "{{ prometheus_host if prometheus_host in groups['all'] else undef(hint='prometheus_host: not an inventory host') }}"
 
 - name: Deploy windows_exporter Prometheus target file on monitor host
   ansible.builtin.template:
@@ -97,5 +97,5 @@
     owner: "{{ remote_username }}"
     group: "{{ remote_username }}"
     mode: "0644"
-  delegate_to: "{{ prometheus_host }}"
+  delegate_to: "{{ prometheus_host if prometheus_host in groups['all'] else undef(hint='prometheus_host: not an inventory host') }}"
   notify: reload prometheus

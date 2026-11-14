@@ -40,7 +40,7 @@
     path: "/etc/docker-ports/sources.d/{{ pgb_probe_service }}.conf"
     state: absent
   become: true
-  delegate_to: "{{ item }}"
+  delegate_to: "{{ item if item in groups['all'] else undef(hint='delegate_to: not an inventory host') }}"
   loop: "{{ groups['prometheus'] | default([]) }}"
   register: pgb_dropin_removed
 
@@ -49,7 +49,7 @@
     name: docker-ports-firewall
     state: restarted
   become: true
-  delegate_to: "{{ item.item }}"
+  delegate_to: "{{ item.item if item.item in groups['all'] else undef(hint='delegate_to: not an inventory host') }}"
   loop: "{{ pgb_dropin_removed.results | default([]) | selectattr('changed', 'defined') | selectattr('changed') | list }}"
   loop_control:
     label: "{{ item.item }}"

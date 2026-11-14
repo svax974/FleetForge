@@ -3,6 +3,16 @@
 # `{{ sync_backup_dest_host }}`. Modèle : postgres-backup-install. Joué par
 # deploy-backup.yml (sur le groupe `sync_servers`).
 
+# `-e` l'emporte sur l'inventaire : le script est lancé (cron, root), le journal reçoit sa sortie.
+- name: Check the script and log paths are plain absolute paths
+  ansible.builtin.assert:
+    that:
+      - sync_backup_script is match('^/[A-Za-z0-9._/-]*$')
+      - sync_backup_log is match('^/[A-Za-z0-9._/-]*$')
+    fail_msg: "sync_backup_script, sync_backup_log : chemins absolus sans espace ni métacaractère."
+    quiet: true
+  tags: [always]
+
 - name: Fail if the backup destination is not in the inventory
   ansible.builtin.fail:
     msg: >-
@@ -50,7 +60,7 @@
     state: present
     key: "{{ sync_backup_key.public_key }}"
     comment: "{{ inventory_hostname }}-{{ sync_backup_name }}-backup"
-  delegate_to: "{{ sync_backup_dest_host }}"
+  delegate_to: "{{ sync_backup_dest_host if sync_backup_dest_host in groups['all'] else undef(hint='sync_backup_dest_host: not an inventory host') }}"
   become: true
   tags: [retarget]
 
@@ -61,7 +71,7 @@
     from_ip: "{{ ansible_host }}"
     port: "{{ sync_backup_dest_port }}"
     comment: "backup source {{ inventory_hostname }} - ssh push"
-  delegate_to: "{{ sync_backup_dest_host }}"
+  delegate_to: "{{ sync_backup_dest_host if sync_backup_dest_host in groups['all'] else undef(hint='sync_backup_dest_host: not an inventory host') }}"
   become: true
   tags: [retarget]
 
@@ -82,7 +92,7 @@
     owner: "{{ sync_backup_dest_user }}"
     group: "{{ sync_backup_dest_user }}"
     mode: '0750'
-  delegate_to: "{{ sync_backup_dest_host }}"
+  delegate_to: "{{ sync_backup_dest_host if sync_backup_dest_host in groups['all'] else undef(hint='sync_backup_dest_host: not an inventory host') }}"
   become: true
   tags: [retarget]
 
@@ -114,7 +124,7 @@
     user: root
     hour: "{{ sync_backup_cron_hour }}"
     minute: "{{ sync_backup_cron_minute }}"
-    job: "{{ sync_backup_script }} >> {{ sync_backup_log }} 2>&1"
+    job: "{{ sync_backup_script | quote }} >> {{ sync_backup_log | quote }} 2>&1"
   become: true
 
 - name: Rotate the backup log

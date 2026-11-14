@@ -130,7 +130,7 @@
     owner: "{{ remote_username }}"
     group: "{{ remote_username }}"
     mode: '0755'
-  delegate_to: "{{ prometheus_host }}"
+  delegate_to: "{{ prometheus_host if prometheus_host in groups['all'] else undef(hint='prometheus_host: not an inventory host') }}"
   become: true
   loop: "{{ aiserver_targets | selectattr('endpoints') | list }}"
   loop_control:
@@ -147,7 +147,7 @@
   vars:
     _target_job: "{{ item.job }}"
     _target_endpoints: "{{ item.endpoints | map(attribute='name') | map('extract', aiserver_labeled) | list }}"
-  delegate_to: "{{ prometheus_host }}"
+  delegate_to: "{{ prometheus_host if prometheus_host in groups['all'] else undef(hint='prometheus_host: not an inventory host') }}"
   become: true
   loop: "{{ aiserver_targets | selectattr('endpoints') | list }}"
   loop_control:
@@ -160,7 +160,7 @@
   ansible.builtin.file:
     path: "{{ aiserver_prometheus_home }}/prometheus-configs/{{ item.job }}/{{ inventory_hostname }}.json"
     state: absent
-  delegate_to: "{{ prometheus_host }}"
+  delegate_to: "{{ prometheus_host if prometheus_host in groups['all'] else undef(hint='prometheus_host: not an inventory host') }}"
   become: true
   loop: "{{ aiserver_targets | rejectattr('endpoints') | list }}"
   loop_control:
@@ -174,11 +174,11 @@
 # inexistant sur les DEUX parcs pendant des semaines.
 - name: Check that a scrape job reads each target directory
   ansible.builtin.shell: >-
-    grep -c prometheus-configs/{{ item.job | quote }}/
+    grep -c -- prometheus-configs/{{ item.job | quote }}/
     {{ aiserver_prometheus_home | quote }}/prometheus.yml || true
   args:
     executable: /bin/bash
-  delegate_to: "{{ prometheus_host }}"
+  delegate_to: "{{ prometheus_host if prometheus_host in groups['all'] else undef(hint='prometheus_host: not an inventory host') }}"
   register: aiserver_jobs_declared
   changed_when: false
   check_mode: false

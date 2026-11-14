@@ -58,7 +58,7 @@
 - name: Verify the Prometheus file_sd directory exists on the monitoring host
   ansible.builtin.stat:
     path: "/home/{{ remote_username }}/prometheus/prometheus-configs"
-  delegate_to: "{{ prometheus_host }}"
+  delegate_to: "{{ prometheus_host if prometheus_host in groups['all'] else undef(hint='prometheus_host: not an inventory host') }}"
   register: preflight_promdir
   tags: [always]
 
@@ -279,7 +279,7 @@
     2>/dev/null || true
   args:
     executable: /bin/bash
-  delegate_to: "{{ prometheus_host }}"
+  delegate_to: "{{ prometheus_host if prometheus_host in groups['all'] else undef(hint='prometheus_host: not an inventory host') }}"
   register: preflight_target_files
   changed_when: false
   check_mode: false
@@ -355,7 +355,7 @@
     password: "{{ prometheus_pass | default(omit) }}"
     force_basic_auth: true
     return_content: true
-  delegate_to: "{{ prometheus_host }}"
+  delegate_to: "{{ prometheus_host if prometheus_host in groups['all'] else undef(hint='prometheus_host: not an inventory host') }}"
   register: preflight_series
   failed_when: false
   changed_when: false

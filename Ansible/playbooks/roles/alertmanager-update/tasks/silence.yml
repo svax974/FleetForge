@@ -41,7 +41,8 @@
   delegate_to: "{{ alertmanager_host }}"
   register: alertmanager_silence
   failed_when: false
-  when: alertmanager_host is defined and alertmanager_host in hostvars
+  # Un hôte d'inventaire seulement (`hostvars` admettrait `localhost`), sinon pas de silence.
+  when: alertmanager_host is defined and alertmanager_host in groups['all']
 
 - name: Keep the silence id for the end of the intervention
   ansible.builtin.set_fact:

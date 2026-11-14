@@ -140,7 +140,7 @@
     2>/dev/null || true
   args:
     executable: /bin/bash
-  delegate_to: "{{ prometheus_host }}"
+  delegate_to: "{{ prometheus_host if prometheus_host in groups['all'] else undef(hint='prometheus_host: not an inventory host') }}"
   register: svcprobe_existing_target
   changed_when: false
   check_mode: false
@@ -177,7 +177,7 @@
     owner: "{{ remote_username }}"
     group: "{{ remote_username }}"
     mode: '0755'
-  delegate_to: "{{ prometheus_host }}"
+  delegate_to: "{{ prometheus_host if prometheus_host in groups['all'] else undef(hint='prometheus_host: not an inventory host') }}"
   become: true
   tags: [monitoring]
 
@@ -189,7 +189,7 @@
     owner: "{{ remote_username }}"
     group: "{{ remote_username }}"
     mode: '0644'
-  delegate_to: "{{ prometheus_host }}"
+  delegate_to: "{{ prometheus_host if prometheus_host in groups['all'] else undef(hint='prometheus_host: not an inventory host') }}"
   become: true
   tags: [monitoring]
 
@@ -201,7 +201,7 @@
     state: absent
   loop: "{{ svcprobe_existing_target.stdout_lines | default([]) }}"
   when: item | basename != svcprobe_instance ~ '.json'
-  delegate_to: "{{ prometheus_host }}"
+  delegate_to: "{{ prometheus_host if prometheus_host in groups['all'] else undef(hint='prometheus_host: not an inventory host') }}"
   become: true
   tags: [monitoring]
 

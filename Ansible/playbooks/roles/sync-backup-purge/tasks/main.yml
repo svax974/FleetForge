@@ -40,7 +40,7 @@
     user: "{{ sync_backup_dest_user }}"
     state: absent
     key: "{{ sync_backup_pubkey.content | b64decode | trim }}"
-  delegate_to: "{{ sync_backup_dest_host }}"
+  delegate_to: "{{ sync_backup_dest_host if sync_backup_dest_host in groups['all'] else undef(hint='sync_backup_dest_host: not an inventory host') }}"
   become: true
   when: sync_backup_pubkey.content is defined
 
@@ -48,5 +48,5 @@
   ansible.builtin.file:
     path: "{{ sync_backup_dest_dir }}"
     state: absent
-  delegate_to: "{{ sync_backup_dest_host }}"
+  delegate_to: "{{ sync_backup_dest_host if sync_backup_dest_host in groups['all'] else undef(hint='sync_backup_dest_host: not an inventory host') }}"
   become: true

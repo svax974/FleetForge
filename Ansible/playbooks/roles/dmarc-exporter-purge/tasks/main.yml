@@ -25,7 +25,7 @@
   ansible.builtin.file:
     path: "{{ prometheus_home }}/prometheus-configs/dmarc/{{ inventory_hostname }}.json"
     state: absent
-  delegate_to: "{{ prometheus_host }}"
+  delegate_to: "{{ prometheus_host if prometheus_host in groups['all'] else undef(hint='prometheus_host: not an inventory host') }}"
   notify: reload prometheus
 
 - name: Remove Prometheus scrape rules for port {{ dmarc_exporter_port }}

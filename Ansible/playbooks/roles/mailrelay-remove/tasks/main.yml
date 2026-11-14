@@ -36,7 +36,7 @@
   ansible.builtin.file:
     path: "/home/{{ remote_username }}/prometheus/prometheus-configs/postfix/{{ inventory_hostname }}.json"
     state: absent
-  delegate_to: "{{ prometheus_host }}"
+  delegate_to: "{{ prometheus_host if prometheus_host in groups['all'] else undef(hint='prometheus_host: not an inventory host') }}"
   ignore_errors: yes
 
 - name: Reload Prometheus after target removal
@@ -44,7 +44,7 @@
     name: prometheus
     state: started
     restart: yes
-  delegate_to: "{{ prometheus_host }}"
+  delegate_to: "{{ prometheus_host if prometheus_host in groups['all'] else undef(hint='prometheus_host: not an inventory host') }}"
   ignore_errors: yes
 
 - name: Remove UFW rules for mail ports

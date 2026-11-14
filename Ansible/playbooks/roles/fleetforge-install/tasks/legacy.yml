@@ -41,12 +41,12 @@
   ansible.builtin.shell: |
     take() {
       if [ -d "$1" ] && [ ! -e "$2" ]; then
-        mv "$1" "$2" && echo "moved $1"
+        mv -- "$1" "$2" && echo "moved $1"
       fi
     }
     take {{ ff_legacy_dir | quote }} {{ ff_dir | quote }}
     take {{ ('/home/' ~ ff_user ~ '/.config/infra-manager') | quote }} {{ ('/home/' ~ ff_user ~ '/.config/fleetforge') | quote }}
-    rm -f {{ (ff_dir ~ '/infra-manager.env') | quote }}
+    rm -f -- {{ (ff_dir ~ '/infra-manager.env') | quote }}
   register: ff_legacy_dirs
   changed_when: "'moved' in ff_legacy_dirs.stdout"
   become: true
@@ -58,6 +58,6 @@
   ansible.builtin.file:
     path: "/home/{{ remote_username }}/prometheus/prometheus-configs/infra-manager"
     state: absent
-  delegate_to: "{{ prometheus_host }}"
+  delegate_to: "{{ prometheus_host if prometheus_host in groups['all'] else undef(hint='prometheus_host: not an inventory host') }}"
   become: true
   tags: [monitoring]

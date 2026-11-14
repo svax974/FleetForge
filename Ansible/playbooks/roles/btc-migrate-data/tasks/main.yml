@@ -43,7 +43,7 @@
         state: present
         key: "{{ btc_migrate_key.public_key }}"
         comment: "{{ inventory_hostname }}-btc-migrate"
-      delegate_to: "{{ btc_migrate_src_host }}"
+      delegate_to: "{{ btc_migrate_src_host if btc_migrate_src_host in groups['all'] else undef(hint='btc_migrate_src_host: not an inventory host') }}"
       become: true
 
     - name: Open SSH on the source host for this host
@@ -53,7 +53,7 @@
         from_ip: "{{ ansible_host }}"
         port: "{{ ssh_custom_port }}"
         comment: "btc migrate target {{ inventory_hostname }} - ssh pull"
-      delegate_to: "{{ btc_migrate_src_host }}"
+      delegate_to: "{{ btc_migrate_src_host if btc_migrate_src_host in groups['all'] else undef(hint='btc_migrate_src_host: not an inventory host') }}"
       become: true
 
     - name: Allow this host through tcpwrappers on the source host (sshd)
@@ -65,7 +65,7 @@
         owner: root
         group: root
         mode: '0644'
-      delegate_to: "{{ btc_migrate_src_host }}"
+      delegate_to: "{{ btc_migrate_src_host if btc_migrate_src_host in groups['all'] else undef(hint='btc_migrate_src_host: not an inventory host') }}"
       become: true
 
     - name: Refresh the source host key in known_hosts

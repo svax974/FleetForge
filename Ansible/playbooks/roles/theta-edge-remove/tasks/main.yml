@@ -12,7 +12,8 @@
     path: "/home/{{ remote_username }}/prometheus/prometheus-configs/node-theta-edge/{{ inventory_hostname }}.json"
     state: absent
   delegate_to: "{{ prometheus_host }}"
-  when: prometheus_host is defined and prometheus_host in hostvars
+  # Un hôte d'inventaire seulement (`hostvars` admettrait `localhost`), sinon rien à retirer.
+  when: prometheus_host is defined and prometheus_host in groups['all']
 
 - name: Stop and disable the exporter
   ansible.builtin.systemd:

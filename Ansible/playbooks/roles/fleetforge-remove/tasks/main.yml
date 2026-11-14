@@ -96,7 +96,8 @@
     state: absent
   delegate_to: "{{ prometheus_host }}"
   become: true
-  when: prometheus_host is defined and prometheus_host in hostvars
+  # Un hôte d'inventaire seulement (`hostvars` admettrait `localhost`), sinon rien à retirer.
+  when: prometheus_host is defined and prometheus_host in groups['all']
 
 # Toutes les règles de ce service partent, quelles que soient leurs sources : le
 # retrait ne se fie pas à l'inventaire COURANT (whitelist, proxies, Prometheus),

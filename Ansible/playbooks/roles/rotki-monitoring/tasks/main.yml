@@ -8,6 +8,14 @@
 # 4302 est publié par Docker : une règle ufw n'aurait AUCUN effet (CLAUDE.md).
 # L'autorisation de l'hôte Prometheus est un drop-in de docker-ports-security ;
 # le DROP par défaut du port vient de host_vars/ctdapi.yml.
+# `-e` l'emporte sur l'inventaire : le script de pare-feu est lancé en root.
+- name: Check the firewall script is a plain absolute path
+  ansible.builtin.assert:
+    that: rotki_mon_firewall_script is match('^/[A-Za-z0-9._/-]*$')
+    fail_msg: "rotki_mon_firewall_script : chemin absolu sans espace ni métacaractère."
+    quiet: true
+  tags: [always]
+
 - name: Check that the Docker port firewall is installed
   ansible.builtin.stat:
     path: "{{ rotki_mon_firewall_script }}"
@@ -100,7 +108,7 @@
   ansible.builtin.uri:
     url: "http://{{ ansible_host }}:{{ rotki_port }}/api/1/ping"
     status_code: 200
-  delegate_to: "{{ prometheus_host }}"
+  delegate_to: "{{ prometheus_host if prometheus_host in groups['all'] else undef(hint='prometheus_host: not an inventory host') }}"
   retries: 3
   delay: 5
   register: rotki_mon_remote

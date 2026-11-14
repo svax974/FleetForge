@@ -25,7 +25,8 @@
     state: absent
   delegate_to: "{{ prometheus_host }}"
   become: true
-  when: prometheus_host is defined and prometheus_host in hostvars
+  # Un hôte d'inventaire seulement (`hostvars` admettrait `localhost`), sinon rien à retirer.
+  when: prometheus_host is defined and prometheus_host in groups['all']
 
 # La sonde part avec le service : laissée en place, elle publierait
 # `service_up 0` indéfiniment. svcprobe lui-même reste (autres services).

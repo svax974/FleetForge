@@ -9,7 +9,7 @@
   ansible.builtin.file:
     path: "{{ prometheus_home }}/prometheus-configs/node-llamacpp/{{ inventory_hostname }}-{{ llamacpp_instance_id }}.json"
     state: absent
-  delegate_to: "{{ prometheus_host }}"
+  delegate_to: "{{ prometheus_host if prometheus_host in groups['all'] else undef(hint='prometheus_host: not an inventory host') }}"
 
 - name: Remove UFW rule for Prometheus scrape port {{ llamacpp_port }}
   community.general.ufw:
