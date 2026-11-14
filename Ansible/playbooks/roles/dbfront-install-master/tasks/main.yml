@@ -52,5 +52,6 @@
   community.docker.docker_container_exec:
     container: postgres
     user: postgres
-    command: "pg_ctl -D /var/lib/postgresql/data -m fast -w reload -U {{ postgres_user }}"
+    # `argv` : une valeur est UN argument (la chaîne `command` est redécoupée façon shell).
+    argv: [pg_ctl, -D, /var/lib/postgresql/data, -m, fast, -w, reload, -U, "{{ postgres_user }}"]
     detach: no

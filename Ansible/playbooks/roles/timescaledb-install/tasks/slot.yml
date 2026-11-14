@@ -3,6 +3,10 @@
 # `tsdb_slots` — un slot par réplica, nommé comme lui. Idempotent. Partagé par replication.yml
 # (slots des pairs au déploiement) et rebuild-timescale-replica.yml (slot du serveur reconstruit,
 # exécuté en délégation sur le primaire).
+- name: Check the names that reach psql
+  ansible.builtin.import_tasks: validate.yml
+  tags: [always]
+
 # Les noms entrent dans une requête SQL entre apostrophes : grammaire des slots PostgreSQL.
 - name: Check the replication slot names (they are read into SQL)
   ansible.builtin.assert:

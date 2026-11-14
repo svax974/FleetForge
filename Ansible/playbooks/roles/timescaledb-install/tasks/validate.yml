@@ -1,0 +1,17 @@
+---
+# `-e` (l'API d'automatisation) l'emporte sur l'inventaire. La base et les comptes entrent dans des
+# commandes `psql -d` / `pg_isready -d` : une base qui contient `=` y est une CHAÎNE DE CONNEXION
+# (`host=ailleurs dbname=…` envoie la requête — et la décision primaire/réplica qu'on en tire — à une
+# autre machine) ; une valeur en `-…` y serait une option. Inclus en tête de main.yml, discover.yml
+# et slot.yml : les trois points d'entrée du rôle (`tasks_from`). Aucun fait requis (`tsdb_dir`, qui
+# dépend de `ansible_env`, est vérifié dans main.yml).
+- name: Database and role names are plain values
+  ansible.builtin.assert:
+    that:
+      - tsdb_db is match('^[A-Za-z0-9_][A-Za-z0-9_.-]*$')
+      - tsdb_user is match('^[A-Za-z0-9_][A-Za-z0-9_.-]*$')
+      - tsdb_repl_user is match('^[A-Za-z0-9_][A-Za-z0-9_.-]*$')
+      - (tsdb_port | string) is match('^[0-9]+$')
+    fail_msg: >-
+      tsdb_db, tsdb_user, tsdb_repl_user : nom simple ([A-Za-z0-9_.-], sans `-` en tête) ; tsdb_port : un nombre.
+    quiet: true

@@ -7,12 +7,16 @@
 # Lecture seule, jouée aussi sous --check. Un serveur injoignable ou sans PostgreSQL n'est simplement
 # pas candidat : c'est le cas normal de l'ancien primaire après une panne.
 
+- name: Check the names that reach psql
+  ansible.builtin.import_tasks: validate.yml
+  tags: [always]
+
 - name: Probe each server of the pair
   ansible.builtin.command:
     cmd: >-
       docker exec papangmetrics-timescaledb psql -U {{ tsdb_user | quote }} -d {{ tsdb_db | quote }} -Atc
       "SELECT pg_is_in_recovery()"
-  delegate_to: "{{ item }}"
+  delegate_to: "{{ item if item in groups['all'] else undef(hint='tsdb_cluster: not an inventory host') }}"
   loop: "{{ tsdb_cluster }}"
   register: tsdb_probe
   changed_when: false

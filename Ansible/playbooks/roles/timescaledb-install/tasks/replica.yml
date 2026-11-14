@@ -23,6 +23,14 @@
     fail_msg: "{{ inventory_hostname }} ne peut pas nommer un slot de réplication (minuscules, chiffres, _)."
     quiet: true
 
+# L'adresse du primaire entre dans la chaîne de connexion de pg_basebackup, recopiée dans
+# primary_conninfo : un espace y ajouterait une clé (`host=x sslmode=disable`).
+- name: Check the primary address (it is written into a connection string)
+  ansible.builtin.assert:
+    that: tsdb_primary_fqdn is match('^[A-Za-z0-9][A-Za-z0-9.:-]*$')
+    fail_msg: "tsdb_primary_fqdn : nom d'hôte ou adresse attendu ({{ tsdb_primary_fqdn }})"
+    quiet: true
+
 - name: Look for an existing database in the data directory
   ansible.builtin.stat:
     path: "{{ tsdb_dir }}/data/PG_VERSION"
@@ -39,7 +47,7 @@
         cmd: >-
           docker exec papangmetrics-timescaledb psql -U {{ tsdb_user | quote }} -d {{ tsdb_db | quote }} -tAc
           "SELECT count(*) FROM pg_replication_slots WHERE slot_name = '{{ inventory_hostname }}'"
-      delegate_to: "{{ tsdb_primary }}"
+      delegate_to: "{{ tsdb_primary if tsdb_primary in groups['all'] else undef(hint='tsdb_primary: not an inventory host') }}"
       register: tsdb_slot_check
       changed_when: false
       failed_when: tsdb_slot_check.stdout | trim != '1'

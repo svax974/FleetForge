@@ -42,6 +42,15 @@
     tsdb_user: "{{ papangmetrics_user | default('papangmetrics') }}"
     tsdb_db: "{{ papangmetrics_db | default('papangmetrics') }}"
   tasks:
+    # `psql -d` lit une base contenant `=` comme une chaîne de connexion (`host=ailleurs`).
+    - name: Noms de base et de rôle simples
+      ansible.builtin.assert:
+        that:
+          - tsdb_db is match('^[A-Za-z0-9_][A-Za-z0-9_.-]*$')
+          - tsdb_user is match('^[A-Za-z0-9_][A-Za-z0-9_.-]*$')
+        fail_msg: "papangmetrics_db / papangmetrics_user : nom simple ([A-Za-z0-9_.-], sans `-` en tête)."
+        quiet: true
+
     - name: Élire le primaire courant
       ansible.builtin.include_role:
         name: timescaledb-install

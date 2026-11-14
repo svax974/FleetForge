@@ -1,6 +1,18 @@
 ---
 # Deploy self-hosted TimescaleDB (Docker) for PapangMetrics indicators.
 
+- name: Check the names that reach psql
+  ansible.builtin.import_tasks: validate.yml
+  tags: [always]
+
+# `tsdb_dir` lance le chien de garde (cron, root) et se monte dans des conteneurs root.
+- name: The data directory is a plain absolute path
+  ansible.builtin.assert:
+    that: tsdb_dir is match('^/[A-Za-z0-9._/-]*$')
+    fail_msg: "tsdb_dir : chemin absolu sans espace ni métacaractère ({{ tsdb_dir }})"
+    quiet: true
+  tags: [always]
+
 # Paire primaire/réplica : élit d'abord le primaire courant (le serveur réellement inscriptible), pour que
 # rien ne dépende d'une valeur d'inventaire qu'une bascule rendrait fausse.
 - name: Elect the current primary of the pair
@@ -139,4 +151,4 @@
   ansible.builtin.cron:
     name: "papangmetrics-timescaledb disk-watchdog"
     minute: "*/2"
-    job: "{{ tsdb_dir }}/disk-watchdog.sh"
+    job: "{{ tsdb_dir | quote }}/disk-watchdog.sh"

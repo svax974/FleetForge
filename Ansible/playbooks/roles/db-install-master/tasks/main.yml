@@ -52,7 +52,8 @@
   community.docker.docker_container_exec:
     container: postgres
     user: postgres
-    command: "pg_ctl -D /var/lib/postgresql/data -m fast -w reload -U {{ postgres_user }}"
+    # `argv` : une valeur est UN argument (la chaîne `command` est redécoupée façon shell).
+    argv: [pg_ctl, -D, /var/lib/postgresql/data, -m, fast, -w, reload, -U, "{{ postgres_user }}"]
     detach: no
 
 # Populate the DB with dump if exists
@@ -76,11 +77,21 @@
     msg: "Found dbdump.sql, importing it..."
   when: dumpfile.stat.exists
 
+# `psql -d` lit une base contenant `=` comme une chaîne de connexion (`host=ailleurs`).
+- name: Check the database and role names
+  ansible.builtin.assert:
+    that:
+      - postgres_db is match('^[A-Za-z0-9_][A-Za-z0-9_.-]*$')
+      - postgres_user is match('^[A-Za-z0-9_][A-Za-z0-9_.-]*$')
+    fail_msg: "postgres_db / postgres_user : nom simple ([A-Za-z0-9_.-], sans `-` en tête)."
+    quiet: true
+  when: dumpfile.stat.exists
+
 - name: Populate initial database if dbdump.sql file exists
   community.docker.docker_container_exec:
     container: postgres
     user: postgres
-    command: "psql -U {{ postgres_user }} -d {{ postgres_db }} -f /var/lib/postgresql/data/dbdump.sql"
+    argv: [psql, -U, "{{ postgres_user }}", -d, "{{ postgres_db }}", -f, /var/lib/postgresql/data/dbdump.sql]
     detach: no
   when: dumpfile.stat.exists
 

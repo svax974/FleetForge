@@ -53,6 +53,17 @@
         quiet: true
       run_once: true
 
+    # `remote_username` compose le chemin des scripts lancés ; `psql -d` lit une base contenant `=`
+    # comme une chaîne de connexion (`host=ailleurs`).
+    - name: Compte et noms de base simples
+      ansible.builtin.assert:
+        that:
+          - remote_username is match('^[a-z_][a-z0-9_-]*$')
+          - papangmetrics_db | default('papangmetrics') is match('^[A-Za-z0-9_][A-Za-z0-9_.-]*$')
+          - papangmetrics_user | default('papangmetrics') is match('^[A-Za-z0-9_][A-Za-z0-9_.-]*$')
+        fail_msg: "remote_username, papangmetrics_db, papangmetrics_user : noms simples attendus."
+        quiet: true
+
     - name: Refuser une cible qui planifie ses propres dumps
       ansible.builtin.assert:
         that: >-

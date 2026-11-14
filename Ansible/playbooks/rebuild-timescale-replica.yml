@@ -45,6 +45,16 @@
         quiet: true
       run_once: true
 
+    # `psql -d` lit une base contenant `=` comme une chaîne de connexion (`host=ailleurs`).
+    - name: Noms de base et de rôle simples
+      ansible.builtin.assert:
+        that:
+          - rb_db is match('^[A-Za-z0-9_][A-Za-z0-9_.-]*$')
+          - rb_user is match('^[A-Za-z0-9_][A-Za-z0-9_.-]*$')
+        fail_msg: "papangmetrics_db / papangmetrics_user : nom simple ([A-Za-z0-9_.-], sans `-` en tête)."
+        quiet: true
+      run_once: true
+
     # Le primaire doit être là, inscriptible : sinon il n'y a rien à copier, et détruire le seul
     # exemplaire de la base serait irréversible.
     - name: Le primaire courant est en marche et inscriptible
@@ -52,7 +62,7 @@
         cmd: >-
           docker exec papangmetrics-timescaledb psql -U {{ rb_user | quote }} -d {{ rb_db | quote }} -Atc
           "SELECT pg_is_in_recovery()"
-      delegate_to: "{{ tsdb_primary }}"
+      delegate_to: "{{ tsdb_primary if tsdb_primary in groups['all'] else undef(hint='tsdb_primary: not an inventory host') }}"
       run_once: true
       register: rb_primary
       changed_when: false
@@ -76,7 +86,7 @@
         # Exécuté SUR LE PRIMAIRE (import statique dans un bloc délégué : la délégation s'applique
         # à toutes les tâches du rôle importé).
         - name: Slot de réplication sur le primaire
-          delegate_to: "{{ tsdb_primary }}"
+          delegate_to: "{{ tsdb_primary if tsdb_primary in groups['all'] else undef(hint='tsdb_primary: not an inventory host') }}"
           block:
             - ansible.builtin.import_role:
                 name: timescaledb-install
