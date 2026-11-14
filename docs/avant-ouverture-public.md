@@ -48,11 +48,36 @@ Lot 6.1 de la passerelle MCP (`fleetforge-gateway`) ; détail dans RUNNING.md, �
     d'aucun mot — seul `webapp_env_app_id` (défaut vide) était concerné, conservé à
     l'identique. Les `assert` ajoutés refusent désormais une valeur hors grammaire qui
     passait avant (nom de projet compose, port, durée, nom de slot, chemin de fichier).
-  - **Hors de portée du contrôle** : gabarits (`templates/*.j2` : scripts, unités systemd,
-    crontabs qui interpolent des variables) et autres modules qui finissent dans un shell
-    (`cron`, `script`, `expect`, commande de conteneur). Un `-e` y reste une injection
-    possible : à inventorier de la même façon. Motifs `grep -E` sans effet destructeur :
-    seul le quoting du shell est fait (une valeur y change ce qui est compté, rien d'autre).
+  - **Ce que `quote` ne couvre pas (14/11/2026, P3 à P6 de la relecture)** — même
+    scanner, mêmes tâches, plus `cron` (job), `script`, `expect`, `docker_container_exec`
+    et les scripts de `runuser -c` ; 206 tâches relevées, 0 restante :
+    - *chaîne de connexion* (P3) : `psql -d`/`pg_isready -d` lisent une base contenant `=`
+      comme un conninfo (`host=ailleurs`) — `assert` des noms de base/rôle
+      (`timescaledb-install/tasks/validate.yml`, `db-install-master`, playbooks timescale),
+      adresse du primaire du conninfo de `pg_basebackup` tenue, `docker_container_exec` en
+      `argv:` ;
+    - *délégation* (P5) : 130 `delegate_to` calculés (`prometheus_host`, destinations de
+      sauvegarde, `item`…) rendus `x if x in groups['all'] else undef(…)` — un `-e` ne peut
+      plus envoyer la tâche (et ses données) hors de l'inventaire, ni sur `localhost` (le
+      poste de contrôle) ; les 13 retraits « sauté si absent » gardent leur `when`, passé de
+      `in hostvars` (qui admet `localhost`) à `in groups['all']`. Changement : une valeur
+      hors inventaire échoue au lieu de tenter SSH vers ce nom ;
+    - *option* (P4) : `--` avant les chemins de `rm`/`du`/`mv`/`cp`/`grep`/`rsync`…, `assert`
+      `^/` sur les points de départ de `find` (où `--` ne protège pas) ;
+    - *programme* (P6) : 20 rôles et 6 playbooks tiennent en chemin absolu sans métacaractère
+      (`^/[A-Za-z0-9._/-]*$`) les variables qui désignent le programme lancé
+      (`openclaw_binary`, `*_bin_path`, `brk_home`, `tsdb_dir`…) ; `backup_cmd`
+      (retarget-backups) n'est plus une variable. Changement : un chemin avec espace, `~`,
+      `+`, `@`… est désormais refusé.
+    Rendu vérifié hors ligne (Templar d'Ansible), AUCUNE exécution sur un hôte ; valeurs
+    réelles des group_vars non lues.
+  - **Hors de portée du contrôle** : gabarits (`templates/*.j2` : 26 scripts shell — ~160
+    variables — et 19 unités systemd dont les `Exec*` interpolent), `win_shell`/
+    `win_powershell` (autre quoting : `'{{ x }}'` y casse sur une apostrophe), la commande
+    d'un `docker_container`, les `lineinfile`/`blockinfile` de sudoers, `executable:`. Un
+    `-e` y reste une injection possible : à inventorier de la même façon. Motifs `grep -E`
+    sans effet destructeur : seul le quoting du shell est fait. `hosts: "{{ dst_host }}"`
+    (migrations, duplication) : la cible d'un play reste choisie par `-e` (dans l'inventaire).
   - **Comptes `run`** : la règle des valeurs des comptes `check`
     (`^[A-Za-z0-9][A-Za-z0-9_.,:/@+=-]{0,255}$`) reste NON appliquée. Proposition : une
     option de compte `plain_extra_vars: true`, posée sur les comptes qui n'ont pas besoin
