@@ -1,49 +1,99 @@
 ---
-- name: Create /opt/docker-repo directory and make it owned by "{{ remote_username }}" user
-  file:
-    path: /opt/docker-repo/auth
+# Registre Docker privé : service, comptes, rétention. Voir defaults/main.yml.
+
+- name: Create the registry directories
+  ansible.builtin.file:
+    path: "{{ item }}"
     state: directory
     owner: "{{ remote_username }}"
     group: "{{ remote_username }}"
     mode: '0700'
+  loop:
+    - "{{ docker_repo_dir }}"
+    - "{{ docker_repo_dir }}/auth"
+    - "{{ docker_repo_dir }}/config"
+    - "{{ docker_repo_dir }}/data"
   become: true
-- name: Copy the htpasswd file to the docker-repo directory
-  template:
-    src: htpasswd
-    dest: /opt/docker-repo/auth/htpasswd
+
+# ── Comptes ────────────────────────────────────────────────────────────────
+# Le compte de lecture est tiré une fois et mis au coffre (jamais régénéré) ; le compte de poussée est le compte
+# historique du parc (`docker_repo_user` / `docker_repo_pass`). Le fichier htpasswd est reconstruit de façon
+# IDEMPOTENTE par le module (compare le mot de passe, ne change rien s'il est identique) : plus d'empreinte bcrypt
+# committée dans le rôle — une empreinte est un secret (CLAUDE.md).
+- name: Identify the fleet this host belongs to
+  ansible.builtin.set_fact:
+    docker_repo_fleet: >-
+      {{ (group_names | intersect(
+            query('ansible.builtin.fileglob', playbook_dir ~ '/group_vars/*.yml')
+            | map('basename') | map('splitext') | map('first') | list)) | first | default('') }}
+  delegate_to: localhost
+  become: false
+
+- name: Put the pull account password in the vault (drawn once, never replaced)
+  ansible.builtin.include_role:
+    name: vault-secret-setup
+  vars:
+    vsecret_file: "{{ playbook_dir }}/group_vars/{{ docker_repo_fleet }}.yml"
+    vsecret_owner: docker-repo-install
+    vsecret_items:
+      - name: docker_repo_pull_pass
+        kind: password
+        length: 40
+        comment: "Mot de passe du compte de LECTURE du registre Docker ({{ docker_repo_pull_user }}) : posé par `docker login` sur chaque hôte d'application (webapp-install). Distinct du compte de poussée."
+  when: docker_repo_pull_pass is not defined and docker_repo_fleet | length > 0
+
+- name: Take the pull password for this run
+  ansible.builtin.set_fact:
+    docker_repo_pull_pass: "{{ vsecret_values['docker_repo_pull_pass'] }}"
+  no_log: true
+  when: docker_repo_pull_pass is not defined and vsecret_values is defined and vsecret_values['docker_repo_pull_pass'] is defined
+
+- name: Check the push account is declared
+  ansible.builtin.assert:
+    that:
+      - docker_repo_pass is defined
+      - docker_repo_pull_pass is defined
+    fail_msg: "`docker_repo_user`/`docker_repo_pass` (compte de poussée) sont attendus dans le vault du parc."
+    quiet: true
+  when: not ansible_check_mode
+
+- name: Install the htpasswd library the account module needs
+  ansible.builtin.apt:
+    name: python3-passlib
+    state: present
+  become: true
+
+- name: Write the registry accounts
+  community.general.htpasswd:
+    path: "{{ docker_repo_dir }}/auth/htpasswd"
+    name: "{{ item.name }}"
+    password: "{{ item.password }}"
+    crypt_scheme: bcrypt
     owner: "{{ remote_username }}"
     group: "{{ remote_username }}"
     mode: '0640'
-
-- name: Create /opt/docker-repo directory and make it owned by "{{ remote_username }}" user
-  file:
-    path: /opt/docker-repo/config
-    state: directory
-    owner: "{{ remote_username }}"
-    group: "{{ remote_username }}"
-    mode: '0700'
+  loop:
+    - { name: "{{ docker_repo_push_user }}", password: "{{ docker_repo_pass | default('') }}" }
+    - { name: "{{ docker_repo_pull_user }}", password: "{{ docker_repo_pull_pass | default('') }}" }
+  loop_control:
+    label: "{{ item.name }}"
+  no_log: true
   become: true
-- name: Copy the config.yml file to the docker-repo directory
-  template:
+  when: not ansible_check_mode
+
+# ── Configuration et service ───────────────────────────────────────────────
+- name: Copy the registry configuration
+  ansible.builtin.template:
     src: config.yml
-    dest: /opt/docker-repo/config/config.yml
+    dest: "{{ docker_repo_dir }}/config/config.yml"
     owner: "{{ remote_username }}"
     group: "{{ remote_username }}"
     mode: '0640'
 
-- name: Create /opt/docker-repo directory and make it owned by "{{ remote_username }}" user
-  file:
-    path: /opt/docker-repo/data
-    state: directory
-    owner: "{{ remote_username }}"
-    group: "{{ remote_username }}"
-    mode: '0700'
-  become: true
-
-- name: Copy the docker-compose file in the docker-repo directory
-  template:
+- name: Copy the docker-compose file
+  ansible.builtin.template:
     src: docker-compose.yml
-    dest: /opt/docker-repo/docker-compose.yml
+    dest: "{{ docker_repo_dir }}/docker-compose.yml"
     owner: "{{ remote_username }}"
     group: "{{ remote_username }}"
     mode: '0640'
@@ -52,6 +102,46 @@
   community.docker.docker_compose_v2:
     project_name: docker-repo
     state: present
-    project_src: /opt/docker-repo
+    project_src: "{{ docker_repo_dir }}"
     pull: always
-    #build: true
+
+# ── Rétention ──────────────────────────────────────────────────────────────
+# Le script s'authentifie avec le compte de poussée (il supprime) : identifiants dans un fichier 0600 de root, jamais
+# dans les arguments d'un processus.
+- name: Keep the credentials of the retention script
+  ansible.builtin.copy:
+    dest: "{{ docker_repo_dir }}/auth/prune.cred"
+    content: "{{ docker_repo_push_user }}:{{ docker_repo_pass | default('') }}"
+    owner: root
+    group: root
+    mode: '0600'
+  no_log: true
+  become: true
+  when: not ansible_check_mode
+
+- name: Deploy the retention script
+  ansible.builtin.template:
+    src: docker-repo-prune.py.j2
+    dest: /usr/local/sbin/docker-repo-prune.py
+    owner: root
+    group: root
+    mode: '0750'
+  become: true
+
+- name: Deploy the retention unit and timer
+  ansible.builtin.template:
+    src: "docker-repo-prune.{{ item }}.j2"
+    dest: "/etc/systemd/system/docker-repo-prune.{{ item }}"
+    owner: root
+    group: root
+    mode: '0644'
+  loop: [service, timer]
+  become: true
+
+- name: Enable the retention timer
+  ansible.builtin.systemd:
+    name: docker-repo-prune.timer
+    state: started
+    enabled: true
+    daemon_reload: true
+  become: true

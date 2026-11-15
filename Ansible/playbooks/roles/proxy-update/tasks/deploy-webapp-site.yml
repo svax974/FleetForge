@@ -1,0 +1,61 @@
+---
+# Déploie le vhost GÉNÉRIQUE d'un nom public d'application sur ce proxy (reload seul, jamais les autres vhosts) —
+# pendant de deploy-one-site.yml pour les applications WebAppTemplate (famille `webapp`) qui n'ont pas de vhost écrit
+# à la main. Usage (depuis un play `hosts: proxies`) :
+#   - ansible.builtin.include_role:
+#       name: proxy-update
+#       tasks_from: deploy-webapp-site
+#     vars:
+#       webapp_vhost_entries: [llm-proxy]      # entrées d'inventaire servies par ce nom
+#
+# Un vhost écrit à la main `<projet>.conf` dans le répertoire du parc garde la priorité : voir webapp-sites.yml.
+
+- name: Fail early without entries
+  ansible.builtin.assert:
+    that:
+      - webapp_vhost_entries is defined
+      - webapp_vhost_entries | length > 0
+    fail_msg: "`webapp_vhost_entries` doit nommer au moins une entrée d'inventaire."
+    quiet: true
+
+- name: Collect the installed nginx version
+  ansible.builtin.command: nginx -v
+  register: nginx_version_raw
+  changed_when: false
+  check_mode: false
+
+- name: Set the nginx version fact
+  ansible.builtin.set_fact:
+    nginx_version: "{{ ((nginx_version_raw.stderr | default('')) ~ (nginx_version_raw.stdout | default(''))) | regex_search('nginx/([0-9.]+)', '\\1') | first }}"
+
+# Avant le gabarit : `_cloudflare_front.inc` référence cette autorité (un `nginx -t` en échec laisserait ici le vhost
+# cassé SUR LE DISQUE, donc le prochain redémarrage de nginx, tous vhosts confondus).
+- name: Install the Cloudflare origin-pull CA
+  ansible.builtin.include_role:
+    name: cloudflare-origin-pull
+    tasks_from: nginx
+  when: groups['all'] | map('extract', hostvars) | selectattr('cloudflare_front', 'defined') | selectattr('cloudflare_front') | list | length > 0
+
+- name: Deploy the generic vhost
+  vars:
+    wa_first: "{{ hostvars[webapp_vhost_entries | first] }}"
+    wa_pages: "{{ wa_first.cloudflare_front | default(false) | bool }}"
+    wa_name: "{{ ((wa_first.webapp_project | default(webapp_vhost_entries | first)) | lower | replace('_', '-') ~ '-back.' ~ domain_name) if wa_pages else wa_first.proxy_hostname }}"
+  ansible.builtin.template:
+    src: webapp.conf.j2
+    dest: "/etc/nginx/sites-enabled/webapp-{{ wa_name }}.conf"
+    owner: root
+    group: root
+  register: proxy_webapp_site_deployed
+
+# Contrôle AVANT de recharger : un vhost mal templaté couperait TOUS les vhosts de ce proxy au reload.
+- name: Test the nginx configuration before reloading
+  ansible.builtin.command: nginx -t
+  changed_when: false
+  when: proxy_webapp_site_deployed.changed
+
+- name: Reload nginx
+  ansible.builtin.systemd:
+    name: nginx
+    state: reloaded
+  when: proxy_webapp_site_deployed.changed

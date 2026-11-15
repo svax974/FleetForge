@@ -1,0 +1,27 @@
+---
+# Vhosts GÉNÉRIQUES des applications WebAppTemplate, pour la resynchronisation COMPLÈTE (tasks/main.yml vide puis
+# reconstruit /etc/nginx/sites-enabled : un vhost généré qui n'y serait pas rendu disparaîtrait au passage suivant).
+# Un nom par `proxy_hostname` ; une entrée qui a un vhost écrit à la main `<projet>.conf` dans le répertoire du parc
+# est ignorée (priorité à la main). Les entrées `webapp_proxy: external` n'ont pas de vhost.
+
+- name: Work out the generic vhosts to render
+  ansible.builtin.set_fact:
+    proxy_webapp_vhosts: >-
+      {%- set out = {} -%}
+      {%- for n in groups['all'] -%}
+      {%- set h = hostvars[n] -%}
+      {%- if 'webapp' in (h.ansible_roles | default([])) and h.proxy_hostname is defined and (h.webapp_proxy | default('internal')) != 'external' -%}
+      {%- if not ((proxy_update_dir ~ '/sites-enabled/' ~ (h.webapp_project | default(n)) ~ '.conf') is file) -%}
+      {%- set _ = out.update({h.proxy_hostname: (out.get(h.proxy_hostname, []) + [n])}) -%}
+      {%- endif -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+
+- name: Render the generic vhosts
+  ansible.builtin.include_tasks: deploy-webapp-site.yml
+  vars:
+    webapp_vhost_entries: "{{ item.value }}"
+  loop: "{{ proxy_webapp_vhosts | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"

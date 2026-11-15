@@ -1,0 +1,218 @@
+---
+# Déploiement GÉNÉRIQUE d'une application bâtie sur WebAppTemplate (vx-public / vx-private) : un seul passage rend
+# l'application atteignable ET surveillée — DNS, front Cloudflare Pages, vhost, filtrage DOCKER-USER, secrets,
+# .env, images (build → registre → hôte), sonde et alertes — et laisse des `.env` tels qu'un simple
+# `./scripts/run.sh prod` dans le dépôt de l'application redéploie ensuite sans Ansible.
+#
+#   ./play.sh web3c deploy-webapp.yml -e webapp=llm-proxy
+#   ./play.sh web3c deploy-webapp.yml -e webapp=papanglabs -e webapp_env=preprod
+#
+# `webapp` = le nom de l'entrée d'inventaire (ou son `webapp_project`). L'entrée porte `ansible_roles: [webapp]` et ses
+# attributs (roles/webapp-setup/defaults/main.yml) : `app_port`, `proxy_hostname`, `access_mode`, `cloudflare_front`,
+# `webapp_db_engine` à la main ; tout le reste est dérivé. Les secrets sont ADOPTÉS du .env existant puis mis au coffre,
+# ou tirés s'ils n'existent nulle part (jamais régénérés : CRYPT_DB_MASTER_KEY perdue = données illisibles).
+#
+# Pas de variable dans un `hosts:` (résolu avant les group_vars) : le premier play valide `webapp` puis range l'entrée
+# dans le groupe constant `webapp_target` (et sa machine canonique dans `webapp_machine`). Jamais de `--limit` : il
+# exclurait les proxies et la machine canonique.
+#
+# Phases (mode registre) : -e webapp_phase=all|build|push|deploy [-e webapp_tag=<tag>]
+#   build   construit l'image sur le constructeur du registre, rien d'autre
+#   push    construit ET pousse
+#   deploy  tire un tag déjà poussé et bascule (rollback = redéployer un ancien tag)
+# Tags :
+#   --tags config      rend seulement les .env (secrets, cibles, ports, registre)
+#   --tags image       .env puis run.sh (build/push/deploy selon webapp_phase), sans DNS ni pare-feu ni vhost
+#   --tags install     DNS + connexion de l'hôte au registre
+#   --tags proxy-conf  vhost (et activation des Authenticated Origin Pulls qui le précède)
+#   --tags security    filtrage DOCKER-USER
+#   --tags monitoring  sonde svcprobe
+# Un jamais-joué : `--check` rend le diff des .env sans écrire (valeurs masquées), sans connexion aux proxies.
+
+# ── Sélection de l'application ─────────────────────────────────────────────
+- name: Select the application
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tags: [always]
+  tasks:
+    - name: Check the parameters
+      ansible.builtin.assert:
+        that:
+          - webapp is defined
+          - webapp | length > 0
+          - webapp_phase | default('all') in ['all', 'build', 'push', 'deploy']
+        fail_msg: >-
+          `-e webapp=<entrée>` est requis (l'entrée d'inventaire ou son `webapp_project`) ;
+          `webapp_phase` : all | build | push | deploy.
+        quiet: true
+
+    - name: Find the entries of the application
+      ansible.builtin.set_fact:
+        wa_selected: >-
+          {%- set out = [] -%}
+          {%- for n in groups['all'] -%}
+          {%- set h = hostvars[n] -%}
+          {%- if 'webapp' in (h.ansible_roles | default([])) and (n == webapp or (h.webapp_project | default(n)) == webapp) and (h.webapp_env | default('prod')) == (webapp_env | default('prod')) -%}
+          {%- set _ = out.append(n) -%}
+          {%- endif -%}
+          {%- endfor -%}
+          {{ out }}
+
+    - name: Fail when no entry matches, or when the group has several entries
+      ansible.builtin.assert:
+        that: wa_selected | length == 1
+        fail_msg: >-
+          {{ 'Aucune entrée `webapp` ne correspond à' if wa_selected | length == 0 else wa_selected | length ~ ' entrées correspondent à' }}
+          webapp={{ webapp }} (environnement {{ webapp_env | default('prod') }}) : {{ wa_selected | join(', ') or '—' }}.
+          L'entrée porte `ansible_roles: [webapp]`. Les applications à plusieurs hôtes par environnement
+          (PapangWorkspace) ne sont pas encore prises en charge par ce playbook.
+        quiet: true
+
+    - name: Put the application in the target group
+      ansible.builtin.add_host:
+        name: "{{ wa_selected | first }}"
+        groups: webapp_target
+      changed_when: false
+
+    - name: Put the canonical machine of the application in its group
+      ansible.builtin.add_host:
+        name: "{{ hostvars[wa_selected | first].webapp_machine | default(wa_selected | first) }}"
+        groups: webapp_machine
+        webapp_target: "{{ wa_selected | first }}"
+      changed_when: false
+
+    # Les alertes de ce service sont celles du groupe générique `services` : sans lui la sonde est muette.
+    - name: Check the alert group the probe relies on is loaded
+      ansible.builtin.assert:
+        # Lu sur l'entrée : `localhost` n'appartient à aucun groupe du parc, donc n'a pas ses group_vars.
+        that: "'services' in (hostvars[wa_selected | first].prom_alert_groups | default([]))"
+        fail_msg: "Le groupe d'alertes `services` n'est pas dans `prom_alert_groups` du parc : ServiceDown ne sonnerait jamais."
+        quiet: true
+
+# ── Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ───────────────────────
+- name: Contrôle préalable
+  hosts: webapp_target
+  remote_user: "{{ remote_username }}"
+  tags: [always]
+  roles:
+    - role: host-preflight
+      preflight_require_docker: true
+  post_tasks:
+    - name: Work out the facts of the application
+      ansible.builtin.include_role:
+        name: webapp-setup
+        tasks_from: facts
+      tags: [always]
+
+# ── DNS + registre ─────────────────────────────────────────────────────────
+- name: Install the application prerequisites (DNS, registry login)
+  hosts: webapp_target
+  remote_user: "{{ remote_username }}"
+  tags: [install]
+  roles:
+    - webapp-install
+
+# ── Vhost ──────────────────────────────────────────────────────────────────
+# `cloudflare_front` : les Authenticated Origin Pulls sont activés chez Cloudflare AVANT le vhost, qui les exige.
+- name: Authenticated Origin Pulls côté Cloudflare
+  hosts: webapp_target
+  gather_facts: false
+  become: false
+  tags: [proxy-conf]
+  tasks:
+    - name: Create the parc certificate and enable it on the API name
+      ansible.builtin.include_role:
+        name: cloudflare-origin-pull
+      vars:
+        cfopull_part: cloudflare
+      when:
+        - cloudflare_front | default(false) | bool
+        - (webapp_proxy | default('internal')) != 'external'
+
+# Reload seul, jamais les autres vhosts. Un vhost écrit à la main `<projet>.conf` (parcs/<parc>/nginx/sites-enabled/) a
+# la priorité ; sinon le gabarit générique est rendu. Pas de `--limit` : il exclurait les proxies.
+- name: Vhost de l'application sur les proxies
+  hosts: proxies
+  remote_user: "{{ remote_username }}"
+  become: true
+  tags: [proxy-conf]
+  tasks:
+    - name: Deploy the hand-written vhost of the application
+      ansible.builtin.include_role:
+        name: proxy-update
+        tasks_from: deploy-one-site
+      vars:
+        site: "{{ hostvars[groups['webapp_target'] | first].webapp_project | default(groups['webapp_target'] | first) }}.conf"
+      when:
+        - (hostvars[groups['webapp_target'] | first].webapp_proxy | default('internal')) != 'external'
+        - (proxy_update_dir ~ '/sites-enabled/' ~ (hostvars[groups['webapp_target'] | first].webapp_project | default(groups['webapp_target'] | first)) ~ '.conf') is file
+
+    - name: Deploy the generic vhost of the application
+      ansible.builtin.include_role:
+        name: proxy-update
+        tasks_from: deploy-webapp-site
+      vars:
+        webapp_vhost_entries: "{{ groups['webapp_target'] }}"
+      when:
+        - (hostvars[groups['webapp_target'] | first].webapp_proxy | default('internal')) != 'external'
+        - hostvars[groups['webapp_target'] | first].proxy_hostname is defined
+        - not ((proxy_update_dir ~ '/sites-enabled/' ~ (hostvars[groups['webapp_target'] | first].webapp_project | default(groups['webapp_target'] | first)) ~ '.conf') is file)
+
+# ── Filtrage des ports publiés par Docker ──────────────────────────────────
+# Sur la machine CANONIQUE (`webapp_machine`, partagée ou non) : c'est elle qui porte `docker_ports_rules`.
+- name: Filter the application ports in DOCKER-USER
+  hosts: webapp_machine
+  remote_user: "{{ remote_username }}"
+  become: true
+  tags: [security]
+  roles:
+    - webapp-security
+
+# ── Silence pendant le déploiement ─────────────────────────────────────────
+# `deploy-full.sh` coupe le service le temps de la bascule : sans silence, ServiceDown part et la veille analyse une
+# panne qui n'en est pas une. Limité à ce service ; hors des phases qui touchent l'hôte, rien.
+- name: Silence the application alerts during the deploy
+  hosts: webapp_target
+  remote_user: "{{ remote_username }}"
+  gather_facts: false
+  tags: [deploy, image]
+  tasks:
+    - name: Silence service="<project>"
+      ansible.builtin.include_role:
+        name: alertmanager-update
+        tasks_from: silence
+      vars:
+        alertmanager_silence_matchers: [{ name: service, value: "{{ wa_project }}" }]
+        alertmanager_silence_comment: "deploy-webapp.yml {{ wa_project }}"
+      when: webapp_phase | default('all') in ['all', 'deploy']
+
+# ── .env + images + bascule ────────────────────────────────────────────────
+- name: Deploy the application
+  hosts: webapp_target
+  remote_user: "{{ remote_username }}"
+  tags: [config, image, deploy]
+  roles:
+    - webapp-deploy
+
+# ── Supervision (OBLIGATOIRE, voir CLAUDE.md) ──────────────────────────────
+- name: Supervision du service
+  hosts: webapp_target
+  remote_user: "{{ remote_username }}"
+  tags: [monitoring]
+  roles:
+    - role: webapp-monitoring
+      when: webapp_phase | default('all') in ['all', 'deploy']
+
+# Après la sonde : le service répond de nouveau, le silence ne couvre plus que la retombée des alertes de la coupure.
+- name: End the application silence
+  hosts: webapp_target
+  remote_user: "{{ remote_username }}"
+  gather_facts: false
+  tags: [deploy, image]
+  tasks:
+    - name: Shorten the silence
+      ansible.builtin.include_role:
+        name: alertmanager-update
+        tasks_from: unsilence
+      when: webapp_phase | default('all') in ['all', 'deploy']

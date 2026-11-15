@@ -1,0 +1,81 @@
+#!/usr/bin/env python3
+# Rétention du registre Docker privé : garde les {{ docker_repo_keep_tags }} tags les plus récents de chaque dépôt, supprime
+# les manifestes plus anciens, puis lance le ramasse-miettes (sans lui, supprimer un manifeste ne libère AUCUN octet).
+# Posé par docker-repo-install, lancé par docker-repo-prune.timer. `--dry-run` : montre sans rien supprimer.
+#
+# L'ancienneté est celle de l'image (champ `created` de sa configuration), pas l'ordre des noms : les tags sont des
+# sha de commit, non triables. Un manifeste n'est supprimé que si AUCUN tag conservé ne le référence.
+# Métriques (node_exporter, collecteur textfile) : docker_repo_prune_last_success_timestamp_seconds,
+# docker_repo_images, docker_repo_pruned_total — `RegistryPruneStale` alerte quand le passage cesse d'avoir lieu.
+import base64, json, subprocess, sys, time, urllib.error, urllib.request
+
+URL = "http://127.0.0.1:{{ docker_repo_port }}"
+KEEP = {{ docker_repo_keep_tags }}
+CRED = open("{{ docker_repo_dir }}/auth/prune.cred").read().strip()
+AUTH = "Basic " + base64.b64encode(CRED.encode()).decode()
+ACCEPT = ("application/vnd.docker.distribution.manifest.v2+json,"
+          "application/vnd.oci.image.manifest.v1+json")
+DRY = "--dry-run" in sys.argv
+
+
+def call(path, method="GET", accept=None):
+    req = urllib.request.Request(URL + path, method=method)
+    req.add_header("Authorization", AUTH)
+    if accept:
+        req.add_header("Accept", accept)
+    with urllib.request.urlopen(req, timeout=60) as r:
+        return r.status, dict(r.headers), r.read()
+
+
+def repos():
+    out, last = [], ""
+    while True:
+        _, _, body = call("/v2/_catalog?n=100" + (("&last=" + last) if last else ""))
+        page = json.loads(body).get("repositories") or []
+        if not page:
+            return out
+        out += page
+        last = page[-1]
+
+
+def created_of(repo, tag):
+    _, headers, body = call("/v2/%s/manifests/%s" % (repo, tag), accept=ACCEPT)
+    manifest = json.loads(body)
+    _, _, cfg = call("/v2/%s/blobs/%s" % (repo, manifest["config"]["digest"]))
+    return json.loads(cfg).get("created", ""), headers.get("Docker-Content-Digest")
+
+
+pruned = images = 0
+for repo in repos():
+    tags = (json.loads(call("/v2/%s/tags/list" % repo)[2]).get("tags")) or []
+    info = []
+    for tag in tags:
+        try:
+            created, digest = created_of(repo, tag)
+        except urllib.error.HTTPError as e:
+            print("WARN %s:%s illisible (%s), conservé" % (repo, tag, e.code))
+            continue
+        info.append((created, tag, digest))
+    info.sort(reverse=True)
+    images += len(info)
+    kept_digests = {d for _, _, d in info[:KEEP]}
+    for created, tag, digest in info[KEEP:]:
+        if digest in kept_digests:
+            continue
+        print("%s %s:%s (%s)" % ("DRY-RUN supprimerait" if DRY else "supprime", repo, tag, created))
+        if not DRY:
+            call("/v2/%s/manifests/%s" % (repo, digest), method="DELETE")
+            kept_digests.add(digest)
+        pruned += 1
+
+if not DRY:
+    subprocess.run(["docker", "exec", "docker-repo-registry", "registry", "garbage-collect", "--delete-untagged",
+                    "/etc/docker/registry/config.yml"], check=True)
+    with open("{{ docker_repo_textfile_dir }}/docker_repo_prune.prom.tmp", "w") as f:
+        f.write("# TYPE docker_repo_prune_last_success_timestamp_seconds gauge\n"
+                "docker_repo_prune_last_success_timestamp_seconds %d\n"
+                "# TYPE docker_repo_images gauge\ndocker_repo_images %d\n"
+                "# TYPE docker_repo_pruned_total gauge\ndocker_repo_pruned_total %d\n" % (time.time(), images - pruned, pruned))
+    import os
+    os.replace("{{ docker_repo_textfile_dir }}/docker_repo_prune.prom.tmp", "{{ docker_repo_textfile_dir }}/docker_repo_prune.prom")
+print("%d image(s) conservée(s), %d supprimée(s)%s" % (images - pruned, pruned, " (simulation)" if DRY else ""))

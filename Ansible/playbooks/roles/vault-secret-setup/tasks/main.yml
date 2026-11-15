@@ -1,0 +1,55 @@
+---
+# Produit des secrets UNE fois, les met au coffre du parc, et les rend à l'appelant.
+# Généralisation de `fleetforge-install/tasks/secrets.yml` (même principe) pour tout rôle
+# qui doit tirer des secrets à son premier déploiement.
+#
+# Entrées :
+#   vsecret_file    fichier group_vars du parc à compléter (lien vers le dépôt privé : blockinfile
+#                   écrit à travers, vérifié — CLAUDE.md « Pièges Ansible »)
+#   vsecret_owner   texte du marqueur (`# BEGIN <nom> — posé par <owner>`)
+#   vsecret_items   liste de { name, kind, length?, adopt?, comment? }
+#       name     nom de la variable de coffre (minuscules, chiffres, `_`)
+#       kind     base64_32 (32 octets, openssl) | hex_32 | password (alphanumérique, `length`, défaut 32)
+#                | api_key (`ac_live_` + 48 hex)
+#       adopt    valeur DÉJÀ en usage (lue dans un .env existant) : mise au coffre telle quelle, jamais
+#                remplacée par un tirage — un secret de chiffrement régénéré rend les données illisibles
+#       comment  commentaire posé au-dessus de la valeur dans le coffre
+# Sorties (faits de l'hôte, `no_log`) :
+#   vsecret_values   { nom: valeur en clair } de TOUS les items (coffre, adoptés ou tirés)
+#   vsecret_created  noms mis au coffre par ce passage (adoptés + tirés)
+#   vsecret_drawn    noms tirés au hasard (donc NOUVEAUX : à signaler à l'opérateur)
+#
+# Règles :
+#   - rien n'est jamais écrasé : une variable déjà au coffre (chargée par group_vars) gagne ;
+#   - `--stdin-name` : la valeur ne passe jamais en argument (lisible par `ps`) ;
+#   - en simulation (--check) rien n'est tiré ni écrit : les valeurs inconnues restent absentes de
+#     `vsecret_values` et l'appelant doit s'en accommoder ;
+#   - le fichier modifié est à COMMITTER dans le dépôt privé : sinon un autre clone tirerait d'autres
+#     secrets et l'accès posé par le premier deviendrait inexplicablement invalide.
+
+- name: Check the secret declarations
+  ansible.builtin.assert:
+    that:
+      - vsecret_file is defined
+      - vsecret_owner is defined
+      - vsecret_items is defined
+      - vsecret_items | map(attribute='name') | map('regex_search', '^[a-z][a-z0-9_]*$') | select('none') | list | length == 0
+      - vsecret_items | map(attribute='kind') | difference(['base64_32', 'hex_32', 'password', 'api_key']) | length == 0
+    fail_msg: >-
+      vault-secret-setup attend vsecret_file, vsecret_owner et vsecret_items (name `[a-z][a-z0-9_]*`,
+      kind base64_32 | hex_32 | password | api_key).
+    quiet: true
+
+- name: Start from an empty result
+  ansible.builtin.set_fact:
+    vsecret_values: {}
+    vsecret_created: []
+    vsecret_drawn: []
+  no_log: true
+
+- name: Settle each secret
+  ansible.builtin.include_tasks: one.yml
+  loop: "{{ vsecret_items }}"
+  loop_control:
+    loop_var: vsecret_item
+    label: "{{ vsecret_item.name }}"

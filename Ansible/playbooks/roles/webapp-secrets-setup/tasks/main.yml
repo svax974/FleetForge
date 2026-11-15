@@ -1,0 +1,111 @@
+---
+# Secrets d'une application WebAppTemplate : adoptés s'ils existent déjà dans son .env, tirés sinon,
+# mis au coffre du parc (group_vars/<parc>.yml, `ansible-vault encrypt_string`, un marqueur par valeur).
+#
+# RÈGLE ABSOLUE : on ADOPTE avant de tirer. Une clé déjà présente dans le .env de l'app est mise au
+# coffre telle quelle. Régénérer CRYPT_DB_MASTER_KEY rend les colonnes chiffrées de la base illisibles ;
+# régénérer DB_PASSWORD d'un Postgres déjà initialisé coupe le back de sa base ; régénérer JWT_SECRET
+# déconnecte tous les utilisateurs. Seule une clé ABSENTE du .env ET du coffre est tirée au hasard.
+#
+# Sortie : le fait `wa_secret_env` ({ CLÉ_DU_ENV: valeur }) que `webapp-env-update` (render) écrit dans
+# back/.env, et `wa_secrets_drawn` (noms de variables NOUVELLEMENT tirées, à signaler).
+#
+# Coffre : `<projet>_<clé>` en minuscules (`llm_proxy_crypt_db_master_key`), `<projet>_<env>_<clé>` hors prod
+# (`papanglabs_preprod_jwt_secret`) — deux environnements ne partagent jamais un secret.
+# Le fichier modifié est à COMMITTER dans le dépôt privé du parc.
+
+- name: Name the vault file of the fleet
+  ansible.builtin.set_fact:
+    wa_fleet: >-
+      {{ (group_names | intersect(
+            query('ansible.builtin.fileglob', playbook_dir ~ '/group_vars/*.yml')
+            | map('basename') | map('splitext') | map('first') | list)) | first | default('') }}
+  tags: [secrets]
+
+- name: Fail when the fleet cannot be identified
+  ansible.builtin.assert:
+    that: wa_fleet | length > 0
+    fail_msg: >-
+      Aucun playbooks/group_vars/<parc>.yml ne correspond aux groupes de {{ inventory_hostname }}
+      ({{ group_names | join(', ') }}) : les secrets iraient dans le mauvais parc, ou nulle part.
+    quiet: true
+  tags: [secrets]
+
+# Le .env déjà en place (adoption). Absent : rien à adopter, tout est tiré.
+- name: Read the env file already in use
+  ansible.builtin.set_fact:
+    wa_secrets_env_text: "{{ lookup('ansible.builtin.file', wa_src ~ wa_back_env_file, errors='ignore') | default('', true) }}"
+  no_log: true
+  delegate_to: localhost
+  become: false
+  tags: [secrets]
+
+- name: Declare the secrets of the application
+  vars:
+    wa_prefix: "{{ (wa_project | lower | regex_replace('[^a-z0-9]', '_')) ~ ('' if wa_env == 'prod' else '_' ~ (wa_env | regex_replace('[^a-z0-9]', '_'))) }}"
+    wa_catalog:
+      - { key: CRYPT_DB_MASTER_KEY,       kind: base64_32, note: "Clé maître du chiffrement des colonnes de la base. NE JAMAIS la régénérer : les données chiffrées deviendraient illisibles." }
+      - { key: CRYPT_SESSION_PRIVATE_KEY, kind: base64_32, note: "Clé privée P-256 du chiffrement de transport (poignée de main x-crypt-session)." }
+      - { key: CRYPT_DB_DERIVATION_SALT,  kind: hex_32,    note: "Sel de la dérivation des clés de colonnes." }
+      - { key: JWT_SECRET,                kind: hex_32,    note: "Secret de signature des sessions JWT (un changement déconnecte tous les utilisateurs)." }
+      - { key: METRICS_TOKEN,             kind: hex_32,    note: "Jeton bearer de lecture de /metrics." }
+    # Une ligne `CLÉ=valeur` de .env (valeur entre guillemets ou non, commentaire de fin exclu). Scalaire entre
+    # guillemets : l'antislash y est consommé par YAML (`\\n` → `\n` pour le moteur de regex), contrairement à `>-`.
+    wa_adopt_tpl: "(?m)^[ ]*{key}=[\"']?([^\"'\\n#]*)"
+    wa_db_item:
+      - { key: DB_PASSWORD, kind: password, length: 40, note: "Mot de passe de la base de l'application (Postgres du conteneur : fixé à l'initialisation du volume, ne jamais le changer sans migrer)." }
+    wa_bootstrap_item:
+      - { key: BOOTSTRAP_API_KEY, kind: api_key, note: "Clé d'API d'amorçage (scope admin) pour l'auto-provisionnement du runner." }
+    wa_all: >-
+      {{ wa_catalog
+         + (wa_db_item if (wa_db_selfhosted | bool) else [])
+         + (wa_bootstrap_item if (webapp_bootstrap_key | default(false) | bool) else []) }}
+  ansible.builtin.set_fact:
+    wa_secret_items: >-
+      {%- set out = [] -%}
+      {%- for it in wa_all -%}
+      {%- set adopted = (wa_secrets_env_text | regex_findall(wa_adopt_tpl | replace('{key}', it.key)) | last | default('') | trim) -%}
+      {%- set _ = out.append({
+            'name': wa_prefix ~ '_' ~ (it.key | lower),
+            'env_key': it.key,
+            'kind': it.kind,
+            'length': it.length | default(32),
+            'adopt': adopted,
+            'comment': it.note ~ ' (' ~ wa_project ~ (', ' ~ wa_env if wa_env != 'prod' else '') ~ ')'}) -%}
+      {%- endfor -%}
+      {{ out }}
+  no_log: true
+  tags: [secrets]
+
+- name: Put the secrets in the vault (adopt first, draw the missing ones)
+  ansible.builtin.include_role:
+    name: vault-secret-setup
+  vars:
+    vsecret_file: "{{ playbook_dir }}/group_vars/{{ wa_fleet }}.yml"
+    vsecret_owner: webapp-secrets-setup
+    vsecret_items: "{{ wa_secret_items }}"
+  tags: [secrets]
+
+- name: Map the secrets to the env keys
+  ansible.builtin.set_fact:
+    wa_secret_env: >-
+      {%- set out = {} -%}
+      {%- for it in wa_secret_items -%}
+      {%- if vsecret_values[it.name] is defined -%}{%- set _ = out.update({it.env_key: vsecret_values[it.name]}) -%}{%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+    wa_secrets_drawn: "{{ vsecret_drawn }}"
+    wa_secrets_adopted: "{{ vsecret_created | difference(vsecret_drawn) }}"
+  no_log: true
+  tags: [secrets]
+
+# Jamais de valeur : seulement les noms de variables, pour que l'opérateur sache quoi committer et quoi sauvegarder.
+- name: Report what was put in the vault
+  ansible.builtin.debug:
+    msg: >-
+      Coffre {{ wa_fleet }}.yml : {{ wa_secrets_adopted | length }} secret(s) ADOPTÉ(S) du .env existant
+      ({{ wa_secrets_adopted | join(', ') or '—' }}), {{ wa_secrets_drawn | length }} NOUVEAU(X) tiré(s)
+      ({{ wa_secrets_drawn | join(', ') or '—' }}). Fichier à committer dans le dépôt privé du parc
+      ; les clés de chiffrement doivent AUSSI être sauvegardées hors du serveur.
+  when: (wa_secrets_adopted | length > 0) or (wa_secrets_drawn | length > 0)
+  tags: [secrets]

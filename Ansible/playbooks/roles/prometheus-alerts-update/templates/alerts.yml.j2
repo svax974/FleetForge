@@ -1702,6 +1702,27 @@ groups:
             destination du `rua` : c'est le symptôme d'une supervision DMARC
             devenue décorative.
 {% endif %}
+{% if 'registry' in prom_alert_groups %}
+
+  # ── Registre Docker privé ──────────────────────────────────────────────────
+  # Le registre qui ne fait plus sa rétention se remplit sans symptôme (une image d'application pèse jusqu'à ~1,2 Go
+  # et chaque déploiement en ajoute une) : le jour où le disque est plein, plus AUCUN déploiement ne peut pousser, et
+  # c'est découvert en plein déploiement. Série : docker-repo-prune.py (collecteur textfile de node_exporter). Contrôle
+  # après déploiement : `count(docker_repo_prune_last_success_timestamp_seconds)` doit valoir 1 — sinon règle décorative.
+  - name: registry
+    rules:
+      - alert: RegistryPruneStale
+        expr: time() - docker_repo_prune_last_success_timestamp_seconds > {{ prom_alert_registry_prune_max_age_seconds | default(172800) }}
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Rétention du registre Docker en retard sur {{ '{{' }} $labels.instance {{ '}}' }}"
+          description: >-
+            Aucun passage réussi de docker-repo-prune depuis plus de
+            {{ ((prom_alert_registry_prune_max_age_seconds | default(172800)) / 3600) | int }} h (il est quotidien). Le registre se
+            remplit : `journalctl -u docker-repo-prune` sur {{ '{{' }} $labels.instance {{ '}}' }}.
+{% endif %}
 {% if 'backups' in prom_alert_groups %}
 
   # ── Sauvegardes ────────────────────────────────────────────────────────────

@@ -1,0 +1,19 @@
+---
+# Déploiement d'une application WebAppTemplate par les scripts DU DÉPÔT APP (scripts/run.sh → deploy-full.sh), pas par
+# un docker_compose Ansible : l'outillage de l'app (bascule sans coupure, mode maintenance, sauvegarde de la base avant
+# bascule, rollback automatique, migrations) est la partie précieuse, et la réécrire en Ansible diverge (cf. historique
+# d'agenthub-deploy / llm-proxy-deploy). Ansible ORCHESTRE : il rend les .env depuis l'inventaire et le coffre
+# (webapp-env-update, tasks_from: render), lance le script, et vérifie que l'app répond.
+#
+# Phases (mode registre, voir scripts/lib/deploy-images.sh du template) :
+#   webapp_phase: all     build + push + deploy (défaut, comme un `run.sh prod` à la main)
+#                 build   construit l'image sur le constructeur, ne pousse rien, ne touche aucun hôte
+#                 push    construit ET pousse, ne touche aucun hôte
+#                 deploy  tire un tag déjà poussé et bascule : exige `-e webapp_tag=<tag>` (aussi un rollback par tag)
+# `webapp_update_common: false` (inventaire ou -e) passe --no-update-common ; `webapp_migrate: true` passe --migrate.
+webapp_phase: all
+webapp_tag: ""
+
+# Attente de santé après un déploiement (boucle locale, sur l'hôte : valable quel que soit l'état du pare-feu).
+webapp_health_retries: 24
+webapp_health_delay: 10

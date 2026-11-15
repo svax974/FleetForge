@@ -1,0 +1,136 @@
+---
+# Calcule les faits `wa_*` de l'entrée courante. À inclure en TÊTE de chaque rôle
+# `webapp-*` : `include_role: { name: webapp-setup, tasks_from: facts }` — les faits
+# restent attachés à l'hôte pour la suite du run, les autres plays (machine
+# canonique, proxies) les lisent par `hostvars[<entrée>].wa_*`.
+#
+# Aucune connexion : tout vient de l'inventaire, du coffre et de apps.yml.
+
+- name: Check that the entry declares what cannot be guessed
+  ansible.builtin.assert:
+    that:
+      - app_port is defined
+      - webapp_db_engine is defined
+      - webapp_db_engine in webapp_db_engines
+      - (webapp_proxy | default('internal')) in ['internal', 'external']
+      - (webapp_proxy | default('internal')) == 'external' or proxy_hostname is defined
+      - (webapp_env | default('prod')) is match('^[a-z][a-z0-9-]*$')
+    fail_msg: >-
+      {{ inventory_hostname }} : une entrée webapp déclare `app_port`, `webapp_db_engine`
+      ({{ webapp_db_engines | join(' | ') }}) et `proxy_hostname` (sauf `webapp_proxy: external`).
+      Reçu : app_port={{ app_port | default('∅') }}, webapp_db_engine={{ webapp_db_engine | default('∅') }},
+      proxy_hostname={{ proxy_hostname | default('∅') }}.
+    quiet: true
+  tags: [always]
+
+- name: Work out the identity, the ports and the front mode of the application
+  ansible.builtin.set_fact:
+    wa_project: "{{ webapp_project | default(inventory_hostname) }}"
+    wa_app_id: "{{ webapp_app_id | default(webapp_project | default(inventory_hostname)) }}"
+    wa_env: "{{ webapp_env | default('prod') }}"
+    wa_front_port: "{{ app_port | int }}"
+    wa_back_port: "{{ back_port | default(app_port | int + 1) | int }}"
+    wa_db_port: "{{ webapp_db_port | default(app_port | int + 2) | int }}"
+    wa_redis_port: "{{ webapp_redis_port | default(app_port | int + 3) | int }}"
+    wa_front_mode: "{{ 'pages' if (cloudflare_front | default(false) | bool) else 'container' }}"
+    wa_machine: "{{ webapp_machine | default(inventory_hostname) }}"
+    wa_machine_key: "{{ ansible_host }}:{{ ansible_port | default(22) }}"
+    wa_replicas: "{{ webapp_replicas | default(1) | int }}"
+    wa_worker: "{{ webapp_worker | default('off') }}"
+    wa_db_selfhosted: "{{ webapp_db_engine in webapp_db_selfhosted_engines }}"
+    wa_db_exposed: "{{ webapp_db_exposed | default(false) | bool }}"
+    wa_external: "{{ (webapp_proxy | default('internal')) == 'external' }}"
+    wa_migrate: "{{ webapp_migrate | default(false) | bool }}"
+    wa_update_common: "{{ webapp_update_common | default(true) | bool }}"
+  tags: [always]
+
+# Env files : `.env` (prod) ou `.env.<env>` ; le front retombe sur `front/.env` s'il n'a pas de variante.
+- name: Name the env files of the environment
+  ansible.builtin.set_fact:
+    wa_back_env_file: "{{ 'back/.env' if wa_env == 'prod' else 'back/.env.' ~ wa_env }}"
+    wa_front_env_file: "{{ 'front/.env' if wa_env == 'prod' else 'front/.env.' ~ wa_env }}"
+  tags: [always]
+
+# Dépôt applicatif sur le poste de contrôle : .private/apps/apps.yml (`<id>: <chemin>`).
+- name: Read the application registry of the control machine
+  ansible.builtin.set_fact:
+    wa_apps_text: "{{ lookup('ansible.builtin.file', webapp_apps_file, errors='ignore') | default('', true) }}"
+  delegate_to: localhost
+  become: false
+  tags: [always]
+
+- name: Find the application checkout on the control machine
+  vars:
+    # `<id>: <chemin>` ligne par ligne (le chemin ne franchit pas la fin de ligne). Scalaire entre guillemets : l'antislash
+    # y est consommé par YAML, contrairement à `>-` où il resterait littéral (CLAUDE.md « Pièges Ansible »).
+    wa_apps_tpl: "(?m)^{id}: *([^ #\\n]+)"
+    wa_apps_found: "{{ wa_apps_text | regex_findall(wa_apps_tpl | replace('{id}', wa_app_id | regex_escape)) }}"
+  ansible.builtin.set_fact:
+    wa_src: "{{ (wa_apps_found | first | regex_replace('/*$', '/')) if wa_apps_found | length > 0 else '' }}"
+  tags: [always]
+
+- name: Fail when the application has no checkout registered
+  ansible.builtin.assert:
+    that: wa_src | length > 1
+    fail_msg: >-
+      `{{ wa_app_id }}` n'est pas déclarée dans {{ webapp_apps_file }} (une ligne `{{ wa_app_id }}: <chemin du dépôt>`).
+      Ajouter l'application au dépôt privé du parc (`webapp_app_id` sur l'entrée si le nom diffère).
+    quiet: true
+  tags: [always]
+
+# Registre du PARC (un parc ne reçoit que ses données) : l'entrée portant la famille `docker-repo`. Sans elle, ou avec
+# `webapp_registry: false`, l'application reste en mode historique (build sur la cible, DEPLOY_REGISTRY absent).
+- name: List the hosts carrying the registry family
+  ansible.builtin.set_fact:
+    wa_registry_hosts: >-
+      {{ groups['all'] | map('extract', hostvars) | selectattr('ansible_roles', 'defined')
+         | selectattr('ansible_roles', 'contains', 'docker-repo') | map(attribute='inventory_hostname') | list }}
+  tags: [always]
+
+- name: Settle the registry settings
+  ansible.builtin.set_fact:
+    wa_registry_on: "{{ (webapp_registry | default(true) | bool) and (wa_registry_hosts | length > 0) and (hostvars[wa_registry_hosts | first].ansible_host | default('') is match('^[0-9a-zA-Z.:-]+$')) and (hostvars[wa_registry_hosts | first].ansible_host != 'xxx.xxx.xxx.xxx') }}"
+    wa_registry_entry: "{{ wa_registry_hosts | first | default('') }}"
+  tags: [always]
+
+- name: Name the registry endpoints
+  ansible.builtin.set_fact:
+    # Nom que les HÔTES tirent (TLS, derrière les proxies) et nom que le CONSTRUCTEUR pousse (sa propre machine, sans TLS).
+    wa_registry: "{{ hostvars[wa_registry_entry].proxy_hostname | default(hostvars[wa_registry_entry].hostname) }}"
+    wa_registry_push: "localhost:{{ docker_repo_port | default(5000) }}"
+    wa_builder_host: "{{ remote_username }}@{{ hostvars[wa_registry_entry].ansible_host }}"
+    wa_builder_ssh_port: "{{ hostvars[wa_registry_entry].ansible_port | default(ssh_custom_port | default(22)) }}"
+  when: wa_registry_on | bool
+  tags: [always]
+
+# Un bloc de WEBAPP_PORT_BLOCK ports consécutifs par app : deux entrées de la même machine qui se chevauchent se
+# disputeraient un port publié (constat : REDIS_PORT=6379 déjà pris par ctdapi sur la machine d'AgentHub).
+- name: Check that no other webapp of the machine overlaps this port block
+  vars:
+    wa_others: >-
+      {{ groups['all'] | map('extract', hostvars) | selectattr('app_port', 'defined')
+         | selectattr('ansible_roles', 'defined') | selectattr('ansible_roles', 'contains', 'webapp')
+         | rejectattr('inventory_hostname', 'equalto', inventory_hostname)
+         | selectattr('ansible_host', 'equalto', ansible_host)
+         | selectattr('ansible_port', 'equalto', ansible_port | default(22)) | list }}
+    wa_overlapping: >-
+      {{ wa_others | selectattr('app_port', 'ge', (app_port | int) - (webapp_port_block | int) + 1)
+         | selectattr('app_port', 'lt', (app_port | int) + (webapp_port_block | int))
+         | map(attribute='inventory_hostname') | list }}
+  ansible.builtin.assert:
+    that: wa_overlapping | length == 0
+    fail_msg: >-
+      {{ inventory_hostname }} (app_port {{ app_port }}, bloc de {{ webapp_port_block }} ports) chevauche
+      {{ wa_overlapping | join(', ') }} sur la même machine : front, back-lb, Postgres et Redis publient
+      app_port … app_port+{{ webapp_port_block | int - 1 }}. Écarter les `app_port`, ou fixer `webapp_db_port` /
+      `webapp_redis_port` / `back_port` explicitement.
+    quiet: true
+  tags: [always]
+
+- name: Report the facts of the application
+  ansible.builtin.debug:
+    msg: >-
+      {{ wa_project }} ({{ wa_env }}) sur {{ ansible_host }} : front {{ wa_front_port }} ({{ wa_front_mode }}),
+      back-lb {{ wa_back_port }}, db {{ wa_db_port }} ({{ webapp_db_engine }}), redis {{ wa_redis_port }} ;
+      registre {{ wa_registry | default('— (mode historique)') }} ; dépôt {{ wa_src }}.
+  tags: [always]

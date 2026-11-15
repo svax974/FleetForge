@@ -1,0 +1,93 @@
+---
+# Premier déploiement d'une application WebAppTemplate : ce qui doit exister AVANT le premier `run.sh` et
+# qui ne dépend pas du code de l'application. Joué sur l'entrée d'inventaire de l'app (machine cible).
+#
+#   1. DNS : CNAME du nom public vers le front des proxies (jamais un A vers l'IP de l'hôte — CLAUDE.md). Rien pour
+#      `cloudflare_front: true` (nom servi par Cloudflare : géré chez eux, voir cloudflare-pages-setup) ni pour
+#      `webapp_proxy: external` (VPS tiers, aucun proxy du parc) ;
+#   2. registre Docker : l'utilisateur de déploiement s'y connecte AVEC SON PROPRE COMPTE (lecture seule), car c'est
+#      l'hôte qui tire l'image (`docker pull` lancé par ssh) — le poste de contrôle ne détient jamais de secret de registre ;
+#   3. témoin d'exécution sur l'hôte (host-preflight, stamp).
+#
+# Ne touche à aucun conteneur et à aucun autre service de la machine (souvent partagée).
+
+- name: Work out the facts of the application
+  ansible.builtin.include_role:
+    name: webapp-setup
+    tasks_from: facts
+  when: wa_project is not defined
+
+# ── 1. DNS ─────────────────────────────────────────────────────────────────
+- name: Ensure the service CNAME to the canonical proxy front
+  ansible.builtin.include_role:
+    name: cloudflare-dns-update
+    tasks_from: cnames
+  vars:
+    cfdns_cname_scope:
+      - "{{ inventory_hostname }}"
+  when:
+    - not (wa_external | bool)
+    - proxy_hostname is defined
+    - not (cloudflare_front | default(false) | bool)
+
+# ── 2. Registre ────────────────────────────────────────────────────────────
+- name: Check the pull account of the registry is declared
+  ansible.builtin.assert:
+    that:
+      - docker_repo_pull_pass is defined
+    fail_msg: >-
+      Le parc a un registre ({{ wa_registry }}) mais pas de compte de LECTURE : `docker_repo_pull_pass` (vault ; compte
+      `docker_repo_pull_user`, défaut `srvc-pull`) dans group_vars/<parc>.yml. `deploy-docker-repo.yml` les tire et les pose
+      (compte de poussée et compte de lecture distincts) ; ou `-e webapp_registry=false` pour rester en build sur l'hôte.
+    quiet: true
+  when: wa_registry_on | bool
+
+- name: Read the Docker credentials of the deploy user
+  ansible.builtin.slurp:
+    src: "/home/{{ remote_username }}/.docker/config.json"
+  register: wa_docker_config
+  failed_when: false
+  changed_when: false
+  when: wa_registry_on | bool
+
+- name: Log the deploy user in to the registry (pull account)
+  ansible.builtin.command:
+    cmd: docker login {{ wa_registry | quote }} --username {{ (docker_repo_pull_user | default('srvc-pull')) | quote }} --password-stdin
+    stdin: "{{ docker_repo_pull_pass }}"
+    stdin_add_newline: false
+  no_log: true
+  register: wa_registry_login
+  changed_when: true
+  when:
+    - wa_registry_on | bool
+    - (wa_docker_config.content | default('') | b64decode) is not search(wa_registry)
+
+- name: Verify the host can reach the registry API
+  ansible.builtin.uri:
+    url: "https://{{ wa_registry }}/v2/"
+    status_code: [200, 401]
+    timeout: 10
+  register: wa_registry_reach
+  failed_when: false
+  changed_when: false
+  when: wa_registry_on | bool
+
+- name: Warn when the registry cannot be reached from this host
+  ansible.builtin.debug:
+    msg: >-
+      {{ wa_registry }} injoignable depuis {{ inventory_hostname }} (statut {{ wa_registry_reach.status | default('aucun') }}) :
+      le vhost du registre n'admet pas encore cette machine (liste d'accès dérivée des entrées webapp,
+      `./play.sh <parc> deploy-docker-repo.yml --tags proxy-conf`), ou le DNS n'est pas publié. Le premier `docker pull`
+      échouera avant la bascule (la version en place continue de servir).
+  when:
+    - wa_registry_on | bool
+    - wa_registry_reach.status | default(0) not in [200, 401]
+
+# ── 3. Témoin ──────────────────────────────────────────────────────────────
+- name: Leave a stamp of this execution on the host
+  ansible.builtin.include_role:
+    name: host-preflight
+    tasks_from: stamp
+  vars:
+    stamp_name: "webapp-{{ wa_project }}"
+    stamp_detail: "webapp-install : {{ wa_project }} ({{ wa_env }}), registre {{ wa_registry | default('aucun') }}"

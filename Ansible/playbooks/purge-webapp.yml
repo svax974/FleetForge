@@ -1,0 +1,27 @@
+---
+# Purge d'une application WebAppTemplate : tout ce que fait `remove-webapp.yml`, PLUS les volumes (BASE DE DONNÉES),
+# les images locales et le répertoire de l'application. Irréversible : exige `-e webapp_purge_confirm=<projet>`.
+#
+#   ./play.sh web3c purge-webapp.yml -e webapp=llm-proxy -e webapp_purge_confirm=llm-proxy
+- name: Select the application
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tags: [always]
+  tasks:
+    - name: Check the parameter and find the entry
+      ansible.builtin.assert:
+        that: webapp is defined and webapp in groups['all']
+        fail_msg: "`-e webapp=<entrée d'inventaire>` est requis."
+        quiet: true
+    - name: Put the application in the target group
+      ansible.builtin.add_host:
+        name: "{{ webapp }}"
+        groups: webapp_target
+      changed_when: false
+
+- name: Purger l'application de sa machine
+  hosts: webapp_target
+  remote_user: "{{ remote_username }}"
+  roles:
+    - webapp-purge

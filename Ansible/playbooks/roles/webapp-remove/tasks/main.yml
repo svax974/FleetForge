@@ -1,0 +1,61 @@
+---
+# Arrête et retire les conteneurs d'une application WebAppTemplate, et sa sonde de supervision. Conserve les volumes
+# (base, dossier partagé) : leur suppression relève de `webapp-purge`.
+#
+# Balayage par ÉTIQUETTE compose : deploy-full.sh lance le back en projet `<PROJECT_NAME>-back-<hôte>` (et le front en
+# `…-front-<hôte>`), avec des conteneurs sans container_name (réplicas `…-back-1`) que `clean-remote.sh` ne connaît pas.
+# Rien d'autre sur la machine (souvent partagée) ne porte ces étiquettes. Un projet compose d'une AUTRE app, ou d'un
+# autre environnement de la même app, n'est jamais touché : le préfixe est `<projet>-back-` / `<projet>-front-`.
+#
+# Ne retire PAS : le filtrage DOCKER-USER (règles dérivées, un play `-security` ne sait pas vider la dernière règle d'une
+# machine — limite connue de docker-ports-security), le vhost des proxies (`remove-webapp.yml`, tag proxy-conf), le
+# DNS ni le coffre (`webapp-purge` / à la main : détruire un secret de chiffrement est irréversible).
+#
+# La sonde svcprobe est retirée ICI et pas laissée en place : une cible qui publie `service_up 0` indéfiniment fait
+# sonner une alerte sur un service volontairement désinstallé (CLAUDE.md, obligation `-monitoring`).
+
+- name: Work out the facts of the application
+  ansible.builtin.include_role:
+    name: webapp-setup
+    tasks_from: facts
+  when: wa_project is not defined
+
+- name: List the containers of the compose projects of the application
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker ps -a --format '{% raw %}{{.ID}} {{.Label "com.docker.compose.project"}}{% endraw %}' \
+      | awk -v p1={{ (wa_project | lower ~ '-back-') | quote }} -v p2={{ (wa_project | lower ~ '-front-') | quote }} \
+          'index($2, p1) == 1 || index($2, p2) == 1 {print $1}'
+  args:
+    executable: /bin/bash
+  register: wa_containers
+  changed_when: false
+  check_mode: false
+  become: true
+
+# `docker rm -f` : le conteneur est arrêté puis supprimé ; les volumes nommés restent.
+- name: Stop and remove those containers
+  ansible.builtin.command:
+    argv: "{{ ['docker', 'rm', '-f', '--'] + wa_containers.stdout_lines }}"
+  become: true
+  when: wa_containers.stdout_lines | length > 0
+
+- name: Remove the monitoring probe
+  ansible.builtin.file:
+    path: "/etc/svcprobe/checks.d/{{ wa_project }}.json"
+    state: absent
+  become: true
+  tags: [monitoring]
+
+- name: Remove the execution stamp
+  ansible.builtin.file:
+    path: "/var/lib/fleetforge/state/webapp-{{ wa_project }}.json"
+    state: absent
+  become: true
+
+- name: Report what was left
+  ansible.builtin.debug:
+    msg: >-
+      {{ wa_project }} : {{ wa_containers.stdout_lines | length }} conteneur(s) retiré(s) sur {{ ansible_host }}, sonde retirée.
+      Conservés : volumes (webapp-purge), règles DOCKER-USER, vhost (`./play.sh <parc> remove-webapp.yml -e webapp={{ inventory_hostname }} --tags proxy-conf`),
+      DNS, secrets du coffre, images du registre.

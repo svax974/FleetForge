@@ -1,0 +1,39 @@
+---
+# Faits d'une application WebAppTemplate (vx-public), calculés depuis l'INVENTAIRE
+# (tasks/facts.yml). Les attributs d'entrée sont préfixés `webapp_` (ou sont les
+# attributs communs du parc : `app_port`, `back_port`, `proxy_hostname`,
+# `access_mode`, `cloudflare_front`) ; les valeurs CALCULÉES le sont par `wa_` —
+# un set_fact `webapp_x: "{{ webapp_x | default(…) }}"` se référencerait lui-même.
+#
+# Attributs MANUELS (jamais devinables) :
+#   app_port, proxy_hostname, access_mode, cloudflare_front, webapp_db_engine
+# Attributs avec défaut DÉRIVÉ (surchargeables) :
+#   webapp_project        PROJECT_NAME (défaut : nom de l'entrée)
+#   webapp_app_id         identifiant dans .private/apps/apps.yml (défaut : webapp_project)
+#   webapp_env            prod | preprod (défaut prod) — choisit `run.sh <env>` et back/.env[.<env>]
+#   back_port             défaut app_port + 1
+#   webapp_db_port        défaut app_port + 2    (Postgres publié sur 127.0.0.1)
+#   webapp_redis_port     défaut app_port + 3    (Redis publié sur 127.0.0.1)
+#   webapp_machine        entrée CANONIQUE de la machine (celle qui porte host_vars/<machine>.yml) ;
+#                         défaut : l'entrée elle-même (machine dédiée)
+#   webapp_replicas       BACK_REPLICAS (défaut 1)
+#   webapp_worker         on | off (BACK_WORKER, défaut off)
+#   webapp_db_exposed     true : Postgres/Redis ouverts (INFRA_BIND=0.0.0.0) au profil « non exposé »
+#   webapp_registry       false : l'app reste en mode historique (build sur la cible)
+#   webapp_proxy          internal (défaut) | external (VPS tiers : ni DNS, ni vhost, ni DOCKER-USER)
+#   webapp_upstreams      entrées d'inventaire que le back CONSOMME (ouvertes à ce back, par délégation)
+#   webapp_metrics_push   true : vmagent pousse vers les Prometheus du parc (PROMETHEUS_REMOTE_WRITE_URLS)
+#   webapp_migrate        true : run.sh --migrate
+#   webapp_update_common  false : run.sh --no-update-common (défaut true : bibliothèques partagées à jour)
+#   webapp_compose_file   COMPOSE_FILE_NAME du dépôt (défaut : celui du template)
+
+# Ports consécutifs réservés à une app : front, back-lb, Postgres, Redis.
+webapp_port_block: 4
+
+# Moteurs de base de données acceptés (DB_ENGINE de back/.env).
+webapp_db_engines: [sqlite, postgres, selfhosted, supabase, cloud, neon]
+# Moteurs qui démarrent un conteneur Postgres sur la machine.
+webapp_db_selfhosted_engines: [postgres, selfhosted]
+
+# Dépôt d'applications du poste de contrôle (identifiant → chemin).
+webapp_apps_file: "{{ playbook_dir }}/../.private/apps/apps.yml"

@@ -1,0 +1,116 @@
+---
+# Voir defaults/main.yml pour le choix (orchestrer les scripts du dépôt app).
+
+- name: Work out the facts of the application
+  ansible.builtin.include_role:
+    name: webapp-setup
+    tasks_from: facts
+  when: wa_project is not defined
+
+- name: Check the phase
+  ansible.builtin.assert:
+    that:
+      - webapp_phase in ['all', 'build', 'push', 'deploy']
+      - webapp_phase != 'deploy' or webapp_tag | length > 0
+      - webapp_phase == 'all' or wa_registry_on | bool
+      - webapp_tag is match('^[A-Za-z0-9_.-]*$')
+    fail_msg: >-
+      webapp_phase={{ webapp_phase }} : all | build | push | deploy. `deploy` exige `-e webapp_tag=<tag>`, et les
+      phases build/push/deploy n'existent qu'en mode registre (un registre dans le parc, `webapp_registry` non faux).
+    quiet: true
+
+# ── .env : inventaire + coffre → dépôt applicatif ──────────────────────────
+- name: Render the env files of the application
+  ansible.builtin.include_role:
+    name: webapp-env-update
+    tasks_from: render
+  tags: [config]
+
+- name: Check the shared library checkout is on main
+  ansible.builtin.command:
+    cmd: git -C {{ (wa_src ~ 'front/.libs/vx-public') | quote }} branch --show-current
+  delegate_to: localhost
+  become: false
+  register: wa_lib_branch
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Warn when the shared library is not on main
+  ansible.builtin.debug:
+    msg: >-
+      vx-public de {{ wa_app_id }} est sur la branche `{{ wa_lib_branch.stdout }}`, pas `main` : le build embarquera
+      ce code non publié (update_common.sh le remettra sur main avant de déployer, sauf --no-update-common).
+  when: wa_lib_branch.stdout | default('') not in ['', 'main']
+
+# ── run.sh ─────────────────────────────────────────────────────────────────
+# `run.sh <env>` : `prod` lit back/.env + front/.env, `preprod` lit back/.env.preprod + front/.env.preprod.
+- name: Run the deployment scripts of the application
+  ansible.builtin.command:
+    cmd: >-
+      ./scripts/run.sh {{ wa_env | quote }}
+      {{ '--build' if webapp_phase == 'build' else '--push' if webapp_phase == 'push' else '--deploy' if webapp_phase == 'deploy' else '' }}
+      {{ ('--tag=' ~ webapp_tag) | quote if webapp_tag | length > 0 else '' }}
+      {{ '--migrate' if (wa_migrate | bool and webapp_phase in ['all', 'deploy']) else '' }}
+      {{ '' if wa_update_common | bool else '--no-update-common' }}
+  args:
+    chdir: "{{ wa_src }}"
+  delegate_to: localhost
+  become: false
+  register: wa_run
+  changed_when: true
+  tags: [image, deploy]
+
+- name: Report the tag that was handled
+  ansible.builtin.debug:
+    msg: "{{ wa_run.stdout_lines | select('search', '\\[IMAGE:') | list }}"
+  when: wa_registry_on | bool
+
+# ── Santé (sauf build/push : aucun hôte touché) ────────────────────────────
+- name: Wait for the front to answer
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ wa_front_port }}/"
+    status_code: [200, 301, 302]
+  register: wa_front_ready
+  until: wa_front_ready.status is defined and wa_front_ready.status in [200, 301, 302]
+  retries: "{{ webapp_health_retries }}"
+  delay: "{{ webapp_health_delay }}"
+  changed_when: false
+  when:
+    - webapp_phase in ['all', 'deploy']
+    - wa_front_mode == 'container'
+
+- name: Wait for the back API health endpoint
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ wa_back_port }}/api/v1/health"
+    status_code: [200]
+    return_content: true
+  register: wa_back_ready
+  until: wa_back_ready.status is defined and wa_back_ready.status == 200
+  retries: "{{ webapp_health_retries }}"
+  delay: "{{ webapp_health_delay }}"
+  changed_when: false
+  when: webapp_phase in ['all', 'deploy']
+
+# Postgres et Redis doivent rester sur la boucle locale (profil « non exposé ») sauf `webapp_db_exposed: true`.
+- name: Check that Postgres and Redis are published on the loopback only
+  # Le port passe par l'environnement du processus, jamais par la ligne de commande.
+  ansible.builtin.shell: ss -ltn "( sport = :$WA_PORT )" | awk 'NR>1 {print $4}'
+  environment:
+    WA_PORT: "{{ item }}"
+  register: wa_infra_listen
+  changed_when: false
+  failed_when: wa_infra_listen.stdout_lines | reject('match', '^(127[.]0[.]0[.]1|\[::1\]):') | list | length > 0
+  loop: "{{ ([wa_db_port] if wa_db_selfhosted | bool else []) + [wa_redis_port] }}"
+  when:
+    - webapp_phase in ['all', 'deploy']
+    - not (wa_db_exposed | bool)
+  become: true
+
+- name: Report how the application is exposed
+  ansible.builtin.debug:
+    msg: >-
+      {{ wa_project }} ({{ wa_env }}) : {{ 'front sur Cloudflare Pages, ' if wa_front_mode == 'pages' else 'front sur 127.0.0.1:' ~ wa_front_port ~ ', ' }}back-lb sur
+      127.0.0.1:{{ wa_back_port }}. {{ 'Version : ' ~ (wa_back_ready.json.revision | default('?')) ~ '.' if (wa_back_ready.json | default(none)) is mapping else '' }}
+      Redéployer sans Ansible : `cd {{ wa_src }} && ./scripts/run.sh {{ wa_env }}` (cibles, registre et secrets sont dans les .env).
+  when: webapp_phase in ['all', 'deploy']

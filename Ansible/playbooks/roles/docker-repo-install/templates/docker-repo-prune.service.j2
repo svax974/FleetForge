@@ -1,0 +1,7 @@
+[Unit]
+Description=Rétention et ramasse-miettes du registre Docker privé
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/docker-repo-prune.py

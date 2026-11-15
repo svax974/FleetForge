@@ -1,0 +1,106 @@
+{# ── Application WebAppTemplate : vhost GÉNÉRIQUE ─────────────────────────────
+   Rendu par `deploy-webapp-site.yml` (et par la resynchronisation complète de
+   tasks/main.yml) pour UN nom public, à partir des entrées d'inventaire qui le
+   portent (`webapp_vhost_entries`) — jamais d'un fichier de parc. Un vhost écrit
+   à la main, `parcs/<parc>/nginx/sites-enabled/<projet>.conf`, a TOUJOURS la
+   priorité : c'est la porte de sortie des applications aux besoins propres
+   (WebSocket, git smart-HTTP, webhooks privés, limites par zone…).
+
+   Deux modes, selon `cloudflare_front` de l'entrée (voir cloudflare-pages-setup) :
+   - false : front en conteneur ; `proxy_hostname` → `app_port` (son nginx interne
+     relaie /api/ vers le back) ;
+   - true  : front sur Cloudflare Pages, qui ne passe PAS par les proxies ; ce
+     vhost n'est que l'API, `<projet>-back.<domaine>` → `back_port` (back-lb).
+   Accès : `access_mode` de l'entrée (_access.inc : privé par défaut) ; avec
+   `cloudflare_front`, public = joignable seulement par NOTRE Cloudflare (certificat
+   client, `_cloudflare_front.inc`).
+   Plusieurs entrées pour un même nom (ex. deux back de prod) : un `upstream`.
+   Blocs supplémentaires : `webapp_vhost_locations` sur la première entrée, une
+   liste de { path, regex?, mode?, ws?, body?, timeout?, buffering? }. #}
+{% set _first = webapp_vhost_entries | first %}
+{% set _h = hostvars[_first] %}
+{% set _pages = _h.cloudflare_front | default(false) | bool %}
+{% set _project = (_h.webapp_project | default(_first)) | lower | replace('_', '-') %}
+{% set _server_name = (_project ~ '-back.' ~ domain_name) if _pages else _h.proxy_hostname %}
+{% set _slug = _server_name | regex_replace('[^a-z0-9]', '_') %}
+{% set access_entry = _first %}
+{% set _backends = [] %}
+{% for _e in webapp_vhost_entries %}
+{% set _port = (hostvars[_e].back_port | default(hostvars[_e].app_port | int + 1)) if _pages else hostvars[_e].app_port %}
+{% set _ = _backends.append(hostvars[_e].ansible_host ~ ':' ~ _port) %}
+{% endfor %}
+{% set _upstream = ('webapp_' ~ _slug) if (_backends | length > 1) else ('http://' ~ _backends[0]) %}
+# {{ _server_name }} → {{ _backends | join(', ') }} ({{ 'API seule, front sur Cloudflare Pages' if _pages else 'front en conteneur' }})
+{% if _backends | length > 1 %}
+upstream webapp_{{ _slug }} {
+{% for _b in _backends %}
+    server {{ _b }} max_fails=3 fail_timeout=10s;
+{% endfor %}
+}
+{% endif %}
+
+server {
+    listen      80;
+    listen      [::]:80;
+    server_name {{ _server_name }};
+    return 301 https://$host$request_uri;
+}
+
+server {
+{% if nginx_version is version('1.25.1', '>=') %}
+    listen      443 ssl;
+    listen      [::]:443 ssl;
+    http2       on;
+{% else %}
+    listen      443 ssl http2;
+    listen      [::]:443 ssl http2;
+{% endif %}
+    server_name {{ _server_name }};
+{% if _pages %}
+    {% include '_cloudflare_front.inc' %}
+{% endif %}
+
+    ssl_certificate     /etc/letsencrypt/live/{{ domain_name }}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/{{ domain_name }}/privkey.pem;
+{% for _l in _h.webapp_vhost_locations | default([]) %}
+
+    location {{ '~* ' if _l.regex | default(false) else '' }}{{ _l.path }} {
+        {% set access_mode_local = _l.mode | default(none) %}
+        {% include '_access.inc' %}
+        proxy_pass         {{ _upstream }};
+        proxy_http_version 1.1;
+        proxy_set_header   Host $host;
+        proxy_set_header   X-Real-IP $remote_addr;
+        proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+{% if _l.ws | default(false) %}
+        proxy_set_header   Upgrade $http_upgrade;
+        proxy_set_header   Connection "upgrade";
+{% endif %}
+{% if _l.body is defined %}
+        client_max_body_size    {{ _l.body }};
+        proxy_request_buffering off;
+{% endif %}
+{% if _l.buffering is defined and not _l.buffering %}
+        proxy_buffering    off;
+{% endif %}
+{% if _l.timeout is defined %}
+        proxy_read_timeout {{ _l.timeout }};
+        proxy_send_timeout {{ _l.timeout }};
+{% endif %}
+    }
+{% endfor %}
+
+    location / {
+        {% set access_mode_local = none %}
+        {% include '_access.inc' %}
+        proxy_pass         {{ _upstream }};
+        proxy_http_version 1.1;
+        proxy_set_header   Host $host;
+        proxy_set_header   X-Real-IP $remote_addr;
+        proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+        proxy_set_header   Upgrade $http_upgrade;
+        proxy_set_header   Connection "upgrade";
+    }
+}

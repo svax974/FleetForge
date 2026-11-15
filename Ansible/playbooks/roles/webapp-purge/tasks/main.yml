@@ -1,0 +1,76 @@
+---
+# Fait tout ce que `webapp-remove` fait, PLUS : supprime les VOLUMES (base, redis, dossier partagé, journaux), les
+# images locales et le répertoire de l'application sur l'hôte. DESTRUCTIF et irréversible : la base disparaît.
+#
+# Garde-fou : `-e webapp_purge_confirm=<nom du projet>` est exigé (un `purge-webapp.yml -e webapp=x` lancé par erreur
+# ne doit jamais effacer des données). Ne touche ni au coffre (les secrets de chiffrement restent : une sauvegarde de
+# la base en dépend), ni au DNS, ni aux images du registre (rétention du registre), ni aux autres apps de la machine.
+
+- name: Work out the facts of the application
+  ansible.builtin.include_role:
+    name: webapp-setup
+    tasks_from: facts
+  when: wa_project is not defined
+
+- name: Require the explicit confirmation
+  ansible.builtin.assert:
+    that: (webapp_purge_confirm | default('')) == wa_project
+    fail_msg: >-
+      Purge de {{ wa_project }} sur {{ ansible_host }} : supprime la BASE DE DONNÉES et tous les volumes. Confirmer avec
+      `-e webapp_purge_confirm={{ wa_project }}`.
+    quiet: true
+
+- name: Remove the containers and the probe first
+  ansible.builtin.include_role:
+    name: webapp-remove
+
+- name: List the volumes of the compose projects of the application
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker volume ls --format '{% raw %}{{.Name}} {{.Label "com.docker.compose.project"}}{% endraw %}' \
+      | awk -v p1={{ (wa_project | lower ~ '-back-') | quote }} -v p2={{ (wa_project | lower ~ '-front-') | quote }} \
+          'index($2, p1) == 1 || index($2, p2) == 1 {print $1}'
+  args:
+    executable: /bin/bash
+  register: wa_volumes
+  changed_when: false
+  check_mode: false
+  become: true
+
+- name: Remove those volumes
+  ansible.builtin.command:
+    argv: "{{ ['docker', 'volume', 'rm', '--'] + wa_volumes.stdout_lines }}"
+  become: true
+  when: wa_volumes.stdout_lines | length > 0
+
+- name: List the images of the application on this host
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker image ls --format '{% raw %}{{.Repository}}:{{.Tag}}{% endraw %}' \
+      | awk -v a={{ (wa_project | lower ~ '_back:') | quote }} -v b={{ (wa_project | lower ~ '-front-') | quote }} -v r={{ ('/' ~ (wa_project | lower) ~ '/') | quote }} \
+          'index($1, a) == 1 || index($1, b) == 1 || index($1, r) > 0 {print $1}'
+  args:
+    executable: /bin/bash
+  register: wa_images
+  changed_when: false
+  check_mode: false
+  become: true
+
+- name: Remove those images
+  ansible.builtin.command:
+    argv: "{{ ['docker', 'image', 'rm', '--'] + wa_images.stdout_lines }}"
+  become: true
+  failed_when: false
+  when: wa_images.stdout_lines | length > 0
+
+- name: Remove the application directory (staged compose, .env.previous, .deploy state)
+  ansible.builtin.file:
+    path: "/home/{{ remote_username }}/{{ wa_project }}"
+    state: absent
+  become: true
+
+- name: Report the purge
+  ansible.builtin.debug:
+    msg: >-
+      {{ wa_project }} purgé sur {{ ansible_host }} : {{ wa_volumes.stdout_lines | length }} volume(s), {{ wa_images.stdout_lines | length }} image(s).
+      Restent : coffre ({{ wa_project }}_*), DNS, vhost, images du registre, sauvegardes.

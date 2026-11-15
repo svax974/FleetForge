@@ -1,0 +1,113 @@
+---
+# Un secret (voir main.yml). `vsecret_item` : { name, kind, length?, adopt?, comment? }.
+
+# Déjà au coffre (chargé par group_vars, donc déchiffré) : il gagne, quoi qu'on ait à adopter ou tirer.
+- name: Read the value already in the vault
+  ansible.builtin.set_fact:
+    vsecret_current: "{{ lookup('ansible.builtin.vars', vsecret_item.name, default='') }}"
+  no_log: true
+
+- name: Keep the value of the vault
+  ansible.builtin.set_fact:
+    vsecret_values: "{{ vsecret_values | combine({vsecret_item.name: vsecret_current}) }}"
+  no_log: true
+  when: vsecret_current | length > 0
+
+# Adoption : la valeur en usage devient celle du coffre (jamais un tirage par-dessus).
+- name: Take the value in use as the new vault value
+  ansible.builtin.set_fact:
+    vsecret_new: "{{ vsecret_item.adopt }}"
+    vsecret_is_drawn: false
+  no_log: true
+  when:
+    - vsecret_current | length == 0
+    - (vsecret_item.adopt | default('')) | length > 0
+
+- name: Draw a 32-byte key (base64)
+  ansible.builtin.command: openssl rand -base64 32
+  delegate_to: localhost
+  become: false
+  register: vsecret_drawn_b64
+  changed_when: false
+  check_mode: false
+  no_log: true
+  when:
+    - vsecret_current | length == 0
+    - (vsecret_item.adopt | default('')) | length == 0
+    - vsecret_item.kind == 'base64_32'
+    - not ansible_check_mode
+
+- name: Draw a 32-byte key (hex)
+  ansible.builtin.command: openssl rand -hex {{ 24 if vsecret_item.kind == 'api_key' else 32 }}
+  delegate_to: localhost
+  become: false
+  register: vsecret_drawn_hex
+  changed_when: false
+  check_mode: false
+  no_log: true
+  when:
+    - vsecret_current | length == 0
+    - (vsecret_item.adopt | default('')) | length == 0
+    - vsecret_item.kind in ['hex_32', 'api_key']
+    - not ansible_check_mode
+
+- name: Retain the drawn value
+  ansible.builtin.set_fact:
+    vsecret_new: >-
+      {%- if vsecret_item.kind == 'base64_32' -%}{{ vsecret_drawn_b64.stdout | trim }}
+      {%- elif vsecret_item.kind == 'hex_32' -%}{{ vsecret_drawn_hex.stdout | trim }}
+      {%- elif vsecret_item.kind == 'api_key' -%}ac_live_{{ vsecret_drawn_hex.stdout | trim }}
+      {%- else -%}{{ lookup('ansible.builtin.password', '/dev/null length=' ~ (vsecret_item.length | default(32)) ~ ' chars=ascii_letters,digits') }}
+      {%- endif -%}
+    vsecret_is_drawn: true
+  no_log: true
+  when:
+    - vsecret_current | length == 0
+    - (vsecret_item.adopt | default('')) | length == 0
+    - not ansible_check_mode
+
+# `--stdin-name` et non la valeur en argument : `ps` rend les arguments lisibles par tous les comptes.
+- name: Encrypt the value for the vault
+  ansible.builtin.command:
+    cmd: ansible-vault encrypt_string --stdin-name {{ vsecret_item.name | quote }}
+    chdir: "{{ playbook_dir }}/.."
+    stdin: "{{ vsecret_new }}"
+    stdin_add_newline: false
+  delegate_to: localhost
+  become: false
+  register: vsecret_vaulted
+  changed_when: true
+  check_mode: false
+  no_log: true
+  when: (vsecret_new | default('', true) | length > 0) and (vsecret_current | length == 0) and not ansible_check_mode
+
+- name: Store the value in the vault file
+  ansible.builtin.blockinfile:
+    path: "{{ vsecret_file }}"
+    marker: "# {mark} {{ vsecret_item.name }} — posé par {{ vsecret_owner }}"
+    insertbefore: EOF
+    block: |
+      {% if vsecret_item.comment | default('') | length > 0 %}
+      {% for line in vsecret_item.comment.split('\n') %}
+      # {{ line }}
+      {% endfor %}
+      {% endif %}
+      {{ vsecret_vaulted.stdout }}
+  delegate_to: localhost
+  become: false
+  when: vsecret_vaulted.stdout | default('') | length > 0
+
+- name: Remember the new value for this run
+  ansible.builtin.set_fact:
+    vsecret_values: "{{ vsecret_values | combine({vsecret_item.name: vsecret_new}) }}"
+    vsecret_created: "{{ vsecret_created + [vsecret_item.name] }}"
+    vsecret_drawn: "{{ vsecret_drawn + ([vsecret_item.name] if vsecret_is_drawn | bool else []) }}"
+  no_log: true
+  when: (vsecret_new | default('', true) | length > 0) and (vsecret_current | length == 0) and not ansible_check_mode
+
+- name: Forget the per-secret temporaries
+  ansible.builtin.set_fact:
+    vsecret_new: ''
+    vsecret_vaulted: {}
+    vsecret_is_drawn: false
+  no_log: true

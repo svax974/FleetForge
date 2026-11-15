@@ -1,0 +1,42 @@
+---
+# Retire une application WebAppTemplate de sa machine : conteneurs et sonde (volumes conservés — `purge-webapp.yml`),
+# puis son vhost des proxies. Contrepartie de `deploy-webapp.yml`.
+#
+#   ./play.sh web3c remove-webapp.yml -e webapp=llm-proxy
+#   ./play.sh web3c remove-webapp.yml -e webapp=llm-proxy --tags proxy-conf    # le vhost seulement
+- name: Select the application
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tags: [always]
+  tasks:
+    - name: Check the parameter and find the entry
+      ansible.builtin.assert:
+        that: webapp is defined and webapp in groups['all']
+        fail_msg: "`-e webapp=<entrée d'inventaire>` est requis."
+        quiet: true
+    - name: Put the application in the target group
+      ansible.builtin.add_host:
+        name: "{{ webapp }}"
+        groups: webapp_target
+      changed_when: false
+
+- name: Retirer l'application de sa machine
+  hosts: webapp_target
+  remote_user: "{{ remote_username }}"
+  roles:
+    - webapp-remove
+
+- name: Retirer le vhost des proxies
+  hosts: proxies
+  remote_user: "{{ remote_username }}"
+  become: true
+  tags: [proxy-conf]
+  tasks:
+    - name: Remove the generic vhost
+      ansible.builtin.include_role:
+        name: proxy-update
+        tasks_from: remove-one-site
+      vars:
+        site: "webapp-{{ ((hostvars[webapp].webapp_project | default(webapp)) | lower | replace('_', '-') ~ '-back.' ~ domain_name) if (hostvars[webapp].cloudflare_front | default(false) | bool) else hostvars[webapp].proxy_hostname }}.conf"
+      when: hostvars[webapp].proxy_hostname is defined

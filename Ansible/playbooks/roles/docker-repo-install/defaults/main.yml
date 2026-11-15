@@ -1,0 +1,24 @@
+---
+# Registre Docker privé du parc (famille `docker-repo`) — dépôt des images d'application construites une fois et tirées
+# par chaque hôte (mode registre de scripts/deploy-full.sh du template, rôles `webapp-*`).
+#
+# Version ÉPINGLÉE (`registry:latest` annoncerait un jour la v3 sans prévenir : un registre qui change de format pendant
+# un déploiement est la pire panne possible, tous les services le tirent). 2.8.3 est la dernière 2.x.
+docker_repo_image: "registry:2.8.3"
+docker_repo_dir: /opt/docker-repo
+
+# Deux comptes, jamais un seul partagé :
+#   push  — le CONSTRUCTEUR (cette machine, `docker login localhost:<port>` par l'utilisateur de déploiement) ;
+#   pull  — les HÔTES qui tirent l'image : lecture seule côté usage (le registre htpasswd n'a pas de droits par compte :
+#           c'est la séparation des SECRETS qui borne la fuite d'un hôte d'application compromis, pas ses droits).
+# `docker_repo_user` / `docker_repo_pass` (vault du parc) restent le compte de poussée historique.
+docker_repo_push_user: "{{ docker_repo_user | default('srvc') }}"
+docker_repo_pull_user: srvc-pull
+
+# Rétention : N tags les plus récents CONSERVÉS par dépôt (une image d'application pèse jusqu'à ~1,2 Go ;
+# chaque tag est un rollback possible). Au-delà : manifestes supprimés puis ramasse-miettes.
+docker_repo_keep_tags: 15
+docker_repo_prune_hour: 4
+
+# Répertoire des métriques du collecteur textfile de node_exporter (voir exporter-sys-install).
+docker_repo_textfile_dir: "{{ node_exporter_textfile_dir | default('/var/lib/node_exporter/textfile') }}"

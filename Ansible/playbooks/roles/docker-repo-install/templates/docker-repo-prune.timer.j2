@@ -1,0 +1,9 @@
+[Unit]
+Description=Rétention quotidienne du registre Docker privé
+
+[Timer]
+OnCalendar=*-*-* {{ '%02d' | format(docker_repo_prune_hour | int) }}:17:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

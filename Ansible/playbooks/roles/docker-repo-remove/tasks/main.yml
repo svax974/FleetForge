@@ -1,12 +1,33 @@
 ---
-# Remove private Docker registry container.
-# Registry data (images) is preserved. Use docker-repo-purge to delete it.
+# Retire le conteneur du registre Docker privé. Les images (/opt/docker-repo/data) sont CONSERVÉES : `docker-repo-purge`
+# les supprime. Retire aussi la rétention planifiée (un timer sans registre échouerait chaque nuit).
 
-- name: Stop and remove registry container
+# `registry` : nom d'avant l'épinglage du compose (le conteneur s'appelle `docker-repo-registry` depuis).
+- name: Stop and remove the registry container
   community.docker.docker_container:
-    name: registry
+    name: "{{ item }}"
     state: absent
+  loop: [docker-repo-registry, registry]
   ignore_errors: true
+
+- name: Stop and remove the retention timer
+  ansible.builtin.systemd:
+    name: docker-repo-prune.timer
+    state: stopped
+    enabled: false
+  become: true
+  failed_when: false
+
+- name: Remove the retention unit files and script
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/systemd/system/docker-repo-prune.timer
+    - /etc/systemd/system/docker-repo-prune.service
+    - /usr/local/sbin/docker-repo-prune.py
+    - "{{ node_exporter_textfile_dir | default('/var/lib/node_exporter/textfile') }}/docker_repo_prune.prom"
+  become: true
 
 # ── Supervision ────────────────────────────────────────────────────────────
 # Convention `-monitoring` (CLAUDE.md) : c'est le rôle de suppression du

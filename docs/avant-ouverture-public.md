@@ -168,3 +168,18 @@ Lot 6.1 de la passerelle MCP (`fleetforge-gateway`) ; détail dans RUNNING.md, �
 - **Dépôt privé** : ports 18080/18081/18083/18089/18088 au registre, et `monero`/`xmrig` à ajouter
   à `prom_alert_groups` du parc concerné (le déploiement échoue sinon, volontairement).
 
+
+## Déploiement générique WebAppTemplate (ajouté le 15/11/2026)
+
+Détail : `docs/deploiement-webapp.md`.
+
+- **Revue humaine** avant d'activer le mode registre sur une app de production : `scripts/lib/deploy-images.sh` et ses
+  branchements dans `deploy-full.sh` (branche locale `feat/registry-deploy` de `vx-public`, non poussée), `vault-secret-setup`
+  et `webapp-secrets-setup` (adoption avant tirage : une clé de chiffrement régénérée rend la base illisible), rendu des `.env`
+  (`webapp-env-update`, `tasks/render.yml`).
+- **Registre Docker** : compte de lecture distinct du compte de poussée (le registre htpasswd n'a pas de droits par compte :
+  seule la séparation des secrets borne une fuite) ; rétention planifiée à valider (`--dry-run` d'abord) ; `registry` à déclarer
+  dans `prom_alert_groups` après le premier passage ; papanglabs n'a pas de registre déployé.
+- **Sauvegarde hors serveur des clés de chiffrement** des apps (le coffre du parc ne suffit pas à lui seul).
+- **Limites de Cloudflare Pages** (sources tierces, non confirmées officiellement) : 100 projets par compte, 500 builds par mois ;
+  à vérifier sur developers.cloudflare.com/pages/platform/limits avant d'y migrer d'autres apps (2 aujourd'hui).

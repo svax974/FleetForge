@@ -1,0 +1,9 @@
+{
+  "service": "{{ wa_project }}",
+  "up": {"kind": "http", "url": "{{ wa_health_url }}", "status": [200], "timeout": 10},
+  "extra_checks": [
+{% for c in wa_checks %}
+    {{ c | to_json }}{{ ',' if not loop.last else '' }}
+{% endfor %}
+  ]
+}

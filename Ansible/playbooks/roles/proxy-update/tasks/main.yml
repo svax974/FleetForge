@@ -119,6 +119,11 @@
   # les déployer ferait inclure leur contenu deux fois.
   when: not (item | basename).startswith('_')
 
+# Vhosts GÉNÉRIQUES des applications WebAppTemplate (famille `webapp`) qui n'ont pas de vhost écrit à la main : rendus
+# ici, sinon le vidage de sites-enabled ci-dessus les supprimerait à chaque resynchronisation complète.
+- name: Render the generic webapp vhosts
+  ansible.builtin.include_tasks: webapp-sites.yml
+
 # Vhost de santé du front (sonde du Load Balancer Cloudflare), posé APRÈS les
 # vhosts du parc : le répertoire sites-enabled vient d'être vidé, il faut donc le
 # reposer à chaque passage — d'où le rôle plutôt que le répertoire du parc.

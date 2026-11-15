@@ -1,0 +1,298 @@
+---
+# Rend les .env de l'application (poste de contrôle) à partir de l'INVENTAIRE et du COFFRE, pour qu'un simple
+# `./scripts/run.sh prod` redéploie ensuite sans rien d'autre. Chemin du déploiement générique
+# (`deploy-webapp.yml`) ; `main.yml` reste celui des rôles `*-deploy` historiques.
+#
+# Séquence (un seul sens : inventaire + coffre → .env → run.sh) :
+#   1. garde .env ↔ coffre : un .env local qui DIFFÈRE du coffre arrête (le restaurer l'écraserait) ;
+#   2. restauration depuis le coffre (`app-env.sh restore`) ;
+#   3. amorçage : .env absent → copie de .env.example (premier déploiement d'une app neuve) ;
+#   4. secrets : adoptés du .env ou tirés, mis au coffre (webapp-secrets-setup) ;
+#   5. front Cloudflare Pages : projet, domaine, DNS (cloudflare-pages-setup) ;
+#   6. rendu des clés POSSÉDÉES par Ansible (toujours réécrites) et des clés « si absentes » (jamais écrasées) ;
+#   7. sauvegarde dans le coffre (`app-env.sh save`) — le dépôt privé du parc est à committer.
+#
+# Clés POSSÉDÉES : cibles du déploiement, ports, mode, registre, secrets. Clés « SI ABSENTES » : identité et choix
+# d'exploitation qu'une app déjà en production porte (PROJECT_NAME fixe les noms de projet compose, donc les VOLUMES ;
+# CLIENT_ORIGINS est une liste d'exploitation) : posées au premier déploiement, jamais modifiées ensuite.
+# Les clés propres à l'application ne sont JAMAIS touchées. Rien n'est affiché : ni valeur, ni secret.
+#
+# Prérequis : les faits `wa_*` (webapp-setup, tasks_from: facts).
+
+- name: Check the facts are there
+  ansible.builtin.assert:
+    that: wa_src is defined and wa_project is defined
+    fail_msg: "webapp-setup (tasks_from: facts) doit précéder ce rendu."
+    quiet: true
+
+# ── 1-2. Coffre ────────────────────────────────────────────────────────────
+- name: Check for the vaulted env files of the application
+  ansible.builtin.stat:
+    path: "{{ playbook_dir }}/../.private/apps/{{ wa_app_id }}"
+  delegate_to: localhost
+  become: false
+  register: wa_env_vault_dir
+
+- name: Compare the local env files with the vault
+  ansible.builtin.command:
+    cmd: ./app-env.sh status {{ wa_app_id | quote }}
+    chdir: "{{ playbook_dir }}/.."
+  delegate_to: localhost
+  become: false
+  register: wa_env_status
+  changed_when: false
+  check_mode: false
+  when: wa_env_vault_dir.stat.isdir | default(false)
+
+- name: Fail when a local env file differs from the vault
+  vars:
+    wa_env_differing: "{{ wa_env_status.stdout_lines | select('search', ' differs *$') | map('split') | map(attribute=1) | list }}"
+  ansible.builtin.fail:
+    msg: >-
+      Le .env {{ wa_env_differing | join(' et ') }} de {{ wa_src }} diffère de la copie du coffre : le restaurer
+      écraserait le fichier local. Si le fichier local fait foi : `./app-env.sh save {{ wa_app_id }}`, puis
+      relancer. Si c'est le coffre : `./app-env.sh restore {{ wa_app_id }}` (garde le local en .env.bak-<date>).
+      Passer outre : `-e webapp_env_overwrite_local=true`.
+  when:
+    - wa_env_vault_dir.stat.isdir | default(false)
+    - wa_env_differing | length > 0
+    - not (webapp_env_overwrite_local | default(false) | bool)
+
+- name: Restore the env files from the vault
+  ansible.builtin.command:
+    cmd: ./app-env.sh restore {{ wa_app_id | quote }}
+    chdir: "{{ playbook_dir }}/.."
+  delegate_to: localhost
+  become: false
+  register: wa_env_restore
+  changed_when: "'restored from' in wa_env_restore.stdout"
+  when: wa_env_vault_dir.stat.isdir | default(false)
+
+# ── 3. Amorçage d'une app neuve ────────────────────────────────────────────
+# `creates` : rien si le .env existe ; `removes` : rien si l'exemple n'existe pas.
+- name: Start the env files from the examples when they do not exist yet
+  ansible.builtin.command:
+    cmd: install -m 0600 -- {{ (wa_src ~ item.example) | quote }} {{ (wa_src ~ item.file) | quote }}
+    creates: "{{ wa_src }}{{ item.file }}"
+    removes: "{{ wa_src }}{{ item.example }}"
+  loop:
+    - { file: "{{ wa_back_env_file }}", example: back/.env.example }
+    - { file: "{{ wa_front_env_file }}", example: front/.env.example }
+  loop_control:
+    label: "{{ item.file }}"
+  delegate_to: localhost
+  become: false
+
+# ── 4-5. Secrets et front Pages ────────────────────────────────────────────
+- name: Put the secrets of the application in the vault
+  ansible.builtin.include_role:
+    name: webapp-secrets-setup
+
+- name: Prepare the Cloudflare Pages front (project, branch, domain)
+  ansible.builtin.include_role:
+    name: cloudflare-pages-setup
+  vars:
+    cfpages_env_file: "{{ wa_src }}{{ wa_front_env_file }}"
+    cfpages_project: "{{ wa_project | lower | replace('_', '-') }}"
+    cfpages_domain: "{{ wa_project | lower | replace('_', '-') ~ '.' ~ domain_name }}"
+  when: wa_front_mode == 'pages'
+
+# ── 6. Rendu ───────────────────────────────────────────────────────────────
+- name: Read the env files as they are now
+  ansible.builtin.set_fact:
+    wa_env_back_text: "{{ lookup('ansible.builtin.file', wa_src ~ wa_back_env_file, errors='ignore') | default('', true) }}"
+    wa_env_front_text: "{{ lookup('ansible.builtin.file', wa_src ~ wa_front_env_file, errors='ignore') | default('', true) }}"
+  no_log: true
+  delegate_to: localhost
+  become: false
+
+- name: Work out the desired keys
+  vars:
+    # `CLÉ=valeur` : valeur entre guillemets ou non, commentaire exclu ; « présente » = non vide.
+    wa_read_tpl: "(?m)^[ ]*{key}=[\"']?([^\"'\\n#]*)"
+    wa_hosts_now: "{{ (wa_env_back_text | regex_findall(wa_read_tpl | replace('{key}', 'BACK_HOSTS')) | last | default('')).split(',') | map('trim') | map('regex_replace', '^.*@', '') | reject('equalto', '') | list }}"
+    wa_hosts_known: "{{ [ansible_host, hostname | default('')] | select | list }}"
+    # Valeur déjà en usage conservée tant qu'elle désigne CETTE machine (IP ou nom) : l'écrire en IP là où un nom était
+    # utilisé changerait le nom de projet compose (<projet>-back-<hôte>), donc les conteneurs et les volumes.
+    wa_back_hosts_value: "{{ (wa_env_back_text | regex_findall(wa_read_tpl | replace('{key}', 'BACK_HOSTS')) | last | trim) if (wa_hosts_now | length > 0 and wa_hosts_now | difference(wa_hosts_known) | length == 0) else ansible_host }}"
+    wa_origins: "{{ (['https://' ~ proxy_hostname] if proxy_hostname is defined else []) + (['https://' ~ (wa_project | lower | replace('_', '-')) ~ '.' ~ domain_name] if wa_front_mode == 'pages' else []) }}"
+    wa_api_url_pages: "https://{{ (wa_project | lower | replace('_', '-')) }}-back.{{ domain_name }}/api/v1"
+    wa_db_name: "{{ wa_project | lower | regex_replace('[^a-z0-9]', '') }}"
+  ansible.builtin.set_fact:
+    wa_env_back_owned: >-
+      {{ {
+        'BACK_HOSTS': wa_back_hosts_value,
+        'REMOTE_USER': remote_username,
+        'REMOTE_SSH_PORT': ansible_port | default(22),
+        'NODE_PORT': wa_back_port,
+        'VITE_PORT': wa_front_port,
+        'REDIS_PORT': wa_redis_port,
+        'APP_ENV': wa_env,
+        'BACK_REPLICAS': wa_replicas,
+        'BACK_WORKER': wa_worker,
+        'TRUST_PROXY': webapp_env_trust_proxy,
+        'INFRA_BIND': '0.0.0.0' if wa_db_exposed else '127.0.0.1',
+        'DEPLOY_MANAGE_UFW': '0'
+      } | combine({'DB_PORT': wa_db_port} if wa_db_selfhosted else {})
+        | combine({'FRONT_HOSTS': ansible_host} if wa_front_mode == 'container' else {})
+        | combine({
+            'DEPLOY_REGISTRY': wa_registry,
+            'DEPLOY_REGISTRY_PUSH': wa_registry_push,
+            'DEPLOY_BUILDER': 'remote',
+            'DEPLOY_BUILDER_HOST': wa_builder_host,
+            'DEPLOY_BUILDER_SSH_PORT': wa_builder_ssh_port
+          } if wa_registry_on | bool else {})
+        | combine(wa_secret_env | default({})) }}
+    wa_env_back_absent: >-
+      {{ {
+        'PROJECT_NAME': wa_project,
+        'REMOTE_CONTEXT_NAME': wa_project,
+        'DB_ENGINE': webapp_db_engine,
+        'CLIENT_ORIGINS': wa_origins | join(','),
+        'DB_USER': wa_db_name,
+        'DB_NAME': wa_db_name
+      } | combine({'SSH_KEY_FILE': webapp_ssh_key_file} if webapp_ssh_key_file | default('') | length > 0 else {}) }}
+    wa_env_front_owned: >-
+      {{ {'VITE_PORT': wa_front_port}
+         | combine({'VITE_API_URL': wa_api_url_pages} if wa_front_mode == 'pages' else {}) }}
+    wa_env_front_absent: >-
+      {{ {'PROJECT_NAME': wa_project}
+         | combine({'VITE_API_URL': '/api/v1'} if wa_front_mode == 'container' else {}) }}
+    # Variables de déploiement qui n'existent plus (mode historique, ou ancien nom) : retirées si présentes.
+    wa_env_back_removed: "{{ ['REMOTE_HOST', 'BACK_REMOTE_HOST', 'FRONT_REMOTE_HOST'] + ([] if wa_registry_on | bool else ['DEPLOY_REGISTRY', 'DEPLOY_REGISTRY_PUSH', 'DEPLOY_BUILDER', 'DEPLOY_BUILDER_HOST', 'DEPLOY_BUILDER_SSH_PORT']) + (['FRONT_HOSTS'] if wa_front_mode == 'pages' else []) }}"
+  no_log: true
+
+- name: Keep only the keys that change
+  vars:
+    wa_read_tpl: "(?m)^[ ]*{key}=[\"']?([^\"'\\n#]*)"
+    wa_back_now: "{{ wa_env_back_text }}"
+    wa_front_now: "{{ wa_env_front_text }}"
+  ansible.builtin.set_fact:
+    wa_back_todo: >-
+      {%- set out = {} -%}
+      {%- for k, v in wa_env_back_owned.items() -%}
+      {%- if (wa_back_now | regex_findall(wa_read_tpl | replace('{key}', k)) | last | default('') | trim) != (v | string) -%}{%- set _ = out.update({k: v}) -%}{%- endif -%}
+      {%- endfor -%}
+      {%- for k, v in wa_env_back_absent.items() -%}
+      {%- if (wa_back_now | regex_findall(wa_read_tpl | replace('{key}', k)) | last | default('') | trim) == '' -%}{%- set _ = out.update({k: v}) -%}{%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+    wa_front_todo: >-
+      {%- set out = {} -%}
+      {%- for k, v in wa_env_front_owned.items() -%}
+      {%- if (wa_front_now | regex_findall(wa_read_tpl | replace('{key}', k)) | last | default('') | trim) != (v | string) -%}{%- set _ = out.update({k: v}) -%}{%- endif -%}
+      {%- endfor -%}
+      {%- for k, v in wa_env_front_absent.items() -%}
+      {%- if (wa_front_now | regex_findall(wa_read_tpl | replace('{key}', k)) | last | default('') | trim) == '' -%}{%- set _ = out.update({k: v}) -%}{%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+  no_log: true
+
+- name: Write the back env keys that change
+  ansible.builtin.lineinfile:
+    path: "{{ wa_src }}{{ wa_back_env_file }}"
+    regexp: '^[ ]*{{ item.key }}='
+    line: '{{ item.key }}="{{ item.value }}"'
+  loop: "{{ wa_back_todo | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  delegate_to: localhost
+  become: false
+  diff: false
+  register: wa_back_written
+
+- name: Write the front env keys that change
+  ansible.builtin.lineinfile:
+    path: "{{ wa_src }}{{ wa_front_env_file }}"
+    regexp: '^[ ]*{{ item.key }}='
+    line: '{{ item.key }}="{{ item.value }}"'
+  loop: "{{ wa_front_todo | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  delegate_to: localhost
+  become: false
+  diff: false
+  register: wa_front_written
+
+- name: Remove the deployment keys that no longer apply
+  ansible.builtin.lineinfile:
+    path: "{{ wa_src }}{{ wa_back_env_file }}"
+    regexp: '^[ ]*{{ item }}='
+    state: absent
+  loop: "{{ wa_env_back_removed }}"
+  delegate_to: localhost
+  become: false
+  diff: false
+  register: wa_back_removed
+
+# Cohérence du mode front : seul VITE_API_URL en https:// fait basculer deploy-full.sh sur Cloudflare Pages.
+- name: Read VITE_API_URL back from the front env file
+  vars:
+    wa_read_tpl: "(?m)^[ ]*{key}=[\"']?([^\"'\\n#]*)"
+  ansible.builtin.set_fact:
+    wa_vite_api_url: "{{ lookup('ansible.builtin.file', wa_src ~ wa_front_env_file, errors='ignore') | default('', true) | regex_findall(wa_read_tpl | replace('{key}', 'VITE_API_URL')) | last | default('') | trim }}"
+  delegate_to: localhost
+  become: false
+  when: not ansible_check_mode
+
+- name: Check that the front mode matches VITE_API_URL
+  ansible.builtin.assert:
+    that: (wa_vite_api_url | default('')).startswith('https://') == (wa_front_mode == 'pages')
+    fail_msg: >-
+      {{ inventory_hostname }} : le front est `{{ wa_front_mode }}` mais VITE_API_URL de
+      {{ wa_src }}{{ wa_front_env_file }} {{ 'commence' if (wa_vite_api_url | default('')).startswith('https://') else 'ne commence pas' }}
+      par https:// : deploy-full.sh ne publie sur Cloudflare Pages QUE pour une URL https://.
+    quiet: true
+  when: not ansible_check_mode
+
+# ── Clés manuelles manquantes : seulement leurs NOMS ───────────────────────
+- name: Find the manual keys with no value
+  vars:
+    wa_read_tpl: "(?m)^[ ]*{key}=[\"']?([^\"'\\n#]*)"
+    wa_modules_text: "{{ lookup('ansible.builtin.file', wa_src ~ 'shared-modules.json', errors='ignore') | default('', true) }}"
+    wa_has_user_module: "{{ (wa_modules_text | regex_search('\"reactcommon\"[^]]*\"user\"')) is not none }}"
+    wa_front_after: "{{ lookup('ansible.builtin.file', wa_src ~ wa_front_env_file, errors='ignore') | default('', true) }}"
+    wa_manual_keys: "{{ webapp_front_manual_keys | default(['VITE_REOWN_PROJECT_ID'] if wa_has_user_module | bool else []) }}"
+  ansible.builtin.set_fact:
+    wa_missing_manual: >-
+      {%- set out = [] -%}
+      {%- for k in wa_manual_keys -%}
+      {%- if (wa_front_after | regex_findall(wa_read_tpl | replace('{key}', k)) | last | default('') | trim) == '' -%}{%- set _ = out.append(k) -%}{%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+  delegate_to: localhost
+  become: false
+  no_log: true
+
+- name: Fail when a manual key is missing
+  ansible.builtin.fail:
+    msg: >-
+      {{ wa_src }}{{ wa_front_env_file }} : à renseigner à la main (une seule fois, jamais devinable) :
+      {{ wa_missing_manual | join(', ') }}. Les poser dans le .env puis `./app-env.sh save {{ wa_app_id }}` —
+      ou `-e webapp_allow_missing_manual=true` pour déployer sans (l'app démarrera dégradée).
+  when:
+    - wa_missing_manual | length > 0
+    - not (webapp_allow_missing_manual | default(false) | bool)
+    - not ansible_check_mode
+
+# ── 7. Coffre ──────────────────────────────────────────────────────────────
+- name: Save the env files into the vault
+  ansible.builtin.command:
+    cmd: ./app-env.sh save {{ wa_app_id | quote }}
+    chdir: "{{ playbook_dir }}/.."
+  delegate_to: localhost
+  become: false
+  register: wa_env_saved
+  changed_when: "'saved to' in wa_env_saved.stdout"
+  # Même sans copie préalable dans le coffre : c'est cette sauvegarde qui la crée (app neuve ou migrée).
+  when:
+    - not ansible_check_mode
+    - (wa_back_written is changed) or (wa_front_written is changed) or (wa_back_removed is changed) or not (wa_env_vault_dir.stat.isdir | default(false))
+
+# Noms seulement : jamais une valeur.
+- name: Report what was rendered
+  ansible.builtin.debug:
+    msg: >-
+      .env de {{ wa_app_id }} ({{ wa_env }}) : {{ wa_back_todo | length }} clé(s) back et {{ wa_front_todo | length }}
+      clé(s) front à jour ({{ (wa_back_todo.keys() | list + wa_front_todo.keys() | list) | join(', ') or '—' }}).
+      {{ 'Coffre mis à jour : à committer dans le dépôt privé du parc.' if wa_env_saved is changed else '' }}
