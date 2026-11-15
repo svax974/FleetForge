@@ -4,13 +4,15 @@
 #   (a) bascule depuis le compose du gabarit : volume `${PROJECT_NAME}_postgres_data` présent, volume attendu absent ;
 #   (b) renommage (projet ou hôte) : un AUTRE volume `<projet>-…_postgres_data` existe, l'attendu est absent ;
 #   (c) le conteneur `${PROJECT_NAME}_postgres` existe sur un volume qui n'est pas l'attendu ;
-#   (d) déploiement antérieur connu (répertoire de l'app sur l'hôte) alors que le volume attendu est absent ou VIDE
-#       (pas de PG_VERSION).
+#   (d) déploiement SAIN antérieur enregistré (marqueur `/var/lib/fleetforge/webapp/<entrée>.state`, écrit par
+#       hardened.yml en fin de déploiement) alors que le volume attendu est absent ou VIDE (pas de PG_VERSION) ;
+#   (e) le marqueur nomme un AUTRE volume ou un autre projet (renommage du projet ou de l'hôte), ou est illisible.
+# Sans marqueur, un premier passage INTERROMPU (répertoire de l'app posé, base jamais remplie) se rejoue sans drapeau.
 # Seul chemin autorisé : `-e webapp_hardening_db_migrated=true`, après la procédure de migration
-# (docs/etude-passerelle-sur-webapp.md, « Migration de la base »).
+# (docs/etude-passerelle-sur-webapp.md, « Migration de la base ») ; le déploiement sain réécrit alors le marqueur.
 # Entrées : wa_h_volumes (noms), wa_h_pg_mounts (volumes montés par `<projet>_postgres`, vide sans conteneur),
-# wa_h_prior_deploy (bool), wa_h_expected_initialised (bool : PG_VERSION présent dans le volume attendu),
-# wa_h_back_host (première cible de BACK_HOSTS). Aucune commande : éprouvé hors ligne.
+# wa_h_marker ({project, volume}, {} sans marqueur), wa_h_expected_initialised (bool : PG_VERSION présent dans le volume
+# attendu), wa_h_back_host (première cible de BACK_HOSTS). Aucune commande : éprouvé hors ligne.
 - name: Work out whether the database would start empty
   vars:
     _project: "{{ wa_project | lower }}"
@@ -25,7 +27,15 @@
       {%- if _old in wa_h_volumes and not _expected_present -%}{%- set _ = r.append('ancien volume ' ~ _old ~ ' (compose du gabarit), ' ~ _expected ~ ' absent') -%}{%- endif -%}
       {%- if _others | length > 0 and not _expected_present -%}{%- set _ = r.append('autre volume du même projet : ' ~ (_others | join(', ')) ~ ' (renommage ?)') -%}{%- endif -%}
       {%- if wa_h_pg_mounts | select('search', '_postgres_data$') | reject('equalto', _expected) | list | length > 0 -%}{%- set _ = r.append('le conteneur ' ~ wa_project ~ '_postgres utilise ' ~ (wa_h_pg_mounts | join(', '))) -%}{%- endif -%}
-      {%- if wa_h_prior_deploy | bool and not (_expected_present and wa_h_expected_initialised | bool) -%}{%- set _ = r.append('déploiement antérieur sur cet hôte, volume ' ~ _expected ~ (' VIDE' if _expected_present else ' absent')) -%}{%- endif -%}
+      {%- set _marker = wa_h_marker if wa_h_marker is mapping else {'invalid': '1'} -%}
+      {%- if _marker | length > 0 -%}
+        {%- if _marker.invalid is defined or _marker.project is not defined or _marker.volume is not defined -%}
+          {%- set _ = r.append('marqueur d état illisible') -%}
+        {%- else -%}
+          {%- if _marker.project != wa_project or _marker.volume != _expected -%}{%- set _ = r.append('le marqueur d état nomme ' ~ _marker.project ~ ' / ' ~ _marker.volume ~ ' au lieu de ' ~ wa_project ~ ' / ' ~ _expected ~ ' (renommage du projet ou de l hôte)') -%}{%- endif -%}
+          {%- if not (_expected_present and wa_h_expected_initialised | bool) -%}{%- set _ = r.append('déploiement antérieur enregistré (marqueur), volume ' ~ _expected ~ (' VIDE' if _expected_present else ' absent')) -%}{%- endif -%}
+        {%- endif -%}
+      {%- endif -%}
       {{ r }}
   ansible.builtin.set_fact:
     wa_h_db_reasons: "{{ _reasons }}"

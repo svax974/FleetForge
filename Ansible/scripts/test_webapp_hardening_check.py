@@ -1665,6 +1665,9 @@ class GuardTests(unittest.TestCase):
                 for key in ("ansible.builtin.set_fact", "set_fact"):
                     if isinstance(task.get(key), dict):
                         names.update(n for n in task[key] if "{{" not in n and n != "cacheable")
+                # `vars` d'une inclusion : vues par toutes les tâches incluses, et une extra-var les masque aussi.
+                if any(k in task for k in ("ansible.builtin.include_tasks", "include_tasks", "ansible.builtin.include_role")):
+                    names.update(n for n in (task.get("vars") or {}) if n.startswith("wa_"))
         self.assertEqual(sorted(names - probed), [], "faits internes absents de la sonde (no-overrides.yml)")
 
     def test_deploy_webapp_refuses_the_gateway_with_the_fleetforge_scope(self):
@@ -1782,9 +1785,12 @@ class DbMigrationTests(unittest.TestCase):
 
     EXPECTED = "fleetforge-gateway-back-192-0-2-10_postgres_data"
 
-    def decide(self, volumes, mounts=(), prior=False, initialised=True, *args):
-        state = {"wa_project": "fleetforge-gateway", "wa_h_volumes": list(volumes), "wa_h_pg_mounts": list(mounts),
-                 "wa_h_prior_deploy": prior, "wa_h_expected_initialised": initialised, "wa_h_back_host": "192.0.2.10"}
+    MARKER = {"project": "fleetforge-gateway", "volume": "fleetforge-gateway-back-192-0-2-10_postgres_data"}
+
+    def decide(self, volumes, mounts=(), prior=False, initialised=True, *args, project="fleetforge-gateway"):
+        marker = self.MARKER if prior is True else (prior or {})
+        state = {"wa_project": project, "wa_h_volumes": list(volumes), "wa_h_pg_mounts": list(mounts),
+                 "wa_h_marker": marker, "wa_h_expected_initialised": initialised, "wa_h_back_host": "192.0.2.10"}
         play = textwrap.dedent("""\
             - hosts: localhost
               gather_facts: false
@@ -1822,6 +1828,47 @@ class DbMigrationTests(unittest.TestCase):
         self.assertEqual(self.decide([])[0], 0)
         self.assertEqual(self.decide(["fleetforge-gateway_postgres_data", self.EXPECTED], mounts=[self.EXPECTED],
                                      prior=True)[0], 0)
+
+    def test_an_interrupted_first_pass_is_replayed_without_flag(self):
+        # Quatrième revue : le répertoire de l'app (posé dès le premier passage) valait « déploiement antérieur » et
+        # bloquait le rejeu d'un premier passage interrompu. Sans marqueur, volume attendu absent ou vide : admis.
+        self.assertEqual(self.decide([])[0], 0)
+        self.assertEqual(self.decide([self.EXPECTED], mounts=[self.EXPECTED], initialised=False)[0], 0)
+
+    def test_the_marker_catches_a_renaming_or_an_unreadable_state(self):
+        # Projet renommé : le marqueur (nommé d'après l'ENTRÉE) nomme encore l'ancien projet et l'ancien volume.
+        renamed = "ffgw-back-192-0-2-10_postgres_data"
+        code, out = self.decide([self.EXPECTED, renamed], prior=True, project="ffgw")
+        self.assertNotEqual(code, 0)
+        self.assertIn("renommage du projet ou de l hôte", out)
+        code, out = self.decide([self.EXPECTED], prior={"volume": self.EXPECTED, "project": "fleetforge-gateway",
+                                                         "invalid": "1"})
+        self.assertNotEqual(code, 0)
+        self.assertIn("illisible", out)
+        code, out = self.decide([self.EXPECTED], prior={"project": "fleetforge-gateway"})
+        self.assertNotEqual(code, 0)
+        self.assertIn("illisible", out)
+
+    def test_the_hardened_profile_owns_project_name(self):
+        # Quatrième revue : PROJECT_NAME était posé « si absent » ; un back/.env qui en porte un autre faisait viser
+        # au pare-feu, au contrôle à l'exécution et à la garde de la base d'autres conteneurs et volumes.
+        from ansible.parsing.dataloader import DataLoader
+        from ansible.template import Templar, trust_as_template
+        path = os.path.join(ROLES, "webapp-env-update", "tasks", "render.yml")
+        task = [t for t in check._load(path) if "wa_env_back_owned" in str(t.get("ansible.builtin.set_fact", {}))][0]
+        base = {k: trust_as_template(v) if isinstance(v, str) else v for k, v in task["vars"].items()}
+        base.update(wa_env_back_text="PROJECT_NAME=other\nBACK_HOSTS=192.0.2.10\n", ansible_host="192.0.2.10",
+                    remote_username="srvc", wa_back_port=4731, wa_front_port=4730, wa_redis_port=4733, wa_env="prod",
+                    wa_replicas=1, wa_worker="off", webapp_env_trust_proxy="x", wa_db_exposed=False,
+                    wa_db_selfhosted=True, wa_db_port=4732, wa_front_mode="container", wa_registry_on=False,
+                    wa_project="fleetforge-gateway", proxy_hostname="a.example.test", domain_name="example.test",
+                    webapp_db_engine="postgres")
+        for hardened in (True, False):
+            variables = dict(base, **({"webapp_hardening": {}} if hardened else {}))
+            templar = Templar(loader=DataLoader(), variables=variables)
+            for key in ("wa_env_back_owned", "wa_env_front_owned"):
+                owned = templar.template(trust_as_template(task["ansible.builtin.set_fact"][key]))
+                self.assertEqual(owned.get("PROJECT_NAME"), "fleetforge-gateway" if hardened else None, (hardened, key))
 
 
 class EnvGrammarTests(unittest.TestCase):

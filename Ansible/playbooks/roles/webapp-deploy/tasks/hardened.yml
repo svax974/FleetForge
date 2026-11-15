@@ -101,15 +101,18 @@
   become: false
   when: webapp_phase in ['all', 'deploy']
 
-# Volumes, volume monté par `<projet>_postgres`, répertoire de l'app (déploiement antérieur), et base initialisée dans
-# le volume attendu (PG_VERSION) : NOMS et booléens seulement.
+# Volumes, volume monté par `<projet>_postgres`, marqueur d'état (déploiement SAIN antérieur : projet et volume, écrit
+# en fin de bloc ci-dessous, root 0644), et base initialisée dans le volume attendu (PG_VERSION) : NOMS et booléens
+# seulement. Le marqueur remplace le répertoire de l'app comme preuve d'un déploiement antérieur : ce répertoire existe
+# dès un premier passage INTERROMPU, qui doit pouvoir être rejoué sans drapeau (quatrième revue).
 - name: Read the database state of the machine
   ansible.builtin.shell: >-
     set -o pipefail;
     expected={{ ((wa_project | lower) ~ '-back-' ~ (wa_h_back_host | lower | regex_replace('[^a-z0-9]', '-')) ~ '_postgres_data') | quote }};
     echo "== volumes"; docker volume ls --format '{% raw %}{{.Name}}{% endraw %}';
     echo "== mounts"; docker inspect --format '{% raw %}{{range .Mounts}}{{.Name}}{{"\n"}}{{end}}{% endraw %}' {{ (wa_project ~ '_postgres') | quote }} 2>/dev/null || true;
-    echo "== prior"; if [ -d {{ ('/home/' ~ remote_username ~ '/' ~ wa_project) | quote }} ]; then echo yes; fi;
+    echo "== marker"; m={{ ('/var/lib/fleetforge/webapp/' ~ inventory_hostname ~ '.state') | quote }};
+    if [ -f "$m" ]; then grep -E '^(project|volume)=[A-Za-z0-9_.-]{1,128}$' "$m" || echo 'invalid=1'; fi;
     echo "== initialised";
     mp=$(docker volume inspect --format '{% raw %}{{.Mountpoint}}{% endraw %}' "$expected" 2>/dev/null || true);
     if [ -n "$mp" ] && [ -f "$mp/PG_VERSION" ]; then echo yes; fi
@@ -128,7 +131,7 @@
       tags: [always]
   vars:
     _sections: >-
-      {%- set out = {'volumes': [], 'mounts': [], 'prior': [], 'initialised': []} -%}
+      {%- set out = {'volumes': [], 'mounts': [], 'marker': [], 'initialised': []} -%}
       {%- set ns = namespace(cur='') -%}
       {%- for l in wa_h_db_state.stdout_lines | default([]) -%}
       {%- if l.startswith('== ') -%}{%- set ns.cur = l[3:] -%}{%- elif l | trim and ns.cur in out -%}{%- set _ = out[ns.cur].append(l | trim) -%}{%- endif -%}
@@ -136,7 +139,11 @@
       {{ out }}
     wa_h_volumes: "{{ _sections.volumes }}"
     wa_h_pg_mounts: "{{ _sections.mounts }}"
-    wa_h_prior_deploy: "{{ _sections.prior | length > 0 }}"
+    # Marqueur lu : {project, volume} (lignes `clé=valeur`), {} sans marqueur, {invalid} illisible.
+    wa_h_marker: >-
+      {%- set m = {} -%}
+      {%- for l in _sections.marker -%}{%- set _ = m.update({l.split('=', 1)[0]: l.split('=', 1)[1] | default('')}) -%}{%- endfor -%}
+      {{ m }}
     wa_h_expected_initialised: "{{ _sections.initialised | length > 0 }}"
   when: webapp_phase in ['all', 'deploy']
 
@@ -257,6 +264,31 @@
       when:
         - webapp_phase in ['all', 'deploy']
         - not ansible_check_mode
+
+    # Déploiement SAIN (santé, écoutes, durcissement réel) : marqueur d'état — projet et volume de la base. Lu au
+    # prochain passage par la garde de la base (db-migration.yml). Hors de /home : root seul l'écrit. Nommé d'après
+    # l'ENTRÉE d'inventaire, pas le projet : un renommage du projet retrouve le marqueur, qui nomme l'ancien volume.
+    - name: Create the directory of the deployed-state markers
+      ansible.builtin.file:
+        path: /var/lib/fleetforge/webapp
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+      become: true
+      when: webapp_phase in ['all', 'deploy']
+
+    - name: Record the deployed state of the application
+      ansible.builtin.copy:
+        dest: "/var/lib/fleetforge/webapp/{{ inventory_hostname }}.state"
+        content: "project={{ wa_project }}\nvolume={{ wa_h_db_expected_volume }}\n"
+        owner: root
+        group: root
+        mode: '0644'
+      become: true
+      when:
+        - webapp_phase in ['all', 'deploy']
+        - wa_h_db_expected_volume is defined
 
   rescue:
     - name: Stop the containers of the application (deployment or verification failed)

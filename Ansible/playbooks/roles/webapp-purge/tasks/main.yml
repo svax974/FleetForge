@@ -43,6 +43,14 @@
   become: true
   when: wa_volumes.stdout_lines | length > 0
 
+# Marqueur d'état du profil durci (webapp-deploy/tasks/hardened.yml) : la base est détruite ci-dessus, un redéploiement
+# repart d'une base vierge VOULUE — le marqueur la refuserait.
+- name: Remove the deployed-state marker of the application
+  ansible.builtin.file:
+    path: "/var/lib/fleetforge/webapp/{{ inventory_hostname }}.state"
+    state: absent
+  become: true
+
 - name: List the images of the application on this host
   ansible.builtin.shell: |
     set -euo pipefail

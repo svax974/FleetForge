@@ -14,7 +14,10 @@
 #
 # Clés POSSÉDÉES : cibles du déploiement, ports, mode, registre, secrets. Clés « SI ABSENTES » : identité et choix
 # d'exploitation qu'une app déjà en production porte (PROJECT_NAME fixe les noms de projet compose, donc les VOLUMES ;
-# CLIENT_ORIGINS est une liste d'exploitation) : posées au premier déploiement, jamais modifiées ensuite.
+# CLIENT_ORIGINS est une liste d'exploitation) : posées au premier déploiement, jamais modifiées ensuite. Profil DURCI
+# (`webapp_hardening`) : PROJECT_NAME est POSSÉDÉ (= `wa_project`) — le pare-feu, le contrôle à l'exécution et la garde
+# de la base nomment conteneurs et volumes d'après `wa_project` ; un PROJECT_NAME divergent les ferait viser à côté
+# (quatrième revue). Un renommage passe alors par la garde de la base (marqueur d'état, webapp-deploy/db-migration.yml).
 # Les clés propres à l'application ne sont JAMAIS touchées. Rien n'est affiché : ni valeur, ni secret.
 #
 # Prérequis : les faits `wa_*` (webapp-setup, tasks_from: facts).
@@ -214,7 +217,8 @@
           } if wa_registry_on | bool else {})
         | combine(wa_secret_env | default({}))
         | combine(wa_h_env | default({}))
-        | combine(wa_env_vault_values | default({})) }}
+        | combine(wa_env_vault_values | default({}))
+        | combine({'PROJECT_NAME': wa_project} if webapp_hardening is defined else {}) }}
     wa_env_back_absent: >-
       {{ {
         'PROJECT_NAME': wa_project,
@@ -227,7 +231,8 @@
         | combine({'ADMIN_WALLET': webapp_admin_wallet} if webapp_admin_wallet | default('') | length > 0 else {}) }}
     wa_env_front_owned: >-
       {{ {'VITE_PORT': wa_front_port}
-         | combine({'VITE_API_URL': wa_api_url_pages} if wa_front_mode == 'pages' else {}) }}
+         | combine({'VITE_API_URL': wa_api_url_pages} if wa_front_mode == 'pages' else {})
+         | combine({'PROJECT_NAME': wa_project} if webapp_hardening is defined else {}) }}
     wa_env_front_absent: >-
       {{ {'PROJECT_NAME': wa_project}
          | combine({'VITE_API_URL': '/api/v1'} if wa_front_mode == 'container' else {}) }}
