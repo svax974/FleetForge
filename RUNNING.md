@@ -537,29 +537,47 @@ Trois bornes facultatives (`max_hosts` obligatoire en mode `check`), tenues par
 `run_ansible_playbook` avant tout (le compte « autonome » du hub est un compte `run`
 avec les deux premières) :
 - `deny_playbooks` : motifs (`*` = toute suite, `?` = un caractère ; lettres, chiffres,
-  `_ . -`) sur le **nom de fichier** du playbook. Le playbook demandé et ceux qu'il
-  importe (`import_playbook` de nom statique, transitivement) sont tous jugés, chacun
-  sous son nom **écrit** (celui de la requête, celui de l'`import_playbook`) ET sous son
-  nom **résolu** (lien symbolique suivi) : un alias `x.yml` interdit par son nom reste
-  interdit même si sa cible est permise, et un alias `x.yml` → `deploy-fleetforge.yml`
-  est interdit si `deploy-fleetforge.yml` l'est. `x.yml` et `x.yaml` sont un même
-  playbook. Refus : `403 forbidden_playbook`. La lecture (`describe_playbook`,
-  `read_tree`) reste ouverte.
-  **Durcissement du 15/11/2026, à valider par le propriétaire** : un import qui ne se
-  résout pas en un fichier lisible sous `playbooks/` (absent, lien qui en sort, fichier
-  refusé par le lecteur de l'arbre) refuse le lancement en `403 forbidden_playbook` —
-  son nom réel ne peut être jugé. Avant, il passait (absent : échec d'Ansible ; lien
-  sortant : exécuté sans jugement). Ne vaut que pour les comptes bornés et le compte
-  d'automatisation, pas pour l'opérateur ;
+  `_ . -`) sur le **nom de fichier** du playbook. `deny_playbooks` juge les IMPORTS :
+  le playbook demandé et ceux qu'il importe (`import_playbook`, transitivement) sont
+  tous jugés, chacun sous son nom **écrit** (celui de la requête tel que FleetForge le
+  lit, espaces de bord retirées ; celui de l'`import_playbook`), sous le nom de chaque
+  lien symbolique traversé (`a2.yml` → `alias.yml` → `deploy-x.yml` : les trois) ET
+  sous son nom **résolu** : un alias `x.yml` interdit par son nom reste interdit même
+  si sa cible est permise, et un alias `x.yml` → `deploy-fleetforge.yml` est interdit
+  si `deploy-fleetforge.yml` l'est. `x.yml` et `x.yaml` sont un même playbook. Refus :
+  `403 forbidden_playbook`. La lecture (`describe_playbook`, `read_tree`) reste ouverte.
+  **Échec fermé (durcissement du 15/11/2026, à valider par le propriétaire)** : une
+  chaîne d'imports que FleetForge ne peut pas nommer entièrement refuse le lancement
+  en `403 forbidden_playbook` (message sans contenu de fichier ni chemin de la
+  machine). Cas refusés, avant ignorés en silence (le playbook importé s'exécutait sans
+  être jugé) :
+  - un fichier de la chaîne, **playbook demandé compris**, illisible : absent, refusé
+    par le lecteur de l'arbre, chiffré par ansible-vault, binaire, au-delà de 1 Mio, ou
+    YAML non analysable (une clé en double, que le chargeur d'Ansible accepte) ;
+  - un élément de premier niveau qui n'est pas un play (mapping), une clé de fusion
+    YAML `<<` ;
+  - toute clé qui se termine par `import_playbook` (y compris `ansible.legacy.` ou un
+    autre FQCN) dont la valeur n'est pas un chemin relatif simple — composants
+    `[A-Za-z0-9_.-]`, ni vide, ni `.`, ni `..` : un gabarit (`{{ }}`, `{% %}`,
+    `{# #}`, même constant), un chemin absolu ou un `..` (Ansible le joint sans suivre
+    les liens que suit le système) sont refusés ; une clé `include_playbook` ;
+  - un import qui passe par un DOSSIER lien symbolique, ou qui ne se résout pas en un
+    fichier lisible sous `playbooks/` (absent, lien qui en sort, fichier refusé) ;
+  - plus de 50 fichiers dans la chaîne.
+  Aucun playbook du dépôt n'est concerné (test `every_real_playbook_chain_is_judgeable`
+  sur l'arbre réel). `describe_playbook` signale le même cas dans `notes`
+  (« chaîne d'imports non jugeable : … »). Ne vaut que pour les comptes bornés et le
+  compte d'automatisation : l'opérateur n'est pas concerné ;
 - `max_hosts` (1 à 1000) : `limit` devient **obligatoire** (sans lui un run vise tout ce
   que cible le playbook, donc un nombre inconnu), `no_limit` est refusé, et les groupes
   de `limit` sont développés par l'inventaire (`all`, l'organisation, un groupe, un
   hôte ; sans doublon) : au-delà, `403 too_many_hosts` ;
 - `allow_playbooks` : liste blanche, mêmes motifs, non vide — seul un playbook qu'elle
-  couvre se lance (`403 forbidden_playbook` sinon ; ceux qu'il importe restent jugés par
-  `deny_playbooks`). Jugée sur le seul nom **résolu**, celui qui s'exécute et qu'hache
-  l'empreinte du check : un alias non listé vers un playbook listé se lance, un alias
-  listé vers un playbook non listé est refusé.
+  couvre se lance (`403 forbidden_playbook` sinon). Jugée sur le seul nom **résolu** du
+  playbook demandé, celui qui s'exécute et qu'hache l'empreinte du check : un alias non
+  listé vers un playbook listé se lance, un alias listé vers un playbook non listé est
+  refusé. `allow_playbooks` ne s'applique JAMAIS aux imports d'un playbook autorisé
+  (comportement existant) : ceux-ci ne sont jugés que par `deny_playbooks`.
 
 Par le déploiement : `ff_api_accounts: [{ user, parcs?, mode, deny_playbooks?, max_hosts?,
 allow_playbooks?, accept_checks_from?, accept_own_checks?, allow_extra_vars?, allow_diff? }]` dans
@@ -685,7 +703,8 @@ Détails :
   pas le même playbook au commit B, ni un check avec `limit` un run `no_limit`. Le run
   exécute exactement l'arbre de ce commit et le retient jusqu'à sa fin.
 - `describe_playbook` : analyse STATIQUE (jamais d'Ansible, jamais de Jinja évalué) des plays
-  (un `import_playbook` de nom statique est déplié), de leurs rôles et dépendances de rôle
+  (un `import_playbook` au nom simple est déplié ; un autre est signalé dans `notes`, et
+  refusé au lancement d'un compte borné), de leurs rôles et dépendances de rôle
   (`meta/main.yml`), de `include_role`/`import_role`/`include_tasks`/`import_tasks` de nom
   statique ; `tags` = union des étiquettes du playbook et des rôles appelés (play, rôle,
   tâche, bloc, `apply:`), utilisable avec `tags`/`skip_tags` ; `vars` = variables référencées
@@ -703,18 +722,30 @@ Détails :
     `playbooks/`, même grammaire que les noms acceptés en entrée). Un alias
     `update-x.yml` → `other.yml` est décrit comme `other.yml` et nommé `other.yml` :
     c'est ce nom qu'exécute FleetForge, qu'entre dans l'empreinte du check et que juge
-    `deny_playbooks` — une passerelle juge ce nom, pas celui qu'elle a demandé. Un lien
-    qui sort de `playbooks/` ou ne mène à rien reste refusé (`404 unknown_playbook`) ;
+    `allow_playbooks`. `deny_playbooks` juge ce nom ET le nom demandé (et les liens
+    traversés) : une passerelle qui reproduit ces listes fait de même — `deny` sur les
+    deux noms, liste blanche sur ce nom-ci. Un lien qui sort de `playbooks/` ou ne mène
+    à rien reste refusé (`404 unknown_playbook`) ;
   - `imports_resolved` : même longueur et même ordre que `imports` (noms tels
     qu'écrits) ; le nom résolu de chaque import (`sub/x.yml` s'il est dans un
     sous-dossier), ou `null` quand il ne se résout pas en un fichier lisible sous
     `playbooks/` (absent, lien sortant, fichier refusé — `notes` le signale aussi, et
-    un lancement d'un compte borné est alors refusé) ;
-  - `commit_subject` : première ligne non vide du message du commit décrit (`commit`),
-    lue par `git cat-file commit` (aucun hook, aucun contenu de l'arbre exécuté),
-    caractères de contrôle et de mise en forme invisible (bidi, largeur nulle) remplacés
-    par une espace, 200 caractères au plus, UTF-8 valide ; vide en mode rsync ou si git
-    ne le lit pas (jamais une erreur). Caviardé comme le reste de la réponse.
+    un lancement d'un compte borné est alors refusé). Un import que l'analyse ne suit
+    pas (gabarit, chemin absolu, `..`, FQCN `ansible.legacy.`, clé `<<`…) n'apparaît pas
+    dans `imports` : seule la note « chaîne d'imports non jugeable » le dit — un appelant
+    échoue fermé sur une `notes` non vide ;
+  - `commit_subject` : première ligne du message du commit décrit (`commit`) non vide
+    une fois nettoyée, lue par `git cat-file commit` (aucun hook, aucun contenu de
+    l'arbre exécuté). LISTE BLANCHE : lettres, chiffres, ponctuation, symboles (Unicode
+    L*, N*, P*, S*) et l'espace U+0020 ; tout le reste (contrôles, caractères de
+    format — bidi, largeur nulle, « tags » Unicode U+E0000–E007F —, marques de
+    variation, séparateurs U+2028/U+2029, autres espaces, remplissages Hangul, usage
+    privé, non attribués) devient une espace. 200 caractères au plus, UTF-8 valide ;
+    vide en mode rsync ou si git ne le lit pas (jamais une erreur). Caviardé comme le
+    reste de la réponse. **Texte NON FIABLE** : écrit par quiconque pousse un commit,
+    le consommateur doit l'échapper (HTML, Markdown, invite d'un modèle) ; et un message
+    de commit peut contenir un secret que le caviardage ne reconnaît pas (court, sans
+    nom ni préfixe révélateur), qui sort alors en clair.
   Par MCP : mêmes champs ; seul le texte de description de l'outil change (schéma
   d'entrée inchangé, pas de `outputSchema`).
 - `read_tree` / `search_tree` : le CODE sous `playbooks/` seulement. `path` est relatif à
