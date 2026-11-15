@@ -32,7 +32,7 @@
     wa_back_port: "{{ back_port | default(app_port | int + 1) | int }}"
     wa_db_port: "{{ webapp_db_port | default(app_port | int + 2) | int }}"
     wa_redis_port: "{{ webapp_redis_port | default(app_port | int + 3) | int }}"
-    wa_front_mode: "{{ 'pages' if (cloudflare_front | default(false) | bool) else 'container' }}"
+    wa_front_mode: "{{ 'pages' if ((cloudflare_front | default(false) | bool) or (webapp_front | default('') == 'pages')) else 'container' }}"
     wa_machine: "{{ webapp_machine | default(inventory_hostname) }}"
     wa_machine_key: "{{ ansible_host }}:{{ ansible_port | default(22) }}"
     wa_replicas: "{{ webapp_replicas | default(1) | int }}"

@@ -38,7 +38,7 @@
 
 - name: Compare the local env files with the vault
   ansible.builtin.command:
-    cmd: ./app-env.sh status {{ wa_app_id | quote }}
+    cmd: ./app-env.sh status {{ wa_app_id | quote }} {{ ('--env=' ~ wa_env) | quote if wa_env != 'prod' else '' }}
     chdir: "{{ playbook_dir }}/.."
   delegate_to: localhost
   become: false
@@ -53,8 +53,8 @@
   ansible.builtin.fail:
     msg: >-
       Le .env {{ wa_env_differing | join(' et ') }} de {{ wa_src }} diffère de la copie du coffre : le restaurer
-      écraserait le fichier local. Si le fichier local fait foi : `./app-env.sh save {{ wa_app_id }}`, puis
-      relancer. Si c'est le coffre : `./app-env.sh restore {{ wa_app_id }}` (garde le local en .env.bak-<date>).
+      écraserait le fichier local. Si le fichier local fait foi : `./app-env.sh save {{ wa_app_id }}{{ ' --env=' ~ wa_env if wa_env != 'prod' else '' }}`, puis
+      relancer. Si c'est le coffre : `./app-env.sh restore {{ wa_app_id }}{{ ' --env=' ~ wa_env if wa_env != 'prod' else '' }}` (garde le local en .env.bak-<date>).
       Passer outre : `-e webapp_env_overwrite_local=true`.
   when:
     - wa_env_vault_dir.stat.isdir | default(false)
@@ -63,7 +63,7 @@
 
 - name: Restore the env files from the vault
   ansible.builtin.command:
-    cmd: ./app-env.sh restore {{ wa_app_id | quote }}
+    cmd: ./app-env.sh restore {{ wa_app_id | quote }} {{ ('--env=' ~ wa_env) | quote if wa_env != 'prod' else '' }}
     chdir: "{{ playbook_dir }}/.."
   delegate_to: localhost
   become: false
@@ -98,7 +98,9 @@
     cfpages_env_file: "{{ wa_src }}{{ wa_front_env_file }}"
     cfpages_project: "{{ wa_project | lower | replace('_', '-') }}"
     cfpages_domain: "{{ wa_project | lower | replace('_', '-') ~ '.' ~ domain_name }}"
-  when: wa_front_mode == 'pages'
+  when:
+    - wa_front_mode == 'pages'
+    - webapp_pages_managed | default(true) | bool
 
 # ── 6. Rendu ───────────────────────────────────────────────────────────────
 - name: Read the env files as they are now
@@ -231,7 +233,7 @@
         | combine({'ADMIN_WALLET': webapp_admin_wallet} if webapp_admin_wallet | default('') | length > 0 else {}) }}
     wa_env_front_owned: >-
       {{ {'VITE_PORT': wa_front_port}
-         | combine({'VITE_API_URL': wa_api_url_pages} if wa_front_mode == 'pages' else {})
+         | combine({'VITE_API_URL': wa_api_url_pages} if (wa_front_mode == 'pages' and (webapp_pages_managed | default(true) | bool)) else {})
          | combine({'PROJECT_NAME': wa_project} if webapp_hardening is defined else {}) }}
     wa_env_front_absent: >-
       {{ {'PROJECT_NAME': wa_project}
@@ -373,8 +375,14 @@
   ansible.builtin.set_fact:
     wa_missing_manual: >-
       {%- set out = [] -%}
+      {#- Le template accepte `WALLET_CONNECT_ID` à la place de `VITE_REOWN_PROJECT_ID` (le premier l'emporte s'ils sont tous deux posés). -#}
+      {%- set aliases = {'VITE_REOWN_PROJECT_ID': ['WALLET_CONNECT_ID']} -%}
       {%- for k in wa_manual_keys -%}
-      {%- if (wa_front_after | regex_findall(wa_read_tpl | replace('{key}', k)) | last | default('') | trim) == '' -%}{%- set _ = out.append(k) -%}{%- endif -%}
+      {%- set ns = namespace(found=false) -%}
+      {%- for kk in [k] + aliases.get(k, []) -%}
+      {%- if (wa_front_after | regex_findall(wa_read_tpl | replace('{key}', kk)) | last | default('') | trim) != '' -%}{%- set ns.found = true -%}{%- endif -%}
+      {%- endfor -%}
+      {%- if not ns.found -%}{%- set _ = out.append(k) -%}{%- endif -%}
       {%- endfor -%}
       {{ out }}
   delegate_to: localhost
@@ -427,7 +435,7 @@
 # ── 7. Coffre ──────────────────────────────────────────────────────────────
 - name: Save the env files into the vault
   ansible.builtin.command:
-    cmd: ./app-env.sh save {{ wa_app_id | quote }}
+    cmd: ./app-env.sh save {{ wa_app_id | quote }} {{ ('--env=' ~ wa_env) | quote if wa_env != 'prod' else '' }}
     chdir: "{{ playbook_dir }}/.."
   delegate_to: localhost
   become: false

@@ -6,6 +6,9 @@
 #   ./app-env.sh save    <app>   # app checkout -> vault (re-encrypted only when the content changed)
 #   ./app-env.sh restore <app>   # vault -> app checkout (mode 0600, a differing local file is kept as .env.bak-<date>)
 #
+# `--env=<name>` (any position, e.g. `--env=preprod`) selects the files of another environment: `<stack>/.env.<name>` in the checkout
+# and `.private/apps/<app>/<stack>.env.<name>.vault`. Without it: production (`<stack>/.env`, `<stack>.env.vault`), unchanged.
+#
 # Apps and their checkout paths: .private/apps/apps.yml. Vault password: ansible.cfg (vault_password_file), which is
 # why this script runs ansible-vault from its own directory.
 set -euo pipefail
@@ -45,7 +48,7 @@ cmd_status() {
   for app in "${apps[@]}"; do
     src=$(app_path "${app}")
     for stack in "${STACKS[@]}"; do
-      printf '%-22s %-6s %s\n' "${app}" "${stack}" "$(stack_status ".private/apps/${app}/${stack}.env.vault" "${src}/${stack}/.env")"
+      printf '%-22s %-6s %s\n' "${app}" "${stack}" "$(stack_status ".private/apps/${app}/${stack}.env${ENV_SUFFIX}.vault" "${src}/${stack}/.env${ENV_SUFFIX}")"
     done
   done
 }
@@ -55,7 +58,7 @@ cmd_save() {
   src=$(app_path "${app}")
   mkdir -p ".private/apps/${app}"
   for stack in "${STACKS[@]}"; do
-    vault=".private/apps/${app}/${stack}.env.vault"; local_file="${src}/${stack}/.env"
+    vault=".private/apps/${app}/${stack}.env${ENV_SUFFIX}.vault"; local_file="${src}/${stack}/.env${ENV_SUFFIX}"
     [[ -f "${local_file}" ]] || { echo "${app} ${stack}: no local .env, skipped"; continue; }
     if [[ "$(stack_status "${vault}" "${local_file}")" == identical ]]; then
       echo "${app} ${stack}: unchanged"
@@ -70,17 +73,31 @@ cmd_restore() {
   local app="${1:?usage: app-env.sh restore <app>}" src vault local_file
   src=$(app_path "${app}")
   for stack in "${STACKS[@]}"; do
-    vault=".private/apps/${app}/${stack}.env.vault"; local_file="${src}/${stack}/.env"
+    vault=".private/apps/${app}/${stack}.env${ENV_SUFFIX}.vault"; local_file="${src}/${stack}/.env${ENV_SUFFIX}"
     [[ -f "${vault}" ]] || { echo "${app} ${stack}: no vault copy, skipped"; continue; }
     case "$(stack_status "${vault}" "${local_file}")" in
       identical) echo "${app} ${stack}: unchanged"; continue ;;
-      differs) cp -p "${local_file}" "${local_file}.bak-$(date +%Y%m%d-%H%M%S)"; echo "${app} ${stack}: local copy kept as .env.bak-*" ;;
+      differs) cp -p "${local_file}" "${local_file}.bak-$(date +%Y%m%d-%H%M%S)"; echo "${app} ${stack}: local copy kept as .env${ENV_SUFFIX}.bak-*" ;;
     esac
     ( umask 077; ansible-vault decrypt --output "${local_file}" "${vault}" >/dev/null )
     chmod 600 "${local_file}"
     echo "${app} ${stack}: restored from ${vault}"
   done
 }
+
+# `--env=<name>` is taken out of the arguments wherever it stands.
+ENV_SUFFIX=""
+ARGS=()
+for arg in "$@"; do
+  case "${arg}" in
+    --env=*)
+      env_name="${arg#--env=}"
+      [[ "${env_name}" =~ ^[a-z][a-z0-9-]{0,30}$ ]] || die "invalid environment name '${env_name}'"
+      [[ "${env_name}" == prod ]] || ENV_SUFFIX=".${env_name}" ;;
+    *) ARGS+=("${arg}") ;;
+  esac
+done
+set -- ${ARGS[@]+"${ARGS[@]}"}
 
 case "${1:-}" in
   status) shift; cmd_status "$@" ;;

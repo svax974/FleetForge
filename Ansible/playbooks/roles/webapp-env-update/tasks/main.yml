@@ -46,7 +46,7 @@
 
 - name: Compute the deployment targets declared by the inventory
   ansible.builtin.set_fact:
-    webapp_env_cf: "{{ cloudflare_front | default(false) | bool }}"
+    webapp_env_cf: "{{ (cloudflare_front | default(false) | bool) or (webapp_front | default('') == 'pages') }}"
     webapp_env_values:
       BACK_HOSTS: "{{ ansible_host }}"
       REMOTE_SSH_PORT: "{{ ansible_port | default(22) }}"
