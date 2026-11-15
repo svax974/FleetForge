@@ -1080,6 +1080,42 @@ class FactCollisionTests(unittest.TestCase):
         self.assertEqual(sorted(e.split("`")[1] for e in errors), ["p", "x_script", "x_tmp"], errors)
 
 
+class LocalProbeTests(unittest.TestCase):
+    """Relecture finale : la règle OUTPUT `local:deny` rejette `srvc` ; toute attente locale sur un port de l'app d'un
+    hôte durci passe par root (`become: true`). svcprobe tourne en root (svcprobe-install : `User=root`)."""
+
+    def test_the_real_roles_probe_the_app_ports_as_root(self):
+        self.assertEqual(check.check_local_app_probes(ROLES), [])
+
+    def test_a_local_probe_without_become_is_caught(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, "webapp-x", "tasks"))
+            with open(os.path.join(tmp, "webapp-x", "tasks", "main.yml"), "w") as f:
+                f.write(textwrap.dedent("""\
+                    - name: uri
+                      ansible.builtin.uri: {url: "http://127.0.0.1:{{ wa_back_port }}/api/v1/health"}
+                    - name: curl
+                      ansible.builtin.shell: curl -fsS http://127.0.0.1:{{ wa_front_port }}/
+                    - name: wait
+                      ansible.builtin.wait_for: {port: "{{ wa_front_port }}"}
+                    - name: as root
+                      ansible.builtin.uri: {url: "http://127.0.0.1:{{ wa_back_port }}/"}
+                      become: true
+                    - name: plain apps only
+                      ansible.builtin.uri: {url: "http://127.0.0.1:{{ wa_back_port }}/"}
+                      when: [webapp_hardening is not defined]
+                    - block:
+                        - name: in block
+                          ansible.builtin.uri: {url: "http://127.0.0.1:{{ wa_front_port }}/"}
+                    """))
+            errors = check.check_local_app_probes(tmp)
+        self.assertEqual(sorted(e.split("« ")[1].split(" »")[0] for e in errors), ["curl", "in block", "uri", "wait"])
+
+    def test_svcprobe_runs_as_root(self):
+        with open(os.path.join(ROLES, "svcprobe-install", "templates", "svcprobe.service"), encoding="utf-8") as f:
+            self.assertIn("User=root", f.read())
+
+
 FAKE_IPTABLES = r'''#!/usr/bin/env python3
 """iptables FACTICE à état (table filter seule) : -S, -L --line-numbers, -I, -D, -N, -X, -F, -A, -C, -h."""
 import json, os, sys

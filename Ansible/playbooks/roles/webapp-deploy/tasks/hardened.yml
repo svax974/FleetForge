@@ -212,11 +212,13 @@
         success_msg: "scripts/run.sh {{ wa_env }} : code 0."
       when: not ansible_check_mode
 
-    # Contrôles SUR l'hôte, en boucle locale (hors DOCKER-USER).
+    # Contrôles SUR l'hôte, en boucle locale (hors DOCKER-USER). EN ROOT : la règle OUTPUT `local:deny` du profil
+    # rejette tout autre compte que root et nginx (dont `srvc`, compte de connexion) vers ces ports.
     - name: Wait for the front to answer
       ansible.builtin.uri:
         url: "http://127.0.0.1:{{ wa_front_port }}/"
         status_code: [200, 301, 302]
+      become: true
       register: wa_front_ready
       until: wa_front_ready.status is defined and wa_front_ready.status in [200, 301, 302]
       retries: "{{ webapp_health_retries }}"
@@ -228,6 +230,7 @@
       ansible.builtin.uri:
         url: "http://127.0.0.1:{{ wa_back_port }}/api/v1/health"
         status_code: [200]
+      become: true
       register: wa_back_ready
       until: wa_back_ready.status is defined and wa_back_ready.status == 200
       retries: "{{ webapp_health_retries }}"

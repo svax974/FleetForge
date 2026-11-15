@@ -62,6 +62,7 @@ Sous-commandes, chacune code 1 avec la liste des écarts :
 
 Dépendance : PyYAML (celui d'Ansible). `python3 -I Ansible/scripts/webapp_hardening_check.py playbook Ansible/playbooks`.
 """
+import glob
 import json
 import os
 import re
@@ -269,6 +270,41 @@ def check_playbook(playbooks_dir):
     errors += check_coverage(playbooks_dir)[0]
     errors += check_secret_loops(os.path.join(playbooks_dir, "roles"))
     errors += check_fact_collisions(playbooks_dir)
+    errors += check_local_app_probes(os.path.join(playbooks_dir, "roles"))
+    return errors
+
+
+APP_PORT_VARS = re.compile(r"\b(wa_front_port|wa_back_port)\b")
+LOCAL_PROBE_MODULES = ("ansible.builtin.uri", "uri", "ansible.builtin.get_url", "get_url", "ansible.builtin.wait_for",
+                       "wait_for")
+LOCAL_PROBE_COMMANDS = ("ansible.builtin.command", "command", "ansible.builtin.shell", "shell")
+
+
+def check_local_app_probes(roles_dir):
+    """Profil durci : la règle OUTPUT `local:deny` REJETTE tout compte autre que root et nginx vers les ports de l'app
+    (relecture finale : les attentes de santé de hardened.yml tournaient en `srvc`, sans `become`, et le `rescue`
+    arrêtait les conteneurs). Toute tâche des rôles `webapp-*` qui joint `wa_front_port`/`wa_back_port` par `uri`,
+    `get_url`, `wait_for`, `curl` ou `wget` porte `become: true` — sauf si elle est réservée aux apps NON durcies
+    (`when` contient `webapp_hardening is not defined`)."""
+    errors = []
+    for path in sorted(glob.glob(os.path.join(roles_dir, "webapp-*", "tasks", "*.yml"))):
+        for task in _tasks_in(_load(path) or []):
+            if "block" in task:
+                continue
+            probe = any(m in task for m in LOCAL_PROBE_MODULES) and APP_PORT_VARS.search(
+                json.dumps([task.get(m) for m in LOCAL_PROBE_MODULES if m in task], default=str))
+            command = next((task[m] for m in LOCAL_PROBE_COMMANDS if m in task), None)
+            if command is not None:
+                text = json.dumps(command, default=str)
+                probe = probe or (re.search(r"\b(curl|wget)\b", text) and APP_PORT_VARS.search(text))
+            if not probe:
+                continue
+            when = json.dumps(task.get("when", ""), default=str)
+            if "webapp_hardening is not defined" in when:
+                continue
+            if task.get("become") is not True:
+                errors.append(f"{path}: « {task.get('name', '?')} » joint un port de l'app sans `become: true` "
+                              "(rejeté par la règle OUTPUT local:deny du profil durci)")
     return errors
 
 
