@@ -105,18 +105,19 @@
   ansible.builtin.template:
     src: webapp-firewall.sh.j2
     dest: "{{ wa_fw_script }}"
-    owner: root
-    group: root
+    owner: "{{ webapp_root_owner }}"
+    group: "{{ webapp_root_group }}"
     mode: '0750'
   become: true
-  register: wa_fw_script
+  # JAMAIS `wa_fw_script` : le `register` écraserait le chemin posé plus haut (relecture finale).
+  register: wa_fw_script_file
 
 - name: Deploy the firewall unit of the application
   ansible.builtin.template:
     src: webapp-firewall.service.j2
-    dest: "/etc/systemd/system/{{ wa_app.wa_h_firewall_unit }}.service"
-    owner: root
-    group: root
+    dest: "{{ webapp_systemd_unit_dir }}/{{ wa_app.wa_h_firewall_unit }}.service"
+    owner: "{{ webapp_root_owner }}"
+    group: "{{ webapp_root_group }}"
     mode: '0644'
   become: true
   register: wa_fw_unit
@@ -133,7 +134,7 @@
 - name: Enable and start the firewall unit of the application
   ansible.builtin.systemd:
     name: "{{ wa_app.wa_h_firewall_unit }}"
-    state: "{{ 'restarted' if (wa_fw_script is changed or wa_fw_unit is changed) else 'started' }}"
+    state: "{{ 'restarted' if (wa_fw_script_file is changed or wa_fw_unit is changed) else 'started' }}"
     enabled: true
     daemon_reload: true
   become: true

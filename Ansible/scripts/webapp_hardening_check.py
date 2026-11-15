@@ -268,6 +268,40 @@ def check_playbook(playbooks_dir):
     errors += _check_eligible_proxies(os.path.join(playbooks_dir, "roles"))
     errors += check_coverage(playbooks_dir)[0]
     errors += check_secret_loops(os.path.join(playbooks_dir, "roles"))
+    errors += check_fact_collisions(playbooks_dir)
+    return errors
+
+
+def _set_names(task):
+    """Noms posés par `set_fact` (hors clés calculées) et `vars` d'une tâche, d'une inclusion ou d'un bloc."""
+    names = set()
+    for key in ("ansible.builtin.set_fact", "set_fact"):
+        if isinstance(task.get(key), dict):
+            names.update(n for n in task[key] if isinstance(n, str) and "{{" not in n and n != "cacheable")
+    if isinstance(task.get("vars"), dict):
+        names.update(n for n in task["vars"] if isinstance(n, str))
+    return names
+
+
+def check_fact_collisions(playbooks_dir):
+    """Un même nom en `set_fact`/`vars` ET en `register` dans un même rôle (tous ses fichiers de tâches) ou un même
+    playbook : le `register` écrase le fait (ou masque la variable de tâche) — `argv: ["{{ x }}"]` lance alors la
+    représentation d'un dict (constat de la relecture finale, webapp-security/tasks/firewall.yml). Tout le dépôt."""
+    groups = {}
+    for path, kind in _all_task_files(playbooks_dir):
+        rel = os.path.relpath(path, playbooks_dir)
+        key = os.sep.join(rel.split(os.sep)[:2]) if rel.startswith("roles" + os.sep) else rel
+        groups.setdefault(key, []).extend((path, t) for t in _tasks_of(path, kind))
+    errors = []
+    for key, tasks in sorted(groups.items()):
+        registered = {}
+        for path, task in tasks:
+            if isinstance(task.get("register"), str):
+                registered.setdefault(task["register"], path)
+        for path, task in tasks:
+            for name in sorted(_set_names(task) & set(registered)):
+                errors.append(f"{path}: « {task.get('name', '?')} » pose `{name}`, aussi `register` dans "
+                              f"{os.path.relpath(registered[name], playbooks_dir)} (collision de faits)")
     return errors
 
 

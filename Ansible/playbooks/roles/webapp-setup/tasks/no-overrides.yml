@@ -67,6 +67,7 @@
     wa_front_todo: __wa_internal_probe__
     wa_front_written: __wa_internal_probe__
     wa_fw_script: __wa_internal_probe__
+    wa_fw_script_file: __wa_internal_probe__
     wa_fw_unit: __wa_internal_probe__
     wa_groups: __wa_internal_probe__
     wa_h_account: __wa_internal_probe__
@@ -221,6 +222,7 @@
       - lookup('ansible.builtin.vars', 'wa_front_todo') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', 'wa_front_written') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', 'wa_fw_script') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'wa_fw_script_file') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', 'wa_fw_unit') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', 'wa_groups') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', 'wa_h_account') | string == '__wa_internal_probe__'

@@ -10,6 +10,13 @@ webapp_volume_format: !unsafe '{"Name":{{json .Name}},"Driver":{{json .Driver}},
 
 # Services compose des relais de confiance (adresses FIXES, ports publiés sur 0.0.0.0) et port du front dans son
 # conteneur (nginx du gabarit : 80), publié EXACTEMENT sur `app_port`.
+# Répertoire des unités systemd posées par le profil (pare-feu, drop-in nginx). Seul le test d'exécution de
+# firewall.yml (scripts/test_webapp_hardening_check.py) le déplace, vers un répertoire temporaire.
+webapp_systemd_unit_dir: /etc/systemd/system
+# Propriétaire des fichiers root du pare-feu (script, unités). Idem : le test les pose au compte qui le joue.
+webapp_root_owner: root
+webapp_root_group: root
+
 webapp_front_service: front
 webapp_back_lb_service: back-lb
 webapp_front_container_port: 80

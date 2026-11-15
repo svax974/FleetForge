@@ -105,9 +105,11 @@
   no_log: true
   when: (vsecret_new | default('', true) | length > 0) and (vsecret_current | length == 0) and not ansible_check_mode
 
+# `vsecret_vaulted` n'est pas remis à zéro ici : c'est un `register`, réécrit à chaque secret (résultat « skipped »,
+# sans `stdout`, quand la tâche est sautée) ; un `set_fact` du même nom ferait une collision de faits (contrôle
+# `check_fact_collisions` de scripts/webapp_hardening_check.py).
 - name: Forget the per-secret temporaries
   ansible.builtin.set_fact:
     vsecret_new: ''
-    vsecret_vaulted: {}
     vsecret_is_drawn: false
   no_log: true

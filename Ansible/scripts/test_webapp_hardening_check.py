@@ -19,6 +19,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import textwrap
 import unittest
@@ -1055,6 +1056,163 @@ class FirewallScriptTests(unittest.TestCase):
         self.assertEqual(final_input[-1]["comment"], "ufw", "règles INPUT de l'app EN TÊTE, ufw intact")
         self.assertEqual([r["comment"].split(":")[1:3] for r in final_input[:-1]],
                          [["host", "reply"], ["host", "allow"], ["host", "allow"], ["host", "deny"]])
+
+
+class FactCollisionTests(unittest.TestCase):
+    """Un nom en `set_fact`/`vars` ET en `register` dans un même rôle ou playbook : le `register` écrase le fait."""
+
+    def test_the_whole_ansible_tree_has_no_fact_collision(self):
+        self.assertEqual(check.check_fact_collisions(PLAYBOOKS), [])
+
+    def test_a_register_over_a_set_fact_is_caught_across_files_of_a_role(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, "roles", "x-install", "tasks"))
+            with open(os.path.join(tmp, "roles", "x-install", "tasks", "main.yml"), "w") as f:
+                f.write("- name: path\n  ansible.builtin.set_fact: {x_script: /usr/local/sbin/x}\n")
+            with open(os.path.join(tmp, "roles", "x-install", "tasks", "deploy.yml"), "w") as f:
+                f.write("- name: deploy\n  ansible.builtin.template: {src: a, dest: '{{ x_script }}'}\n  register: x_script\n"
+                        "- name: uses\n  ansible.builtin.debug: {msg: x}\n  vars: {x_tmp: 1}\n"
+                        "- name: other\n  ansible.builtin.command: id\n  register: x_tmp\n")
+            with open(os.path.join(tmp, "play.yml"), "w") as f:
+                f.write("- hosts: all\n  tasks:\n    - {name: a, ansible.builtin.set_fact: {p: 1}}\n"
+                        "    - {name: b, ansible.builtin.command: id, register: p}\n")
+            errors = check.check_fact_collisions(tmp)
+        self.assertEqual(sorted(e.split("`")[1] for e in errors), ["p", "x_script", "x_tmp"], errors)
+
+
+FAKE_IPTABLES = r'''#!/usr/bin/env python3
+"""iptables FACTICE à état (table filter seule) : -S, -L --line-numbers, -I, -D, -N, -X, -F, -A, -C, -h."""
+import json, os, sys
+state = os.environ["FW_STATE"] + ("6" if os.path.basename(sys.argv[0]) == "ip6tables" else "4")
+chains = json.load(open(state)) if os.path.exists(state) else {"INPUT": [], "FORWARD": [], "OUTPUT": [], "DOCKER-USER": []}
+args = [a for a in sys.argv[1:] if a != "-w"]
+if os.environ.get("FW_NO_CGROUP") and "cgroup" in args:
+    sys.stderr.write("iptables: Couldn't load match `cgroup':No such file or directory\n"); sys.exit(2)
+def comment(spec):
+    return spec[spec.index("--comment") + 1] if "--comment" in spec else ""
+def target(spec):
+    for flag in ("-j", "-g"):
+        if flag in spec:
+            return spec[spec.index(flag) + 1]
+    return ""
+op = args[0] if args else ""
+if op in ("-h", "--help") or "-h" in args or "--help" in args:
+    sys.exit(0)
+if op == "-S":
+    names = [args[1]] if len(args) > 1 else list(chains)
+    for c in names:
+        if c not in chains:
+            sys.exit(1)
+        print(("-P " + c + " ACCEPT") if c in ("INPUT", "FORWARD", "OUTPUT") else ("-N " + c))
+    for c in names:
+        for r in chains[c]:
+            print(" ".join(["-A", c] + r))
+    sys.exit(0)
+if op == "-L":
+    c = args[1]
+    if c not in chains:
+        sys.exit(1)
+    if "--line-numbers" in args:
+        print("Chain " + c); print("num target")
+        for i, r in enumerate(chains[c], 1):
+            print(f"{i} {target(r)} 6 -- 0.0.0.0/0 0.0.0.0/0 /* {comment(r)} */")
+    sys.exit(0)
+c = args[1] if len(args) > 1 else ""
+if op == "-N":
+    if c in chains: sys.exit(1)
+    chains[c] = []
+elif op in ("-X", "-F"):
+    if c not in chains: sys.exit(1)
+    if op == "-X": del chains[c]
+    else: chains[c] = []
+elif c not in chains:
+    sys.exit(1)
+elif op == "-I":
+    chains[c].insert(int(args[2]) - 1, args[3:])
+elif op == "-A":
+    chains[c].append(args[2:])
+elif op == "-D":
+    del chains[c][int(args[2]) - 1]
+elif op == "-C":
+    sys.exit(0 if args[2:] in chains[c] else 1)
+else:
+    sys.exit(2)
+json.dump(chains, open(state, "w"))
+'''
+FAKE_SYSTEMCTL = r'''#!/bin/sh
+echo "systemctl $*" >> "$FW_LOG"
+case "$1" in
+  show) printf 'Id=%s\nLoadState=loaded\nActiveState=active\nSubState=exited\nUnitFileState=enabled\n' "$2" ;;
+  is-enabled) echo enabled ;;
+  is-active) echo active ;;
+  --version) echo "systemd 255 (255.4)" ;;
+esac
+exit 0
+'''
+FAKE_UFW = "#!/bin/sh\nprintf 'Status: active\\nDefault: deny (incoming), allow (outgoing), deny (routed)\\n'\n"
+
+
+@unittest.skipUnless(shutil.which("ansible-playbook") and shutil.which("bash"), "ansible-playbook ou bash absent")
+class FirewallRunTests(unittest.TestCase):
+    """firewall.yml JOUÉ pour de bon (pas `--check`), en local, avec iptables, ufw et systemctl FACTICES : la relecture
+    finale a trouvé un `register` qui écrasait le chemin du script — tâche sautée en `--check`, échec à chaque vrai
+    passage. Ce chemin est exécuté ici au moins une fois."""
+
+    PLAY = """\
+- hosts: gw
+  gather_facts: false
+  tasks:
+    - ansible.builtin.include_role:
+        name: webapp-security
+        tasks_from: firewall
+    - ansible.builtin.copy: {content: "{{ wa_firewall_problems }}", dest: "{{ play_tmp }}/problems.txt"}
+"""
+
+    def run_firewall(self, **env_extra):
+        with tempfile.TemporaryDirectory() as tmp:
+            bindir = os.path.join(tmp, "bin")
+            os.makedirs(bindir)
+            for name, text in (("iptables", FAKE_IPTABLES), ("ip6tables", FAKE_IPTABLES), ("systemctl", FAKE_SYSTEMCTL),
+                               ("ufw", FAKE_UFW)):
+                with open(os.path.join(bindir, name), "w") as f:
+                    f.write(text)
+                os.chmod(os.path.join(bindir, name), 0o755)
+            os.makedirs(os.path.join(tmp, "units"))
+            with open(os.path.join(tmp, "play.yml"), "w") as f:
+                f.write(self.PLAY)
+            with open(os.path.join(tmp, "ansible.cfg"), "w") as f:
+                f.write(f"[defaults]\nroles_path={ROLES}\nstdout_callback=default\n")
+            egress_host = [{"name": "upstream", "dest": "192.0.2.10", "port": 443, "proto": "tcp"}]
+            host = {
+                "ansible_connection": "local", "ansible_python_interpreter": sys.executable, "ansible_host": "192.0.2.10",
+                "wa_project": "fleetforge-gateway", "wa_front_port": 4730, "wa_back_port": 4731,
+                "wa_h_subnet": "10.73.231.0/24", "wa_h_remote_proxies": ["198.51.100.20"], "wa_h_vpn_addresses": [],
+                "wa_h_tag": "webapp-fleetforge-gateway", "wa_h_egress": egress_host, "wa_h_egress_remote": [],
+                "wa_h_egress_host": egress_host, "wa_h_firewall_unit": "webapp-fleetforge-gateway-firewall",
+                "wa_h_firewall_script": os.path.join(tmp, "webapp-fleetforge-gateway-firewall.sh"),
+                "webapp_systemd_unit_dir": os.path.join(tmp, "units"),
+                "webapp_root_owner": str(os.getuid()), "webapp_root_group": str(os.getgid()),
+            }
+            with open(os.path.join(tmp, "inventory.yml"), "w") as f:
+                yaml.safe_dump({"all": {"hosts": {"gw": host}}}, f)
+            env = dict(os.environ, ANSIBLE_CONFIG=os.path.join(tmp, "ansible.cfg"),
+                       PATH=f"{bindir}:{os.environ['PATH']}", FW_STATE=os.path.join(tmp, "fw"),
+                       FW_LOG=os.path.join(tmp, "log"), **env_extra)
+            run = subprocess.run(["ansible-playbook", "-i", os.path.join(tmp, "inventory.yml"), os.path.join(tmp, "play.yml"),
+                                  "-e", f"play_tmp={tmp}", "-e", "ansible_become=false"],
+                                 capture_output=True, text=True, env=env, timeout=300)
+            out = run.stdout + run.stderr
+            problems = open(os.path.join(tmp, "problems.txt")).read() if os.path.exists(os.path.join(tmp, "problems.txt")) else None
+            chains = json.load(open(os.path.join(tmp, "fw4"))) if os.path.exists(os.path.join(tmp, "fw4")) else {}
+            return run.returncode, out, problems, chains
+
+    def test_the_firewall_tasks_really_run_and_leave_a_conforming_chain(self):
+        code, out, problems, chains = self.run_firewall()
+        self.assertEqual(code, 0, out[-4000:])
+        self.assertEqual(problems, "", out[-2000:])
+        tags = [r[r.index("--comment") + 1] for r in chains["DOCKER-USER"]]
+        self.assertTrue(any(":4731:deny:" in t for t in tags), tags)
+        self.assertTrue(any(":local:deny:" in " ".join(r) for r in chains["OUTPUT"]), chains["OUTPUT"])
 
 
 FIREWALL_PROBLEMS_PLAY = """\
