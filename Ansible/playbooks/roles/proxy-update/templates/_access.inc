@@ -54,15 +54,37 @@
             paquet arrive en local, avec l'adresse du conteneur (pas de NAT
             pour une destination locale). Ses sous-réseaux Docker DÉDIÉS sont
             alors déclarés sur son entrée (`access_local_cidrs`) — et admis ici
-            SEULEMENT sur un proxy co-localisé, SEULEMENT s'ils sont privés :
-            une valeur publique ou mal formée est ignorée (fermé), jamais
-            élargie. #}
+            SEULEMENT sur un proxy co-localisé, SEULEMENT s'ils sont valides :
+            IPv4 aux octets ≤ 255, préfixe /16 à /32, forme CANONIQUE (aucun
+            bit d'hôte), plage privée (10/8, 172.16/12, 192.168/16), et ne
+            contenant l'adresse d'AUCUN serveur VPN. Toute autre valeur est
+            ignorée (fermé), jamais élargie ni corrigée. #}
         {% if hostvars[host]['ansible_host'] == ansible_host %}
         {% for cidr in hostvars[host].access_local_cidrs | default([]) %}
-        {% if cidr is match('^(10[.][0-9]{1,3}[.][0-9]{1,3}|172[.](1[6-9]|2[0-9]|3[01])[.][0-9]{1,3}|192[.]168[.][0-9]{1,3})[.][0-9]{1,3}/(1[6-9]|2[0-9]|3[0-2])$') %}
+        {% set _lc = namespace(ok=false, vpn=false) %}
+        {% if cidr is string and cidr is match('^[0-9]{1,3}([.][0-9]{1,3}){3}/[0-9]{1,2}$') %}
+        {% set _o = cidr.split('/')[0].split('.') | map('int') | list %}
+        {% set _len = cidr.split('/')[1] | int %}
+        {% if (_o | max) <= 255 and _len >= 16 and _len <= 32 %}
+        {% set _net = ((_o[0] * 256 + _o[1]) * 256 + _o[2]) * 256 + _o[3] %}
+        {% set _size = 2 ** (32 - _len) %}
+        {% for v in groups['vpns'] | default([]) %}
+        {% set _va = hostvars[v]['ansible_host'] | default('') | string %}
+        {% if _va is match('^[0-9]{1,3}([.][0-9]{1,3}){3}$') %}
+        {% set _vo = _va.split('.') | map('int') | list %}
+        {% set _vn = ((_vo[0] * 256 + _vo[1]) * 256 + _vo[2]) * 256 + _vo[3] %}
+        {% if _vn >= _net and _vn < _net + _size %}{% set _lc.vpn = true %}{% endif %}
+        {% endif %}
+        {% endfor %}
+        {% set _lc.ok = (_net % _size == 0)
+             and (_o[0] == 10 or (_o[0] == 172 and _o[1] >= 16 and _o[1] <= 31) or (_o[0] == 192 and _o[1] == 168))
+             and not _lc.vpn %}
+        {% endif %}
+        {% endif %}
+        {% if _lc.ok %}
         allow {{ cidr }};  # serveur lié {{ host }}, réseau Docker local
         {% else %}
-        # access_local_cidrs « {{ cidr }} » de {{ host }} ignoré : pas un sous-réseau privé /16 à /32.
+        # access_local_cidrs « {{ cidr }} » de {{ host }} ignoré : pas un sous-réseau IPv4 privé canonique /16 à /32 hors VPN.
         {% endif %}
         {% endfor %}
         {% endif %}
