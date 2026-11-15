@@ -916,6 +916,13 @@ def _values(data, path, hardened, front, back_lb):
     networks = list((data.get("networks") or {}).keys())
     if len(networks) != 1 or not subnet_nets:
         errors.append(f"{path}: exactement UN réseau de premier niveau, de sous-réseau ${{HARDEN_SUBNET}} ({networks})")
+    # UN SEUL pool : un second `ipam.config` (avant ou après) donnerait aux services sans adresse fixe une adresse hors
+    # du sous-réseau dédié, donc hors des règles `-s <sous-réseau>` (relecture finale).
+    for name, net in (data.get("networks") or {}).items():
+        pools = _as_list(((net or {}).get("ipam") or {}).get("config"))
+        if len(pools) != 1 or str((pools[0] or {}).get("subnet", "")) != FAKE_ENV["HARDEN_SUBNET"]:
+            errors.append(f"{path}: réseau {name} : exactement UNE entrée ipam.config, `subnet: ${{HARDEN_SUBNET}}` "
+                          f"({[str((p or {}).get('subnet', '')) for p in pools]})")
     for name, svc in services.items():
         svc = svc or {}
         where = f"{path}: service {name}"

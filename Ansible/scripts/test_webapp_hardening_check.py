@@ -479,6 +479,17 @@ class ComposeNetworkAndSecretTests(unittest.TestCase):
         self.assertIn("exactement UN réseau", errors)
         self.assertIn("service redis : réseaux", errors)
 
+    def test_a_second_pool_on_the_dedicated_network_is_refused(self):
+        # Relecture finale : `- subnet: 10.99.0.0/24` placé AVANT ${HARDEN_SUBNET} sur le réseau `app` passait ; les
+        # services sans adresse fixe (back, back-worker, db, redis) prenaient une adresse du premier pool, hors des
+        # règles `-s <sous-réseau>`.
+        def mutate(d):
+            net = d["networks"]["app"]
+            net["ipam"]["config"] = [{"subnet": "10.99.0.0/24"}] + net["ipam"]["config"]
+        self.assertIn("exactement UNE entrée ipam.config", compose_errors(_with(mutate)))
+        after = _with(lambda d: d["networks"]["app"]["ipam"]["config"].append({"subnet": "10.99.0.0/24"}))
+        self.assertIn("exactement UNE entrée ipam.config", compose_errors(after))
+
     def test_secrets_are_interpolated_only_where_they_serve(self):
         bad_arg = _with(lambda d: d["services"]["front"]["build"].__setitem__("args", {"X": "${FFG_UPSTREAM_MAIN_RUN_PASSWORD}"}))
         self.assertIn("build.args interpole le secret ${FFG_UPSTREAM_MAIN_RUN_PASSWORD}", compose_errors(bad_arg))
@@ -1485,7 +1496,7 @@ RUNTIME_PLAYBOOK = """\
   gather_facts: false
   vars:
     hc: {SecurityOpt: ["no-new-privileges:true"], ReadonlyRootfs: true, CapDrop: [ALL], Memory: 1, NanoCpus: 1}
-    net: {"fleetforge-gateway-back-x_app": {IPAddress: "10.73.231.20"}}
+    net: {"fleetforge-gateway-back-x_app": {IPAddress: "__BACK_IP__"}}
   tasks:
     - ansible.builtin.include_role:
         name: webapp-security
@@ -1512,7 +1523,7 @@ RUNTIME_PLAYBOOK = """\
           - {Name: /fleetforge-gateway_front, HostConfig: {SecurityOpt: ["no-new-privileges:true"], PortBindings: __FRONT_PORTS__}, Mounts: [], User: "", Labels: {com.docker.compose.service: front}, Networks: {"fleetforge-gateway-back-x_app": {IPAddress: "10.73.231.10"}}}
           - {Name: /fleetforge-gateway_back_lb, HostConfig: {SecurityOpt: ["no-new-privileges:true"], PortBindings: {"4731/tcp": [{HostIp: "0.0.0.0", HostPort: "4731"}]}}, Mounts: [], User: "", Labels: {com.docker.compose.service: back-lb}, Networks: {"fleetforge-gateway-back-x_app": {IPAddress: "10.73.231.11"}}}
           - {Name: /fleetforge-gateway-back-x-db-1, HostConfig: {SecurityOpt: ["no-new-privileges:true"], PortBindings: __DB_PORTS__}, Mounts: [], User: "", Labels: {com.docker.compose.service: db}, Networks: __DB_NETS__}
-        wa_net_inspect: {stdout_lines: ['{"Name":"fleetforge-gateway-back-x_app","IPAM":{"Config":[{"Subnet":"10.73.231.0/24"}]},"Containers":{},"Labels":{"com.docker.compose.project":"fleetforge-gateway-back-x"}}', '{"Name":"fleetforge-gateway-back-x_other","IPAM":{"Config":[{"Subnet":"172.30.0.0/16"}]},"Containers":{},"Labels":{"com.docker.compose.project":"fleetforge-gateway-back-x"}}']}
+        wa_net_inspect: {stdout_lines: ['{"Name":"fleetforge-gateway-back-x_app","IPAM":{"Config":__APP_IPAM__},"Containers":{},"Labels":{"com.docker.compose.project":"fleetforge-gateway-back-x"}}', '{"Name":"fleetforge-gateway-back-x_other","IPAM":{"Config":[{"Subnet":"172.30.0.0/16"}]},"Containers":{},"Labels":{"com.docker.compose.project":"fleetforge-gateway-back-x"}}']}
         wa_vol_inspect: {stdout_lines: ['{"Name":"__VOLUME__","Driver":"local","Options":null,"Labels":{"com.docker.compose.project":"__VOLPROJECT__"}}']}
     - ansible.builtin.debug: {msg: "VIOLATIONS=[{{ wa_violations }}]"}
 """
@@ -1522,6 +1533,8 @@ GOOD_RUNTIME = {
     "__DB_PORTS__": '{"5432/tcp": [{HostIp: "127.0.0.1", HostPort: "4732"}]}',
     "__WORKER_USER__": "999:999",
     "__DB_NETS__": '"{{ net }}"',
+    "__BACK_IP__": "10.73.231.20",
+    "__APP_IPAM__": '[{"Subnet":"10.73.231.0/24"}]',
 }
 
 
@@ -1554,6 +1567,16 @@ class RuntimeViolationsTests(unittest.TestCase):
 
     def test_a_code_service_under_another_account_is_a_violation(self):
         self.assertIn("utilisateur 1000:1000", self.violations(__WORKER_USER__="1000:1000"))
+
+    def test_a_second_pool_or_an_address_outside_the_subnet_is_a_violation(self):
+        # Relecture finale : un second pool sur le réseau dédié ; back, back-worker et db (sans adresse fixe) y
+        # prennent une adresse hors du /24, que le réseau « porte » pourtant ${HARDEN_SUBNET}.
+        two_pools = '[{"Subnet":"10.99.0.0/24"},{"Subnet":"10.73.231.0/24"}]'
+        violations = self.violations(__APP_IPAM__=two_pools, __BACK_IP__="10.99.0.5")
+        self.assertIn("2 pools IPAM au lieu d un seul", violations)
+        self.assertIn("back-1 : adresse 10.99.0.5 hors de 10.73.231.0/24", violations)
+        self.assertIn("adresse 10.99.0.5 hors", self.violations(__BACK_IP__="10.99.0.5"))
+        self.assertIn("adresse 10.73.232.1 hors", self.violations(__BACK_IP__="10.73.232.1"))
 
     def test_a_third_party_container_on_a_second_or_foreign_subnet_is_a_violation(self):
         # Quatrième revue : db (service tiers, hors `services`) n'était pas contrôlé ; un second réseau du projet (même
