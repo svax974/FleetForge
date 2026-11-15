@@ -5,13 +5,15 @@
  * SPDX-License-Identifier: MIT — see LICENSE
  */
 
-//! Isolation de la passerelle MCP de FleetForge (`Ansible/scripts/ffg_isolation_check.py`) :
-//! ses plays ne visent que `fleetforge_gateways` (jamais `infras`), ses rôles ne créent aucun
-//! conteneur, les proxies admis écartent les adresses VPN, le vhost rendu limite `/mcp` aux
-//! serveurs nommés (+ whitelist de test filtrée, retirée exactement par
-//! `ffg_mcp_allow_whitelist: false`) puis `deny all`, et un compose non durci (montages de
-//! l'hôte, driver_opts, volumes_from, cap_add, unconfined, ports publics, compte, read_only,
-//! cap_drop, limites, réseau, relais à adresse fixe) est refusé — compose piégé de la revue compris.
+//! Isolation de la passerelle MCP de FleetForge, entrée `webapp` DURCIE
+//! (`Ansible/scripts/webapp_hardening_check.py`) : seule la garde vise `fleetforge_gateways`, la
+//! passerelle est déployée par l'import de deploy-webapp.yml (jamais par un play `infras`), les
+//! rôles `webapp-*` ne créent aucun conteneur, les proxies admis écartent les adresses VPN, le vhost
+//! générique limite `/mcp` à sa liste nommée (+ whitelist de test filtrée) puis `deny all`, les
+//! gardes sans connexion refusent un profil invalide, et un compose non durci (montages de l'hôte,
+//! driver_opts, volumes_from, cap_add, unconfined, ports publics, compte, read_only, cap_drop,
+//! limites, réseau, relais à adresse fixe, Redis sans mot de passe) est refusé — composes piégés
+//! des revues compris.
 //! Le contrôle est en Python (PyYAML, Jinja2 : ceux d'Ansible). PRÉREQUIS : un tel interpréteur
 //! (`FLEETFORGE_ANSIBLE_PYTHON`, celui d'`ansible`, ou `python3`). Sans lui le test ÉCHOUE — un
 //! contrôle de sécurité qui passerait sans rien vérifier serait pire que pas de contrôle ;
@@ -61,11 +63,11 @@ fn the_gateway_stays_isolated_from_the_control_node() {
         );
     };
     let scripts = ansible_dir().join("scripts");
-    let (ok, out) = run(&python, &scripts.join("test_ffg_isolation_check.py"), &[]);
+    let (ok, out) = run(&python, &scripts.join("test_webapp_hardening_check.py"), &[]);
     assert!(ok, "tests du contrôle d'isolation :\n{out}");
     let (ok, out) = run(
         &python,
-        &scripts.join("ffg_isolation_check.py"),
+        &scripts.join("webapp_hardening_check.py"),
         &[Path::new("playbook"), &ansible_dir().join("playbooks")],
     );
     assert!(ok, "isolation de la passerelle dans les playbooks et rôles :\n{out}");
