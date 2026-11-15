@@ -38,6 +38,11 @@
     _bridge_gateway: "{{ wa_h_subnet.split('/')[0].rsplit('.', 1)[0] ~ '.1' }}"
   ansible.builtin.set_fact:
     wa_h_remote_proxies: "{{ _eligible_addresses | reject('equalto', ansible_host) | list }}"
+    # Un proxy (admis ou non) sur CETTE machine : son nginx joint l'app en local, par la règle OUTPUT `local:nginx`
+    # (groupe de contrôle), alors exigée — cgroup v2 et xt_cgroup vérifiés avant de toucher au pare-feu.
+    wa_h_local_proxy: >-
+      {{ groups['proxies'] | default([]) | map('extract', hostvars, 'ansible_host') | select('defined')
+         | select('equalto', ansible_host) | list | length > 0 }}
     wa_h_trusted_relays: "{{ _eligible_addresses + ([_bridge_gateway] if ansible_host in _eligible_addresses else []) }}"
   tags: [always]
 

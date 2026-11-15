@@ -955,8 +955,11 @@ class FirewallScriptTests(unittest.TestCase):
         self.assertIn('-m cgroup --path ${NGINX_CGROUP} $(comment local:nginx) -j ACCEPT', script)
         self.assertIn('-m owner --uid-owner 0 $(comment local:root) -j ACCEPT', script)
         self.assertIn('$(comment local:deny) -j REJECT', script)
-        self.assertIn('local_rules 4 "-p tcp -m addrtype --dst-type LOCAL -m multiport --dports ${FRONT_PORT},${BACK_PORT}"', script)
-        self.assertIn('local_rules 4 "-p tcp -d ${INTERNAL} -m multiport --dports ${FRONT_CPORT},${BACK_PORT}"', script)
+        self.assertIn('local_rules 4 "-p tcp -m addrtype --dst-type LOCAL -m multiport --dports ${FRONT_PORT},${BACK_PORT} -m conntrack --ctstate NEW"', script)
+        self.assertIn('local_rules 4 "-p tcp -d ${INTERNAL} -m multiport --dports ${FRONT_CPORT},${BACK_PORT} -m conntrack --ctstate NEW"', script)
+        self.assertIn('local_rules 6 "-p tcp -m addrtype --dst-type LOCAL -m multiport --dports ${FRONT_PORT},${BACK_PORT} -m conntrack --ctstate NEW"', script)
+        # xt_cgroup sondé sur une chaîne jetable AVANT la première insertion.
+        self.assertLess(script.index("if ! cgroup_probe; then"), script.index("insert_all iptables DOCKER-USER"))
         self.assertIn("insert_all iptables OUTPUT", script)
         self.assertNotIn("--uid-owner www-data", script, "www-data est aussi WordPress : jamais admis")
 
@@ -980,7 +983,7 @@ class FirewallScriptTests(unittest.TestCase):
     def test_the_script_renders_inserts_on_top_and_drops_each_port(self):
         script = self.render(["192.0.2.30"])
         self.assertIn('-I "${chain}" 1', script)
-        self.assertNotIn(" -A ", script)
+        self.assertNotRegex(script, r" -A (DOCKER-USER|INPUT|OUTPUT|FORWARD)\b", "jamais d'ajout en queue d'une chaîne réelle")
         self.assertIn("insert_all iptables DOCKER-USER", script)
         self.assertIn("insert_all iptables INPUT", script)
         self.assertIn('TAG="webapp-fleetforge-gateway"', script)
@@ -1001,6 +1004,8 @@ class FirewallScriptTests(unittest.TestCase):
             state = os.environ["FW_STATE"]
             chains = json.load(open(state))
             args = [a for a in sys.argv[1:] if a != "-w"]
+            if args[0] in ("-N", "-A", "-F", "-X"):  # chaîne jetable de la sonde xt_cgroup : sans effet ici
+                sys.exit(0)
             if args[0] in ("-L", "-I", "-D") and args[1] not in chains:
                 sys.exit(1)
             def show(rules):
@@ -1215,12 +1220,12 @@ class FirewallRunTests(unittest.TestCase):
     - ansible.builtin.copy: {content: "{{ wa_firewall_problems }}", dest: "{{ play_tmp }}/problems.txt"}
 """
 
-    def run_firewall(self, **env_extra):
+    def run_firewall(self, local_proxy=False, extra_bin=None, **env_extra):
         with tempfile.TemporaryDirectory() as tmp:
             bindir = os.path.join(tmp, "bin")
             os.makedirs(bindir)
             for name, text in (("iptables", FAKE_IPTABLES), ("ip6tables", FAKE_IPTABLES), ("systemctl", FAKE_SYSTEMCTL),
-                               ("ufw", FAKE_UFW)):
+                               ("ufw", FAKE_UFW), *(extra_bin or {}).items()):
                 with open(os.path.join(bindir, name), "w") as f:
                     f.write(text)
                 os.chmod(os.path.join(bindir, name), 0o755)
@@ -1239,6 +1244,7 @@ class FirewallRunTests(unittest.TestCase):
                 "wa_h_firewall_script": os.path.join(tmp, "webapp-fleetforge-gateway-firewall.sh"),
                 "webapp_systemd_unit_dir": os.path.join(tmp, "units"),
                 "webapp_root_owner": str(os.getuid()), "webapp_root_group": str(os.getgid()),
+                "wa_h_local_proxy": local_proxy,
             }
             with open(os.path.join(tmp, "inventory.yml"), "w") as f:
                 yaml.safe_dump({"all": {"hosts": {"gw": host}}}, f)
@@ -1252,6 +1258,21 @@ class FirewallRunTests(unittest.TestCase):
             problems = open(os.path.join(tmp, "problems.txt")).read() if os.path.exists(os.path.join(tmp, "problems.txt")) else None
             chains = json.load(open(os.path.join(tmp, "fw4"))) if os.path.exists(os.path.join(tmp, "fw4")) else {}
             return run.returncode, out, problems, chains
+
+    def test_a_local_proxy_without_xt_cgroup_fails_before_touching_the_firewall(self):
+        # Relecture finale : sans xt_cgroup, l'insertion de la règle nginx échouait AU MILIEU du passage. Le script
+        # sonde le module sur une chaîne jetable avant toute insertion ; cgroup v2 et module vus avant le script.
+        fake_stat = "#!/bin/sh\necho cgroup2fs\n"
+        code, out, problems, chains = self.run_firewall(local_proxy=True, extra_bin={"stat": fake_stat, "modprobe": "#!/bin/sh\nexit 0\n"},
+                                                        FW_NO_CGROUP="1")
+        self.assertNotEqual(code, 0)
+        self.assertIn("xt_cgroup", out)
+        self.assertFalse([r for c in chains.values() for r in c], "aucune règle posée")
+        code, out, _, chains = self.run_firewall(local_proxy=True, extra_bin={"stat": "#!/bin/sh\necho tmpfs\n",
+                                                                               "modprobe": "#!/bin/sh\nexit 0\n"})
+        self.assertNotEqual(code, 0)
+        self.assertIn("cgroup2fs", out)
+        self.assertEqual(chains, {}, "rien touché : refus avant le script")
 
     def test_the_firewall_tasks_really_run_and_leave_a_conforming_chain(self):
         code, out, problems, chains = self.run_firewall()
@@ -1365,6 +1386,19 @@ class FirewallProblemsTests(unittest.TestCase):
         front = ["-A OUTPUT -m owner --uid-owner 33 -j ACCEPT"]
         rules = [r for r in OUR_INPUT if not r.startswith("-A OUTPUT")] + front + [r for r in OUR_INPUT if r.startswith("-A OUTPUT")]
         self.assertIn("iptables OUTPUT", self.problems([], input_rules=rules))
+
+    def test_a_local_proxy_requires_the_nginx_rules(self):
+        play = FIREWALL_PROBLEMS_PLAY.replace("wa_h_subnet: 10.73.231.0/24}", "wa_h_subnet: 10.73.231.0/24, wa_h_local_proxy: true}")
+        nginx = [r.replace("-m owner --uid-owner 0", "-m cgroup --path system.slice/nginx.service").replace(":local:root:", ":local:nginx:")
+                 for r in OUR_INPUT if ":local:root:" in r]
+        for rules, expected in ((OUR_INPUT, "local:nginx absentes"), (nginx + OUR_INPUT, "")):
+            text = play.replace("__RULES__", json.dumps(OUR_RULES)).replace("__INPUT__", json.dumps(rules))
+            code, out, files = run_local_play(text, outputs=["problems.txt"])
+            if expected:
+                self.assertIn(expected, files.get("problems.txt", out))
+            else:
+                self.assertEqual(files.get("problems.txt"), "", out[-2000:])
+        self.assertEqual(self.problems([]), "", "sans proxy local, aucune règle nginx exigée")
 
     def test_an_ip6tables_table_without_docker_user_is_not_a_problem(self):
         play_rules = json.dumps(["-P INPUT ACCEPT", "-N f2b-sshd"])

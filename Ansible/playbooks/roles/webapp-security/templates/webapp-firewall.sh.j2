@@ -48,6 +48,17 @@ DNS_SERVERS=({{ wa_dns_resolvers | join(' ') }})
 # vide = pas de nginx ici).
 FRONT_CPORT={{ webapp_front_container_port | int }}
 NGINX_CGROUP="{{ wa_h_nginx_cgroup | default('') }}"
+# Un proxy partage cette machine : la règle `local:nginx` est EXIGÉE (cgroup v2 et xt_cgroup, sondés plus bas).
+LOCAL_PROXY={{ 1 if (wa_app.wa_h_local_proxy | default(false) | string | lower) in ['true', 'yes', '1'] else 0 }}
+# Groupe de contrôle RELU à chaque passage (l'unité est relancée au démarrage de nginx, drop-in ExecStartPost) : la
+# valeur du déploiement ne sert que si nginx ne tourne pas. Grammaire stricte avant d'entrer dans une règle.
+if [ -r /run/nginx.pid ]; then
+  cg=$(sed -n 's|^0::/||p' "/proc/$(cat /run/nginx.pid)/cgroup" 2>/dev/null || true)
+  case "${cg}" in
+    ""|*..*|*[!A-Za-z0-9@._/-]*) ;;
+    *) NGINX_CGROUP="${cg}" ;;
+  esac
+fi
 
 # Purge des générations PRÉCÉDENTES seulement (commentaire de l'app sans `:${GEN}`), par NUMÉRO (réinjecter une spec à
 # commentaire la ferait découper par le shell). L'awk lit TOUTE la sortie, sans `exit` : fermer le tube tôt tue
@@ -140,9 +151,27 @@ local_rules() {
     if [ "${family}" = 4 ]; then RULES_OUTPUT+=("${rule}"); else RULES_OUTPUT6+=("${rule}"); fi
   done
 }
-local_rules 4 "-p tcp -m addrtype --dst-type LOCAL -m multiport --dports ${FRONT_PORT},${BACK_PORT}"
-local_rules 4 "-p tcp -d ${INTERNAL} -m multiport --dports ${FRONT_CPORT},${BACK_PORT}"
-local_rules 6 "-p tcp -m addrtype --dst-type LOCAL -m multiport --dports ${FRONT_PORT},${BACK_PORT}"
+local_rules 4 "-p tcp -m addrtype --dst-type LOCAL -m multiport --dports ${FRONT_PORT},${BACK_PORT} -m conntrack --ctstate NEW"
+local_rules 4 "-p tcp -d ${INTERNAL} -m multiport --dports ${FRONT_CPORT},${BACK_PORT} -m conntrack --ctstate NEW"
+local_rules 6 "-p tcp -m addrtype --dst-type LOCAL -m multiport --dports ${FRONT_PORT},${BACK_PORT} -m conntrack --ctstate NEW"
+
+# xt_cgroup sondé sur une chaîne JETABLE, AVANT toute insertion ni purge : sans lui, l'insertion de la règle nginx
+# échouerait au milieu du passage (chaînes à moitié reposées). Proxy de la machine : module EXIGÉ, échec propre.
+cgroup_probe() {
+  local chain="webapp-probe-$$" path="system.slice" rc=0
+  [ -n "${NGINX_CGROUP}" ] && [ -d "/sys/fs/cgroup/${NGINX_CGROUP}" ] && path="${NGINX_CGROUP}"
+  iptables -w -N "${chain}" || return 1
+  iptables -w -A "${chain}" -m cgroup --path "${path}" -j RETURN || rc=1
+  iptables -w -F "${chain}" || true
+  iptables -w -X "${chain}" || true
+  return "${rc}"
+}
+if [ "${LOCAL_PROXY}" = 1 ] || [ -n "${NGINX_CGROUP}" ]; then
+  if ! cgroup_probe; then
+    echo "${TAG} : correspondance iptables « cgroup » (xt_cgroup, cgroup v2) indisponible — pare-feu NON modifié" >&2
+    exit 1
+  fi
+fi
 
 # Insertion en tête, de la dernière règle à la première (ordre final = ordre voulu). Liste retournée par
 # construction : le gabarit Jinja interdit la syntaxe de longueur de tableau de bash (elle ouvrirait un commentaire).

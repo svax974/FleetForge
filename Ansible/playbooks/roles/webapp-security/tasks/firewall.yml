@@ -101,6 +101,35 @@
       aucun proxy admis à l'adresse d'un VPN.
     quiet: true
 
+# Proxy sur cette machine : la règle `local:nginx` (`-m cgroup --path`) exige cgroup v2 (en hybride/v1, `--path`
+# viserait une autre hiérarchie) et le module xt_cgroup. Vérifié AVANT toute modification du pare-feu, sans en
+# créer de chaîne (aussi en `--check`) ; le script resonde le module sur une chaîne jetable avant d'insérer.
+- name: Read the cgroup hierarchy and the xt_cgroup module
+  ansible.builtin.shell: >-
+    echo "fs=$(stat -fc %T /sys/fs/cgroup 2>/dev/null)";
+    if [ -d /sys/module/xt_cgroup ] || modprobe -n -q xt_cgroup 2>/dev/null; then echo xt=ok; fi
+  args:
+    executable: /bin/bash
+  become: true
+  register: wa_h_cgroup_probe
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: wa_app.wa_h_local_proxy | default(false) | bool
+
+- name: Refuse a local proxy without cgroup v2 and xt_cgroup
+  ansible.builtin.assert:
+    that:
+      - "'fs=cgroup2fs' in (wa_h_cgroup_probe.stdout_lines | default([]))"
+      - "'xt=ok' in (wa_h_cgroup_probe.stdout_lines | default([]))"
+    fail_msg: >-
+      {{ inventory_hostname }} porte un proxy : nginx y joint {{ wa_app.wa_project }} en local, par une règle OUTPUT
+      `-m cgroup --path`. Elle exige cgroup v2 (`stat -fc %T /sys/fs/cgroup` = cgroup2fs, lu :
+      {{ (wa_h_cgroup_probe.stdout_lines | default(['?']) | first) }}) et le module xt_cgroup (`modinfo xt_cgroup`).
+      Pare-feu NON modifié.
+    quiet: true
+  when: wa_app.wa_h_local_proxy | default(false) | bool
+
 - name: Deploy the firewall script of the application
   ansible.builtin.template:
     src: webapp-firewall.sh.j2

@@ -106,6 +106,11 @@
         {%- if (outrules | select('search', '--dst-type LOCAL .*' ~ _tag ~ ':local:deny.*-j REJECT') | list | length) == 0 -%}
           {%- set ns.p = ns.p + ['iptables : aucun REJECT du trafic local vers les ports publiés (OUTPUT)'] -%}
         {%- endif -%}
+        {#- Proxy sur cette machine : son nginx DOIT être admis (sinon 502 proxy → app, sans alerte). -#}
+        {%- if wa_app.wa_h_local_proxy | default(false) | bool
+               and (outrules | select('search', '-m cgroup --path [^ ]+ .*' ~ _tag ~ ':local:nginx.*-j ACCEPT') | list | length) < 2 -%}
+          {%- set ns.p = ns.p + ['iptables : règles OUTPUT local:nginx absentes (proxy de cette machine : cgroup v2, nginx actif ?)'] -%}
+        {%- endif -%}
         {%- if (outrules | select('search', '-d ' ~ _subnet ~ ' .*' ~ _tag ~ ':local:deny.*-j REJECT') | list | length) == 0 -%}
           {%- set ns.p = ns.p + ['iptables : aucun REJECT du trafic local vers ' ~ _subnet ~ ' (OUTPUT)'] -%}
         {%- endif -%}
