@@ -1,0 +1,48 @@
+---
+# Profil DURCI (`webapp_hardening.runtime_user`) : compte système sans shell ni home, qui n'existe que pour donner aux
+# conteneurs de code un uid qui n'est PAS celui de `remote_username` (le gabarit fixe `1000:1000`, souvent l'uid de
+# srvc). Le compose durci l'utilise via HARDEN_RUNTIME_UID / HARDEN_RUNTIME_GID (webapp-env-update, render).
+#
+# Exception assumée à « srvc pilote ce qu'il déploie » (CLAUDE.md § 2) : une app durcie détient des secrets d'un autre
+# service et peut partager sa machine avec un nœud de contrôle. Une évasion de conteneur ne doit hériter ni des clés
+# SSH, ni de l'arbre Ansible, ni du vault de srvc. srvc garde la main (docker, journaux).
+
+- name: Create the dedicated group
+  ansible.builtin.group:
+    name: "{{ wa_h_user }}"
+    system: true
+  become: true
+
+- name: Create the dedicated account (no shell, no home, no extra group)
+  ansible.builtin.user:
+    name: "{{ wa_h_user }}"
+    group: "{{ wa_h_user }}"
+    groups: []
+    append: false
+    system: true
+    shell: /usr/sbin/nologin
+    create_home: false
+    home: /nonexistent
+    password_lock: true
+  become: true
+
+- name: Read the groups of the dedicated account
+  ansible.builtin.command:
+    argv: [id, -nG, "{{ wa_h_user }}"]
+  register: wa_account_groups
+  changed_when: false
+  check_mode: false
+  failed_when: false
+
+# Un groupe docker, sudo ou celui de srvc annulerait toute l'isolation : docker vaut root, le groupe de srvc ouvre ses
+# fichiers (clés, vault, arbre Ansible).
+- name: Fail when the dedicated account belongs to a privileged group
+  ansible.builtin.assert:
+    that:
+      - wa_account_groups.rc == 0 or ansible_check_mode
+      - (wa_account_groups.stdout | default('')).split() | intersect(wa_h_forbidden_groups) | length == 0
+    fail_msg: >-
+      Le compte {{ wa_h_user }} appartient à {{ (wa_account_groups.stdout | default('')).split()
+      | intersect(wa_h_forbidden_groups) | join(', ') }} : il doit rester hors de {{ wa_h_forbidden_groups | join(', ') }}.
+      Le retirer à la main (`gpasswd -d {{ wa_h_user }} <groupe>`), puis rejouer.
+    quiet: true

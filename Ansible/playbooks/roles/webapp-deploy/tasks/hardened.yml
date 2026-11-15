@@ -1,0 +1,207 @@
+---
+# Déploiement d'une application DURCIE (`webapp_hardening`), après le rendu des .env (render.yml) — à la place du
+# `run.sh` et des attentes de santé génériques de main.yml.
+#
+#   1. refus du back/.env (NOMS seulement, jamais une valeur) ;
+#   2. dans UN bloc — compose durci contrôlé (scripts/webapp_hardening_check.py, interpolation + `docker compose
+#      config`), pare-feu DOCKER-USER en place et atteint, PUIS run.sh (seulement si les deux viennent d'être vérifiés
+#      dans ce passage), santé, Postgres/Redis sur la boucle locale, durcissement RÉEL (webapp-security, runtime) ;
+#   3. au moindre échec : conteneurs de l'app ARRÊTÉS (fermé), puis échec.
+# La sortie de run.sh est masquée (no_log) : elle peut citer l'environnement, qui porte des secrets d'un amont.
+
+# ── 1. Interdits du back/.env ──────────────────────────────────────────────
+# vmagent (profil `metrics`, lancé dès qu'une URL de remote_write est posée) monte le SOCKET DOCKER : interdit.
+# DEPLOY_FROM_MAIN : deploy-full.sh déploierait origin/main, pas l'arbre dont le compose vient d'être contrôlé.
+# REDIS_PASSWORD : jamais vide. WHITELIST, PROXY_HOSTS, BACK_WHITELIST : deploy-full.sh en ferait des règles ufw —
+# le filtrage est celui du profil, rien d'autre. COMPOSE_FILE (lu par docker compose lui-même) et toute ligne `export`
+# des clés de déploiement : le fichier contrôlé ne serait plus celui déployé. INFRA_BIND hors boucle locale.
+- name: Look for forbidden settings in the back env file (names only)
+  ansible.builtin.shell: >-
+    set -o pipefail;
+    f={{ (wa_src ~ wa_back_env_file) | quote }};
+    if grep -Eq -- '^[[:space:]]*(export[[:space:]]+)?PROMETHEUS_REMOTE_WRITE_URLS?=["'"'"']?[^"'"'"'[:space:]]' "$f"; then echo PROMETHEUS_REMOTE_WRITE_URL; fi;
+    if grep -E -- '^[[:space:]]*(export[[:space:]]+)?INFRA_BIND=' "$f" | grep -Evq -- '^[[:space:]]*INFRA_BIND=["'"'"']?(127[.]0[.]0[.]1)?["'"'"']?[[:space:]]*$'; then echo INFRA_BIND; fi;
+    if grep -Eqi -- '^[[:space:]]*(export[[:space:]]+)?DEPLOY_FROM_MAIN=["'"'"']?(1|true|yes|on)' "$f"; then echo DEPLOY_FROM_MAIN; fi;
+    if ! grep -Eq -- '^[[:space:]]*REDIS_PASSWORD=["'"'"']?[^"'"'"'[:space:]]' "$f"; then echo REDIS_PASSWORD; fi;
+    for k in WHITELIST PROXY_HOSTS BACK_WHITELIST; do
+      if [ "$(grep -Ec -- '^[[:space:]]*(export[[:space:]]+)?'"$k"'=["'"'"']?[^"'"'"'[:space:]]' "$f")" != 0 ]; then echo "$k"; fi;
+    done;
+    if grep -Eq -- '^[[:space:]]*(export[[:space:]]+)?COMPOSE_FILE=' "$f"; then echo COMPOSE_FILE; fi;
+    if grep -Eq -- '^[[:space:]]*export[[:space:]]+(COMPOSE_FILE_NAME|DEPLOY_FROM_MAIN|COMPOSE_FILE)=' "$f"; then echo export; fi;
+    true
+  args:
+    executable: /bin/bash
+  delegate_to: localhost
+  become: false
+  register: wa_h_switches
+  changed_when: false
+  check_mode: false
+
+- name: Fail on a forbidden setting of the back env file
+  ansible.builtin.assert:
+    that: wa_h_switches.stdout | trim | length == 0
+    fail_msg: >-
+      {{ wa_src }}{{ wa_back_env_file }} : {{ wa_h_switches.stdout_lines | join(', ') }} — profil durci : ni vmagent
+      (PROMETHEUS_REMOTE_WRITE_URL), ni INFRA_BIND hors 127.0.0.1, DEPLOY_FROM_MAIN absent ou faux, REDIS_PASSWORD non
+      vide, WHITELIST/PROXY_HOSTS/BACK_WHITELIST vides ou absents, ni COMPOSE_FILE, ni `export` des clés de déploiement.
+    quiet: true
+  when: not ansible_check_mode
+
+# ── 2-3. Bloc fermé ────────────────────────────────────────────────────────
+- name: Deploy, verify, or stop the hardened application
+  block:
+    - name: Check the compose file is hardened (static, before deploying)
+      ansible.builtin.command:
+        argv:
+          - "{{ ansible_playbook_python }}"
+          - -I
+          - "{{ playbook_dir }}/../scripts/webapp_hardening_check.py"
+          - compose
+          - "{{ wa_src }}{{ wa_h_compose_file }}"
+          - --services
+          - "{{ wa_h_services | join(',') }}"
+          - --docker
+      delegate_to: localhost
+      become: false
+      register: wa_h_compose_check
+      changed_when: false
+      check_mode: false
+      failed_when: false
+
+    - name: Refuse to deploy a compose that is not hardened
+      ansible.builtin.assert:
+        that: wa_h_compose_check.rc == 0
+        fail_msg: >-
+          {{ wa_h_compose_file }} n'est pas durci — rien n'est déployé : {{ wa_h_compose_check.stdout_lines | join(' | ') }}
+        success_msg: "{{ wa_h_compose_file }} : compose durci ({{ wa_h_services | join(', ') }})."
+
+    # Le pare-feu doit être EN PLACE et ATTEINT avant qu'un conteneur ne parte (`--tags image` seul, unité en échec
+    # après un redémarrage…).
+    - name: Read the firewall state before deploying
+      ansible.builtin.include_role:
+        name: webapp-security
+        tasks_from: firewall-check
+        apply:
+          tags: [always]
+      when: webapp_phase in ['all', 'deploy']
+
+    - name: Refuse to deploy without the firewall of the application
+      ansible.builtin.assert:
+        that: wa_firewall_problems | trim | length == 0
+        fail_msg: >-
+          Pare-feu de {{ wa_project }} absent ou contourné ({{ wa_firewall_problems }}) : aucun conteneur n'est démarré.
+          Jouer d'abord le play de filtrage (tag security).
+      when:
+        - webapp_phase in ['all', 'deploy']
+        - not ansible_check_mode
+
+    - name: Record that this run checked the compose and the firewall
+      ansible.builtin.set_fact:
+        wa_h_predeploy_checked: >-
+          {{ wa_h_compose_check.rc == 0
+             and (webapp_phase not in ['all', 'deploy'] or (wa_firewall_problems | default('x') | trim | length == 0)) }}
+
+    - name: Run the deployment scripts of the hardened application
+      ansible.builtin.command:
+        argv: >-
+          {{ ['./scripts/run.sh', wa_env]
+             + (['--build'] if webapp_phase == 'build' else ['--push'] if webapp_phase == 'push' else ['--deploy'] if webapp_phase == 'deploy' else [])
+             + (['--tag=' ~ webapp_tag] if webapp_tag | length > 0 else [])
+             + (['--migrate'] if (wa_migrate | bool and webapp_phase in ['all', 'deploy']) else [])
+             + ([] if wa_update_common | bool else ['--no-update-common']) }}
+        chdir: "{{ wa_src }}"
+      delegate_to: localhost
+      become: false
+      environment:
+        COMPOSE_FILE_NAME: "{{ wa_h_compose_file }}"
+      register: wa_h_run
+      changed_when: true
+      failed_when: false
+      no_log: true
+      when: wa_h_predeploy_checked | bool
+
+    - name: Fail when the deployment script failed (exit code only)
+      ansible.builtin.assert:
+        that: (wa_h_run.rc | default(1)) == 0
+        fail_msg: >-
+          scripts/run.sh {{ wa_env }} a échoué (code {{ wa_h_run.rc | default('?') }}). Sortie masquée ici ; la relire en
+          relançant à la main depuis {{ wa_src }} : `./scripts/run.sh {{ wa_env }} --no-update-common`.
+        success_msg: "scripts/run.sh {{ wa_env }} : code 0."
+      when: not ansible_check_mode
+
+    # Contrôles SUR l'hôte, en boucle locale (hors DOCKER-USER).
+    - name: Wait for the front to answer
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ wa_front_port }}/"
+        status_code: [200, 301, 302]
+      register: wa_front_ready
+      until: wa_front_ready.status is defined and wa_front_ready.status in [200, 301, 302]
+      retries: "{{ webapp_health_retries }}"
+      delay: "{{ webapp_health_delay }}"
+      changed_when: false
+      when: webapp_phase in ['all', 'deploy']
+
+    - name: Wait for the back API health endpoint
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ wa_back_port }}/api/v1/health"
+        status_code: [200]
+      register: wa_back_ready
+      until: wa_back_ready.status is defined and wa_back_ready.status == 200
+      retries: "{{ webapp_health_retries }}"
+      delay: "{{ webapp_health_delay }}"
+      changed_when: false
+      when: webapp_phase in ['all', 'deploy']
+
+    - name: Collect the listeners of the Postgres and Redis host ports
+      ansible.builtin.shell: >-
+        set -o pipefail;
+        ss -ltnH | awk '{print $4}'
+        | grep -E ':('{{ wa_db_port | int | string | quote }}'|'{{ wa_redis_port | int | string | quote }}')$' || true
+      args:
+        executable: /bin/bash
+      register: wa_h_infra_listeners
+      changed_when: false
+      check_mode: false
+      when: webapp_phase in ['all', 'deploy']
+
+    - name: Fail when Postgres or Redis listens outside loopback
+      ansible.builtin.assert:
+        that:
+          - wa_h_infra_listeners.stdout_lines | reject('match', '^(127[.]0[.]0[.]1|[[]::1[]]):') | list | length == 0
+        fail_msg: "Postgres/Redis de {{ wa_project }} écoutent hors boucle locale ({{ wa_h_infra_listeners.stdout_lines | join(', ') }})."
+        success_msg: "Postgres et Redis de {{ wa_project }} sur la boucle locale uniquement."
+      when: webapp_phase in ['all', 'deploy']
+
+    - name: Verify the hardening of the running application
+      ansible.builtin.include_role:
+        name: webapp-security
+        tasks_from: runtime
+        apply:
+          tags: [always]
+      when:
+        - webapp_phase in ['all', 'deploy']
+        - not ansible_check_mode
+
+  rescue:
+    - name: Stop the containers of the application (deployment or verification failed)
+      ansible.builtin.include_role:
+        name: webapp-security
+        tasks_from: stop
+        apply:
+          tags: [always]
+      when: webapp_phase in ['all', 'deploy']
+
+    - name: Fail after stopping the application
+      ansible.builtin.fail:
+        msg: >-
+          Déploiement ou vérification de {{ wa_project }} en échec ({{ ansible_failed_task.name | default('?') }}) :
+          conteneurs de l'app ARRÊTÉS. Corriger puis rejouer le déploiement.
+
+- name: Report how the hardened application is exposed
+  ansible.builtin.debug:
+    msg: >-
+      {{ wa_project }} ({{ wa_env }}) : front sur 0.0.0.0:{{ wa_front_port }}, back-lb sur 0.0.0.0:{{ wa_back_port }},
+      filtrés dans DOCKER-USER (proxies admis distants ; un proxy de cette machine passe par la boucle locale) ;
+      Postgres/Redis sur 127.0.0.1. Nom public https://{{ proxy_hostname }}. Version :
+      {{ (wa_back_ready.json.revision | default('?')) if (wa_back_ready.json | default(none)) is mapping else '?' }}.
+  when: webapp_phase in ['all', 'deploy']

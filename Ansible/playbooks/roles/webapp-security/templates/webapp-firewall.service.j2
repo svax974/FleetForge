@@ -1,0 +1,14 @@
+[Unit]
+Description=Restrict the published ports of {{ wa_app.wa_project }} to the remote proxies (webapp hardening)
+# Docker recrée DOCKER-USER vide à chaque démarrage : reposer les règles APRÈS
+# lui, sans quoi l'application serait exposée jusqu'au prochain passage Ansible.
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart={{ wa_app.wa_h_firewall_script }}
+
+[Install]
+WantedBy=multi-user.target

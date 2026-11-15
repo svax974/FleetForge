@@ -1,0 +1,15 @@
+---
+# Profil DURCI (`webapp_hardening`) seulement : contrôle du durcissement RÉEL (tasks/runtime.yml, violations.yml).
+# Sans profil, rien de ce fichier n'est lu.
+
+# Formats de `docker inspect` : champs UTILES seulement, jamais `Config.Env` (secrets de l'app). `!unsafe` : Ansible
+# ne doit pas interpréter les accolades de Go.
+webapp_inspect_format: !unsafe '{"Name":{{json .Name}},"HostConfig":{{json .HostConfig}},"Mounts":{{json .Mounts}},"User":{{json .Config.User}},"Labels":{{json .Config.Labels}},"Networks":{{json .NetworkSettings.Networks}}}'
+webapp_network_format: !unsafe '{"Name":{{json .Name}},"IPAM":{{json .IPAM}},"Containers":{{json .Containers}},"Labels":{{json .Labels}}}'
+webapp_volume_format: !unsafe '{"Name":{{json .Name}},"Driver":{{json .Driver}},"Options":{{json .Options}},"Labels":{{json .Labels}}}'
+
+# Services compose des relais de confiance (adresses FIXES, ports publiés sur 0.0.0.0) et port du front dans son
+# conteneur (nginx du gabarit : 80), publié EXACTEMENT sur `app_port`.
+webapp_front_service: front
+webapp_back_lb_service: back-lb
+webapp_front_container_port: 80

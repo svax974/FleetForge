@@ -52,9 +52,9 @@
 # Allow app_port from proxies + whitelist + VPNs (if defined for this host).
 # `ufw_app_ports: false` sur l'entrée : ses ports sont PUBLIÉS PAR DOCKER et
 # filtrés dans DOCKER-USER par le rôle `-security` du service — une règle ufw y
-# serait décorative, et resterait après un resserrement (passerelle MCP de
-# FleetForge : `fleetforge-gateway-security` purge alors toute règle ufw de ses
-# ports).
+# serait décorative, et resterait après un resserrement (app `webapp` durcie,
+# ex. la passerelle MCP de FleetForge : `webapp-security` purge alors toute
+# règle ufw de ses ports).
 - name: Allow app_port from proxies
   community.general.ufw:
     rule: allow

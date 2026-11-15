@@ -1,0 +1,125 @@
+---
+# Profil DURCI d'une entrée `webapp` (`webapp_hardening`) : garde STATIQUE de l'inventaire (asserts locaux, aucune
+# connexion) puis faits `wa_h_*` lus par webapp-install, -security, -env-update, -deploy, -monitoring, -remove.
+# Inclus par facts.yml (sous `webapp_hardening is defined`) et par le play de garde de deploy-webapp.yml.
+# Exige les faits `wa_*` (facts.yml) : `wa_project`, `wa_front_port`, `wa_back_port`, `wa_db_port`, `wa_redis_port`.
+#
+# Ce que le profil promet (docs/etude-passerelle-sur-webapp.md) : compose durci contrôlé AVANT run.sh, pare-feu
+# DOCKER-USER propre à l'app (proxies admis distants seulement, + le sous-réseau dédié vers le back-lb), compte Unix
+# dédié, contrôle du durcissement RÉEL après le déploiement, conteneurs ARRÊTÉS au moindre écart.
+
+- name: Settle the hardening profile
+  vars:
+    _h: "{{ webapp_hardening_defaults | combine(webapp_hardening if webapp_hardening is mapping else {}) }}"
+  ansible.builtin.set_fact:
+    wa_h_user: "{{ _h.runtime_user | default('') }}"
+    wa_h_subnet: "{{ _h.docker_subnet | default('') }}"
+    wa_h_front_ip: "{{ _h.front_ip | default('') }}"
+    wa_h_back_lb_ip: "{{ _h.back_lb_ip | default('') }}"
+    wa_h_protected_paths: "{{ ['/home/' ~ remote_username] + (_h.protected_paths | default([])) }}"
+    wa_h_services: "{{ _h.services }}"
+    wa_h_allowed_binds: "{{ _h.allowed_bind_sources }}"
+    wa_h_compose_file: "{{ webapp_compose_file | default(_h.compose_file) }}"
+    wa_h_forbidden_groups: "{{ webapp_forbidden_groups }}"
+    wa_h_vpn_addresses: "{{ webapp_vpn_addresses }}"
+    wa_h_eligible_proxies: "{{ webapp_eligible_proxies }}"
+    wa_h_tag: "webapp-{{ wa_project }}"
+    wa_h_firewall_script: "/usr/local/sbin/webapp-{{ wa_project }}-firewall.sh"
+    wa_h_firewall_unit: "webapp-{{ wa_project }}-firewall"
+  tags: [always]
+
+# Relais de confiance : proxies ADMIS (hors adresses VPN), plus la passerelle du pont dédié quand un proxy admis est
+# sur CETTE machine (il atteint les ports publiés par la boucle locale, donc par le pont). Jamais `loopback`,
+# `linklocal`, `uniquelocal` génériques. Proxies DISTANTS : ceux que le pare-feu admet (un proxy de la machine passe
+# par 127.0.0.1, chaîne OUTPUT, hors DOCKER-USER).
+- name: Work out the trusted relays and the admitted proxies
+  vars:
+    _eligible_addresses: "{{ wa_h_eligible_proxies | map('extract', hostvars, 'ansible_host') | select('defined') | unique | list }}"
+    _bridge_gateway: "{{ wa_h_subnet.split('/')[0].rsplit('.', 1)[0] ~ '.1' }}"
+  ansible.builtin.set_fact:
+    wa_h_remote_proxies: "{{ _eligible_addresses | reject('equalto', ansible_host) | list }}"
+    wa_h_trusted_relays: "{{ _eligible_addresses + ([_bridge_gateway] if ansible_host in _eligible_addresses else []) }}"
+  tags: [always]
+
+- name: Write the trusted relays into their settings
+  ansible.builtin.set_fact:
+    # TRUST_PROXY du back : relais + front et back-lb à adresse fixe.
+    wa_h_trust_proxy: "{{ (wa_h_trusted_relays + [wa_h_front_ip, wa_h_back_lb_ip]) | unique | join(',') }}"
+    # Directives nginx du back-lb, insérées par l'interpolation de Compose dans son heredoc quoté.
+    wa_h_realip: "{{ wa_h_trusted_relays | map('regex_replace', '^', 'set_real_ip_from ') | map('regex_replace', '$', ';') | join(' ') }}"
+  tags: [always]
+
+# Garde : tout ce qui suit lit l'inventaire. Un défaut ici serait un déploiement « réussi » d'une app mal isolée.
+- name: Check the hardening profile of the entry
+  vars:
+    _prefix: "{{ wa_h_subnet.split('/')[0].rsplit('.', 1)[0] }}"
+    _host_octet: '[.]([2-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-4])$'
+  ansible.builtin.assert:
+    that:
+      - webapp_hardening is mapping
+      - wa_project is match('^[a-z][a-z0-9-]{0,40}$')
+      - wa_h_user is match('^[a-z_][a-z0-9_-]{0,30}$')
+      - wa_h_user != remote_username
+      - wa_h_subnet is match(webapp_private_cidr_regex)
+      - wa_h_subnet is match('^[0-9.]+/24$')
+      # Hors des plages que Docker attribue par défaut : un autre projet de la machine ne peut pas recevoir le même.
+      - wa_h_subnet is not match('^(172[.](1[6-9]|2[0-9]|3[01])|192[.]168)[.]')
+      - wa_h_subnet in (access_local_cidrs | default([]))
+      - wa_h_front_ip != wa_h_back_lb_ip
+      - wa_h_front_ip is match('^' ~ (_prefix | regex_escape) ~ _host_octet)
+      - wa_h_back_lb_ip is match('^' ~ (_prefix | regex_escape) ~ _host_octet)
+      - wa_h_protected_paths | reject('match', '^/[A-Za-z0-9._/-]+$') | list | length == 0
+      - wa_h_services is not string and wa_h_services | length > 0
+      - wa_h_services | reject('match', '^[a-z][a-z0-9-]{0,40}$') | list | length == 0
+      - wa_h_allowed_binds is not string
+      - wa_h_compose_file is match('^[A-Za-z0-9._/-]+$')
+      - "'..' not in wa_h_compose_file"
+      # Ports publiés par Docker : une règle ufw serait décorative (et resterait après un resserrement).
+      - not (ufw_app_ports | default(true) | bool)
+      - not (wa_db_exposed | bool)
+      - not (webapp_metrics_push | default(false) | bool)
+      # Front en conteneur sur la même machine que le back : un seul projet compose, donc un seul réseau dédié.
+      - wa_front_mode == 'container'
+      - not (wa_external | bool)
+      - wa_h_remote_proxies | reject('match', '^[0-9]{1,3}([.][0-9]{1,3}){3}$') | list | length == 0
+      - wa_h_remote_proxies | intersect(wa_h_vpn_addresses) | length == 0
+      - (wa_h_trusted_relays + [wa_h_front_ip, wa_h_back_lb_ip]) | reject('match', '^[0-9]{1,3}([.][0-9]{1,3}){3}$') | list | length == 0
+    fail_msg: >-
+      {{ inventory_hostname }} : profil `webapp_hardening` invalide — `runtime_user` (≠ {{ remote_username }}),
+      `docker_subnet` privé en /24 hors 172.16/12 et 192.168/16 ET listé dans `access_local_cidrs`, `front_ip` et
+      `back_lb_ip` distincts dans ce /24 (hors .0/.1/.255), `protected_paths` absolus sans métacaractère, `services`
+      et `compose_file` (relatif, sans `..`) ; `ufw_app_ports: false` ; ni `webapp_db_exposed` ni `webapp_metrics_push` ;
+      front en conteneur, proxy interne ; aucun proxy admis à l'adresse d'un VPN.
+    quiet: true
+  tags: [always]
+
+# Ports de l'app (front, back-lb, Postgres, Redis) : libres parmi TOUTES les variables `*port` des autres entrées de
+# la machine (pas seulement les `webapp`, dont facts.yml compare déjà les blocs) — un port ajouté demain à une autre
+# famille est comparé aussi.
+- name: Check the ports of the application are free on the machine
+  vars:
+    _ours: "{{ [wa_front_port, wa_back_port, wa_db_port, wa_redis_port] | map('int') | list }}"
+    _neighbours: >-
+      {{ groups['all'] | map('extract', hostvars)
+         | selectattr('ansible_host', 'defined')
+         | selectattr('ansible_host', 'equalto', ansible_host)
+         | rejectattr('inventory_hostname', 'equalto', inventory_hostname) | list }}
+    _taken: >-
+      {%- set ns = namespace(p=[]) -%}
+      {%- for n in _neighbours -%}
+      {%- for k in n.keys() if k is match('^[a-z0-9_]*port$') and k != 'ansible_port' -%}
+      {%- set v = n[k] | string -%}
+      {%- if v is match('^[0-9]+$') -%}{%- set ns.p = ns.p + [v] -%}{%- endif -%}
+      {%- endfor -%}
+      {%- endfor -%}
+      {{ ns.p | join(',') }}
+    _clash: "{{ _ours | intersect((_taken | string).split(',') | reject('equalto', '') | map('int') | list) }}"
+  ansible.builtin.assert:
+    that:
+      - (_ours | unique | length) == 4
+      - _clash | length == 0
+    fail_msg: >-
+      {{ inventory_hostname }} : front/back-lb/Postgres/Redis ({{ _ours | join(', ') }}) doivent être distincts et libres
+      sur {{ ansible_host }} — déjà pris par une autre entrée de la machine : {{ _clash | join(', ') or 'aucun' }}.
+    quiet: true
+  tags: [always]

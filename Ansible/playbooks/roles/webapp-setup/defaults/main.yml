@@ -31,7 +31,22 @@
 #   webapp_extra_secrets  secrets propres à l'app : liste de { key, kind (hex_32|base64_32|password|api_key), length?, note? }
 #   webapp_back_env_example  modèle du back/.env d'une app neuve (défaut back/.env.example)
 #   webapp_admin_wallet   ADMIN_WALLET (adresse publique, clé « si absente » : jamais réécrite)
-#   webapp_vhost_locations  blocs supplémentaires du vhost : liste de { path, regex?, mode?, ws?, body?, timeout?, buffering? }
+#   webapp_vhost_locations  blocs supplémentaires du vhost : liste de { path, regex?, mode?, ws?, body?, timeout?, buffering?,
+#                         upstream? (front | back : back-lb), priority? (`^~`), access? }. `access: { hosts, whitelist?,
+#                         vpn_addresses?, v6_min_prefix? }` remplace le mode par une liste NOMMÉE (proxy-update/_named_access.inc) :
+#                         serveurs `hosts` (entrées, IPv4), whitelist filtrée si `whitelist`, adresses VPN écartées sauf
+#                         `vpn_addresses: true`, puis `deny all` (`hosts: []` sans whitelist = fermé)
+#
+# Attributs OPTIONNELS du profil durci et des .env (absents : comportement INCHANGÉ) :
+#   webapp_hardening      profil de DURCISSEMENT (tasks/hardening.yml) : { runtime_user, docker_subnet, front_ip, back_lb_ip,
+#                         protected_paths?, services?, allowed_bind_sources?, compose_file? } — compose durci contrôlé avant
+#                         run.sh, pare-feu DOCKER-USER propre (proxies admis seulement), compte Unix dédié, contrôle à
+#                         l'exécution, conteneurs ARRÊTÉS au moindre écart, vhost qui réécrit X-Forwarded-For.
+#                         docs/etude-passerelle-sur-webapp.md
+#   webapp_env_from_vault { CLÉ_DU_ENV: <variable du coffre> } : secrets non tirés par l'app (mots de passe d'un amont),
+#                         écrits dans back/.env (no_log) ; absent ou malformé = échec, par NOM
+#   webapp_env_required   clés que back/.env doit porter NON VIDES après le rendu (noms seulement)
+#   webapp_upstream_checks  sondes svcprobe `upstream_<id>` : [{ id, url }], URL https lue DEPUIS le conteneur back
 
 # Ports consécutifs réservés à une app : front, back-lb, Postgres, Redis.
 webapp_port_block: 4
@@ -43,3 +58,23 @@ webapp_db_selfhosted_engines: [postgres, selfhosted]
 
 # Dépôt d'applications du poste de contrôle (identifiant → chemin).
 webapp_apps_file: "{{ playbook_dir }}/../.private/apps/apps.yml"
+
+# ── Profil durci (`webapp_hardening`, tasks/hardening.yml) ─────────────────
+# Proxies ADMIS par une app durcie : ceux dont l'adresse n'est celle d'AUCUN serveur VPN (même calcul que le front
+# `proxy-private`) — un proxy à l'adresse d'un VPN (proxy2 = vpn1, NAT domestique) admettrait tout ce qui sort par elle.
+# SEULE définition (scripts/webapp_hardening_check.py le vérifie) ; les autres rôles lisent les faits `wa_h_*`.
+webapp_vpn_addresses: "{{ groups['vpns'] | default([]) | map('extract', hostvars, 'ansible_host') | list }}"
+webapp_eligible_proxies: >-
+  {{ groups['proxies'] | default([]) | map('extract', hostvars)
+     | rejectattr('ansible_host', 'in', webapp_vpn_addresses)
+     | map(attribute='inventory_hostname') | list }}
+# Sous-réseau privé /16 à /32 (grammaire de `_access.inc`), sans zéro en tête d'un octet.
+webapp_private_cidr_regex: '^(10[.](0|[1-9][0-9]{0,2})[.](0|[1-9][0-9]{0,2})|172[.](1[6-9]|2[0-9]|3[01])[.](0|[1-9][0-9]{0,2})|192[.]168[.](0|[1-9][0-9]{0,2}))[.](0|[1-9][0-9]{0,2})/(1[6-9]|2[0-9]|3[0-2])$'
+# Défauts du profil.
+webapp_hardening_defaults:
+  services: [back, back-worker]
+  allowed_bind_sources: []
+  protected_paths: []
+  compose_file: scripts/docker-compose-hardened.yml
+# Groupes interdits au compte dédié : chacun vaut root, ou l'accès aux fichiers de `remote_username` (clés, vault).
+webapp_forbidden_groups: [docker, sudo, adm, lxd, root, "{{ remote_username }}"]

@@ -1,0 +1,57 @@
+---
+# Arrête TOUS les conteneurs d'une application durcie (projets compose `<projet>-back-<hôte>` et
+# `<projet>-front-<hôte>` de deploy-full.sh) — échec fermé : appelé quand le déploiement ou le contrôle du
+# durcissement échoue. Ne retire rien (volumes, images) : webapp-remove le fait.
+
+- name: Read the facts of the hardened application
+  ansible.builtin.set_fact:
+    wa_app: "{{ hostvars[webapp_target | default(inventory_hostname)] }}"
+
+- name: Check the project name used to select the containers to stop
+  ansible.builtin.assert:
+    that: wa_app.wa_project is match('^[a-z][a-z0-9-]{0,40}$')
+    quiet: true
+
+- name: List the containers with their compose project (to stop)
+  ansible.builtin.command:
+    argv: [docker, ps, --format, '{% raw %}{{.ID}} {{.Label "com.docker.compose.project"}}{% endraw %}']
+  become: true
+  register: wa_ps_stop
+  changed_when: false
+  check_mode: false
+
+- name: Stop the containers of the application
+  ansible.builtin.command:
+    argv: "{{ ['docker', 'stop'] + _ids }}"
+  vars:
+    _ids: >-
+      {{ wa_ps_stop.stdout_lines | select('match', '^[0-9a-f]+ ' ~ (wa_app.wa_project | regex_escape) ~ '-(back|front)-')
+         | map('split') | map('first') | list }}
+  become: true
+  failed_when: false
+  when:
+    - _ids | length > 0
+    - not ansible_check_mode
+
+# Relecture : un `docker stop` qui échoue (ou un conteneur relancé par une politique `restart: always`) ne doit pas
+# passer pour un arrêt.
+- name: List the containers of the application still running
+  ansible.builtin.command:
+    argv: [docker, ps, --format, '{% raw %}{{.ID}} {{.Label "com.docker.compose.project"}}{% endraw %}']
+  become: true
+  register: wa_ps_after_stop
+  changed_when: false
+  check_mode: false
+
+- name: Fail when a container of the application is still running
+  ansible.builtin.assert:
+    that: >-
+      wa_ps_after_stop.stdout_lines
+      | select('match', '^[0-9a-f]+ ' ~ (wa_app.wa_project | regex_escape) ~ '-(back|front)-') | list | length == 0
+    fail_msg: >-
+      Des conteneurs de {{ wa_app.wa_project }} tournent ENCORE après l'arrêt de sécurité
+      ({{ wa_ps_after_stop.stdout_lines | select('match', '^[0-9a-f]+ ' ~ (wa_app.wa_project | regex_escape) ~ '-(back|front)-')
+      | map('split') | map('last') | unique | join(', ') }}) : les arrêter à la main (`docker ps` sur
+      {{ inventory_hostname }}) avant toute autre action.
+    quiet: true
+  when: not ansible_check_mode

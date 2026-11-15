@@ -1,0 +1,141 @@
+---
+# Pare-feu d'une application DURCIE (`webapp_hardening`) : ports PUBLIÉS PAR DOCKER (front `app_port:80`, back-lb
+# `back_port:back_port`), donc DOCKER-USER — avec SON script et SON unité (la machine peut porter d'autres services et
+# des `docker_ports_rules` qui ne la concernent pas ; l'app ne dépend pas de la liste d'une autre entrée).
+#
+# Règles, IPv4 et IPv6, sur les seules connexions DNATées vers ces ports (`--ctstate DNAT --ctorigdstport`, le front
+# écoutant sur 80 dans son conteneur), INSÉRÉES EN TÊTE de la chaîne (un RETURN inconditionnel posé avant elles par
+# Docker ou un autre rôle les rendrait décoratives) :
+#   • front et back-lb : proxies ADMIS et distants seulement (hors adresses VPN ; un proxy de la même machine passe
+#     par 127.0.0.1, chaîne OUTPUT, hors DOCKER-USER) ;
+#   • back-lb : plus le sous-réseau Docker DÉDIÉ de l'app (relais front → back-lb) ;
+#   • puis DROP. Ni whitelist, ni vpns, ni Prometheus : les humains passent par le vhost, la supervision par svcprobe
+#     sur la boucle locale.
+# Le script PURGE les règles qu'il a posées avant de reposer les voulues : additif ET soustractif. Toute règle ufw sur
+# ces ports est retirée (décorative ; `ufw_app_ports: false` sur l'entrée empêche d'en poser).
+#
+# Fenêtre au redémarrage : Docker relance les conteneurs (`restart: unless-stopped`) pendant son propre démarrage,
+# AVANT que l'unité (After=docker.service) ne repose les règles — quelques secondes où les ports publiés ne sont pas
+# filtrés. Non fermée (Docker n'offre pas de crochet avant le redémarrage des conteneurs) ; la sonde svcprobe
+# `firewall_<port>` et l'alerte ServiceCheckFailing signalent une chaîne restée vide.
+#
+# Joué AVANT le déploiement de l'app (aucune fenêtre où un port publié serait ouvert) puis rejoué par
+# update-ufw-all.yml quand la liste des proxies change.
+
+- name: Read the facts of the hardened application
+  ansible.builtin.set_fact:
+    wa_app: "{{ hostvars[webapp_target | default(inventory_hostname)] }}"
+
+- name: Name the firewall script of the application
+  ansible.builtin.set_fact:
+    wa_fw_script: "{{ wa_app.wa_h_firewall_script }}"
+
+# Les valeurs entrent dans un script root : grammaire tenue avant le rendu.
+- name: Check the values written into the firewall script
+  ansible.builtin.assert:
+    that:
+      - wa_app.wa_front_port | string is match('^[0-9]{2,5}$')
+      - wa_app.wa_back_port | string is match('^[0-9]{2,5}$')
+      - wa_app.wa_front_port | int != wa_app.wa_back_port | int
+      - wa_app.wa_h_subnet is match('^[0-9]{1,3}([.][0-9]{1,3}){3}/[0-9]{1,2}$')
+      - wa_app.wa_h_subnet is not match('^172[.]16[.]0[.]0/12$')
+      - wa_app.wa_h_remote_proxies | reject('match', '^[0-9]{1,3}([.][0-9]{1,3}){3}$') | list | length == 0
+      - wa_app.wa_h_remote_proxies | intersect(wa_app.wa_h_vpn_addresses) | length == 0
+      - wa_app.wa_h_tag is match('^webapp-[a-z][a-z0-9-]{0,40}$')
+      - wa_fw_script is match('^/[A-Za-z0-9._/-]+$')
+    fail_msg: >-
+      Ports, sous-réseau DÉDIÉ (jamais 172.16.0.0/12) et adresses des proxies : formes numériques IPv4 attendues ;
+      aucun proxy admis à l'adresse d'un VPN.
+    quiet: true
+
+- name: Deploy the firewall script of the application
+  ansible.builtin.template:
+    src: webapp-firewall.sh.j2
+    dest: "{{ wa_fw_script }}"
+    owner: root
+    group: root
+    mode: '0750'
+  become: true
+  register: wa_fw_script
+
+- name: Deploy the firewall unit of the application
+  ansible.builtin.template:
+    src: webapp-firewall.service.j2
+    dest: "/etc/systemd/system/{{ wa_app.wa_h_firewall_unit }}.service"
+    owner: root
+    group: root
+    mode: '0644'
+  become: true
+  register: wa_fw_unit
+
+- name: Enable and start the firewall unit of the application
+  ansible.builtin.systemd:
+    name: "{{ wa_app.wa_h_firewall_unit }}"
+    state: "{{ 'restarted' if (wa_fw_script is changed or wa_fw_unit is changed) else 'started' }}"
+    enabled: true
+    daemon_reload: true
+  become: true
+
+# Une règle ufw sur un port publié est décorative ; posée par un autre rôle ou à la main, elle raconterait une autre
+# histoire que la chaîne réelle. TOUTES sont retirées, quelle que soit leur source, IPv4 et IPv6.
+- name: Remove every ufw rule on the application ports
+  ansible.builtin.include_tasks:
+    file: ufw-purge.yml
+    apply:
+      tags: [always]
+
+# Application immédiate (l'unité oneshot ne repasse pas d'elle-même), puis contrôle de l'état RÉEL de la chaîne.
+- name: Apply the rules now
+  ansible.builtin.command:
+    argv: ["{{ wa_fw_script }}"]
+  become: true
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Read the firewall state
+  ansible.builtin.include_tasks:
+    file: firewall-check.yml
+    apply:
+      tags: [always]
+
+- name: Fail when the firewall of the application is missing or bypassed
+  ansible.builtin.assert:
+    that: wa_firewall_problems | trim | length == 0
+    fail_msg: >-
+      Pare-feu de {{ wa_app.wa_project }} NON conforme : {{ wa_firewall_problems }}. Vérifier
+      `systemctl status {{ wa_app.wa_h_firewall_unit }}` et `iptables -S DOCKER-USER` ; rejouer le rôle (le script
+      insère ses règles en tête).
+    quiet: true
+  when: not ansible_check_mode
+
+# ufw ne filtre pas les ports publiés par Docker, mais il filtre ce qui arrive en INPUT : docker-proxy sur `[::]` si
+# une liaison IPv6 apparaissait, et les règles que `deploy-full.sh` poserait sur NODE_PORT/DB_PORT (WHITELIST,
+# PROXY_HOSTS : refusées dans back/.env). HYPOTHÈSE vérifiée ici : ufw actif, politique entrante `deny`.
+- name: Read the ufw status
+  ansible.builtin.command:
+    argv: [ufw, status, verbose]
+  become: true
+  register: wa_ufw_status
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Fail when ufw is not active with an incoming deny policy
+  ansible.builtin.assert:
+    that:
+      - wa_ufw_status.stdout is search('Status:[ ]+active')
+      - wa_ufw_status.stdout is search('Default:[ ]+deny [(]incoming[)]')
+    fail_msg: >-
+      ufw n'est pas actif avec une politique entrante `deny` sur {{ inventory_hostname }} : ce qui arrive en INPUT
+      (docker-proxy, règles posées par deploy-full.sh) ne serait pas filtré.
+    quiet: true
+  when: not ansible_check_mode
+
+- name: Report the exposure
+  ansible.builtin.debug:
+    msg: >-
+      Ports {{ wa_app.wa_front_port }} (front) et {{ wa_app.wa_back_port }} (back-lb) de {{ wa_app.wa_project }},
+      publiés sur 0.0.0.0, filtrés dans DOCKER-USER : {{ ('proxies distants ' ~ (wa_app.wa_h_remote_proxies | join(', ')))
+      if wa_app.wa_h_remote_proxies | length > 0 else 'aucune source externe' }}, puis DROP (IPv6 : DROP). Un proxy de
+      cette machine passe par 127.0.0.1 (boucle locale, hors DOCKER-USER). Contrôle depuis une machine hors proxies :
+      `nc -z {{ wa_app.ansible_host }} {{ wa_app.wa_back_port }}` doit échouer.

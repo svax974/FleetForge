@@ -43,9 +43,19 @@
       ce code non publié (update_common.sh le remettra sur main avant de déployer, sauf --no-update-common).
   when: wa_lib_branch.stdout | default('') not in ['', 'main']
 
+# ── Profil durci : refus du back/.env, compose et pare-feu contrôlés, déploiement fermé en cas d'échec ──
+- name: Deploy the hardened application (checked first, stopped on any failure)
+  ansible.builtin.include_tasks:
+    file: hardened.yml
+    apply:
+      tags: [image, deploy]
+  when: webapp_hardening is defined
+  tags: [image, deploy]
+
 # ── run.sh ─────────────────────────────────────────────────────────────────
 # `run.sh <env>` : `prod` lit back/.env + front/.env, `preprod` lit back/.env.preprod + front/.env.preprod.
 - name: Run the deployment scripts of the application
+  when: webapp_hardening is not defined
   ansible.builtin.command:
     cmd: >-
       ./scripts/run.sh {{ wa_env | quote }}
@@ -64,7 +74,9 @@
 - name: Report the tag that was handled
   ansible.builtin.debug:
     msg: "{{ wa_run.stdout_lines | select('search', '\\[IMAGE:') | list }}"
-  when: wa_registry_on | bool
+  when:
+    - wa_registry_on | bool
+    - webapp_hardening is not defined
 
 # ── Santé (sauf build/push : aucun hôte touché) ────────────────────────────
 - name: Wait for the front to answer
@@ -79,6 +91,7 @@
   when:
     - webapp_phase in ['all', 'deploy']
     - wa_front_mode == 'container'
+    - webapp_hardening is not defined
 
 - name: Wait for the back API health endpoint
   ansible.builtin.uri:
@@ -90,7 +103,9 @@
   retries: "{{ webapp_health_retries }}"
   delay: "{{ webapp_health_delay }}"
   changed_when: false
-  when: webapp_phase in ['all', 'deploy']
+  when:
+    - webapp_phase in ['all', 'deploy']
+    - webapp_hardening is not defined
 
 # Postgres et Redis doivent rester sur la boucle locale (profil « non exposé ») sauf `webapp_db_exposed: true`.
 - name: Check that Postgres and Redis are published on the loopback only
@@ -105,6 +120,7 @@
   when:
     - webapp_phase in ['all', 'deploy']
     - not (wa_db_exposed | bool)
+    - webapp_hardening is not defined
   become: true
 
 - name: Report how the application is exposed
@@ -113,4 +129,6 @@
       {{ wa_project }} ({{ wa_env }}) : {{ 'front sur Cloudflare Pages, ' if wa_front_mode == 'pages' else 'front sur ' ~ (webapp_publish_bind | default('127.0.0.1')) ~ ':' ~ wa_front_port ~ ', ' }}back-lb sur
       {{ webapp_publish_bind | default('127.0.0.1') }}:{{ wa_back_port }}. {{ 'Version : ' ~ (wa_back_ready.json.revision | default('?')) ~ '.' if (wa_back_ready.json | default(none)) is mapping else '' }}
       Redéployer sans Ansible : `cd {{ wa_src }} && ./scripts/run.sh {{ wa_env }}` (cibles, registre et secrets sont dans les .env).
-  when: webapp_phase in ['all', 'deploy']
+  when:
+    - webapp_phase in ['all', 'deploy']
+    - webapp_hardening is not defined

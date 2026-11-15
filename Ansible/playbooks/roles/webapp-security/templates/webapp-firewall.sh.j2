@@ -1,0 +1,83 @@
+#!/bin/bash
+# Pare-feu des ports publiés de {{ wa_app.wa_project }} (profil durci `webapp_hardening`) — géré par Ansible
+# (webapp-security, tasks/firewall.yml), ne pas éditer.
+#
+# Docker insère ses DNAT en amont d'ufw : seule DOCKER-USER voit ce trafic. Les
+# règles ne visent que les connexions DNATées vers un port PUBLIÉ
+# (`--ctstate DNAT --ctorigdstport`) : le trafic direct entre conteneurs d'un
+# même réseau n'est pas concerné, et le front qui écoute sur 80 dans son
+# conteneur est bien filtré sur son port publié.
+#
+# Les règles sont INSÉRÉES EN TÊTE de DOCKER-USER : un RETURN inconditionnel
+# placé avant elles (ancien défaut de Docker, autre rôle) les rendrait
+# décoratives. Elles ne touchent que ces deux ports.
+#
+# Rejoué au démarrage APRÈS docker.service (Docker recrée DOCKER-USER vide).
+# Idempotent : purge d'abord les règles portant son commentaire, puis repose.
+set -euo pipefail
+
+TAG="{{ wa_app.wa_h_tag }}"
+FRONT_PORT={{ wa_app.wa_front_port | int }}
+BACK_PORT={{ wa_app.wa_back_port | int }}
+PROXIES=({{ wa_app.wa_h_remote_proxies | join(' ') }})
+INTERNAL={{ wa_app.wa_h_subnet }}
+
+# Purge par NUMÉRO (réinjecter une spec à commentaire la ferait découper par le
+# shell). L'awk lit TOUTE la sortie, sans `exit` : fermer le tube tôt tue
+# iptables par SIGPIPE et, avec `pipefail`, le script (docker-ports-security,
+# constat du 08/10/2026).
+purge() {
+  local cmd="$1" n
+  "${cmd}" -w -L DOCKER-USER -n >/dev/null 2>&1 || return 0
+  while true; do
+    n=$("${cmd}" -w -L DOCKER-USER --line-numbers -n \
+        | awk -v t="/* ${TAG}:" 'index($0, t) && !done {print $1; done=1}')
+    [ -z "${n}" ] && break
+    "${cmd}" -w -D DOCKER-USER "${n}"
+  done
+}
+
+# Règles voulues, dans l'ORDRE d'évaluation ; insérées ensuite en tête, de la
+# dernière à la première. `--ctdir ORIGINAL` est INDISPENSABLE : la réponse
+# (conteneur → client) porte elle aussi l'état DNAT et le port d'origine ; sans
+# lui elle tomberait dans le DROP final, y compris pour une source autorisée.
+RULES4=()
+RULES6=()
+add() {
+  local family="$1" port="$2" target="$3" what="$4" src="${5:-}"
+  local spec="${src:+-s ${src} }-p tcp -m conntrack --ctstate DNAT --ctorigdstport ${port} --ctdir ORIGINAL -m comment --comment ${TAG}:${port}:${what} -j ${target}"
+  if [ "${family}" = 4 ]; then RULES4+=("${spec}"); else RULES6+=("${spec}"); fi
+}
+
+for port in "${FRONT_PORT}" "${BACK_PORT}"; do
+  for src in ${PROXIES[@]+"${PROXIES[@]}"}; do
+    add 4 "${port}" RETURN proxy "${src}"
+  done
+done
+add 4 "${BACK_PORT}" RETURN internal "${INTERNAL}"
+for port in "${FRONT_PORT}" "${BACK_PORT}"; do
+  add 4 "${port}" DROP deny
+  add 6 "${port}" DROP deny
+done
+
+# Insertion en tête, de la dernière règle à la première (ordre final = ordre
+# voulu). Liste retournée par construction : le gabarit Jinja interdit la
+# syntaxe de longueur de tableau de bash (elle ouvrirait un commentaire).
+insert_all() {
+  local cmd="$1"; shift
+  local reversed=() rule
+  for rule in "$@"; do reversed=("${rule}" ${reversed[@]+"${reversed[@]}"}); done
+  for rule in "${reversed[@]}"; do
+    # shellcheck disable=SC2086  # la spec est découpée volontairement (aucune valeur libre)
+    "${cmd}" -w -I DOCKER-USER 1 ${rule}
+  done
+}
+
+purge iptables
+insert_all iptables "${RULES4[@]}"
+
+# IPv6 : Docker publie aussi sur [::]. Aucune source IPv6 admise.
+if ip6tables -w -L DOCKER-USER -n >/dev/null 2>&1; then
+  purge ip6tables
+  insert_all ip6tables "${RULES6[@]}"
+fi

@@ -27,7 +27,15 @@
 #   --tags proxy-conf  vhost (et activation des Authenticated Origin Pulls qui le précède)
 #   --tags security    filtrage DOCKER-USER
 #   --tags monitoring  sonde svcprobe
+#   --tags hardening   (profil durci) recontrôle du durcissement RÉEL, conteneurs arrêtés au moindre écart
 # Un jamais-joué : `--check` rend le diff des .env sans écrire (valeurs masquées), sans connexion aux proxies.
+#
+# Profil DURCI (`webapp_hardening` sur l'entrée, docs/etude-passerelle-sur-webapp.md) : garde sans connexion, compte
+# dédié, pare-feu DOCKER-USER propre à l'app, compose durci contrôlé avant run.sh, durcissement vérifié après,
+# conteneurs ARRÊTÉS au moindre écart. Sans l'attribut : comportement inchangé.
+#
+# `webapp_optional: true` (un playbook qui IMPORTE celui-ci, ex. deploy-fleetforge.yml pour sa passerelle) : sans
+# `webapp`, rien n'est visé (aucune connexion) au lieu d'échouer.
 
 # ── Sélection de l'application ─────────────────────────────────────────────
 - name: Select the application
@@ -36,6 +44,12 @@
   gather_facts: false
   tags: [always]
   tasks:
+    - name: Select nothing when the application is optional and not named
+      ansible.builtin.meta: end_play
+      when:
+        - webapp_optional | default(false) | bool
+        - (webapp | default('')) | length == 0
+
     - name: Check the parameters
       ansible.builtin.assert:
         that:
@@ -90,6 +104,18 @@
         fail_msg: "Le groupe d'alertes `services` n'est pas dans `prom_alert_groups` du parc : ServiceDown ne sonnerait jamais."
         quiet: true
 
+# ── Garde du profil durci (inventaire seul, AUCUNE connexion) ──────────────
+- name: Garde du profil durci
+  hosts: webapp_target
+  gather_facts: false
+  tags: [always]
+  tasks:
+    - name: Check the hardening profile of the entry before any connection
+      ansible.builtin.include_role:
+        name: webapp-setup
+        tasks_from: facts
+      when: webapp_hardening is defined
+
 # ── Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ───────────────────────
 - name: Contrôle préalable
   hosts: webapp_target
@@ -136,8 +162,14 @@
   hosts: proxies
   remote_user: "{{ remote_username }}"
   become: true
+  # Aucune application sélectionnée (`webapp_optional`) : aucune connexion aux proxies.
+  gather_facts: "{{ groups['webapp_target'] | default([]) | length > 0 }}"
   tags: [proxy-conf]
   tasks:
+    - name: Nothing to do without a selected application
+      ansible.builtin.meta: end_play
+      when: groups['webapp_target'] | default([]) | length == 0
+
     - name: Deploy the hand-written vhost of the application
       ansible.builtin.include_role:
         name: proxy-update
@@ -194,6 +226,25 @@
   tags: [config, image, deploy]
   roles:
     - webapp-deploy
+
+# ── Durcissement RÉEL (profil durci) ───────────────────────────────────────
+# Déjà vérifié dans le bloc du déploiement ; ce play permet le recontrôle seul (`--tags hardening`). Écart : conteneurs
+# de l'app ARRÊTÉS, play en échec. Sans profil : sauté, aucune connexion.
+- name: Durcissement de l'application
+  hosts: webapp_target
+  remote_user: "{{ remote_username }}"
+  gather_facts: false
+  tags: [hardening]
+  tasks:
+    - name: Verify the hardening of the running application
+      ansible.builtin.include_role:
+        name: webapp-security
+        tasks_from: runtime
+        apply:
+          tags: [hardening]
+      when:
+        - webapp_hardening is defined
+        - webapp_phase | default('all') in ['all', 'deploy']
 
 # ── Supervision (OBLIGATOIRE, voir CLAUDE.md) ──────────────────────────────
 - name: Supervision du service

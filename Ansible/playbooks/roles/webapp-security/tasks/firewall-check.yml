@@ -1,0 +1,64 @@
+---
+# État RÉEL du pare-feu d'une application durcie, lu dans DOCKER-USER : pour chaque port publié, une règle
+# `<tag>:<port>:deny` (DROP), et AUCUNE règle inconditionnelle RETURN/ACCEPT avant la première règle de l'app (elle
+# rendrait le DROP décoratif). Pose `wa_firewall_problems` (texte, vide = conforme) ; ne fait rien échouer lui-même —
+# les appelants décident :
+#   • tasks/firewall.yml : échec du rôle ;
+#   • webapp-deploy (profil durci) : AVANT run.sh, aucun conteneur démarré sinon ;
+#   • tasks/runtime.yml : écart ajouté au durcissement (conteneurs arrêtés).
+# IPv6 : la chaîne ip6tables absente n'est PAS une preuve d'absence d'IPv6 (docker-proxy publie `[::]:port` quand le
+# conteneur n'a pas d'IPv6) — c'est la liaison explicite `0.0.0.0:` du compose (contrôlée) qui l'empêche.
+
+- name: Read the facts of the hardened application
+  ansible.builtin.set_fact:
+    wa_app: "{{ hostvars[webapp_target | default(inventory_hostname)] }}"
+
+- name: Read the IPv4 DOCKER-USER chain
+  ansible.builtin.command:
+    argv: [iptables, -w, -S, DOCKER-USER]
+  become: true
+  register: wa_chain4
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Read the IPv6 DOCKER-USER chain
+  ansible.builtin.command:
+    argv: [ip6tables, -w, -S, DOCKER-USER]
+  become: true
+  register: wa_chain6
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Work out the firewall problems
+  vars:
+    _tag: "{{ wa_app.wa_h_tag }}"
+    _families:
+      - { family: iptables, result: "{{ wa_chain4 }}", required: true }
+      - { family: ip6tables, result: "{{ wa_chain6 }}", required: false }
+  ansible.builtin.set_fact:
+    wa_firewall_problems: >-
+      {%- set ns = namespace(p=[]) -%}
+      {%- for fam in _families -%}
+        {%- if (fam.result.rc | default(1)) != 0 -%}
+          {%- if fam.required -%}{%- set ns.p = ns.p + [fam.family ~ ' : chaîne DOCKER-USER illisible'] -%}{%- endif -%}
+        {%- else -%}
+          {%- set rules = fam.result.stdout_lines | default([]) | select('match', '^-A DOCKER-USER ') | list -%}
+          {%- set ours = rules | select('search', _tag ~ ':') | list -%}
+          {%- if ours | length == 0 -%}
+            {%- set ns.p = ns.p + [fam.family ~ ' : aucune règle de ' ~ _tag] -%}
+          {%- else -%}
+            {%- set first = rules.index(ours | first) -%}
+            {%- for r in rules[:first] if r is match('^-A DOCKER-USER -j (RETURN|ACCEPT)[ ]*$') -%}
+              {%- set ns.p = ns.p + [fam.family ~ ' : « ' ~ r ~ ' » précède les règles de ' ~ _tag] -%}
+            {%- endfor -%}
+          {%- endif -%}
+          {%- for port in [wa_app.wa_front_port | string, wa_app.wa_back_port | string] -%}
+            {%- if (rules | select('search', '--ctorigdstport ' ~ port ~ ' .*' ~ _tag ~ ':' ~ port ~ ':deny.*-j DROP') | list | length) == 0 -%}
+              {%- set ns.p = ns.p + [fam.family ~ ' : aucun DROP sur le port ' ~ port] -%}
+            {%- endif -%}
+          {%- endfor -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ ns.p | join(' ; ') }}

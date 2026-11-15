@@ -244,15 +244,40 @@
         tasks_from: firewall
       when: prometheus_host is defined
 
-# Passerelle MCP de FleetForge : ports publiés par Docker, donc DOCKER-USER
-# (son script purge puis repose ses règles : un proxy retiré perd son accès).
-# Groupe absent de l'inventaire (papanglabs) : play ignoré.
-- name: FleetForge gateway (Docker-published ports)
-  hosts: fleetforge_gateways
+# Applications `webapp` DURCIES (`webapp_hardening`, ex. la passerelle MCP de
+# FleetForge) : ports publiés par Docker, donc DOCKER-USER — leur script purge
+# puis repose leurs règles (un proxy retiré perd son accès). Aucune entrée
+# durcie (papanglabs) : plays ignorés. Pas de variable dans un `hosts:` : les
+# entrées sont rangées dans un groupe constant.
+- name: Find the hardened webapp entries
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Put the hardened webapp entries in their group
+      ansible.builtin.add_host:
+        name: "{{ item }}"
+        groups: webapp_hardened
+      loop: >-
+        {{ groups['all'] | map('extract', hostvars) | selectattr('webapp_hardening', 'defined')
+           | selectattr('ansible_roles', 'defined') | selectattr('ansible_roles', 'contains', 'webapp')
+           | map(attribute='inventory_hostname') | list }}
+      changed_when: false
+
+- name: Hardened webapp entries (Docker-published ports)
+  hosts: webapp_hardened
   remote_user: "{{ remote_username }}"
   become: true
-  roles:
-    - fleetforge-gateway-security
+  tasks:
+    - name: Work out the facts of the application
+      ansible.builtin.include_role:
+        name: webapp-setup
+        tasks_from: facts
+
+    - name: Re-apply the firewall of the application
+      ansible.builtin.include_role:
+        name: webapp-security
+        tasks_from: firewall
 
 # ── Note : retrait d'une autorisation ──────────────────────────────────────
 # Ce playbook AJOUTE les règles correspondant à la configuration courante.

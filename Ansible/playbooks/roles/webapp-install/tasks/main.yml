@@ -83,6 +83,12 @@
     - wa_registry_on | bool
     - wa_registry_reach.status | default(0) not in [200, 401]
 
+# ── Profil durci : compte Unix dédié des conteneurs de code ────────────────
+- name: Create the dedicated account of the hardened application
+  ansible.builtin.include_tasks:
+    file: account.yml
+  when: webapp_hardening is defined
+
 # ── 3. Témoin ──────────────────────────────────────────────────────────────
 - name: Leave a stamp of this execution on the host
   ansible.builtin.include_role:

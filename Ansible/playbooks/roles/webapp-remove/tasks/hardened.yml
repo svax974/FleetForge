@@ -1,0 +1,80 @@
+---
+# Retrait de ce que le profil durci (`webapp_hardening`) a posé sur la machine : pare-feu DOCKER-USER propre à l'app
+# (unité, script, règles portant son étiquette), règles ufw de ses ports, compte Unix dédié. Les comptes et secrets
+# d'un AMONT (ex. `ffg_*` de FleetForge) vivent sur l'entrée de l'amont : rappel affiché, rien n'y est touché.
+
+- name: Check the names that select what is removed
+  ansible.builtin.assert:
+    that:
+      - wa_project is match('^[a-z][a-z0-9-]{0,40}$')
+      - wa_h_user is match('^[a-z_][a-z0-9_-]{0,30}$')
+      - wa_h_user != remote_username
+      - wa_h_firewall_script is match('^/[A-Za-z0-9._/-]+$')
+    quiet: true
+
+- name: Stop and disable the firewall unit of the application
+  ansible.builtin.systemd:
+    name: "{{ wa_h_firewall_unit }}"
+    state: stopped
+    enabled: false
+  become: true
+  failed_when: false
+
+# Par leur COMMENTAIRE (`<étiquette>:`), sans se fier à l'inventaire courant.
+- name: Remove the rules of the application from DOCKER-USER
+  ansible.builtin.shell: |
+    set -euo pipefail
+    for cmd in iptables ip6tables; do
+      "${cmd}" -w -L DOCKER-USER -n >/dev/null 2>&1 || continue
+      while true; do
+        n=$("${cmd}" -w -L DOCKER-USER --line-numbers -n | awk -v t={{ ('/* ' ~ wa_h_tag ~ ':') | quote }} 'index($0, t) && !done {print $1; done=1}')
+        [ -z "${n}" ] && break
+        "${cmd}" -w -D DOCKER-USER "${n}"
+        echo "removed ${cmd} ${n}"
+      done
+    done
+  args:
+    executable: /bin/bash
+  become: true
+  register: wa_h_rules_removed
+  changed_when: "'removed' in wa_h_rules_removed.stdout"
+
+- name: Remove every ufw rule on the application ports
+  ansible.builtin.include_role:
+    name: webapp-security
+    tasks_from: ufw-purge
+    apply:
+      tags: [always]
+
+- name: Remove the firewall unit and script of the application
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "/etc/systemd/system/{{ wa_h_firewall_unit }}.service"
+    - "{{ wa_h_firewall_script }}"
+  become: true
+
+- name: Reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+  become: true
+
+- name: Remove the dedicated account
+  ansible.builtin.user:
+    name: "{{ wa_h_user }}"
+    state: absent
+  become: true
+
+- name: Remove the dedicated group
+  ansible.builtin.group:
+    name: "{{ wa_h_user }}"
+    state: absent
+  become: true
+
+- name: Remind what the profile does not remove
+  ansible.builtin.debug:
+    msg: >-
+      {{ wa_project }} : pare-feu, règles ufw et compte {{ wa_h_user }} retirés. Restent : les secrets ou comptes d'un
+      amont (`webapp_env_from_vault`, ex. comptes `ffg_*` dans `ff_api_accounts` de l'entrée FleetForge, et l'app dans
+      son `access_linked`).

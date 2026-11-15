@@ -1,0 +1,109 @@
+---
+# Calcul des écarts de durcissement, À PARTIR des lectures de tasks/runtime.yml (wa_passwd, wa_groups, wa_path_probe,
+# wa_containers, wa_net_inspect, wa_vol_inspect, wa_firewall_problems) et des faits `wa_h_*` de l'entrée (`wa_app`).
+# Aucune commande : fichier séparé pour être éprouvé hors ligne sur des descriptions factices
+# (scripts/test_webapp_hardening_check.py).
+- name: Work out the hardening violations
+  vars:
+    _project: "{{ wa_app.wa_project }}"
+    _fields: "{{ (wa_passwd.stdout | default('')).split(':') }}"
+    _runtime_user: "{{ (_fields[2] ~ ':' ~ _fields[3]) if _fields | length > 3 else '' }}"
+    _networks: "{{ (wa_net_inspect.stdout_lines | default([])) | map('from_json') | list }}"
+    _volumes: "{{ (wa_vol_inspect.stdout_lines | default([])) | map('from_json') | list }}"
+    _front_port: "{{ wa_app.wa_front_port | string }}"
+    _back_port: "{{ wa_app.wa_back_port | string }}"
+  ansible.builtin.set_fact:
+    wa_violations: >-
+      {%- set ns = namespace(v=[], seen=[]) -%}
+      {%- if _runtime_user == '' -%}{%- set ns.v = ns.v + ['compte ' ~ wa_app.wa_h_user ~ ' absent'] -%}{%- endif -%}
+      {%- if (wa_firewall_problems | default('') | trim) -%}{%- set ns.v = ns.v + ['pare-feu : ' ~ wa_firewall_problems] -%}{%- endif -%}
+      {%- for g in (wa_groups.stdout | default('')).split() | intersect(wa_app.wa_h_forbidden_groups) -%}
+        {%- set ns.v = ns.v + ['compte ' ~ wa_app.wa_h_user ~ ' dans le groupe ' ~ g] -%}
+      {%- endfor -%}
+      {%- for r in wa_path_probe.results | default([]) if (r.rc | default(1)) == 0 -%}
+        {%- set ns.v = ns.v + ['compte ' ~ wa_app.wa_h_user ~ ' : test ' ~ r.item.0 ~ ' ' ~ r.item.1 ~ ' réussit'] -%}
+      {%- endfor -%}
+      {%- for vol in _volumes -%}
+        {%- set opts = vol.Options | default({}, true) -%}
+        {%- if vol.Driver | default('local') != 'local' or 'device' in opts or 'bind' in (opts.o | default('')) -%}
+          {%- set ns.v = ns.v + ['volume ' ~ vol.Name ~ ' : pilote ou options de montage de l hôte'] -%}
+        {%- endif -%}
+        {#- Volume d'un AUTRE projet (external/name dans le compose) : sa base serait lue. -#}
+        {%- if not (vol.Name | default('')).startswith(_project ~ '-')
+               or not ((vol.Labels | default({}, true))['com.docker.compose.project'] | default('')).startswith(_project ~ '-') -%}
+          {%- set ns.v = ns.v + ['volume ' ~ vol.Name ~ ' : hors du projet ' ~ _project] -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {%- for net in _networks if not ((net.Labels | default({}, true))['com.docker.compose.project'] | default('')).startswith(_project ~ '-') -%}
+        {%- set ns.v = ns.v + ['réseau ' ~ net.Name ~ ' : hors du projet ' ~ _project] -%}
+      {%- endfor -%}
+      {%- for c in wa_containers -%}
+        {%- set name = c.Name | regex_replace('^/', '') -%}
+        {%- set svc = (c.Labels | default({}, true))['com.docker.compose.service'] | default('') -%}
+        {%- set hc = c.HostConfig | default({}, true) -%}
+        {%- set nets = (c.Networks | default({}, true)) -%}
+        {%- set ns.seen = ns.seen + [svc] -%}
+        {%- if hc.Privileged | default(false) -%}{%- set ns.v = ns.v + [name ~ ' : privileged'] -%}{%- endif -%}
+        {%- for k in ['NetworkMode', 'PidMode', 'IpcMode', 'UTSMode', 'UsernsMode', 'CgroupnsMode'] if (hc[k] | default('', true)) == 'host' -%}
+          {%- set ns.v = ns.v + [name ~ ' : ' ~ k ~ '=host'] -%}
+        {%- endfor -%}
+        {%- if (hc.NetworkMode | default('', true)) is match('^(container|service):') -%}{%- set ns.v = ns.v + [name ~ ' : réseau d un autre conteneur'] -%}{%- endif -%}
+        {%- if hc.Devices | default([], true) | length > 0 -%}{%- set ns.v = ns.v + [name ~ ' : périphériques de l hôte'] -%}{%- endif -%}
+        {%- if hc.CapAdd | default([], true) | length > 0 -%}{%- set ns.v = ns.v + [name ~ ' : capacités ajoutées ' ~ (hc.CapAdd | join(','))] -%}{%- endif -%}
+        {%- if (hc.SecurityOpt | default([], true) | select('search', 'unconfined') | list | length) > 0 -%}
+          {%- set ns.v = ns.v + [name ~ ' : seccomp/AppArmor unconfined'] -%}
+        {%- endif -%}
+        {%- if (hc.SecurityOpt | default([], true) | select('match', '^no-new-privileges(:true)?$') | list | length) == 0 -%}
+          {%- set ns.v = ns.v + [name ~ ' : sans no-new-privileges'] -%}
+        {%- endif -%}
+        {%- for m in c.Mounts | default([], true) if m.Type | default('') == 'bind' and (m.Source | default('')) not in wa_app.wa_h_allowed_binds -%}
+          {%- set ns.v = ns.v + [name ~ ' : montage de l hôte ' ~ (m.Source | default('?')) ~ ' (aucun bind autorisé hors allowed_bind_sources)'] -%}
+        {%- endfor -%}
+        {#- Ports publiés : front et back-lb EXACTEMENT leur port, sur 0.0.0.0 ; tout autre conteneur : boucle locale. -#}
+        {%- set pb = hc.PortBindings | default({}, true) -%}
+        {%- set pbns = namespace(f=[]) -%}
+        {%- for cport, binds in pb.items() -%}{%- for b in binds | default([], true) -%}
+          {%- set pbns.f = pbns.f + [cport ~ '=' ~ (b.HostIp | default('')) ~ ':' ~ (b.HostPort | default(''))] -%}
+        {%- endfor -%}{%- endfor -%}
+        {%- set flat = pbns.f -%}
+        {%- if svc == webapp_front_service -%}
+          {%- if flat != [(webapp_front_container_port | string) ~ '/tcp=0.0.0.0:' ~ _front_port] -%}
+            {%- set ns.v = ns.v + [name ~ ' : ports publiés ' ~ (flat | join(',')) ~ ' au lieu de ' ~ webapp_front_container_port ~ '/tcp=0.0.0.0:' ~ _front_port] -%}
+          {%- endif -%}
+        {%- elif svc == webapp_back_lb_service -%}
+          {%- if flat != [_back_port ~ '/tcp=0.0.0.0:' ~ _back_port] -%}
+            {%- set ns.v = ns.v + [name ~ ' : ports publiés ' ~ (flat | join(',')) ~ ' au lieu de ' ~ _back_port ~ '/tcp=0.0.0.0:' ~ _back_port] -%}
+          {%- endif -%}
+        {%- else -%}
+          {%- for f in flat if not f.split('=', 1)[1].startswith('127.0.0.1:') -%}
+            {%- set ns.v = ns.v + [name ~ ' : port publié hors boucle locale ' ~ f] -%}
+          {%- endfor -%}
+        {%- endif -%}
+        {%- for n in nets | list if not n.startswith(_project ~ '-') -%}
+          {%- set ns.v = ns.v + [name ~ ' : réseau étranger au projet ' ~ n] -%}
+        {%- endfor -%}
+        {%- if svc in wa_app.wa_h_services -%}
+          {%- if (c.User | default('')) != _runtime_user -%}{%- set ns.v = ns.v + [name ~ ' : utilisateur ' ~ (c.User | default('') or 'root') ~ ' au lieu de ' ~ _runtime_user] -%}{%- endif -%}
+          {%- if not (hc.ReadonlyRootfs | default(false)) -%}{%- set ns.v = ns.v + [name ~ ' : racine en écriture'] -%}{%- endif -%}
+          {%- if 'ALL' not in (hc.CapDrop | default([], true)) -%}{%- set ns.v = ns.v + [name ~ ' : capacités non retirées (cap_drop ALL)'] -%}{%- endif -%}
+          {%- if (hc.Memory | default(0) | int) <= 0 -%}{%- set ns.v = ns.v + [name ~ ' : sans limite mémoire'] -%}{%- endif -%}
+          {%- if (hc.NanoCpus | default(0) | int) <= 0 and (hc.CpuQuota | default(0) | int) <= 0 -%}{%- set ns.v = ns.v + [name ~ ' : sans limite CPU'] -%}{%- endif -%}
+        {%- endif -%}
+        {%- if svc in wa_app.wa_h_services + [webapp_front_service, webapp_back_lb_service] -%}
+          {%- set subnets = _networks | selectattr('Name', 'in', nets | list) | map(attribute='IPAM.Config') | flatten | map(attribute='Subnet') | list -%}
+          {%- if wa_app.wa_h_subnet not in subnets -%}{%- set ns.v = ns.v + [name ~ ' : réseau hors du sous-réseau dédié ' ~ wa_app.wa_h_subnet] -%}{%- endif -%}
+        {%- endif -%}
+        {%- set ips = nets.values() | map(attribute='IPAddress') | list -%}
+        {%- if svc == webapp_front_service and wa_app.wa_h_front_ip not in ips -%}{%- set ns.v = ns.v + [name ~ ' : adresse du front différente de ' ~ wa_app.wa_h_front_ip] -%}{%- endif -%}
+        {%- if svc == webapp_back_lb_service and wa_app.wa_h_back_lb_ip not in ips -%}{%- set ns.v = ns.v + [name ~ ' : adresse du back-lb différente de ' ~ wa_app.wa_h_back_lb_ip] -%}{%- endif -%}
+      {%- endfor -%}
+      {%- for s in wa_app.wa_h_services + [webapp_front_service, webapp_back_lb_service] if s not in ns.seen -%}
+        {%- set ns.v = ns.v + ['service ' ~ s ~ ' introuvable'] -%}
+      {%- endfor -%}
+      {%- for net in _networks -%}
+        {%- for cid, att in (net.Containers | default({}, true)).items() if not (att.Name | default('')).startswith(_project) -%}
+          {%- set ns.v = ns.v + ['réseau ' ~ net.Name ~ ' : conteneur étranger ' ~ (att.Name | default(cid))] -%}
+        {%- endfor -%}
+      {%- endfor -%}
+      {{ ns.v | join(' ; ') }}
+  no_log: true

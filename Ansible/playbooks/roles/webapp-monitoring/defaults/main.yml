@@ -1,0 +1,4 @@
+---
+# Format `docker ps` de la sonde `upstream_<id>` (`webapp_upstream_checks`) : retrouve le conteneur back du projet par
+# son étiquette compose. `!unsafe` : Ansible ne doit pas interpréter les accolades de Go.
+webapp_probe_ps_format: !unsafe '{{.ID}} {{.Label "com.docker.compose.project"}}'

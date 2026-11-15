@@ -32,6 +32,15 @@
          + [{'name': 'redis', 'kind': 'docker', 'container': wa_project ~ '_redis'}] }}
   tags: [monitoring]
 
+# Profil durci (`firewall_<port>`) et amonts (`webapp_upstream_checks`, `upstream_<id>`) : sondes supplémentaires.
+- name: Describe the extra checks of the application
+  ansible.builtin.include_tasks:
+    file: extra-checks.yml
+    apply:
+      tags: [monitoring]
+  when: webapp_hardening is defined or webapp_upstream_checks is defined
+  tags: [monitoring]
+
 # `public: true` n'est PAS un détail de style : sans lui, les defaults du rôle inclus (svcprobe_checks_dir,
 # svcprobe_listen_port) restent confinés à ses propres tâches (comportement documenté d'`include_role`).
 - name: Ensure the shared probe is installed

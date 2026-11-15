@@ -53,6 +53,13 @@
     state: absent
   become: true
 
+# Profil durci : le pare-feu (script, unité, règles posées), les règles ufw des ports et le compte dédié sont À L'APP —
+# retirés ici, sans se fier à l'inventaire courant pour les règles (proxies et ports ont pu changer).
+- name: Remove what the hardening profile installed
+  ansible.builtin.include_tasks:
+    file: hardened.yml
+  when: webapp_hardening is defined
+
 - name: Report what was left
   ansible.builtin.debug:
     msg: >-

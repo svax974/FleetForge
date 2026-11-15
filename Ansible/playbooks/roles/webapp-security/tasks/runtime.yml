@@ -1,0 +1,158 @@
+---
+# Contrôle du DURCISSEMENT RÉEL d'une application durcie (`webapp_hardening`), après son déploiement (webapp-deploy :
+# dans le bloc du déploiement ; deploy-webapp.yml : play « hardening ») — lit la machine, ne modifie rien, sauf en cas
+# d'échec : les conteneurs de l'app sont ARRÊTÉS (fermé, tasks/stop.yml) puis le play échoue.
+#
+# `docker inspect` est appelé avec un FORMAT limité (HostConfig, Mounts, Config.User, Config.Labels,
+# NetworkSettings.Networks) : jamais `Config.Env`, qui porte les secrets (mots de passe aval, DB_PASSWORD, JWT_SECRET,
+# CRYPT_*). Les tâches qui lisent ces descriptions sont `no_log` quand même.
+#
+# Prouve, sur la machine, que :
+#   • aucun conteneur du projet n'est privilégié, n'ajoute de capacité, n'est `unconfined` (seccomp/AppArmor), ne
+#     partage un espace de noms de l'hôte, n'a de périphérique de l'hôte, ne monte AUCUN chemin de l'hôte (bind) hors
+#     `allowed_bind_sources` (vide), ni un volume local déguisé en montage (`driver_opts` bind/device), et que tous
+#     portent no-new-privileges ;
+#   • les services de CODE (`services` du profil) tournent sous le compte dédié (uid:gid), racine en lecture seule,
+#     toutes capacités retirées, limites mémoire et CPU, sur le réseau du sous-réseau dédié ;
+#   • le front et le back-lb (relais de confiance de TRUST_PROXY) ont leurs adresses fixes et publient EXACTEMENT leur
+#     port sur 0.0.0.0, tout autre conteneur sur la boucle locale seulement ;
+#   • volumes et réseaux appartiennent au seul projet, sans conteneur étranger ;
+#   • le pare-feu DOCKER-USER est en place et atteint ;
+#   • le compte dédié n'est dans aucun groupe privilégié et ne peut ni lire ni traverser les chemins protégés.
+
+- name: Read the facts of the hardened application
+  ansible.builtin.set_fact:
+    wa_app: "{{ hostvars[webapp_target | default(inventory_hostname)] }}"
+
+- name: Check the names used to select the containers
+  ansible.builtin.assert:
+    that:
+      - wa_app.wa_project is match('^[a-z][a-z0-9-]{0,40}$')
+      - wa_app.wa_h_user is match('^[a-z_][a-z0-9_-]{0,30}$')
+      - wa_app.wa_h_protected_paths | reject('match', '^/[A-Za-z0-9._/-]+$') | list | length == 0
+    quiet: true
+
+- name: List the containers with their compose project
+  ansible.builtin.command:
+    argv: [docker, ps, -a, --format, '{% raw %}{{.ID}} {{.Label "com.docker.compose.project"}}{% endraw %}']
+  become: true
+  register: wa_ps
+  changed_when: false
+  check_mode: false
+
+# Projets de deploy-full.sh : `<projet>-back-<hôte>` et `<projet>-front-<hôte>`.
+- name: Keep the containers of the application
+  ansible.builtin.set_fact:
+    wa_container_ids: >-
+      {{ wa_ps.stdout_lines | select('match', '^[0-9a-f]+ ' ~ (wa_app.wa_project | regex_escape) ~ '-(back|front)-')
+         | map('split') | map('first') | list }}
+
+- name: Inspect the containers (selected fields, never the environment)
+  ansible.builtin.command:
+    argv: "{{ ['docker', 'inspect', '--format', webapp_inspect_format] + wa_container_ids }}"
+  become: true
+  register: wa_inspect
+  changed_when: false
+  check_mode: false
+  no_log: true
+  when: wa_container_ids | length > 0
+
+- name: Parse the container descriptions
+  ansible.builtin.set_fact:
+    wa_containers: "{{ (wa_inspect.stdout_lines | default([])) | map('from_json') | list }}"
+  no_log: true
+
+- name: Inspect the networks of the containers
+  ansible.builtin.command:
+    argv: >-
+      {{ ['docker', 'network', 'inspect', '--format', webapp_network_format]
+         + (wa_containers | map(attribute='Networks') | map('list') | flatten | unique | list) }}
+  become: true
+  register: wa_net_inspect
+  changed_when: false
+  check_mode: false
+  no_log: true
+  when: wa_containers | length > 0
+
+- name: Inspect the named volumes of the containers
+  ansible.builtin.command:
+    argv: "{{ ['docker', 'volume', 'inspect', '--format', webapp_volume_format] + _volumes }}"
+  vars:
+    _volumes: >-
+      {{ wa_containers | map(attribute='Mounts') | flatten
+         | selectattr('Type', 'equalto', 'volume') | map(attribute='Name') | unique | list }}
+  become: true
+  register: wa_vol_inspect
+  changed_when: false
+  check_mode: false
+  no_log: true
+  when: _volumes | length > 0
+
+# L'ordre et la présence des DROP (même contrôle qu'avant le déploiement) : un pare-feu perdu depuis (unité en échec)
+# se voit ici.
+- name: Verify the firewall is in place and reached
+  ansible.builtin.include_tasks:
+    file: firewall-check.yml
+    apply:
+      tags: [always]
+  tags: [always]
+
+- name: Read the dedicated account
+  ansible.builtin.command:
+    argv: [getent, passwd, "{{ wa_app.wa_h_user }}"]
+  register: wa_passwd
+  changed_when: false
+  check_mode: false
+  failed_when: false
+
+- name: Read the groups of the dedicated account
+  ansible.builtin.command:
+    argv: [id, -nG, "{{ wa_app.wa_h_user }}"]
+  register: wa_groups
+  changed_when: false
+  check_mode: false
+  failed_when: false
+
+# rc 0 = le compte LIT (-r) ou TRAVERSE (-x) le chemin : interdit.
+- name: Probe the protected paths as the dedicated account
+  ansible.builtin.command:
+    argv: [runuser, -u, "{{ wa_app.wa_h_user }}", --, test, "{{ item.0 }}", "{{ item.1 }}"]
+  loop: "{{ ['-r', '-x'] | product(wa_app.wa_h_protected_paths) | list }}"
+  loop_control:
+    label: "{{ item.0 }} {{ item.1 }}"
+  become: true
+  register: wa_path_probe
+  changed_when: false
+  check_mode: false
+  failed_when: false
+  when: wa_passwd.rc == 0
+
+# `apply: always` : un include dynamique ne transmet pas les tags de son appelant à ses tâches (CLAUDE.md, pièges) ;
+# ce fichier n'est chargé que si son appelant a été retenu.
+- name: Work out the hardening violations
+  ansible.builtin.include_tasks:
+    file: violations.yml
+    apply:
+      tags: [always]
+  tags: [always]
+
+- name: Stop the containers when the hardening is not met
+  ansible.builtin.include_tasks:
+    file: stop.yml
+    apply:
+      tags: [always]
+  tags: [always]
+  when: wa_violations | trim | length > 0
+
+- name: Fail when the hardening is not met
+  ansible.builtin.assert:
+    that: wa_violations | trim | length == 0
+    fail_msg: >-
+      Durcissement de {{ wa_app.wa_project }} NON conforme (conteneurs arrêtés) : {{ wa_violations }}. Le compose
+      ({{ wa_app.wa_h_compose_file }}) doit porter, pour {{ wa_app.wa_h_services | join(', ') }} :
+      user "${HARDEN_RUNTIME_UID}:${HARDEN_RUNTIME_GID}", read_only (+ tmpfs), cap_drop [ALL], mem_limit et cpus ; pour
+      tous : no-new-privileges, aucun cap_add, aucun montage de l'hôte ni volume à driver_opts, ni socket Docker ni
+      vmagent ; front et back-lb sur le réseau ${HARDEN_SUBNET} aux adresses ${HARDEN_FRONT_IP} / ${HARDEN_BACK_LB_IP},
+      publiant EXACTEMENT 0.0.0.0:{{ wa_app.wa_front_port }} / 0.0.0.0:{{ wa_app.wa_back_port }}, tout autre port en
+      127.0.0.1 ; volumes et réseaux du seul projet ; pare-feu DOCKER-USER en place (docs/etude-passerelle-sur-webapp.md § 8).
+    success_msg: "Durcissement conforme : {{ wa_containers | length }} conteneur(s), compte {{ wa_app.wa_h_user }} isolé."

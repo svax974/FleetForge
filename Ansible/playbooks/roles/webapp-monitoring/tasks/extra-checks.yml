@@ -1,0 +1,45 @@
+---
+# Sondes supplémentaires, ajoutées à `wa_checks` (main.yml) — fichier séparé pour être éprouvé hors ligne
+# (scripts/test_webapp_hardening_check.py). Aucune commande.
+#
+# Profil durci : `firewall_<port>` — la règle DROP de chaque port publié est dans DOCKER-USER ET atteinte (aucune
+# règle inconditionnelle RETURN/ACCEPT avant la première règle de l'app). Docker recrée la chaîne vide à chaque
+# démarrage, l'unité de l'app la repose : 0 = ports publiés ouverts → ServiceCheckFailing.
+# `webapp_upstream_checks` : `upstream_<id>`, l'URL d'un amont lue DEPUIS le conteneur back (chemin réel app → amont).
+# À 0 alors que service_up vaut 1 : l'app répond mais ne joint plus son amont (amont tombé, vhost qui la refuse, DNS).
+
+# Les valeurs entrent dans une commande de sonde : grammaire tenue AVANT de la composer.
+- name: Check the values written into the probe commands
+  ansible.builtin.assert:
+    that:
+      - wa_project is match('^[a-z][a-z0-9-]{0,40}$')
+      - webapp_hardening is not defined or wa_h_tag is match('^webapp-[a-z][a-z0-9-]{0,40}$')
+      - webapp_upstream_checks | default([]) | map(attribute='id') | reject('match', '^[a-z][a-z0-9_]{0,31}$') | list | length == 0
+      - webapp_upstream_checks | default([]) | map(attribute='url') | reject('match', '^https://[a-z0-9][a-z0-9.-]{0,252}(/[A-Za-z0-9._/-]*)?$') | list | length == 0
+    fail_msg: "Nom de projet, id ou URL (https://<nom>/<chemin>) d'un amont hors grammaire : ils entrent dans la commande de la sonde."
+    quiet: true
+
+- name: Describe the extra checks of the application
+  vars:
+    _awk: >-
+      /^-A DOCKER-USER/ { if (!seen && $0 ~ /^-A DOCKER-USER -j (RETURN|ACCEPT) *$/) bad = 1; if (index($0, t ":")) seen = 1;
+      if (index($0, t ":" p ":deny") && $0 ~ /-j DROP/) ok = 1 } END { exit !(ok && !bad) }
+    _fmt: "{{ webapp_probe_ps_format }}"
+    _firewall: >-
+      {%- set out = [] -%}
+      {%- if webapp_hardening is defined -%}
+      {%- for port in [wa_front_port | int, wa_back_port | int] -%}
+      {%- set _ = out.append({'name': 'firewall_' ~ port, 'kind': 'command', 'timeout': 10,
+            'argv': ['/bin/sh', '-c', "iptables -w -S DOCKER-USER | awk -v t=" ~ wa_h_tag ~ " -v p=" ~ port ~ " '" ~ _awk ~ "'"]}) -%}
+      {%- endfor -%}
+      {%- endif -%}
+      {{ out }}
+    _upstreams: >-
+      {%- set out = [] -%}
+      {%- for u in webapp_upstream_checks | default([]) -%}
+      {%- set _ = out.append({'name': 'upstream_' ~ u.id, 'kind': 'command', 'timeout': 20,
+            'argv': ['/bin/sh', '-c', "c=$(docker ps --filter label=com.docker.compose.service=back --format '" ~ _fmt ~ "' | awk '$2 ~ /^" ~ wa_project ~ "-back-/ {print $1}' | head -n 1); [ -n \"$c\" ] && exec docker exec \"$c\" wget -q -O /dev/null -T 10 " ~ u.url]}) -%}
+      {%- endfor -%}
+      {{ out }}
+  ansible.builtin.set_fact:
+    wa_checks: "{{ wa_checks + _firewall + _upstreams }}"

@@ -10,71 +10,84 @@
 #   non exposé (base, cache) : vpns + Prometheus + whitelist + serveurs liés.
 # `published_remap: true` partout où le port du conteneur diffère du port publié (le front écoute sur 80).
 #
+# Profil DURCI (`webapp_hardening` sur l'entrée) : rien de ce qui précède — le pare-feu est celui de l'APP
+# (tasks/firewall.yml : son script, son unité, proxies admis distants seulement, règles en tête de chaîne).
+#
 # `webapp_target` : l'entrée de l'application (variable passée par le playbook), dont on lit les faits `wa_*`.
 
 - name: Read the facts of the application
   ansible.builtin.set_fact:
     wa_app: "{{ hostvars[webapp_target] }}"
 
-- name: Derive the Docker port rules of the application
-  vars:
-    src_proxies: "{{ groups['proxies'] | default([]) | map('extract', hostvars, 'ansible_host') | list }}"
-    src_prometheus: "{{ [hostvars[prometheus_host].ansible_host] if (prometheus_host is defined and prometheus_host in hostvars) else [] }}"
-    src_linked: "{{ (wa_app.access_linked | default([])) | map('extract', hostvars, 'ansible_host') | list }}"
-    # Hôtes qui tirent ou appellent l'app : amonts qu'elle consomme n'ont rien à faire ici (sens inverse, voir plus bas).
-    wa_declared: "{{ docker_ports_rules | default([]) | map(attribute='port') | map('int') | list }}"
-    wa_all: >-
-      {{ [
-           {'port': wa_app.wa_front_port | int, 'comment': wa_app.wa_project ~ ' — front', 'allow_internal': true,
-            'allow_whitelist': true, 'allow_vpns': true, 'published_remap': true,
-            'sources': (src_proxies + src_prometheus + src_linked) | unique | list},
-           {'port': wa_app.wa_back_port | int, 'comment': wa_app.wa_project ~ ' — back-lb', 'allow_internal': true,
-            'allow_whitelist': true, 'allow_vpns': true,
-            'sources': (src_proxies + src_prometheus + src_linked) | unique | list}
-         ] + ([
-           {'port': wa_app.wa_db_port | int, 'comment': wa_app.wa_project ~ ' — postgres (non exposé)', 'allow_internal': true,
-            'allow_whitelist': true, 'allow_vpns': true, 'published_remap': true,
-            'sources': (src_prometheus + src_linked) | unique | list}
-         ] if wa_app.wa_db_selfhosted | bool else []) + [
-           {'port': wa_app.wa_redis_port | int, 'comment': wa_app.wa_project ~ ' — redis (non exposé)', 'allow_internal': true,
-            'allow_whitelist': true, 'allow_vpns': true, 'published_remap': true,
-            'sources': (src_prometheus + src_linked) | unique | list}
-         ] }}
-  ansible.builtin.set_fact:
-    wa_derived_rules: "{{ wa_all | rejectattr('port', 'in', wa_declared) | list }}"
+- name: Apply the firewall of the hardened application
+  ansible.builtin.include_tasks:
+    file: firewall.yml
+    apply:
+      tags: [always]
+  when: wa_app.webapp_hardening is defined
 
-# Un fait intermédiaire : `docker_ports_rules: "{{ docker_ports_rules + … }}"` en `vars:` se référencerait lui-même.
-- name: Merge the derived rules with the ones of host_vars
-  ansible.builtin.set_fact:
-    wa_machine_rules: "{{ (docker_ports_rules | default([])) + wa_derived_rules }}"
+- name: Filter the application ports through the machine rules
+  when: wa_app.webapp_hardening is not defined
+  block:
+    - name: Derive the Docker port rules of the application
+      vars:
+        src_proxies: "{{ groups['proxies'] | default([]) | map('extract', hostvars, 'ansible_host') | list }}"
+        src_prometheus: "{{ [hostvars[prometheus_host].ansible_host] if (prometheus_host is defined and prometheus_host in hostvars) else [] }}"
+        src_linked: "{{ (wa_app.access_linked | default([])) | map('extract', hostvars, 'ansible_host') | list }}"
+        # Hôtes qui tirent ou appellent l'app : amonts qu'elle consomme n'ont rien à faire ici (sens inverse, voir plus bas).
+        wa_declared: "{{ docker_ports_rules | default([]) | map(attribute='port') | map('int') | list }}"
+        wa_all: >-
+          {{ [
+               {'port': wa_app.wa_front_port | int, 'comment': wa_app.wa_project ~ ' — front', 'allow_internal': true,
+                'allow_whitelist': true, 'allow_vpns': true, 'published_remap': true,
+                'sources': (src_proxies + src_prometheus + src_linked) | unique | list},
+               {'port': wa_app.wa_back_port | int, 'comment': wa_app.wa_project ~ ' — back-lb', 'allow_internal': true,
+                'allow_whitelist': true, 'allow_vpns': true,
+                'sources': (src_proxies + src_prometheus + src_linked) | unique | list}
+             ] + ([
+               {'port': wa_app.wa_db_port | int, 'comment': wa_app.wa_project ~ ' — postgres (non exposé)', 'allow_internal': true,
+                'allow_whitelist': true, 'allow_vpns': true, 'published_remap': true,
+                'sources': (src_prometheus + src_linked) | unique | list}
+             ] if wa_app.wa_db_selfhosted | bool else []) + [
+               {'port': wa_app.wa_redis_port | int, 'comment': wa_app.wa_project ~ ' — redis (non exposé)', 'allow_internal': true,
+                'allow_whitelist': true, 'allow_vpns': true, 'published_remap': true,
+                'sources': (src_prometheus + src_linked) | unique | list}
+             ] }}
+      ansible.builtin.set_fact:
+        wa_derived_rules: "{{ wa_all | rejectattr('port', 'in', wa_declared) | list }}"
 
-- name: Apply the machine's Docker port rules (host_vars + the ones derived from the application)
-  ansible.builtin.include_role:
-    name: docker-ports-security
-  vars:
-    docker_ports_rules: "{{ wa_machine_rules }}"
+    # Un fait intermédiaire : `docker_ports_rules: "{{ docker_ports_rules + … }}"` en `vars:` se référencerait lui-même.
+    - name: Merge the derived rules with the ones of host_vars
+      ansible.builtin.set_fact:
+        wa_machine_rules: "{{ (docker_ports_rules | default([])) + wa_derived_rules }}"
 
-# Contrôle de l'état RÉEL de la chaîne, pas des variables : un port publié sans DROP est joignable depuis Internet
-# alors que `ufw status` affiche des DENY rassurants.
-- name: Read back the DOCKER-USER chain
-  ansible.builtin.command: iptables -S DOCKER-USER
-  become: true
-  register: wa_chain
-  changed_when: false
-  check_mode: false
+    - name: Apply the machine's Docker port rules (host_vars + the ones derived from the application)
+      ansible.builtin.include_role:
+        name: docker-ports-security
+      vars:
+        docker_ports_rules: "{{ wa_machine_rules }}"
 
-- name: Verify the published ports are really dropped by default
-  ansible.builtin.assert:
-    that:
-      - wa_chain.stdout is search('--(dport|ctorigdstport) ' ~ item ~ '.*-j DROP')
-    fail_msg: >-
-      Le port {{ item }} ({{ wa_app.wa_project }}) est publié sur 0.0.0.0 mais aucun DROP ne le protège dans
-      DOCKER-USER : joignable depuis Internet. Vérifier `systemctl status docker-ports-firewall` et
-      `iptables -S DOCKER-USER` sur {{ inventory_hostname }}.
-    success_msg: "Port {{ item }} filtré dans DOCKER-USER."
-  loop: "{{ wa_machine_rules | map(attribute='port') | map('int') | unique
-            | select('in', [wa_app.wa_front_port | int, wa_app.wa_back_port | int, wa_app.wa_db_port | int, wa_app.wa_redis_port | int]) | list }}"
-  when: not ansible_check_mode
+    # Contrôle de l'état RÉEL de la chaîne, pas des variables : un port publié sans DROP est joignable depuis Internet
+    # alors que `ufw status` affiche des DENY rassurants.
+    - name: Read back the DOCKER-USER chain
+      ansible.builtin.command: iptables -S DOCKER-USER
+      become: true
+      register: wa_chain
+      changed_when: false
+      check_mode: false
+
+    - name: Verify the published ports are really dropped by default
+      ansible.builtin.assert:
+        that:
+          - wa_chain.stdout is search('--(dport|ctorigdstport) ' ~ item ~ '.*-j DROP')
+        fail_msg: >-
+          Le port {{ item }} ({{ wa_app.wa_project }}) est publié sur 0.0.0.0 mais aucun DROP ne le protège dans
+          DOCKER-USER : joignable depuis Internet. Vérifier `systemctl status docker-ports-firewall` et
+          `iptables -S DOCKER-USER` sur {{ inventory_hostname }}.
+        success_msg: "Port {{ item }} filtré dans DOCKER-USER."
+      loop: "{{ wa_machine_rules | map(attribute='port') | map('int') | unique
+                | select('in', [wa_app.wa_front_port | int, wa_app.wa_back_port | int, wa_app.wa_db_port | int, wa_app.wa_redis_port | int]) | list }}"
+      when: not ansible_check_mode
 
 # Amonts consommés (`webapp_upstreams`) : l'app est cliente d'autres services, qui doivent l'admettre. Sans cela le back
 # démarre et échoue à chaque appel (ufw côté service jette ses paquets, l'appel expire, le proxy renvoie un 504 sans

@@ -127,6 +127,48 @@
     quiet: true
   tags: [always]
 
+# Locations à liste NOMMÉE (`access`) : rendues par proxy-update/_named_access.inc. Une forme invalide ne doit
+# jamais devenir un vhost plus ouvert que voulu : refusée ici, avant toute connexion aux proxies.
+- name: Check the named access lists of the vhost locations
+  vars:
+    _named: "{{ webapp_vhost_locations | default([]) | selectattr('access', 'defined') | list }}"
+    _hosts: "{{ _named | map(attribute='access') | map(attribute='hosts', default=[]) | flatten | list }}"
+    _vpn_hosts: >-
+      {%- set ns = namespace(bad=[]) -%}
+      {%- for l in _named if l.access is mapping and not (l.access.vpn_addresses | default(false) | bool) -%}
+      {%- for h in l.access.hosts | default([]) if h in hostvars and (hostvars[h].ansible_host | default('')) in webapp_vpn_addresses -%}
+      {%- set ns.bad = ns.bad + [h] -%}
+      {%- endfor -%}
+      {%- endfor -%}
+      {{ ns.bad | join(',') }}
+  ansible.builtin.assert:
+    that:
+      - _named | map(attribute='access') | reject('mapping') | list | length == 0
+      - _named | map(attribute='access') | map(attribute='hosts', default=[]) | select('string') | list | length == 0
+      - _hosts | difference(groups['all']) | length == 0
+      - _named | map(attribute='access') | map(attribute='whitelist', default=false) | map('string') | map('lower') | reject('in', ['true', 'false']) | list | length == 0
+      - _named | map(attribute='access') | map(attribute='vpn_addresses', default=false) | map('string') | map('lower') | reject('in', ['true', 'false']) | list | length == 0
+      - _named | map(attribute='access') | map(attribute='v6_min_prefix', default=128) | map('int') | select('lt', 64) | list | length == 0
+      - _named | map(attribute='access') | map(attribute='v6_min_prefix', default=128) | map('int') | select('gt', 128) | list | length == 0
+      - webapp_vhost_locations | default([]) | map(attribute='upstream', default='front') | reject('in', ['front', 'back']) | list | length == 0
+      # Un serveur nommé à l'adresse d'un VPN ouvrirait le chemin à tout ce qui sort par ce VPN.
+      - _vpn_hosts | trim | length == 0
+    fail_msg: >-
+      {{ inventory_hostname }} : `webapp_vhost_locations[].access` = { hosts: [entrées de l'inventaire], whitelist: bool,
+      vpn_addresses: bool, v6_min_prefix: 64…128 } ; `upstream` : front | back ; aucun serveur nommé à l'adresse d'un VPN
+      sans `vpn_addresses: true`.
+    quiet: true
+  when: (webapp_vhost_locations | default([]) | selectattr('access', 'defined') | list | length) > 0
+  tags: [always]
+
+- name: Work out the hardening profile
+  ansible.builtin.include_tasks:
+    file: hardening.yml
+    apply:
+      tags: [always]
+  when: webapp_hardening is defined
+  tags: [always]
+
 - name: Report the facts of the application
   ansible.builtin.debug:
     msg: >-
