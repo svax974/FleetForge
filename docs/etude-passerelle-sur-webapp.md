@@ -208,7 +208,9 @@ Ce que `webapp_hardening_check.py compose` exige ; tout écart = déploiement re
   ```
   `${HARDEN_BACK_LB_REALIP}` (posé par Ansible) = `set_real_ip_from <relais>;` des seuls relais de confiance ; jamais
   `$proxy_add_x_forwarded_for` ; CHAQUE `location` qui relaie réécrit `X-Forwarded-For $remote_addr`.
-- **`db`** : `ports: ["127.0.0.1:${DB_PORT}:5432"]` (littéral), `env_file: [../back/.env]`, réseau `app`.
+- **`db`** : `ports: ["127.0.0.1:${DB_PORT}:5432"]` (littéral), réseau `app`, et SANS `env_file` : Postgres ne reçoit
+  que `POSTGRES_USER`/`POSTGRES_DB`/`POSTGRES_PASSWORD` (`environment:`), jamais les secrets de l'app ni les mots de
+  passe aval que porte back/.env (correction du 15/11/2026, conforme au compose du gabarit).
 - **`redis`** : `ports: ["127.0.0.1:${REDIS_PORT}:6379"]` (littéral), réseau `app`, AUTHENTIFIÉ sans mot de passe en
   argument (ni `--requirepass`, ni `redis-cli -a`, visibles par `ps`) : le mot de passe vient de l'environnement
   (`environment: {REDIS_PASSWORD: "${REDIS_PASSWORD:?}"}`) et entre dans un fichier de configuration, en gardant l'abandon de
@@ -238,6 +240,56 @@ Conforme à l'étude, avec ces précisions :
   de `social-manager` et `llm-proxy` sur les trois proxies, faits `wa_*` identiques) ; `--list-tasks` n'ajoute que des
   inclusions ou des `end_play` conditionnés par `webapp_hardening`, `webapp_upstream_checks` ou `webapp_optional`.
 
+## Troisième revue (15/11/2026) : ce qui a changé
+
+- **Compose : liste BLANCHE de clés** (racine, services, `build`, `deploy`, `healthcheck`, `depends_on`, rattachement
+  réseau, formes longues de ports, volumes et `env_file`, réseaux et volumes de premier niveau), appliquée au YAML brut
+  (ancres et `<<` résolues) ET à la sortie de `docker compose config`. Le compose du gabarit passe ; `post_start`/
+  `pre_stop`, `use_api_socket`, `provider`, `build.ssh`/`additional_contexts`/`network`, `gpus`, `ulimits`,
+  `extra_hosts`, `dns`, `labels`, `profiles`… sont refusés.
+- **Secrets** : toute boucle sur une valeur secrète est `no_log` (contrôle statique dans `webapp_hardening_check.py
+  playbook`).
+- **Gardes** : comptes `ffg_*` validés par `fleetforge-install` avant `api-accounts.json`, quel que soit le scope ;
+  `deploy-webapp.yml` joue lui-même la garde de la passerelle ; `deploy-fleetforge.yml` refuse un `-e webapp` étranger.
+- **back/.env** : grammaire stricte, aucune clé en double ; **compte dédié** marqué (GECOS), jamais réservé ni existant
+  d'une autre origine, supprimé seulement s'il porte le marqueur ; **`webapp_update_common: false`** exigé.
+- **Compose contrôlé dans le play de garde**, avant toute connexion ; **vhost** contrôlé (`webapp_hardening_check.py
+  vhost`) avant d'être posé ; grammaire des valeurs de `webapp_vhost_locations` ; **URI brute** de `/mcp` contrôlée
+  (`raw_uri` : `/x/../mcp` → 400).
+- **ufw** : le profil ne SUPPRIME plus aucune règle ufw ; une règle sur ses ports (posée ailleurs) est SIGNALÉE et
+  bloque le déploiement (conforme à « une ouverture qui n'est pas la sienne est signalée, pas supprimée »).
+- **docker-ports-security** ne purge plus que ses propres règles ; la garde refuse un port déjà dans `docker_ports_rules`.
+
+### Sortie réseau du sous-réseau dédié (raisonné, non éprouvé sur une machine)
+
+Un paquet d'un conteneur traverse **FORWARD** (donc `DOCKER-USER`) quand sa destination est une AUTRE machine, et
+**INPUT** quand sa destination est une adresse de L'HÔTE (passerelle du pont `.1`, adresse publique) — c'est le cas de
+la passerelle, qui joint FleetForge par `https://infra.<domaine>` (CNAME vers le front privé : proxy1, sur la MÊME
+machine, et proxy3) et le relais SMTP `mail1` (même machine). Le pare-feu du profil pose donc, en tête :
+- `DOCKER-USER` : réponses (ESTABLISHED/RELATED), trafic interne au sous-réseau, destinations de `egress_allow` qui
+  ne sont pas cette machine, DNS des résolveurs de la machine, puis `-s <sous-réseau> -j DROP` (Internet, métadonnées
+  169.254.169.254…) ;
+- `INPUT` : réponses, destinations de `egress_allow` qui sont cette machine (443 pour proxy1, 587 pour mail1), puis
+  `-s <sous-réseau> -j DROP` (sshd, exporters, tout le reste de l'hôte). L'ACCEPT précède ufw : le relais n'admet en
+  ufw que `172.17.0.0/16` (Alertmanager), pas le sous-réseau dédié.
+`egress_allow` de la passerelle : `upstream` (proxies admis, 443) et `smtp` (`mail1`, 587 = port de soumission
+utilisé par les autres clients du parc : Alertmanager, Roundcube). DNS : les résolveurs non locaux de la machine,
+lus sur place (le résolveur embarqué de Docker les interroge depuis l'espace réseau du conteneur ; un résolveur de
+boucle locale passe par l'hôte). Supervision : aucune sortie (svcprobe est scruté en ENTRÉE ; pas de vmagent, pas de
+`webapp_metrics_push`) ; sonde `firewall_egress`.
+
+### Migration de la base (bascule vers le compose durci)
+
+Refusée sans `-e webapp_hardening_db_migrated=true` dès qu'une base vierge démarrerait (ancien volume, autre volume du
+projet, conteneur sur un autre volume, déploiement antérieur avec volume absent ou vide). Procédure :
+1. dump de la base en place (`docker exec <projet>_postgres pg_dump -Fc -U <DB_USER> <DB_NAME> > dump`), ou le dump que
+   `deploy-full.sh` prend avant bascule ;
+2. déploiement durci avec `-e webapp_hardening_db_migrated=true` ;
+3. app en maintenance, `pg_restore` dans le nouveau conteneur (volume `<projet>-back-<hôte>_postgres_data`) ;
+4. comptage des lignes des tables clés (avant/après) identique, puis ouverture.
+Automatiser (`--tags db-migrate` : dump, restauration, comparaison des comptages, échec fermé) : estimé **M** (une
+journée, revue comprise), non implémenté.
+
 ## 9. Choix à valider par le propriétaire
 
 1. Allow-list par chemin portée par `webapp_vhost_locations[].access` (plutôt qu'un `webapp_path_access` séparé).
@@ -250,3 +302,16 @@ Conforme à l'étude, avec ces précisions :
 6. Alertes : `deploy-webapp.yml` vérifie que le groupe `services` est chargé mais ne recharge pas les règles (l'ancien play
    « Règles d'alerte de la passerelle » disparaît) — inchangé pour les autres apps.
 7. Nom du compose : `scripts/docker-compose-hardened.yml` (fourni par le gabarit, § 8).
+8. **SMTP** : la passerelle envoie par `mail1` en 587, où postfix exige l'authentification SASL (`mynetworks` =
+   boucle locale seulement) : créer un compte SASL pour la passerelle sur le relais et le saisir dans l'admin de l'app
+   (`common_email_provider: smtp`, hôte `mail.<domaine>`, port 587). Un fournisseur externe (Brevo, Mailjet) serait
+   BLOQUÉ par le pare-feu de sortie (adresses variables) : à décider s'il devait l'être.
+9. **Destinations NON ouvertes** (à ouvrir seulement sur décision) : Prowl (`PROWL_API_URL`, notifications, optionnel),
+   Telegram / Web Push (module `interaction`, prévu pour l'approbation des runs réels au lot 6.4 : entrée à ajouter à
+   `egress_allow` le moment venu), authentification Google / wallet (non activées : `authMethods` = e-mail seulement).
+10. **Processus local** : une règle `OUTPUT -m owner` réservant `NODE_PORT`/`VITE_PORT` locaux à nginx (proxy1) et root
+   fermerait le cas d'un processus de la machine qui se présente depuis le pont (relais de confiance) et forge
+   `X-Forwarded-For` — non posée (impact sur svcprobe, utilisateur de nginx à vérifier) ; à décider.
+11. **Premier déploiement interrompu** : si `run.sh` échoue après avoir créé le répertoire de l'app mais avant le volume,
+   le rejeu est refusé (déploiement antérieur sans base) jusqu'à `-e webapp_hardening_db_migrated=true` : friction
+   assumée plutôt qu'une base vierge silencieuse.

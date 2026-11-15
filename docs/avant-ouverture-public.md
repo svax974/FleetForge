@@ -75,6 +75,18 @@ par `deploy-fleetforge.yml` (garde du groupe `fleetforge_gateways` puis import d
 - **Alertes** : `deploy-webapp.yml` exige le groupe `services` dans `prom_alert_groups` mais ne recharge
   plus les règles (l'ancien play « Règles d'alerte de la passerelle » a disparu) ; `services` est déjà
   chargé sur web3c. `X-Robots-Tag noindex` de l'ancien vhost : abandonné.
+- **Troisième revue (15/11/2026) traitée** (liste blanche de clés du compose, secrets `no_log`, gardes non
+  contournables, grammaire du back/.env, compte marqué, pare-feu sans fenêtre, sortie réseau bornée, base jamais
+  vierge, URI brute de `/mcp`, ufw signalé et non supprimé) — détail : `docs/etude-passerelle-sur-webapp.md`,
+  « Troisième revue ». La REVUE de cette forme reste à faire avant tout déploiement réel.
+- **Sortie réseau du sous-réseau dédié** (FORWARD et INPUT) : RAISONNÉE, jamais éprouvée sur une machine — à observer
+  au premier déploiement : sondes `upstream_main` (chemin vers FleetForge), envoi d'un code de connexion par e-mail
+  (relais `mail1`, 587), `firewall_egress`. Résolution DNS depuis le conteneur : dépend du résolveur de la machine
+  (lu sur place) — un échec de `upstream_main` avec « bad address » la désignerait.
+- **Compte SASL de la passerelle sur `mail1`** (postfix n'admet que la boucle locale sans authentification) : à créer,
+  puis à saisir dans l'admin de l'app (`common_email_*`). Sans lui, aucun code de connexion ne part.
+- **Destinations de sortie non ouvertes** (décisions) : Prowl, Telegram/Web Push (approbations, lot 6.4), Google/wallet.
+- **`OUTPUT -m owner`** pour réserver les ports locaux de la passerelle à nginx et root : non posé, à décider.
 - **Permissions de `/home/srvc/fleetforge` et `~/.ssh`** : le compte `ffgateway` ne doit ni les lire ni
   les traverser. Non vérifié sur la machine ; le premier `--tags hardening` le dira (échec = chmod à faire).
 - **Sauvegarde de la base de la passerelle** : données `pgbak_*` posées, NON activée (décision du

@@ -76,8 +76,13 @@ du parc**, et les clés de chiffrement à sauvegarder hors du serveur. Restent m
     (`scripts/docker-compose-hardened.yml` du gabarit, § 8 de l'étude) contrôlé par `scripts/webapp_hardening_check.py`
     AVANT `run.sh`, durcissement RÉEL vérifié après (`--tags hardening` pour le recontrôle seul), conteneurs ARRÊTÉS au
     moindre écart, vhost qui réécrit X-Forwarded-For, sondes `firewall_<port>` ;
+    Sortie du sous-réseau bornée : `webapp_hardening.egress_allow: [{name, proxies: true | inventory_host | host, port,
+    proto}]` (vide = rien, hors réponses, trafic interne et DNS de la machine), FORWARD pour une autre machine, INPUT
+    pour celle-ci ; aucune règle ufw supprimée (une règle d'une autre origine sur ses ports bloque le déploiement) ;
+    base jamais vierge (`-e webapp_hardening_db_migrated=true` après migration) ;
   - `webapp_vhost_locations[].access: { hosts, whitelist?, vpn_addresses?, v6_min_prefix? }` (+ `upstream: back`,
-    `priority: true`) — liste NOMMÉE par chemin (`proxy-update/templates/_named_access.inc`) ;
+    `priority: true`, `raw_uri` : URI brute exigée) — liste NOMMÉE par chemin (`proxy-update/templates/_named_access.inc`),
+    contrôlée par `webapp_hardening_check.py vhost` avant chaque pose ; valeurs des locations sous grammaire ;
   - `webapp_env_from_vault: { CLÉ: variable du coffre }`, `webapp_env_required: [CLÉS]`, `webapp_upstream_checks: [{ id, url }]`.
 - `deploy-webapp.yml` s'importe dans un autre playbook avec `webapp_optional: true` (sans `webapp` : rien n'est visé,
   aucune connexion) — c'est ainsi que `deploy-fleetforge.yml` déploie sa passerelle.
