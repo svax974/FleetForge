@@ -9,8 +9,10 @@
 # famille, avant que les rôles posent ces faits sur les hôtes : la sonde ne reste que sur `localhost`.
 #
 # Noms LITTÉRAUX, sans boucle (une variable de liste se surchargerait elle-même par `-e` ; une boucle sur des noms de
-# faits secrets serait signalée par le contrôle des boucles) : tous les `set_fact`/`register` des rôles webapp-*, les
-# `vars` de leurs inclusions et gateway-guard.yml, plus `webapp_target`. Une assertion par nom : celle qui échoue NOMME
+# faits secrets serait signalée par le contrôle des boucles) : tous les `set_fact`/`register` des rôles webapp-*, de
+# gateway-guard.yml et api-accounts-gateway.yml, TOUTES leurs `vars:` de tâche, d'inclusion et de bloc (variables de
+# travail des contrôles : `-e _families=[]` effaçait le contrôle DOCKER-USER), plus `webapp_target`. Renommer ces
+# variables ne protégerait de rien : `-e` accepte n'importe quel nom ; seule la sonde DÉTECTE l'extra-var. Une assertion par nom : celle qui échoue NOMME
 # le fait. scripts/test_webapp_hardening_check.py vérifie que les deux listes sont identiques et couvrent tous ces
 # faits, et qu'un `-e` de l'un d'eux fait échouer deploy-webapp, remove-webapp et purge-webapp.
 - name: Probe the internal facts of the webapp roles
@@ -166,6 +168,105 @@
     webapp_env_values: __wa_internal_probe__
     webapp_env_vite_api_url: __wa_internal_probe__
     webapp_target: __wa_internal_probe__
+    # `vars:` de niveau tâche, inclusion ou bloc (variables de travail des contrôles : `_families`, `_reasons`…).
+    _accounts: __wa_internal_probe__
+    _awk: __wa_internal_probe__
+    _back_port: __wa_internal_probe__
+    _bad: __wa_internal_probe__
+    _bridge_gateway: __wa_internal_probe__
+    _check: __wa_internal_probe__
+    _clash: __wa_internal_probe__
+    _denied_allowed: __wa_internal_probe__
+    _denies: __wa_internal_probe__
+    _drawn: __wa_internal_probe__
+    _e: __wa_internal_probe__
+    _egress: __wa_internal_probe__
+    _eligible_addresses: __wa_internal_probe__
+    _ev: __wa_internal_probe__
+    _expected: __wa_internal_probe__
+    _expected_present: __wa_internal_probe__
+    _f: __wa_internal_probe__
+    _families: __wa_internal_probe__
+    _fields: __wa_internal_probe__
+    _firewall: __wa_internal_probe__
+    _fmt: __wa_internal_probe__
+    _front_port: __wa_internal_probe__
+    _h: __wa_internal_probe__
+    _host_octet: __wa_internal_probe__
+    _hosts: __wa_internal_probe__
+    _ids: __wa_internal_probe__
+    _locations: __wa_internal_probe__
+    _named: __wa_internal_probe__
+    _named_mcp: __wa_internal_probe__
+    _neighbours: __wa_internal_probe__
+    _networks: __wa_internal_probe__
+    _old: __wa_internal_probe__
+    _others: __wa_internal_probe__
+    _ours: __wa_internal_probe__
+    _parc: __wa_internal_probe__
+    _ports: __wa_internal_probe__
+    _prefix: __wa_internal_probe__
+    _project: __wa_internal_probe__
+    _read: __wa_internal_probe__
+    _reasons: __wa_internal_probe__
+    _rule_clash: __wa_internal_probe__
+    _rule_ports: __wa_internal_probe__
+    _run: __wa_internal_probe__
+    _runtime_user: __wa_internal_probe__
+    _sections: __wa_internal_probe__
+    _slots: __wa_internal_probe__
+    _subnet: __wa_internal_probe__
+    _tag: __wa_internal_probe__
+    _taken: __wa_internal_probe__
+    _upstream_egress: __wa_internal_probe__
+    _upstreams: __wa_internal_probe__
+    _user: __wa_internal_probe__
+    _users: __wa_internal_probe__
+    _volumes: __wa_internal_probe__
+    _vpn_hosts: __wa_internal_probe__
+    cfdns_cname_scope: __wa_internal_probe__
+    cfpages_domain: __wa_internal_probe__
+    cfpages_env_file: __wa_internal_probe__
+    cfpages_project: __wa_internal_probe__
+    docker_ports_rules: __wa_internal_probe__
+    src_linked: __wa_internal_probe__
+    src_prometheus: __wa_internal_probe__
+    src_proxies: __wa_internal_probe__
+    stamp_detail: __wa_internal_probe__
+    stamp_name: __wa_internal_probe__
+    vsecret_file: __wa_internal_probe__
+    vsecret_items: __wa_internal_probe__
+    vsecret_owner: __wa_internal_probe__
+    wa_adopt_tpl: __wa_internal_probe__
+    wa_all: __wa_internal_probe__
+    wa_api_url_pages: __wa_internal_probe__
+    wa_apps_found: __wa_internal_probe__
+    wa_apps_tpl: __wa_internal_probe__
+    wa_back_after: __wa_internal_probe__
+    wa_back_hosts_value: __wa_internal_probe__
+    wa_back_now: __wa_internal_probe__
+    wa_bootstrap_item: __wa_internal_probe__
+    wa_catalog: __wa_internal_probe__
+    wa_db_item: __wa_internal_probe__
+    wa_db_name: __wa_internal_probe__
+    wa_declared: __wa_internal_probe__
+    wa_down_checks: __wa_internal_probe__
+    wa_env_differing: __wa_internal_probe__
+    wa_extra_items: __wa_internal_probe__
+    wa_front_after: __wa_internal_probe__
+    wa_front_now: __wa_internal_probe__
+    wa_has_user_module: __wa_internal_probe__
+    wa_health_container: __wa_internal_probe__
+    wa_health_pages: __wa_internal_probe__
+    wa_hosts_known: __wa_internal_probe__
+    wa_hosts_now: __wa_internal_probe__
+    wa_manual_keys: __wa_internal_probe__
+    wa_modules_text: __wa_internal_probe__
+    wa_origins: __wa_internal_probe__
+    wa_others: __wa_internal_probe__
+    wa_overlapping: __wa_internal_probe__
+    wa_prefix: __wa_internal_probe__
+    wa_read_tpl: __wa_internal_probe__
 
 - name: Refuse internal facts given on the command line
   ansible.builtin.assert:
@@ -321,6 +422,104 @@
       - lookup('ansible.builtin.vars', 'webapp_env_values') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', 'webapp_env_vite_api_url') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', 'webapp_target') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_accounts') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_awk') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_back_port') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_bad') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_bridge_gateway') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_check') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_clash') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_denied_allowed') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_denies') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_drawn') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_e') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_egress') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_eligible_addresses') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_ev') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_expected') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_expected_present') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_f') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_families') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_fields') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_firewall') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_fmt') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_front_port') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_h') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_host_octet') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_hosts') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_ids') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_locations') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_named') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_named_mcp') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_neighbours') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_networks') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_old') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_others') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_ours') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_parc') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_ports') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_prefix') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_project') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_read') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_reasons') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_rule_clash') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_rule_ports') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_run') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_runtime_user') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_sections') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_slots') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_subnet') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_tag') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_taken') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_upstream_egress') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_upstreams') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_user') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_users') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_volumes') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_vpn_hosts') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'cfdns_cname_scope') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'cfpages_domain') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'cfpages_env_file') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'cfpages_project') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'docker_ports_rules') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'src_linked') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'src_prometheus') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'src_proxies') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'stamp_detail') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'stamp_name') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'vsecret_file') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'vsecret_items') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'vsecret_owner') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'wa_adopt_tpl') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'wa_all') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'wa_api_url_pages') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'wa_apps_found') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'wa_apps_tpl') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'wa_back_after') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'wa_back_hosts_value') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'wa_back_now') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'wa_bootstrap_item') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'wa_catalog') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'wa_db_item') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'wa_db_name') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'wa_declared') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'wa_down_checks') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'wa_env_differing') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'wa_extra_items') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'wa_front_after') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'wa_front_now') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'wa_has_user_module') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'wa_health_container') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'wa_health_pages') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'wa_hosts_known') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'wa_hosts_now') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'wa_manual_keys') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'wa_modules_text') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'wa_origins') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'wa_others') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'wa_overlapping') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'wa_prefix') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'wa_read_tpl') | string == '__wa_internal_probe__'
     fail_msg: >-
       Fait interne donné en extra-vars (-e) : refusé (l'assertion en échec, ci-dessus, le nomme). Ces faits sont
       calculés par les rôles de la famille `webapp` (contrôles du profil durci, pare-feu, compose, base, cible) ; les

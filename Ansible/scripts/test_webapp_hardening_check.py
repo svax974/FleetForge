@@ -1859,7 +1859,7 @@ class GuardTests(unittest.TestCase):
         inventory["all"]["vars"]["prom_alert_groups"] = ["services"]
         for playbook in ("deploy-webapp.yml", "remove-webapp.yml", "purge-webapp.yml"):
             for name in ("wa_violations", "wa_firewall_problems", "wa_h_compose_check", "wa_h_db_reasons",
-                         "wa_ufw_foreign", "wa_h_predeploy_checked", "webapp_target"):
+                         "wa_ufw_foreign", "wa_h_predeploy_checked", "webapp_target", "_families", "_reasons", "_tag"):
                 with self.subTest(playbook=playbook, name=name):
                     code, out = self.real_playbook(playbook, inventory, "-e", "webapp=fleetforge-gateway",
                                                    "-e", json.dumps({name: ""}))
@@ -1879,6 +1879,7 @@ class GuardTests(unittest.TestCase):
         names = set()
         files = glob.glob(os.path.join(ROLES, "webapp-*", "tasks", "*.yml"))
         files.append(os.path.join(ROLES, "fleetforge-install", "tasks", "gateway-guard.yml"))
+        files.append(os.path.join(ROLES, "fleetforge-install", "tasks", "api-accounts-gateway.yml"))
         for path in files:
             for task in check._tasks_in(check._load(path) or []):
                 if isinstance(task.get("register"), str):
@@ -1886,9 +1887,9 @@ class GuardTests(unittest.TestCase):
                 for key in ("ansible.builtin.set_fact", "set_fact"):
                     if isinstance(task.get(key), dict):
                         names.update(n for n in task[key] if "{{" not in n and n != "cacheable")
-                # `vars` d'une inclusion : vues par toutes les tâches incluses, et une extra-var les masque aussi.
-                if any(k in task for k in ("ansible.builtin.include_tasks", "include_tasks", "ansible.builtin.include_role")):
-                    names.update(n for n in (task.get("vars") or {}) if n.startswith("wa_"))
+                # `vars` de TOUTE tâche, inclusion ou bloc (relecture finale : `-e _families=[]` effaçait le contrôle
+                # DOCKER-USER de firewall-problems.yml) — une extra-var les masque aussi.
+                names.update(n for n in (task.get("vars") or {}))
         self.assertEqual(sorted(names - probed), [], "faits internes absents de la sonde (no-overrides.yml)")
 
     def test_deploy_webapp_refuses_the_gateway_with_the_fleetforge_scope(self):
