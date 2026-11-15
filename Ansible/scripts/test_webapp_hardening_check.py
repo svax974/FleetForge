@@ -484,6 +484,54 @@ class ComposeWhitelistTests(unittest.TestCase):
         self.assertIn("clé `use_api_socket` hors de la liste blanche (docker compose config)", errors)
 
 
+class SecretLoopTests(unittest.TestCase):
+    """Une boucle sur une valeur secrète sans `no_log` l'affiche dès `-v` (`loop_control.label` ne masque pas `item`)."""
+
+    def roles_copy(self, tmp, edit=None):
+        for role in ("webapp-env-update", "vault-secret-setup", "webapp-secrets-setup"):
+            shutil.copytree(os.path.join(ROLES, role), os.path.join(tmp, role))
+        if edit:
+            path, old, new = edit
+            full = os.path.join(tmp, path)
+            with open(full, encoding="utf-8") as f:
+                text = f.read()
+            self.assertIn(old, text)
+            with open(full, "w", encoding="utf-8") as f:
+                f.write(text.replace(old, new, 1))
+
+    def test_the_real_roles_have_no_secret_loop_without_no_log(self):
+        self.assertEqual(check.check_secret_loops(ROLES), [])
+
+    def test_removing_no_log_from_the_env_rendering_is_caught(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.roles_copy(tmp, ("webapp-env-update/tasks/render.yml",
+                                  "« Report what was rendered »).\n  no_log: true\n", "« Report what was rendered »).\n"))
+            errors = check.check_secret_loops(tmp)
+        self.assertTrue(any("Write the back env keys that change" in e for e in errors), errors)
+
+    def test_a_loop_over_a_secret_named_key_or_a_vault_lookup_is_caught(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, "webapp-x", "tasks"))
+            with open(os.path.join(tmp, "webapp-x", "tasks", "main.yml"), "w") as f:
+                f.write(textwrap.dedent("""\
+                    - name: names
+                      ansible.builtin.debug: {msg: "{{ item }}"}
+                      loop: [FFG_UPSTREAM_MAIN_RUN_PASSWORD, REDIS_PASSWORD]
+                    - name: derived
+                      ansible.builtin.set_fact:
+                        x_values: "{{ lookup('ansible.builtin.vars', 'x') }}"
+                    - name: uses derived
+                      ansible.builtin.debug: {msg: "{{ item }}"}
+                      loop: "{{ x_values | dict2items }}"
+                    - name: hidden
+                      ansible.builtin.debug: {msg: "{{ item }}"}
+                      loop: "{{ x_values | dict2items }}"
+                      no_log: true
+                    """))
+            errors = check.check_secret_loops(tmp)
+        self.assertEqual(sorted(e.split("« ")[1].split(" »")[0] for e in errors), ["names", "uses derived"])
+
+
 class CoverageTests(unittest.TestCase):
     """Comptes aval : tout playbook sensible est refusé ou dans la liste blanche explicite."""
 

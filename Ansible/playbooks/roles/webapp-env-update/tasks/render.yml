@@ -277,6 +277,9 @@
   become: false
   diff: false
   register: wa_back_written
+  # Les valeurs sont des secrets (clés de chiffrement, mots de passe) : `label` ne masque pas `item` dès `-v`.
+  # Les NOMS écrits sortent du rapport final (« Report what was rendered »).
+  no_log: true
 
 - name: Write the front env keys that change
   ansible.builtin.lineinfile:
@@ -292,6 +295,8 @@
   become: false
   diff: false
   register: wa_front_written
+  # Dérivé du front/.env lu (qui peut porter CLOUDFLARE_API_TOKEN) : par prudence, comme le back.
+  no_log: true
 
 # Clés NON secrètes posées par un play appelant (fait `wa_env_injected`, ex. FFG_UPSTREAMS du play passerelle de
 # deploy-fleetforge.yml) : valeurs qui peuvent porter des guillemets doubles (JSON), écrites entre apostrophes —

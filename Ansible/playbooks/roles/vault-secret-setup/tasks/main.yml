@@ -53,3 +53,5 @@
   loop_control:
     loop_var: vsecret_item
     label: "{{ vsecret_item.name }}"
+  # `vsecret_item.adopt` porte la valeur ADOPTÉE du .env : `label` ne la masque pas dès `-v`.
+  no_log: true

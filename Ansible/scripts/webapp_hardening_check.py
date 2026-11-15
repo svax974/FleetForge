@@ -243,6 +243,7 @@ def check_playbook(playbooks_dir):
     errors += _check_roles(os.path.join(playbooks_dir, "roles"))
     errors += _check_eligible_proxies(os.path.join(playbooks_dir, "roles"))
     errors += check_coverage(playbooks_dir)[0]
+    errors += check_secret_loops(os.path.join(playbooks_dir, "roles"))
     return errors
 
 
@@ -324,6 +325,73 @@ def _check_roles(roles_dir):
                         errors.append(f"{fpath}: « {task.get('name', '?')} » lance ou monte un conteneur : {text.strip()[:80]}")
     if not found:
         errors.append(f"{roles_dir}: aucun rôle webapp-*")
+    return errors
+
+
+# ── secrets dans les boucles ──────────────────────────────────────────────
+# Revue du 15/11/2026 : `loop_control.label` ne masque PAS `item` dès `-v` (la valeur sort dans le résultat de
+# l'itération). Toute boucle sur une valeur qui porte un secret exige `no_log: true`.
+SECRET_ROLES = re.compile(r"^(webapp-.*|vault-secret-setup|fleetforge-install)$")
+# Noms d'une clé de .env secrète (une boucle qui les itère porte leurs valeurs).
+SECRET_NAME = re.compile(r"PASSWORD|SECRET|JWT|CRYPT_")
+# Sources d'une VALEUR secrète : variables du coffre, faits qui en sont tirés, contenu lu des .env.
+SECRET_SOURCE = re.compile(
+    r"[a-z0-9]_password\b|[a-z0-9]_pass\b|[a-z0-9]_secret\b|vsecret_values|vsecret_items|vsecret_current|wa_secret_env"
+    r"|wa_secret_items|wa_env_vault_values|ff_api_new_passwords|wa_secrets_env_text|wa_env_back_text|wa_env_front_text"
+    r"|lookup\(\s*'ansible\.builtin\.vars'")
+LOOP_KEYS = ("loop", "with_items", "with_dict", "with_list", "with_together", "with_nested", "with_subelements")
+
+
+def _task_files(roles_dir):
+    for role in sorted(os.listdir(roles_dir)):
+        tasks_dir = os.path.join(roles_dir, role, "tasks")
+        if SECRET_ROLES.match(role) and os.path.isdir(tasks_dir):
+            for fname in sorted(os.listdir(tasks_dir)):
+                if fname.endswith((".yml", ".yaml")):
+                    yield os.path.join(tasks_dir, fname)
+
+
+def _with_local_vars(text, local_vars):
+    """Le texte d'une expression, plus celui des `vars` de la tâche qu'elle référence (de proche en proche)."""
+    seen = set()
+    changed = True
+    while changed:
+        changed = False
+        for name, value in local_vars.items():
+            if name not in seen and re.search(r"\b" + re.escape(str(name)) + r"\b", text):
+                seen.add(name)
+                text += json.dumps(value, default=str)
+                changed = True
+    return text
+
+
+def check_secret_loops(roles_dir):
+    """Faits dérivés d'un secret (propagation par les `set_fact`/`vars`), puis boucles sans `no_log` sur eux."""
+    tasks = [(path, task) for path in _task_files(roles_dir) for task in _tasks_in(_load(path) or [])]
+    secret = set()
+    changed = True
+    while changed:
+        changed = False
+        for _, task in tasks:
+            # Faits de l'HÔTE seulement (les `vars` d'une tâche ne sortent pas d'elle : lus plus bas, tâche par tâche).
+            for key in ("ansible.builtin.set_fact", "set_fact"):
+                for name, value in (task.get(key) or {}).items() if isinstance(task.get(key), dict) else ():
+                    text = _with_local_vars(json.dumps(value, default=str), task.get("vars") or {})
+                    if name not in secret and (SECRET_SOURCE.search(str(name)) or SECRET_SOURCE.search(text)
+                                               or any(re.search(r"\b" + re.escape(s) + r"\b", text) for s in secret)):
+                        secret.add(name)
+                        changed = True
+    errors = []
+    for path, task in tasks:
+        for key in LOOP_KEYS:
+            if key not in task:
+                continue
+            looped = json.dumps(task[key], default=str)
+            text = _with_local_vars(looped, task.get("vars") or {})
+            carries = (SECRET_NAME.search(looped) or SECRET_SOURCE.search(text)
+                       or any(re.search(r"\b" + re.escape(s) + r"\b", text) for s in secret))
+            if carries and task.get("no_log") is not True:
+                errors.append(f"{path}: « {task.get('name', '?')} » boucle sur une valeur secrète sans `no_log: true`")
     return errors
 
 
