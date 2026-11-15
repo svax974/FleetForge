@@ -181,6 +181,10 @@
   # Aucune application sélectionnée (`webapp_optional`) : aucune connexion aux proxies.
   gather_facts: "{{ groups['webapp_target'] | default([]) | length > 0 }}"
   tags: [proxy-conf]
+  vars:
+    # Même chemin que `proxy_update_dir` (defaults du rôle proxy-update, non chargés à ce niveau) : sert à savoir si un
+    # vhost écrit à la main existe, côté poste de contrôle.
+    webapp_vhost_dir: "{{ playbook_dir }}/../parcs/{{ parc_name }}/nginx"
   tasks:
     - name: Nothing to do without a selected application
       ansible.builtin.meta: end_play
@@ -194,7 +198,7 @@
         site: "{{ hostvars[groups['webapp_target'] | first].webapp_project | default(groups['webapp_target'] | first) }}.conf"
       when:
         - (hostvars[groups['webapp_target'] | first].webapp_proxy | default('internal')) != 'external'
-        - (proxy_update_dir ~ '/sites-enabled/' ~ (hostvars[groups['webapp_target'] | first].webapp_project | default(groups['webapp_target'] | first)) ~ '.conf') is file
+        - (webapp_vhost_dir ~ '/sites-enabled/' ~ (hostvars[groups['webapp_target'] | first].webapp_project | default(groups['webapp_target'] | first)) ~ '.conf') is file
 
     - name: Deploy the generic vhost of the application
       ansible.builtin.include_role:
@@ -205,7 +209,7 @@
       when:
         - (hostvars[groups['webapp_target'] | first].webapp_proxy | default('internal')) != 'external'
         - hostvars[groups['webapp_target'] | first].proxy_hostname is defined
-        - not ((proxy_update_dir ~ '/sites-enabled/' ~ (hostvars[groups['webapp_target'] | first].webapp_project | default(groups['webapp_target'] | first)) ~ '.conf') is file)
+        - not ((webapp_vhost_dir ~ '/sites-enabled/' ~ (hostvars[groups['webapp_target'] | first].webapp_project | default(groups['webapp_target'] | first)) ~ '.conf') is file)
 
 # ── Filtrage des ports publiés par Docker ──────────────────────────────────
 # Sur la machine CANONIQUE (`webapp_machine`, partagée ou non) : c'est elle qui porte `docker_ports_rules`.
