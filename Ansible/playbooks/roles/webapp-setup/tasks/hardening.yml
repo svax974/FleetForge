@@ -43,7 +43,8 @@
 
 # SORTIE du sous-réseau dédié (pare-feu du profil) : liste EXPLICITE `webapp_hardening.egress_allow`, une ligne par
 # destination, avec sa raison : [{name, proxies: true | inventory_host: <entrée> | host: <IPv4>, port, proto?}].
-# `proxies: true` = les proxies ADMIS (le nom public d'un amont est un CNAME vers leur front privé). Liste vide ou
+# `proxies: true` = les proxies ADMIS ; seul celui de CETTE machine passe la garde (un proxy distant est refusé,
+# voir l'assert plus bas). Liste vide ou
 # absente = RIEN (hors réponses, trafic interne au sous-réseau et DNS des résolveurs de la machine, lus sur place par
 # le pare-feu). Une destination qui est l'adresse de CETTE machine passe par INPUT (port de l'hôte), les autres par
 # FORWARD (DOCKER-USER). Tout le reste est refusé : Internet, métadonnées 169.254.169.254, services de l'hôte.
@@ -134,6 +135,14 @@
       - wa_h_egress | map(attribute='port') | map('string') | reject('match', '^[1-9][0-9]{0,4}$') | list | length == 0
       - wa_h_egress | map(attribute='proto') | reject('in', ['tcp', 'udp']) | list | length == 0
       - wa_h_egress | map(attribute='name') | map('string') | reject('match', '^[a-z][a-z0-9_-]{0,31}$') | list | length == 0
+      # Jamais un proxy DISTANT (FORWARD, puis MASQUERADE) : il verrait l'adresse PUBLIQUE de cette machine, que ses
+      # vhosts admettent au titre des autres entrées de la machine (FleetForge, supervision…) — l'app en hériterait.
+      # Un proxy de CETTE machine passe par INPUT, sous l'adresse du conteneur (`access_local_cidrs`).
+      - >-
+        wa_h_egress_remote | map(attribute='dest')
+        | intersect(groups['proxies'] | default([]) | map('extract', hostvars, 'ansible_host') | select('defined')
+                    | map('string') | list)
+        | length == 0
     fail_msg: >-
       {{ inventory_hostname }} : profil `webapp_hardening` invalide — `runtime_user` (≠ {{ remote_username }}),
       `docker_subnet` privé en /24 hors 172.16/12 et 192.168/16 ET listé dans `access_local_cidrs`, `front_ip` et
@@ -142,7 +151,7 @@
       `webapp_db_exposed` ni `webapp_metrics_push` ;
       front en conteneur, proxy interne ; aucun proxy admis à l'adresse d'un VPN ; `egress_allow` : [{name,
       proxies: true | inventory_host: <entrée> | host: <IPv4>, port, proto: tcp|udp}] (adresse unique, hors 0/8,
-      127/8 et 169.254/16).
+      127/8 et 169.254/16 ; jamais l'adresse d'un proxy DISTANT : seul le proxy de cette machine, joint en local).
     quiet: true
   tags: [always]
 

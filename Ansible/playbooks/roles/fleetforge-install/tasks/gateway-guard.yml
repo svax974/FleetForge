@@ -27,6 +27,9 @@
       {{ webapp_vhost_locations | default([]) | selectattr('access', 'defined')
          | selectattr('path', 'search', 'mcp') | selectattr('upstream', 'defined') | selectattr('upstream', 'equalto', 'back')
          | selectattr('raw_uri', 'defined') | list }}
+    _upstream_egress: >-
+      {{ (webapp_hardening.egress_allow | default([]) if webapp_hardening is mapping else [])
+         | select('mapping') | selectattr('name', 'defined') | selectattr('name', 'equalto', 'upstream') | list }}
   ansible.builtin.assert:
     that:
       - inventory_hostname not in (groups['infras'] | default([]))
@@ -42,19 +45,24 @@
       - proxy_hostname is search('[.]' ~ (domain_name | regex_escape) ~ '$')
       - proxy_hostname != 'proxy.' ~ domain_name
       - _named_mcp | length > 0
-      # Sorties du sous-réseau (pare-feu du profil) : l'amont par les proxies admis en 443, et le relais SMTP (connexion
-      # par code e-mail, `authMethods: ["email"]`) — exigées NOMMÉMENT : sans elles, la passerelle ne pilote rien ou
-      # n'envoie aucun code, sans erreur visible au déploiement.
-      - webapp_hardening.egress_allow | default([]) | selectattr('name', 'defined') | selectattr('name', 'equalto', 'upstream')
-        | selectattr('proxies', 'defined') | selectattr('port', 'equalto', 443) | list | length == 1
+      # Sorties du sous-réseau (pare-feu du profil) : l'amont par le proxy de CETTE machine en 443, et le relais SMTP
+      # (connexion par code e-mail, `authMethods: ["email"]`) — exigées NOMMÉMENT : sans elles, la passerelle ne pilote
+      # rien ou n'envoie aucun code, sans erreur visible au déploiement. Jamais un proxy DISTANT : le paquet y sortirait
+      # par FORWARD, masqué (MASQUERADE) derrière l'adresse publique de la machine, que les vhosts admettent au titre
+      # d'infra1 (et de la supervision) — la passerelle hériterait de leurs droits (quatrième revue).
+      - _upstream_egress | length == 1
+      - _upstream_egress[0].proxies is not defined and _upstream_egress[0].host is not defined
+      - _upstream_egress[0].inventory_host | default('') in (groups['proxies'] | default([]))
+      - hostvars[_upstream_egress[0].inventory_host | default('')].ansible_host | default('') == ansible_host
+      - _upstream_egress[0].port == 443
       - webapp_hardening.egress_allow | default([]) | selectattr('name', 'defined') | selectattr('name', 'equalto', 'smtp') | list | length == 1
     fail_msg: >-
       Entrée {{ inventory_hostname }} invalide pour la passerelle : entrée dédiée hors du groupe `infras`, famille
       `webapp` (jamais `fleetforge`), `webapp_hardening`, `access_mode: private` (E1), `hostname`, `proxy_hostname`
       (nom de la zone, pas le front des proxies), et une location `/mcp` de `webapp_vhost_locations` relayée au back-lb
       (`upstream: back`) derrière une liste nommée (`access`), URI brute contrôlée (`raw_uri`) ; `webapp_hardening.egress_allow`
-      avec `{name: upstream, proxies: true, port: 443}` et une entrée `smtp` (relais du parc : à renseigner par le
-      propriétaire avant le premier déploiement).
+      avec `{name: upstream, inventory_host: <proxy de CETTE machine>, port: 443}` (jamais `proxies: true` ni un proxy
+      distant) et une entrée `smtp` (relais du parc : à renseigner par le propriétaire avant le premier déploiement).
     quiet: true
 
 # Chaque amont : l'entrée FleetForge qu'il désigne doit admettre la passerelle (`access_linked`) et porter les trois
@@ -90,6 +98,12 @@
       - _e in (groups['infras'] | default([]))
       - _ev.proxy_hostname is defined
       - _ev.proxy_hostname is match('^[a-z0-9][a-z0-9.-]{0,252}$')
+      # L'amont est joint par le nom PRIVÉ de sa machine (`hostname`, enregistrement A), servi par le seul proxy de la
+      # même machine (server_name du vhost FleetForge du parc) : l'entrée FleetForge partage la machine de la passerelle.
+      - _ev.hostname is defined
+      - _ev.hostname is match('^[a-z0-9][a-z0-9.-]{0,252}$')
+      - _ev.hostname is search('[.]' ~ (domain_name | regex_escape) ~ '$')
+      - _ev.ansible_host | default('') == ansible_host
       - inventory_hostname in (_ev.access_linked | default([]))
       - item.parcs is defined and item.parcs is not string and item.parcs | length > 0
       - (_users.values() | unique | list | length) == 3
@@ -113,7 +127,8 @@
       - _slots.items() | list | difference((webapp_env_from_vault | default({})).items() | list) | length == 0
     fail_msg: >-
       Amont « {{ item.id | default('?') }} » de {{ inventory_hostname }} : l'entrée `{{ _e }}` doit être du groupe
-      `infras`, déclarer `proxy_hostname`, nommer {{ inventory_hostname }} dans `access_linked`, et porter dans
+      `infras`, sur la machine de la passerelle, déclarer `proxy_hostname` et `hostname` (nom privé de la machine,
+      dans {{ domain_name }}, ajouté au server_name du vhost FleetForge du proxy co-localisé), nommer {{ inventory_hostname }} dans `access_linked`, et porter dans
       `ff_api_accounts` {{ _users.read }} (read), {{ _users.check }} (check, max_hosts) et {{ _users.run }} (run,
       max_hosts, accept_checks_from: [{{ _users.check }}], accept_own_checks: false) couvrant les parcs
       {{ item.parcs | default([]) | join(', ') }}, check et run avec `allow_playbooks` = {{ ffg_allowed_playbooks | join(', ') }}
@@ -147,10 +162,12 @@
     quiet: true
 
 # FFG_UPSTREAMS : JSON sans secret (id, URL https de l'amont, parcs, noms de comptes), écrit par webapp-env-update.
+# URL : le nom PRIVÉ de la machine de l'amont (`hostname`), jamais `proxy_hostname` (CNAME vers le front de TOUS les
+# proxies : un proxy distant serait joint par FORWARD, sous l'adresse publique de la machine).
 - name: Work out FFG_UPSTREAMS
   vars:
     _upstreams: >-
-      [{% for u in ffg_upstreams %}{"id": {{ u.id | to_json }}, "baseUrl": {{ ('https://' ~ hostvars[u.entry].proxy_hostname) | to_json }}, "parcs": {{ u.parcs | to_json }}{% if u.users is defined %}, "users": {{ u.users | to_json }}{% endif %}}{{ '' if loop.last else ', ' }}{% endfor %}]
+      [{% for u in ffg_upstreams %}{"id": {{ u.id | to_json }}, "baseUrl": {{ ('https://' ~ hostvars[u.entry].hostname) | to_json }}, "parcs": {{ u.parcs | to_json }}{% if u.users is defined %}, "users": {{ u.users | to_json }}{% endif %}}{{ '' if loop.last else ', ' }}{% endfor %}]
   ansible.builtin.set_fact:
     wa_env_injected:
       FFG_UPSTREAMS: "{{ _upstreams | trim }}"

@@ -1301,7 +1301,7 @@ def guard_inventory(**gateway):
         "access_local_cidrs": ["10.73.231.0/24"],
         "webapp_hardening": {"runtime_user": "ffgateway", "docker_subnet": "10.73.231.0/24",
                              "front_ip": "10.73.231.10", "back_lb_ip": "10.73.231.11", "protected_paths": ["/run/fleetforge"],
-                             "egress_allow": [{"name": "upstream", "proxies": True, "port": 443},
+                             "egress_allow": [{"name": "upstream", "inventory_host": "proxy1", "port": 443},
                                               {"name": "smtp", "inventory_host": "mail1", "port": 587}]},
         "webapp_vhost_locations": [MCP, WELL_KNOWN],
         "ffg_upstreams": [{"id": "main", "entry": "infra1", "parcs": ["demo"]}],
@@ -1325,6 +1325,7 @@ def guard_inventory(**gateway):
             "proxies": {"hosts": {"proxy1": {"ansible_host": "192.0.2.10"}, "proxy2": {"ansible_host": "198.51.100.1"}}},
             "vpns": {"hosts": {"vpn1": {"ansible_host": "198.51.100.1"}}},
             "infras": {"hosts": {"infra1": {"ansible_host": "192.0.2.10", "proxy_hostname": "infra.example.test",
+                                            "hostname": "infra-priv.example.test",
                                             "access_linked": ["agenthub", "fleetforge-gateway"], "ff_api_user": "agenthub",
                                             "ff_api_accounts": accounts, "fleetforge_port": 9750}}},
             "apps": {"hosts": {"agenthub": {"ansible_host": "203.0.113.7"}, "mail1": {"ansible_host": "192.0.2.10"}}},
@@ -1362,7 +1363,48 @@ class GuardTests(unittest.TestCase):
         # Relais : proxy1 (admis, sur cette machine → passerelle du pont), front, back-lb ; proxy2 = VPN, jamais.
         self.assertIn("GUARD=OK 192.0.2.10,10.73.231.1,10.73.231.10,10.73.231.11 ", out)
         self.assertNotIn("198.51.100.1", out.split("GUARD=OK", 1)[1].split("\n", 1)[0])
-        self.assertIn('"baseUrl": "https://infra.example.test"', out.replace('\\"', '"'))
+        # Nom PRIVÉ de la machine de l'amont (servi par le proxy co-localisé), jamais le CNAME vers tous les proxies.
+        self.assertIn('"baseUrl": "https://infra-priv.example.test"', out.replace('\\"', '"'))
+
+    def test_the_upstream_is_never_reached_through_a_remote_proxy(self):
+        # Quatrième revue : par un proxy distant, le paquet sort par FORWARD, masqué derrière l'adresse publique de la
+        # machine — que le vhost FleetForge admet au titre d'infra1. Refusé par la garde générique du profil (toute
+        # sortie FORWARD vers un proxy) ET par celle de la passerelle (amont = proxy de CETTE machine).
+        def with_proxy3(**gateway):
+            inventory = guard_inventory(**gateway)
+            inventory["all"]["children"]["proxies"]["hosts"]["proxy3"] = {"ansible_host": "203.0.113.50"}
+            return inventory
+        base = guard_inventory()["all"]["children"]["fleetforge_gateways"]["hosts"]["fleetforge-gateway"]["webapp_hardening"]
+        smtp = base["egress_allow"][1]
+        code, out = self.guard(with_proxy3())
+        self.assertEqual(code, 0, out[-3000:])
+        cases = {
+            "proxies": [{"name": "upstream", "proxies": True, "port": 443}, smtp],
+            "remote": [{"name": "upstream", "inventory_host": "proxy3", "port": 443}, smtp],
+            "extra": [base["egress_allow"][0], smtp, {"name": "other", "inventory_host": "proxy3", "port": 443}],
+            "by_address": [base["egress_allow"][0], smtp, {"name": "other", "host": "203.0.113.50", "port": 8443}],
+        }
+        for label, egress in cases.items():
+            with self.subTest(label):
+                code, out = self.guard(with_proxy3(webapp_hardening=dict(base, egress_allow=egress)))
+                self.assertNotEqual(code, 0, label)
+        # Garde générique seule (sans celle de la passerelle) : hardening.yml refuse une sortie FORWARD vers un proxy.
+        play = GUARD_PLAY.replace("""    - ansible.builtin.include_role:
+        name: fleetforge-install
+        tasks_from: gateway-guard
+""", "").replace(" {{ wa_env_injected.FFG_UPSTREAMS }}", "")
+        code, out = run_local_play(play, with_proxy3(webapp_hardening=dict(base, egress_allow=cases["by_address"])),
+                                   {"apps.yml": "fleetforge-gateway: /nonexistent/app/\n"})
+        self.assertNotEqual(code, 0)
+        self.assertIn("proxy DISTANT", out)
+
+    def test_the_upstream_entry_must_share_the_machine_and_declare_its_private_name(self):
+        inventory = guard_inventory()
+        del inventory["all"]["children"]["infras"]["hosts"]["infra1"]["hostname"]
+        self.assertNotEqual(self.guard(inventory)[0], 0)
+        inventory = guard_inventory()
+        inventory["all"]["children"]["infras"]["hosts"]["infra1"]["ansible_host"] = "203.0.113.60"
+        self.assertNotEqual(self.guard(inventory)[0], 0)
 
     def test_a_subnet_in_the_docker_pools_is_refused(self):
         hardening = dict(guard_inventory()["all"]["children"]["fleetforge_gateways"]["hosts"]["fleetforge-gateway"]["webapp_hardening"],
