@@ -55,14 +55,17 @@
             pour une destination locale). Ses sous-réseaux Docker DÉDIÉS sont
             alors déclarés sur son entrée (`access_local_cidrs`) — et admis ici
             SEULEMENT sur un proxy co-localisé, SEULEMENT s'ils sont valides :
-            IPv4 aux octets ≤ 255, préfixe /16 à /32, forme CANONIQUE (aucun
-            bit d'hôte), plage privée (10/8, 172.16/12, 192.168/16), et ne
-            contenant l'adresse d'AUCUN serveur VPN. Toute autre valeur est
-            ignorée (fermé), jamais élargie ni corrigée. #}
+            IPv4 aux octets ≤ 255 sans zéro en tête, préfixe /16 à /32, forme
+            CANONIQUE (aucun bit d'hôte), plage privée (10/8, 172.16/12,
+            192.168/16), une seule ligne, et ne contenant l'adresse d'AUCUN
+            serveur VPN. Toute autre valeur est ignorée (fermé), jamais élargie
+            ni corrigée, et n'est réaffichée qu'expurgée (aucune injection de
+            directive par un commentaire). #}
         {% if hostvars[host]['ansible_host'] == ansible_host %}
         {% for cidr in hostvars[host].access_local_cidrs | default([]) %}
         {% set _lc = namespace(ok=false, vpn=false) %}
-        {% if cidr is string and cidr is match('^[0-9]{1,3}([.][0-9]{1,3}){3}/[0-9]{1,2}$') %}
+        {% if cidr is string and (cidr.splitlines() | length) == 1 and cidr == (cidr | trim)
+              and cidr is match('^(0|[1-9][0-9]{0,2})([.](0|[1-9][0-9]{0,2})){3}/(0|[1-9][0-9]?)$') %}
         {% set _o = cidr.split('/')[0].split('.') | map('int') | list %}
         {% set _len = cidr.split('/')[1] | int %}
         {% if (_o | max) <= 255 and _len >= 16 and _len <= 32 %}
@@ -84,7 +87,7 @@
         {% if _lc.ok %}
         allow {{ cidr }};  # serveur lié {{ host }}, réseau Docker local
         {% else %}
-        # access_local_cidrs « {{ cidr }} » de {{ host }} ignoré : pas un sous-réseau IPv4 privé canonique /16 à /32 hors VPN.
+        # access_local_cidrs « {{ cidr | string | regex_replace('[^0-9./]', '?') }} » de {{ host }} ignoré : pas un sous-réseau IPv4 privé canonique /16 à /32 hors VPN.
         {% endif %}
         {% endfor %}
         {% endif %}
