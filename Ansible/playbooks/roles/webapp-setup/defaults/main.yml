@@ -25,7 +25,13 @@
 #   webapp_metrics_push   true : vmagent pousse vers les Prometheus du parc (PROMETHEUS_REMOTE_WRITE_URLS)
 #   webapp_migrate        true : run.sh --migrate
 #   webapp_update_common  false : run.sh --no-update-common (défaut true : bibliothèques partagées à jour)
-#   webapp_compose_file   COMPOSE_FILE_NAME du dépôt (défaut : celui du template)
+#   webapp_compose_file   COMPOSE_FILE_NAME du dépôt (défaut : celui du template) — clé POSSÉDÉE si renseigné
+#   webapp_publish_bind   adresse de publication du front et du back-lb (FRONT_BIND, BACK_LB_BIND) quand le compose les lie
+#                         à 127.0.0.1 par défaut : `0.0.0.0` pour des proxies DISTANTS (le filtre est alors DOCKER-USER)
+#   webapp_extra_secrets  secrets propres à l'app : liste de { key, kind (hex_32|base64_32|password|api_key), length?, note? }
+#   webapp_back_env_example  modèle du back/.env d'une app neuve (défaut back/.env.example)
+#   webapp_admin_wallet   ADMIN_WALLET (adresse publique, clé « si absente » : jamais réécrite)
+#   webapp_vhost_locations  blocs supplémentaires du vhost : liste de { path, regex?, mode?, ws?, body?, timeout?, buffering? }
 
 # Ports consécutifs réservés à une app : front, back-lb, Postgres, Redis.
 webapp_port_block: 4

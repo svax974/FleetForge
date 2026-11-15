@@ -76,7 +76,7 @@
     creates: "{{ wa_src }}{{ item.file }}"
     removes: "{{ wa_src }}{{ item.example }}"
   loop:
-    - { file: "{{ wa_back_env_file }}", example: back/.env.example }
+    - { file: "{{ wa_back_env_file }}", example: "{{ webapp_back_env_example | default('back/.env.example') }}" }
     - { file: "{{ wa_front_env_file }}", example: front/.env.example }
   loop_control:
     label: "{{ item.file }}"
@@ -135,6 +135,8 @@
         'DEPLOY_MANAGE_UFW': '0'
       } | combine({'DB_PORT': wa_db_port} if wa_db_selfhosted else {})
         | combine({'FRONT_HOSTS': ansible_host} if wa_front_mode == 'container' else {})
+        | combine({'COMPOSE_FILE_NAME': webapp_compose_file} if webapp_compose_file | default('') | length > 0 else {})
+        | combine({'FRONT_BIND': webapp_publish_bind, 'BACK_LB_BIND': webapp_publish_bind} if webapp_publish_bind | default('') | length > 0 else {})
         | combine({
             'DEPLOY_REGISTRY': wa_registry,
             'DEPLOY_REGISTRY_PUSH': wa_registry_push,
@@ -151,7 +153,8 @@
         'CLIENT_ORIGINS': wa_origins | join(','),
         'DB_USER': wa_db_name,
         'DB_NAME': wa_db_name
-      } | combine({'SSH_KEY_FILE': webapp_ssh_key_file} if webapp_ssh_key_file | default('') | length > 0 else {}) }}
+      } | combine({'SSH_KEY_FILE': webapp_ssh_key_file} if webapp_ssh_key_file | default('') | length > 0 else {})
+        | combine({'ADMIN_WALLET': webapp_admin_wallet} if webapp_admin_wallet | default('') | length > 0 else {}) }}
     wa_env_front_owned: >-
       {{ {'VITE_PORT': wa_front_port}
          | combine({'VITE_API_URL': wa_api_url_pages} if wa_front_mode == 'pages' else {}) }}
@@ -174,7 +177,8 @@
       {%- if (wa_back_now | regex_findall(wa_read_tpl | replace('{key}', k)) | last | default('') | trim) != (v | string) -%}{%- set _ = out.update({k: v}) -%}{%- endif -%}
       {%- endfor -%}
       {%- for k, v in wa_env_back_absent.items() -%}
-      {%- if (wa_back_now | regex_findall(wa_read_tpl | replace('{key}', k)) | last | default('') | trim) == '' -%}{%- set _ = out.update({k: v}) -%}{%- endif -%}
+      {%- set cur = (wa_back_now | regex_findall(wa_read_tpl | replace('{key}', k)) | last | default('') | trim) -%}
+      {%- if cur == '' or (cur | regex_findall('example[.](com|org)|[.]invalid') | length > 0) -%}{%- set _ = out.update({k: v}) -%}{%- endif -%}
       {%- endfor -%}
       {{ out }}
     wa_front_todo: >-
@@ -183,7 +187,8 @@
       {%- if (wa_front_now | regex_findall(wa_read_tpl | replace('{key}', k)) | last | default('') | trim) != (v | string) -%}{%- set _ = out.update({k: v}) -%}{%- endif -%}
       {%- endfor -%}
       {%- for k, v in wa_env_front_absent.items() -%}
-      {%- if (wa_front_now | regex_findall(wa_read_tpl | replace('{key}', k)) | last | default('') | trim) == '' -%}{%- set _ = out.update({k: v}) -%}{%- endif -%}
+      {%- set cur = (wa_front_now | regex_findall(wa_read_tpl | replace('{key}', k)) | last | default('') | trim) -%}
+      {%- if cur == '' or (cur | regex_findall('example[.](com|org)|[.]invalid') | length > 0) -%}{%- set _ = out.update({k: v}) -%}{%- endif -%}
       {%- endfor -%}
       {{ out }}
   no_log: true
@@ -193,6 +198,8 @@
     path: "{{ wa_src }}{{ wa_back_env_file }}"
     regexp: '^[ ]*{{ item.key }}='
     line: '{{ item.key }}="{{ item.value }}"'
+    # En `--check`, un .env neuf n'existe pas encore (l'amorçage est une commande) : simuler la création.
+    create: "{{ ansible_check_mode }}"
   loop: "{{ wa_back_todo | dict2items }}"
   loop_control:
     label: "{{ item.key }}"
@@ -206,6 +213,8 @@
     path: "{{ wa_src }}{{ wa_front_env_file }}"
     regexp: '^[ ]*{{ item.key }}='
     line: '{{ item.key }}="{{ item.value }}"'
+    # En `--check`, un .env neuf n'existe pas encore (l'amorçage est une commande) : simuler la création.
+    create: "{{ ansible_check_mode }}"
   loop: "{{ wa_front_todo | dict2items }}"
   loop_control:
     label: "{{ item.key }}"

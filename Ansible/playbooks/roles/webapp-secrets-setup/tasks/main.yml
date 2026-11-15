@@ -56,9 +56,13 @@
       - { key: DB_PASSWORD, kind: password, length: 40, note: "Mot de passe de la base de l'application (Postgres du conteneur : fixé à l'initialisation du volume, ne jamais le changer sans migrer)." }
     wa_bootstrap_item:
       - { key: BOOTSTRAP_API_KEY, kind: api_key, note: "Clé d'API d'amorçage (scope admin) pour l'auto-provisionnement du runner." }
+    # Secrets propres à l'app (`webapp_extra_secrets` sur l'entrée : liste de { key, kind, length?, note? }), adoptés puis tirés
+    # comme les autres. Ex. social-manager : REDIS_PASSWORD, DB_WORKER_PASSWORD.
+    wa_extra_items: "{{ webapp_extra_secrets | default([]) }}"
     wa_all: >-
       {{ wa_catalog
          + (wa_db_item if (wa_db_selfhosted | bool) else [])
+         + wa_extra_items
          + (wa_bootstrap_item if (webapp_bootstrap_key | default(false) | bool) else []) }}
   ansible.builtin.set_fact:
     wa_secret_items: >-
@@ -71,7 +75,7 @@
             'kind': it.kind,
             'length': it.length | default(32),
             'adopt': adopted,
-            'comment': it.note ~ ' (' ~ wa_project ~ (', ' ~ wa_env if wa_env != 'prod' else '') ~ ')'}) -%}
+            'comment': (it.note | default('Secret propre à l application')) ~ ' (' ~ wa_project ~ (', ' ~ wa_env if wa_env != 'prod' else '') ~ ')'}) -%}
       {%- endfor -%}
       {{ out }}
   no_log: true

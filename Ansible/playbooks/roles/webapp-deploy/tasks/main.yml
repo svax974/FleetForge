@@ -110,7 +110,7 @@
 - name: Report how the application is exposed
   ansible.builtin.debug:
     msg: >-
-      {{ wa_project }} ({{ wa_env }}) : {{ 'front sur Cloudflare Pages, ' if wa_front_mode == 'pages' else 'front sur 127.0.0.1:' ~ wa_front_port ~ ', ' }}back-lb sur
-      127.0.0.1:{{ wa_back_port }}. {{ 'Version : ' ~ (wa_back_ready.json.revision | default('?')) ~ '.' if (wa_back_ready.json | default(none)) is mapping else '' }}
+      {{ wa_project }} ({{ wa_env }}) : {{ 'front sur Cloudflare Pages, ' if wa_front_mode == 'pages' else 'front sur ' ~ (webapp_publish_bind | default('127.0.0.1')) ~ ':' ~ wa_front_port ~ ', ' }}back-lb sur
+      {{ webapp_publish_bind | default('127.0.0.1') }}:{{ wa_back_port }}. {{ 'Version : ' ~ (wa_back_ready.json.revision | default('?')) ~ '.' if (wa_back_ready.json | default(none)) is mapping else '' }}
       Redéployer sans Ansible : `cd {{ wa_src }} && ./scripts/run.sh {{ wa_env }}` (cibles, registre et secrets sont dans les .env).
   when: webapp_phase in ['all', 'deploy']

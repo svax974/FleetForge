@@ -28,6 +28,12 @@ collision refusée sur une même machine), `webapp_machine` (entrée canonique q
 `webapp_upstreams`, `webapp_update_common`, `webapp_migrate`. L'application est retrouvée par `webapp_app_id`
 (`.private/apps/apps.yml`).
 
+Attributs pour une app à stack propre (exemple : `social-manager`, entrée de `web3c_inventory.yml`) : `webapp_compose_file`
+(`COMPOSE_FILE_NAME`), `webapp_back_env_example` (modèle du `.env` d'une app neuve), `webapp_publish_bind` (`FRONT_BIND` et
+`BACK_LB_BIND`, `0.0.0.0` pour des proxies distants, filtrés ensuite par DOCKER-USER), `webapp_extra_secrets` (adoptés puis
+tirés comme les autres), `webapp_admin_wallet` (`ADMIN_WALLET`, « si absent »), `webapp_vhost_locations` (WebSocket, taille de
+corps). Une valeur d'exemple (`example.com`, `.invalid`) dans une clé « si absente » est remplacée.
+
 ## Ce que le playbook écrit dans les `.env`
 
 Un seul sens : **inventaire + coffre → `.env` → `run.sh`**. Clés POSSÉDÉES (toujours réécrites) : `BACK_HOSTS` (valeur déjà en
@@ -69,8 +75,9 @@ gabarit de vhost générique, registre durci (version épinglée, deux comptes, 
 Branche `feat/registry-deploy` du dépôt `vx-public` (poussée le 15/11/2026, pas encore fusionnée : relecture, puis `update_common.sh`).
 Registre papanglabs : entrée, vhost, règle DOCKER-USER et playbook prêts, vérifiés en `--check` ; **pas encore déployé**.
 
-À faire : back-lb sans la `location` AgentHub du template ; entrées CompanyManager, Maestro, air-farmer, ai-medialab,
-social-manager ; groupes multi-hôtes (PapangWorkspace : `BACK_HOSTS` de plusieurs entrées, `app-env.sh` par environnement,
+À faire : back-lb sans la `location` AgentHub du template ; entrées Maestro, air-farmer, ai-medialab (CompanyManager existe, famille `tradekong`, à
+convertir) ; social-manager : entrée créée (machine de `companymanager`, `socialmanager.web3c.cc`, accès privé,
+mode registre désactivé), jamais déployée ; groupes multi-hôtes (PapangWorkspace : `BACK_HOSTS` de plusieurs entrées, `app-env.sh` par environnement,
 `webapp_upstreams` actif, `webapp_metrics_push`) ; enveloppe `deploy-agenthub.yml` (runner, SMTP) ;
 suppression des rôles par app une fois migrés ; métrique `webapp_deployed_info`.
 
