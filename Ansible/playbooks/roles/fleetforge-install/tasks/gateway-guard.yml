@@ -1,0 +1,171 @@
+---
+# Passerelle MCP de FleetForge : garde STATIQUE de son entrée (asserts locaux, AUCUNE connexion) et préparation de ce
+# que SEUL FleetForge sait — joué par deploy-fleetforge.yml sur `fleetforge_gateways`, avant l'import de
+# deploy-webapp.yml. La passerelle est une entrée `webapp` DURCIE (`webapp_hardening`) : son déploiement, son pare-feu,
+# son vhost et son durcissement sont ceux de la famille générique (docs/etude-passerelle-sur-webapp.md). Reste ici ce
+# qui relève de l'infra de FleetForge :
+#   • l'entrée est DÉDIÉE (hors `infras`, sans la famille `fleetforge` : elle ne doit jamais passer pour un nœud de
+#     contrôle), privée (E1), durcie, avec `/mcp` relayé au back-lb derrière une liste NOMMÉE ;
+#   • chaque amont (`ffg_upstreams`) désigne une entrée FleetForge qui admet la passerelle (`access_linked`) et porte
+#     les trois comptes BORNÉS (liste blanche exacte, refus requis, `accept_own_checks: false`) ;
+#   • les mots de passe aval sont nommés par `webapp_env_from_vault` (un par compte, rien d'autre), `FFG_UPSTREAMS`
+#     est exigé dans back/.env (`webapp_env_required`) ;
+#   • faits : `wa_env_injected` (FFG_UPSTREAMS, JSON sans secret) et, au PREMIER déploiement, les mots de passe que
+#     fleetforge-install vient de tirer dans CE run (pas encore relus depuis le group_vars du parc), no_log.
+
+- name: Check the deployment scope
+  ansible.builtin.assert:
+    that: (ff_deploy_scope | default('all')) in ['all', 'fleetforge', 'gateway']
+    fail_msg: "ff_deploy_scope vaut « {{ ff_deploy_scope | default('') }} » : all, fleetforge ou gateway."
+    quiet: true
+
+- name: Check the gateway entry is dedicated, private and hardened
+  vars:
+    _named_mcp: >-
+      {{ webapp_vhost_locations | default([]) | selectattr('access', 'defined')
+         | selectattr('path', 'search', 'mcp') | selectattr('upstream', 'defined') | selectattr('upstream', 'equalto', 'back') | list }}
+  ansible.builtin.assert:
+    that:
+      - inventory_hostname not in (groups['infras'] | default([]))
+      - "'fleetforge' not in (ansible_roles | default([]))"
+      - "'webapp' in (ansible_roles | default([]))"
+      - webapp_hardening is defined
+      # E1 : vhost privé, rien de public. Une passerelle qui partage la machine du nœud de contrôle ne sera JAMAIS
+      # publique (prérequis E2/E3 : la déplacer d'abord, voir docs/avant-ouverture-public.md).
+      - access_mode is defined
+      - access_mode == 'private'
+      - hostname is defined
+      - proxy_hostname is defined
+      - proxy_hostname is search('[.]' ~ (domain_name | regex_escape) ~ '$')
+      - proxy_hostname != 'proxy.' ~ domain_name
+      - _named_mcp | length > 0
+    fail_msg: >-
+      Entrée {{ inventory_hostname }} invalide pour la passerelle : entrée dédiée hors du groupe `infras`, famille
+      `webapp` (jamais `fleetforge`), `webapp_hardening`, `access_mode: private` (E1), `hostname`, `proxy_hostname`
+      (nom de la zone, pas le front des proxies), et une location `/mcp` de `webapp_vhost_locations` relayée au back-lb
+      (`upstream: back`) derrière une liste nommée (`access`).
+    quiet: true
+
+# Chaque amont : l'entrée FleetForge qu'il désigne doit admettre la passerelle (`access_linked`) et porter les trois
+# comptes BORNÉS attendus — jamais le compte d'AgentHub (`ff_api_user`) ni un compte plus large.
+- name: Check each upstream against its FleetForge entry
+  vars:
+    _e: "{{ item.entry | default('') }}"
+    _ev: "{{ hostvars[_e] if _e in hostvars else {} }}"
+    _users: "{{ ffg_default_users | combine(item.users | default({})) }}"
+    _accounts: "{{ _ev.ff_api_accounts | default([]) }}"
+    _read: "{{ _accounts | selectattr('user', 'defined') | selectattr('user', 'equalto', _users.read) | first | default({}) }}"
+    _check: "{{ _accounts | selectattr('user', 'defined') | selectattr('user', 'equalto', _users.check) | first | default({}) }}"
+    _run: "{{ _accounts | selectattr('user', 'defined') | selectattr('user', 'equalto', _users.run) | first | default({}) }}"
+    _parc: "{{ _ev.parc_name | default('') }}"
+    # Playbooks de la liste blanche qu'un motif de refus de ffg_check/ffg_run toucherait (glob FleetForge : `*`, `?`),
+    # traduit en regex sans antislash.
+    _denied_allowed: >-
+      {{ ffg_allowed_playbooks
+         | select('match', '^(' ~ (((_check.deny_playbooks | default([])) + (_run.deny_playbooks | default([])))
+             | map('regex_replace', '[.]', '[.]') | map('regex_replace', '[?]', '.') | map('regex_replace', '[*]', '.*')
+             | join('|')) ~ ')$') | list }}
+    # Mot de passe de chaque compte : nommé dans `webapp_env_from_vault`, exactement.
+    _slots: >-
+      {%- set out = {} -%}
+      {%- for role in ['read', 'check', 'run'] -%}
+      {%- set _ = out.update({'FFG_UPSTREAM_' ~ (item.id | default('') | upper) ~ '_' ~ (role | upper) ~ '_PASSWORD': 'ff_api_password_' ~ _users[role]}) -%}
+      {%- endfor -%}
+      {{ out }}
+  ansible.builtin.assert:
+    that:
+      - item.id is defined
+      - item.id is match('^[a-z][a-z0-9_]{0,31}$')
+      - _e in (groups['infras'] | default([]))
+      - _ev.proxy_hostname is defined
+      - _ev.proxy_hostname is match('^[a-z0-9][a-z0-9.-]{0,252}$')
+      - inventory_hostname in (_ev.access_linked | default([]))
+      - item.parcs is defined and item.parcs is not string and item.parcs | length > 0
+      - (_users.values() | unique | list | length) == 3
+      - (_ev.ff_api_user | default('')) not in _users.values()
+      - _read.mode | default('read') == 'read' and _read.user is defined
+      - _check.mode | default('') == 'check'
+      - _run.mode | default('') == 'run'
+      - _users.check in (_run.accept_checks_from | default([]))
+      # Séparation réelle : le compte run n'utilise PAS ses propres checks.
+      - not (_run.accept_own_checks | default(true) | bool)
+      - _check.max_hosts is defined and _run.max_hosts is defined
+      - ffg_required_denies | difference(_check.deny_playbooks | default([])) | length == 0
+      - ffg_required_denies | difference(_run.deny_playbooks | default([])) | length == 0
+      # Liste blanche EXACTE (décision du propriétaire), et aucun motif de refus du compte ne la touche.
+      - (_check.allow_playbooks | default([]) | sort) == (ffg_allowed_playbooks | sort)
+      - (_run.allow_playbooks | default([]) | sort) == (ffg_allowed_playbooks | sort)
+      - _denied_allowed | length == 0
+      - item.parcs | difference(_read.parcs | default([_parc])) | length == 0
+      - item.parcs | difference(_check.parcs | default([_parc])) | length == 0
+      - item.parcs | difference(_run.parcs | default([_parc])) | length == 0
+      - _slots.items() | list | difference((webapp_env_from_vault | default({})).items() | list) | length == 0
+    fail_msg: >-
+      Amont « {{ item.id | default('?') }} » de {{ inventory_hostname }} : l'entrée `{{ _e }}` doit être du groupe
+      `infras`, déclarer `proxy_hostname`, nommer {{ inventory_hostname }} dans `access_linked`, et porter dans
+      `ff_api_accounts` {{ _users.read }} (read), {{ _users.check }} (check, max_hosts) et {{ _users.run }} (run,
+      max_hosts, accept_checks_from: [{{ _users.check }}], accept_own_checks: false) couvrant les parcs
+      {{ item.parcs | default([]) | join(', ') }}, check et run avec `allow_playbooks` = {{ ffg_allowed_playbooks | join(', ') }}
+      et refusant {{ ffg_required_denies | join(', ') }} ; trois noms distincts, aucun égal au compte d'AgentHub
+      (`ff_api_user`) ; `webapp_env_from_vault` de la passerelle : {{ _slots.keys() | join(', ') }}.
+  loop: "{{ ffg_upstreams | default([]) }}"
+  loop_control:
+    label: "{{ item.id | default('?') }} → {{ item.entry | default('?') }}"
+
+- name: Check the upstreams and the keys the gateway needs
+  vars:
+    _expected: >-
+      {%- set out = [] -%}
+      {%- for u in ffg_upstreams | default([]) if u is mapping -%}
+      {%- for role in ['read', 'check', 'run'] -%}
+      {%- set _ = out.append('FFG_UPSTREAM_' ~ (u.id | default('') | upper) ~ '_' ~ (role | upper) ~ '_PASSWORD') -%}
+      {%- endfor -%}
+      {%- endfor -%}
+      {{ out }}
+  ansible.builtin.assert:
+    that:
+      - ffg_upstreams | default([]) is not string
+      - ffg_upstreams | default([]) | length > 0
+      - ffg_upstreams | map(attribute='id') | unique | list | length == ffg_upstreams | length
+      # Aucun secret de plus que les mots de passe aval : rien d'autre ne transite par cette voie.
+      - (webapp_env_from_vault | default({})).keys() | list | sort == _expected | sort
+      - "'FFG_UPSTREAMS' in (webapp_env_required | default([]))"
+    fail_msg: >-
+      {{ inventory_hostname }} : `ffg_upstreams` (liste d'amonts {id, entry, parcs}, ids uniques) vide ou invalide, ou
+      `webapp_env_from_vault` ≠ {{ _expected | join(', ') }}, ou FFG_UPSTREAMS absent de `webapp_env_required`.
+    quiet: true
+
+# FFG_UPSTREAMS : JSON sans secret (id, URL https de l'amont, parcs, noms de comptes), écrit par webapp-env-update.
+- name: Work out FFG_UPSTREAMS
+  vars:
+    _upstreams: >-
+      [{% for u in ffg_upstreams %}{"id": {{ u.id | to_json }}, "baseUrl": {{ ('https://' ~ hostvars[u.entry].proxy_hostname) | to_json }}, "parcs": {{ u.parcs | to_json }}{% if u.users is defined %}, "users": {{ u.users | to_json }}{% endif %}}{{ '' if loop.last else ', ' }}{% endfor %}]
+  ansible.builtin.set_fact:
+    wa_env_injected:
+      FFG_UPSTREAMS: "{{ _upstreams | trim }}"
+
+- name: Check FFG_UPSTREAMS
+  ansible.builtin.assert:
+    that:
+      - wa_env_injected.FFG_UPSTREAMS is match('^[][{}A-Za-z0-9 ",:._/-]+$')
+      - wa_env_injected.FFG_UPSTREAMS | from_json | length == ffg_upstreams | length
+    fail_msg: "FFG_UPSTREAMS hors grammaire (ids, noms publics et parcs : [A-Za-z0-9._-])."
+    quiet: true
+
+# Premier déploiement : fleetforge-install vient de tirer les mots de passe dans CE run (fait `ff_api_new_passwords`
+# de l'entrée FleetForge) — ils ne sont pas encore relus depuis le group_vars. Fait d'hôte du même nom que la variable
+# du coffre, que `webapp_env_from_vault` lit ensuite. Jamais affiché.
+- name: Take the passwords drawn in this run when the vault does not have them yet
+  vars:
+    _users: "{{ ffg_default_users | combine(item.0.users | default({})) }}"
+    _user: "{{ _users[item.1] }}"
+    _drawn: "{{ (hostvars[item.0.entry].ff_api_new_passwords | default({}))[_user] | default('') }}"
+  ansible.builtin.set_fact:
+    "{{ 'ff_api_password_' ~ _user }}": "{{ _drawn }}"
+  loop: "{{ ffg_upstreams | product(['read', 'check', 'run']) | list }}"
+  loop_control:
+    label: "{{ item.0.id }} {{ item.1 }}"
+  when:
+    - lookup('ansible.builtin.vars', 'ff_api_password_' ~ _user, default='') | length == 0
+    - _drawn | length > 0
+  no_log: true

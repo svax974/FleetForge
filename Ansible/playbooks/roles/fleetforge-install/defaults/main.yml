@@ -297,3 +297,82 @@ ff_ansible_extra_files: []
 ff_ansible_prune: true
 ff_ansible_foreign_paths: [.private, .claude, backups/roles, backups/wordpress]
 ff_install_ansible: true
+
+# ── Passerelle MCP (entrée `webapp` durcie du groupe `fleetforge_gateways`) ─
+# Garde jouée par deploy-fleetforge.yml (tasks/gateway-guard.yml, sans connexion) : comptes aval BORNÉS de l'entrée
+# FleetForge amont. Noms par défaut des trois comptes (plan 06 §2.4).
+ffg_default_users: { read: ffg_read, check: ffg_check, run: ffg_run }
+
+# Motifs que les comptes `check` et `run` doivent refuser : la passerelle ne redéploie ni FleetForge ni elle-même, ne
+# touche ni aux accès (SSH, pare-feu, VPN, proxies, DNS, certificats, clés), ni aux sauvegardes, ni aux suppressions.
+# Liste MINIMALE vérifiée par la garde ; l'inventaire peut en ajouter, jamais en retirer.
+ffg_required_denies:
+  - "*-fleetforge.yml"
+  - "*-fleetforge-gateway.yml"
+  - "*-readonly-user.yml"
+  - "setup-server.yml"
+  - "purge-*.yml"
+  - "remove-*.yml"
+  - "update-security-*.yml"
+  - "update-sshd-security.yml"
+  - "update-ufw-all.yml"
+  - "deploy-vpn*"
+  - "install-vpn-routes*"
+  - "deploy-cloudflare-origin-pull*"
+  - "update-cloudflare-dns*"
+  - "deploy-proxy*"
+  - "update-proxy*"
+  - "deploy-install-cert*"
+  - "deploy-webapp*"
+  - "retarget-backups*"
+  - "restore-*"
+  - "export-*-keys*"
+  - "deploy-copyfail-patch*"
+  - "deploy-docker-repo*"
+  - "temp.yml"
+  # Playbooks « sensibles » (un play sur localhost — le nœud de contrôle —, all, proxies, infras, vpns ou la
+  # supervision, un motif d'hôte templaté) : couverture exigée par scripts/webapp_hardening_check.py (`coverage`).
+  - "backup-*"
+  - "migrate-*"
+  - "*timescale*"
+  - "deploy-agenthub*"
+  - "deploy-alertmanager*"
+  - "deploy-astar*"
+  - "deploy-backup*"
+  - "deploy-btc-pipeline*"
+  - "deploy-exporter-sys*"
+  - "deploy-freellm*"
+  - "deploy-grass*"
+  - "deploy-llamacpp*"
+  - "deploy-llm-proxy*"
+  - "deploy-mailrelay*"
+  - "deploy-mailserver*"
+  - "deploy-monero*"
+  - "deploy-*monitoring*"
+  - "update-*monitoring*"
+  - "deploy-openclaw*"
+  - "deploy-opencode*"
+  - "deploy-papanglabs-*"
+  - "deploy-prometheus*"
+  - "deploy-rpcbtc*"
+  - "deploy-starnet*"
+  - "deploy-storj*"
+  - "deploy-sync-server*"
+  - "deploy-theta-edge*"
+  - "deploy-wordpress*"
+  - "deploy-xmrig*"
+  - "update-journald-all*"
+  - "update-loadtest-scrape*"
+  - "update-opencode-model*"
+
+# LISTE BLANCHE des comptes `ffg_check` / `ffg_run` (décision du propriétaire, 15/11/2026) : EXACTEMENT ces
+# playbooks, posés en `allow_playbooks` sur les deux comptes et vérifiés par la garde. Aucun motif de
+# `ffg_required_denies` ne doit les toucher (le refus l'emporte dans FleetForge).
+#   • update-prometheus-alerts.yml : rend les règles d'alerte, les valide par `docker run promtool`, les installe et
+#     REDÉMARRE le conteneur Prometheus (become) — courte coupure de la supervision ;
+#   • check-monitoring.yml : lecture seule (requêtes `uri` à l'API Prometheus locale, aucun shell/command, aucune tâche
+#     `check_mode: false`).
+# `deploy-exporter-sys.yml` reste EXCLU : il ouvre des règles ufw.
+ffg_allowed_playbooks:
+  - update-prometheus-alerts.yml
+  - check-monitoring.yml

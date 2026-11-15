@@ -59,52 +59,46 @@
 #
 # ════ DEUX SERVICES, UN PLAYBOOK : FleetForge ET sa passerelle MCP ═════════
 # Ce playbook déploie aussi la passerelle MCP de FleetForge (`fleetforge-gateway`,
-# app Nest du gabarit, dépôt PRIVÉ séparé) sur les hôtes du groupe
-# `fleetforge_gateways` — une entrée d'inventaire DÉDIÉE, jamais l'entrée de
-# FleetForge. Un parc sans ce groupe (papanglabs) se déploie exactement comme
-# avant : les plays de la passerelle ne trouvent aucun hôte.
+# app Nest du gabarit, dépôt PRIVÉ séparé) : une entrée d'inventaire DÉDIÉE du
+# groupe `fleetforge_gateways`, de famille GÉNÉRIQUE `webapp` avec le profil
+# durci `webapp_hardening` (jamais l'entrée de FleetForge, jamais la famille
+# `fleetforge`). Ses plays sont ceux de deploy-webapp.yml, IMPORTÉ en fin de
+# playbook (docs/etude-passerelle-sur-webapp.md). Un parc sans ce groupe
+# (papanglabs) se déploie exactement comme avant : rien n'est visé.
 #
 #   ./play.sh web3c deploy-fleetforge.yml                              # les deux
 #   ./play.sh web3c deploy-fleetforge.yml -e ff_deploy_scope=fleetforge  # FleetForge seul
 #   ./play.sh web3c deploy-fleetforge.yml -e ff_deploy_scope=gateway     # passerelle seule
-#   ./play.sh web3c deploy-fleetforge-gateway.yml                      # idem (alias mince)
 #   ./play.sh web3c deploy-fleetforge.yml --tags gateway               # plays de la passerelle
 #   ./play.sh web3c deploy-fleetforge.yml --tags proxy-conf            # les DEUX vhosts
 #   ./play.sh web3c deploy-fleetforge.yml -e ff_deploy_scope=gateway --tags hardening
 #                                                   # recontrôle du durcissement seul
+# Retrait : remove-webapp.yml / purge-webapp.yml -e webapp=fleetforge-gateway.
 #
 # PRÉREQUIS AVANT LE PREMIER DÉPLOIEMENT RÉEL de la passerelle :
 #   1. CHOISIR LA MACHINE : `ansible_host` de l'entrée dédiée. Premier
 #      déploiement : la MÊME machine que `infra1` (décision du 15/11/2026) ;
 #      la déplacer = changer cette seule valeur (aucune adresse, aucun chemin
-#      de la machine de contrôle n'est écrit dans les rôles de la passerelle) ;
+#      de la machine de contrôle n'est écrit dans les rôles) ;
 #   2. les comptes aval `ffg_read`/`ffg_check`/`ffg_run` dans `ff_api_accounts`
 #      de l'entrée FleetForge (mots de passe tirés et chiffrés au group_vars du
-#      parc par fleetforge-install, à COMMITTER) et la passerelle dans son
-#      `access_linked` — le play de garde le vérifie ;
-#   3. un compose DURCI dans le dépôt de l'app (`ffg_compose_file`, écrit en
-#      COMPOSE_FILE_NAME) : compte dédié (FFG_RUNTIME_UID/GID), read_only,
-#      cap_drop ALL, no-new-privileges partout, aucun cap_add, limites
-#      mémoire/CPU, réseau ${FFG_DOCKER_SUBNET} avec le front et le back-lb à
-#      ${FFG_FRONT_IP} / ${FFG_BACK_LB_IP}, ports `0.0.0.0:${VITE_PORT}:80` et
-#      `0.0.0.0:${NODE_PORT}:${NODE_PORT}` EXACTEMENT, back-lb dont la config
-#      nginx (heredoc QUOTÉ) insère ${FFG_BACK_LB_REALIP}, `real_ip_header
-#      X-Forwarded-For` et RÉÉCRIT X-Forwarded-For (`$$remote_addr` dans le
-#      compose), Postgres/Redis en `127.0.0.1:`, Redis sans mot de passe en ligne
-#      de commande, `restart: unless-stopped`, aucun montage de l'hôte, volume ou
-#      réseau `external`/`name`, secrets/configs, volumes_from ni socket Docker —
-#      fourni par le GABARIT (non créé ici) ; refusé AVANT déploiement sinon
-#      (scripts/ffg_isolation_check.py, interpolation + `docker compose config`),
-#      puis vérifié sur la machine (dans le bloc du déploiement et par le tag
-#      `hardening` : conteneurs ARRÊTÉS au moindre écart ou échec) ;
+#      parc par fleetforge-install, à COMMITTER), la passerelle dans son
+#      `access_linked`, les mots de passe nommés par `webapp_env_from_vault` de
+#      la passerelle — le play de garde le vérifie ;
+#   3. le compose DURCI du gabarit (`scripts/docker-compose-hardened.yml`,
+#      spécification : docs/etude-passerelle-sur-webapp.md § 8) — refusé AVANT
+#      déploiement sinon (scripts/webapp_hardening_check.py, interpolation +
+#      `docker compose config`), puis vérifié sur la machine (dans le bloc du
+#      déploiement et par le tag `hardening` : conteneurs ARRÊTÉS au moindre
+#      écart ou échec) ;
 #   4. une revue Opus indépendante (docs/avant-ouverture-public.md).
 #
-# EXPOSITION (E1, plan 06 §7) : vhost PRIVÉ ; `/mcp` limité aux serveurs
-# NOMMÉS par `ffg_mcp_allowed_hosts` (infra1, AgentHub) et, en TEST seulement,
-# à la whitelist (`ffg_mcp_allow_whitelist: true` — à repasser à `false` dès
-# la fin des tests et avant toute exposition E2/E3), filtrée : IPv4 seule ou
-# /32, IPv6 de préfixe ≥ `ffg_mcp_whitelist_max_v6_prefix` (128 par défaut) ;
-# ni vpns ni plage large. Second niveau, côté app : chaque credential `exec`
+# EXPOSITION (E1, plan 06 §7) : vhost PRIVÉ ; `/mcp` (location de
+# `webapp_vhost_locations` relayée au back-lb, liste NOMMÉE `access`) limité aux
+# serveurs `hosts` (infra1, AgentHub) et, en TEST seulement, à la whitelist
+# (`whitelist: true` — à repasser à `false` dès la fin des tests et avant toute
+# exposition E2/E3), filtrée : IPv4 seule ou /32, IPv6 de préfixe ≥
+# `v6_min_prefix` (128 par défaut) ; ni vpns ni plage large. Second niveau, côté app : chaque credential `exec`
 # porte sa propre allow-list d'adresses (≤ /16, `mcp-access`), qui ne
 # s'élargit pas avec la whitelist. Ports publiés (DOCKER-USER, règles en tête
 # de chaîne) : proxies ADMIS seulement — jamais un proxy à l'adresse d'un VPN —,
@@ -113,11 +107,11 @@
 # sur la machine, front et back-lb à adresse fixe), et le back-lb réécrit
 # X-Forwarded-For.
 # Adresses des serveurs VPN écartées de `/mcp` (proxy2 = vpn1 = NAT domestique) :
-# `ffg_mcp_allow_vpn_addresses: true` OUVRE /mcp À TOUT CE QUI SORT PAR LE VPN —
-# décision explicite du propriétaire, pour des tests depuis chez lui (défaut false).
+# `vpn_addresses: true` OUVRE /mcp À TOUT CE QUI SORT PAR LE VPN — décision
+# explicite du propriétaire, pour des tests depuis chez lui (décision : false).
 # Comptes `ffg_check`/`ffg_run` : liste blanche `allow_playbooks` =
 # update-prometheus-alerts.yml + check-monitoring.yml (décision du 15/11/2026),
-# et liste de refus couvrant tout playbook « sensible » (scripts/ffg_isolation_check.py).
+# et liste de refus couvrant tout playbook « sensible » (scripts/webapp_hardening_check.py).
 # Ports publiés en `0.0.0.0:` EXPLICITE (sinon docker-proxy publierait aussi
 # `[::]`, en INPUT, hors DOCKER-USER) ; ufw actif en `deny` entrant vérifié.
 # RISQUE RÉSIDUEL tant que la machine est partagée : tout processus local peut
@@ -130,8 +124,8 @@
 # nœud de contrôle : la déplacer d'abord (docs/etude-isolation-passerelle-vm.md).
 
 # ── Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ───────────────────────
-# `ff_deploy_scope=gateway` (deploy-fleetforge-gateway.yml) : les plays de
-# FleetForge s'arrêtent avant toute connexion (`gather_facts` faux, puis
+# `ff_deploy_scope=gateway` : les plays de FleetForge s'arrêtent avant toute
+# connexion (`gather_facts` faux, puis
 # `end_play`). Valeur par défaut `all` : comportement inchangé.
 - name: Contrôle préalable
   hosts: infras
@@ -308,188 +302,45 @@
     - fleetforge-monitoring
 
 # ════════════════════════════════════════════════════════════════════════════
-# Passerelle MCP de FleetForge — groupe `fleetforge_gateways` (entrée dédiée).
-# Aucun hôte dans le groupe (papanglabs) : chaque play ci-dessous est sauté.
-# `ff_deploy_scope=fleetforge` : idem, sans connexion (`gather_facts` faux).
-# Tous portent le tag `gateway` ; `hosts:` en dur (CLAUDE.md : jamais de
-# variable dans un `hosts:`), jamais `infras` ni `all`.
+# Passerelle MCP de FleetForge — entrée `webapp` DURCIE du groupe
+# `fleetforge_gateways`. Aucun hôte dans le groupe (papanglabs) : rien n'est
+# visé. `ff_deploy_scope=fleetforge` : idem, sans connexion. `hosts:` en dur
+# (CLAUDE.md : jamais de variable dans un `hosts:`), jamais `infras` ni `all`.
 # ════════════════════════════════════════════════════════════════════════════
 
-# Garde STATIQUE (aucune connexion) : entrée dédiée hors `infras`, familles non
-# mélangées, `access_mode: private`, amonts cohérents avec l'entrée FleetForge
-# (comptes bornés, `access_linked`), listes d'accès de `/mcp`.
+# Garde STATIQUE (aucune connexion) de ce que SEUL FleetForge sait : entrée
+# dédiée hors `infras` sans la famille `fleetforge`, privée et durcie, `/mcp`
+# derrière une liste nommée, comptes aval bornés de l'entrée FleetForge
+# (`access_linked`, liste blanche, refus), mots de passe aval nommés. Prépare
+# FFG_UPSTREAMS et, au premier passage, les mots de passe tirés dans CE run.
 - name: Garde de la passerelle (inventaire, sans connexion)
   hosts: fleetforge_gateways
   gather_facts: false
-  tags: [gateway]
+  tags: [gateway, always]
   tasks:
     - name: Skip the gateway when only FleetForge is deployed
       ansible.builtin.meta: end_play
       when: (ff_deploy_scope | default('all')) == 'fleetforge'
-      tags: [always]
 
-    - name: Check the gateway inventory entry
+    - name: Check the gateway entry and prepare what only FleetForge knows
       ansible.builtin.include_role:
-        name: fleetforge-gateway-install
-        tasks_from: inventory
+        name: fleetforge-install
+        tasks_from: gateway-guard
         apply:
           tags: [always]
-      tags: [always]
 
-- name: Contrôle préalable de la passerelle
-  hosts: fleetforge_gateways
-  remote_user: "{{ remote_username }}"
-  gather_facts: "{{ (ff_deploy_scope | default('all')) != 'fleetforge' }}"
+# Déploiement par la famille GÉNÉRIQUE `webapp` (profil `webapp_hardening`) :
+# DNS, vhost (`/mcp` : liste nommée, le reste privé), compte dédié, pare-feu
+# DOCKER-USER propre (proxies admis distants), .env rendus (secrets adoptés,
+# mots de passe aval no_log), compose durci contrôlé AVANT run.sh, durcissement
+# vérifié APRÈS — conteneurs ARRÊTÉS au moindre écart —, sonde svcprobe.
+# `webapp` vide (scope `fleetforge`, ou pas de groupe) : `webapp_optional`,
+# rien n'est visé, aucune connexion.
+- name: Déploiement de la passerelle (famille webapp)
+  ansible.builtin.import_playbook: deploy-webapp.yml
+  vars:
+    webapp: >-
+      {{ '' if (ff_deploy_scope | default('all')) == 'fleetforge'
+         else (groups['fleetforge_gateways'] | default([]) | first | default('')) }}
+    webapp_optional: true
   tags: [gateway]
-  pre_tasks:
-    - name: Skip the gateway when only FleetForge is deployed
-      ansible.builtin.meta: end_play
-      when: (ff_deploy_scope | default('all')) == 'fleetforge'
-      tags: [always]
-  roles:
-    - role: host-preflight
-      preflight_require_docker: true
-
-# Compte Unix dédié (uid des conteneurs), CNAME du nom public.
-- name: Installation de la passerelle
-  hosts: fleetforge_gateways
-  remote_user: "{{ remote_username }}"
-  gather_facts: "{{ (ff_deploy_scope | default('all')) != 'fleetforge' }}"
-  tags: [gateway]
-  pre_tasks:
-    - name: Skip the gateway when only FleetForge is deployed
-      ansible.builtin.meta: end_play
-      when: (ff_deploy_scope | default('all')) == 'fleetforge'
-      tags: [always]
-  roles:
-    - fleetforge-gateway-install
-
-# AVANT l'app : ses ports publiés ne sont jamais ouverts sans filtre.
-# Rejoué seul par update-ufw-all.yml quand les proxies changent.
-- name: Pare-feu de la passerelle (DOCKER-USER)
-  hosts: fleetforge_gateways
-  remote_user: "{{ remote_username }}"
-  gather_facts: "{{ (ff_deploy_scope | default('all')) != 'fleetforge' }}"
-  tags: [gateway, firewall]
-  pre_tasks:
-    - name: Skip the gateway when only FleetForge is deployed
-      ansible.builtin.meta: end_play
-      when: (ff_deploy_scope | default('all')) == 'fleetforge'
-      tags: [always]
-  roles:
-    - fleetforge-gateway-security
-
-# Pousse SEULEMENT sites-enabled/fleetforge-gateway.conf (reload si changé).
-# Le gabarit du parc inclut `_fleetforge_gateway.inc` : `/mcp` limité aux
-# serveurs nommés (+ whitelist de test), le reste en mode privé.
-# Pas de `--limit` : il exclurait les proxies.
-- name: Vhost de la passerelle sur les proxies
-  hosts: proxies
-  remote_user: "{{ remote_username }}"
-  become: true
-  gather_facts: >-
-    {{ (ff_deploy_scope | default('all')) != 'fleetforge'
-       and (groups['fleetforge_gateways'] | default([]) | length > 0) }}
-  tags: [gateway, proxy-conf]
-  tasks:
-    - name: Skip the gateway when only FleetForge is deployed, or without a gateway host
-      ansible.builtin.meta: end_play
-      when: >-
-        (ff_deploy_scope | default('all')) == 'fleetforge'
-        or groups['fleetforge_gateways'] | default([]) | length == 0
-      tags: [always]
-
-    - name: Look for the gateway vhost of this parc
-      ansible.builtin.set_fact:
-        ffg_vhost_wanted: >-
-          {{ (query('ansible.builtin.fileglob',
-                    playbook_dir ~ '/../parcs/' ~ parc_name ~ '/nginx/sites-enabled/fleetforge-gateway.conf') | length > 0)
-             and (groups['fleetforge_gateways'] | default([]) | length > 0) }}
-
-    - name: Deploy just the gateway vhost
-      ansible.builtin.include_role:
-        name: proxy-update
-        tasks_from: deploy-one-site
-      vars:
-        site: fleetforge-gateway.conf
-      when: ffg_vhost_wanted | bool
-
-# Code de l'app : scripts de SON dépôt (run.sh prod → deploy-full.sh), depuis
-# le poste de contrôle ; .env fixés par l'inventaire, mots de passe aval
-# restaurés du vault (no_log), compose durci contrôlé avant.
-- name: Déploiement de l'app passerelle
-  hosts: fleetforge_gateways
-  remote_user: "{{ remote_username }}"
-  gather_facts: "{{ (ff_deploy_scope | default('all')) != 'fleetforge' }}"
-  tags: [gateway, app]
-  pre_tasks:
-    - name: Skip the gateway when only FleetForge is deployed
-      ansible.builtin.meta: end_play
-      when: (ff_deploy_scope | default('all')) == 'fleetforge'
-      tags: [always]
-  roles:
-    - fleetforge-gateway-deploy
-
-# Durcissement RÉEL lu sur la machine (docker inspect, compte dédié) ; écart :
-# conteneurs de la passerelle ARRÊTÉS, play en échec.
-- name: Durcissement de la passerelle
-  hosts: fleetforge_gateways
-  remote_user: "{{ remote_username }}"
-  gather_facts: "{{ (ff_deploy_scope | default('all')) != 'fleetforge' }}"
-  tags: [gateway, hardening]
-  tasks:
-    - name: Skip the gateway when only FleetForge is deployed
-      ansible.builtin.meta: end_play
-      when: (ff_deploy_scope | default('all')) == 'fleetforge'
-      tags: [always]
-
-    - name: Verify the hardening of the running gateway
-      ansible.builtin.include_role:
-        name: fleetforge-gateway-security
-        tasks_from: runtime
-        apply:
-          tags: [gateway, hardening]
-
-# ── Supervision (OBLIGATOIRE, voir CLAUDE.md) ──────────────────────────────
-- name: Supervision de la passerelle
-  hosts: fleetforge_gateways
-  remote_user: "{{ remote_username }}"
-  gather_facts: "{{ (ff_deploy_scope | default('all')) != 'fleetforge' }}"
-  tags: [gateway]
-  pre_tasks:
-    - name: Skip the gateway when only FleetForge is deployed
-      ansible.builtin.meta: end_play
-      when: (ff_deploy_scope | default('all')) == 'fleetforge'
-      tags: [always]
-  roles:
-    - fleetforge-gateway-monitoring
-
-# ── Règles d'alerte de la passerelle ───────────────────────────────────────
-# Sondes svcprobe : groupe générique `services` (ServiceDown, ServiceCheckFailing
-# — dont `upstream_<id>`, chemin passerelle → FleetForge). Le play échoue si le
-# groupe n'est pas chargé sur ce parc plutôt que de réussir sans alerte.
-- name: Règles d'alerte de la passerelle
-  hosts: prometheus1:monitor
-  remote_user: "{{ remote_username }}"
-  become: true
-  gather_facts: >-
-    {{ (ff_deploy_scope | default('all')) != 'fleetforge'
-       and (groups['fleetforge_gateways'] | default([]) | length > 0) }}
-  tags: [gateway, alerts, monitoring]
-  pre_tasks:
-    - name: Nothing to arm without a gateway host (or when only FleetForge is deployed)
-      ansible.builtin.meta: end_play
-      when: >-
-        groups['fleetforge_gateways'] | default([]) | length == 0
-        or (ff_deploy_scope | default('all')) == 'fleetforge'
-      tags: [always]
-
-    - name: Fail when the services alert group is not enabled for this parc
-      ansible.builtin.assert:
-        that: "'services' in prom_alert_groups"
-        fail_msg: >-
-          `services` absent de `prom_alert_groups` (group_vars du parc) :
-          ServiceDown et ServiceCheckFailing ne seraient pas chargées, et la
-          passerelle (ou son chemin vers FleetForge) pourrait tomber sans alerte.
-  roles:
-    - prometheus-alerts-update
