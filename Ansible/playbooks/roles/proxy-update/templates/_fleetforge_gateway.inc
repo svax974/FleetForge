@@ -19,6 +19,11 @@
           ignoré (commentaire), jamais élargi ;
        3. rien d'autre : ni vpns, ni supervision, ni `access_linked`, ni plage
           large. Un serveur lié dont l'adresse n'est pas une IPv4 est ignoré.
+     Toute adresse d'un serveur VPN (serveur lié OU whitelist) est écartée de
+     `/mcp` — proxy2 = vpn1 = NAT domestique : l'admettre ouvrirait /mcp à tout
+     ce qui sort par le VPN —, sauf `ffg_mcp_allow_vpn_addresses: true`
+     (décision explicite, pour des tests depuis chez soi). Aucune valeur n'est
+     réaffichée brute dans un commentaire (pas d'injection de directive).
      Un proxy dont l'adresse est celle d'un serveur VPN ne reçoit AUCUN vhost
      de la passerelle (il admettrait tout ce qui sort par cette adresse ; le
      front privé du DNS ne pointe d'ailleurs pas sur lui).
@@ -81,27 +86,39 @@ server {
     add_header X-Robots-Tag "noindex, nofollow" always;
 
     # ── /mcp : serveurs liés nommés (+ whitelist de test), rien d'autre ──
+    {#- Une valeur n'est JAMAIS réaffichée brute (elle pourrait porter un saut de
+        ligne et une directive) : en commentaire, seulement ses caractères
+        d'adresse ; une valeur à plusieurs lignes ou à espaces est ignorée.
+        Adresses de serveurs VPN écartées sauf `ffg_mcp_allow_vpn_addresses`. #}
+    {%- set _allow_vpn = _gw.ffg_mcp_allow_vpn_addresses | default(false) | bool %}
     location ~* ^/mcp(/.*)?$ {
         # 1. Serveurs liés (ffg_mcp_allowed_hosts de {{ ffg_entry }})
 {% for h in _gw.ffg_mcp_allowed_hosts | default([]) %}
-{% if h in hostvars and (hostvars[h].ansible_host | default('')) is match(_gw_ipv4) %}
-        allow {{ hostvars[h].ansible_host }};  # mcp: serveur lié {{ h }}
+{% set _h = h | string | regex_replace('[^A-Za-z0-9_.-]', '?') %}
+{% set _a = (hostvars[h].ansible_host | default('') | string) if h in hostvars else '' %}
+{% if _a is match(_gw_ipv4) and _a == (_a | trim) and (_a.splitlines() | length) == 1 and (_allow_vpn or _a not in _vpn_addresses) %}
+        allow {{ _a }};  # mcp: serveur lié {{ _h }}
 {% else %}
-        # mcp: serveur lié {{ h }} ignoré (absent de l'inventaire ou adresse non IPv4)
+        # mcp: serveur lié {{ _h }} ignoré (absent, adresse non IPv4, ou adresse d'un serveur VPN)
 {% endif %}
 {% endfor %}
-        # 2. Whitelist du parc : {{ 'ACTIVÉE (accès de test, ffg_mcp_allow_whitelist)' if (_gw.ffg_mcp_allow_whitelist | default(false) | bool) else 'non admise' }}
+        # 2. Whitelist du parc : {{ 'ACTIVÉE (accès de test, ffg_mcp_allow_whitelist)' if (_gw.ffg_mcp_allow_whitelist | default(false) | bool) else 'non admise' }}{{ ' — adresses VPN ADMISES (ffg_mcp_allow_vpn_addresses)' if _allow_vpn else '' }}
 {% if _gw.ffg_mcp_allow_whitelist | default(false) | bool %}
 {% for ip in whitelist | default([]) %}
 {% set _ip = ip | string %}
-{% set _v4 = _ip is match('^[0-9]{1,3}([.][0-9]{1,3}){3}(/32)?$') %}
-{% set _v6 = _ip is match('^[0-9A-Fa-f:]*:[0-9A-Fa-f:]*(/[0-9]{1,3})?$')
+{% set _shown = _ip | regex_replace('[^0-9A-Fa-f.:/]', '?') %}
+{% set _clean = _ip == (_ip | trim) and (_ip.splitlines() | length) == 1 and ' ' not in _ip %}
+{% set _v4 = _clean and _ip is match('^(0|[1-9][0-9]{0,2})([.](0|[1-9][0-9]{0,2})){3}(/32)?$') %}
+{% set _v6 = _clean and _ip is match('^[0-9A-Fa-f:]*:[0-9A-Fa-f:]*(/[0-9]{1,3})?$')
              and ((_ip.split('/')[1] | int) if '/' in _ip else 128) >= _v6_min
              and ((_ip.split('/')[1] | int) if '/' in _ip else 128) <= 128 %}
-{% if _v4 or _v6 %}
+{% set _is_vpn = _ip.split('/')[0] in _vpn_addresses %}
+{% if (_v4 or _v6) and (_allow_vpn or not _is_vpn) %}
         allow {{ _ip }};  # mcp: whitelist (test)
+{% elif _is_vpn %}
+        # mcp: whitelist {{ _shown }} ignorée (adresse d'un serveur VPN)
 {% else %}
-        # mcp: whitelist {{ _ip }} ignorée (plage plus large qu'autorisé sur /mcp)
+        # mcp: whitelist {{ _shown }} ignorée (forme invalide ou plage plus large qu'autorisé sur /mcp)
 {% endif %}
 {% endfor %}
 {% endif %}
