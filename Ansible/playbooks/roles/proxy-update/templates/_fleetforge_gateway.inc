@@ -12,10 +12,16 @@
           d'inventaire ; vide = personne) ;
        2. la `whitelist` du parc, SI `ffg_mcp_allow_whitelist` est vrai — accès
           de TEST, à repasser à `false` dès la fin des tests et avant toute
-          exposition E2/E3 ;
+          exposition E2/E3. FILTRÉE : une IPv4 seulement en adresse seule ou
+          /32 ; une IPv6 seulement avec un préfixe ≥
+          `ffg_mcp_whitelist_max_v6_prefix` (128 par défaut = une adresse ; le
+          propriétaire peut descendre explicitement jusqu'à 64). Le reste est
+          ignoré (commentaire), jamais élargi ;
        3. rien d'autre : ni vpns, ni supervision, ni `access_linked`, ni plage
-          large. Une adresse qui n'est pas une IPv4 est ignorée (commentaire),
-          jamais élargie.
+          large. Un serveur lié dont l'adresse n'est pas une IPv4 est ignoré.
+     Un proxy dont l'adresse est celle d'un serveur VPN ne reçoit AUCUN vhost
+     de la passerelle (il admettrait tout ce qui sort par cette adresse ; le
+     front privé du DNS ne pointe d'ailleurs pas sur lui).
      Une seule `location` regex insensible à la casse couvre `/mcp`, `/MCP`,
      `/mcp/…` : nginx normalise l'URI avant le choix de la `location`
      (`//mcp`, `/x/../mcp`, `%2e%2e` → `/mcp`), et Express route `/MCP` et
@@ -37,8 +43,12 @@
    Co-localisation (modèle freellm.conf) : passerelle sur la machine de CE
    proxy → 127.0.0.1, sinon son adresse ; le port distant n'est ouvert qu'aux
    proxies dans DOCKER-USER (`fleetforge-gateway-security`). #}
-{% if ffg_entry is defined and ffg_entry in hostvars %}
+{% set _vpn_addresses = groups['vpns'] | default([]) | map('extract', hostvars, 'ansible_host') | list %}
+{% if ffg_entry is defined and ffg_entry in hostvars and ansible_host in _vpn_addresses %}
+# Passerelle {{ ffg_entry }} : aucun vhost sur ce proxy (son adresse est celle d'un serveur VPN).
+{% elif ffg_entry is defined and ffg_entry in hostvars %}
 {% set _gw = hostvars[ffg_entry] %}
+{% set _v6_min = _gw.ffg_mcp_whitelist_max_v6_prefix | default(128) | int %}
 {% set _gw_backend = '127.0.0.1' if _gw.ansible_host == ansible_host else _gw.ansible_host %}
 {% set _gw_front = 'http://' ~ _gw_backend ~ ':' ~ _gw.app_port %}
 {% set _gw_back = 'http://' ~ _gw_backend ~ ':' ~ _gw.back_port %}
@@ -83,7 +93,16 @@ server {
         # 2. Whitelist du parc : {{ 'ACTIVÉE (accès de test, ffg_mcp_allow_whitelist)' if (_gw.ffg_mcp_allow_whitelist | default(false) | bool) else 'non admise' }}
 {% if _gw.ffg_mcp_allow_whitelist | default(false) | bool %}
 {% for ip in whitelist | default([]) %}
-        allow {{ ip }};  # mcp: whitelist (test)
+{% set _ip = ip | string %}
+{% set _v4 = _ip is match('^[0-9]{1,3}([.][0-9]{1,3}){3}(/32)?$') %}
+{% set _v6 = _ip is match('^[0-9A-Fa-f:]*:[0-9A-Fa-f:]*(/[0-9]{1,3})?$')
+             and ((_ip.split('/')[1] | int) if '/' in _ip else 128) >= _v6_min
+             and ((_ip.split('/')[1] | int) if '/' in _ip else 128) <= 128 %}
+{% if _v4 or _v6 %}
+        allow {{ _ip }};  # mcp: whitelist (test)
+{% else %}
+        # mcp: whitelist {{ _ip }} ignorée (plage plus large qu'autorisé sur /mcp)
+{% endif %}
 {% endfor %}
 {% endif %}
         # 3. Rien d'autre.
