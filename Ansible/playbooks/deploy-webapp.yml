@@ -110,6 +110,15 @@
   gather_facts: false
   tags: [always]
   tasks:
+    # Passerelle MCP de FleetForge : sa garde (comptes aval bornés, profil durci EXIGÉ, mots de passe aval nommés,
+    # FFG_UPSTREAMS) est jouée ICI aussi — un `-e webapp=<passerelle>` ne la contourne pas (un `-e` l'emporte sur les
+    # `vars:` d'un import, et un fait « garde passée » se forgerait de même).
+    - name: Check the MCP gateway entry before any connection
+      ansible.builtin.include_role:
+        name: fleetforge-install
+        tasks_from: gateway-guard
+      when: inventory_hostname in (groups['fleetforge_gateways'] | default([]))
+
     - name: Check the hardening profile of the entry before any connection
       ansible.builtin.include_role:
         name: webapp-setup

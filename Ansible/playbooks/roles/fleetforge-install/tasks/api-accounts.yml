@@ -59,6 +59,15 @@
     label: "{{ item.user | default('?') }}"
   tags: [secrets, config]
 
+# Comptes de la passerelle MCP (`ffg_*`) : bornés ICI, avant tout tirage et avant d'écrire api-accounts.json, quel que
+# soit `ff_deploy_scope` (api-accounts-gateway.yml, éprouvé hors ligne).
+- name: Check the bounded accounts of the MCP gateway
+  ansible.builtin.include_tasks:
+    file: api-accounts-gateway.yml
+    apply:
+      tags: [secrets, config]
+  tags: [secrets, config]
+
 # ── Tirage et mise au vault (poste de contrôle) ───────────────────────────
 - name: Draw the passwords of the new bounded accounts (first deployment only)
   ansible.builtin.set_fact:

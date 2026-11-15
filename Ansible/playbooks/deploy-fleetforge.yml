@@ -123,6 +123,30 @@
 # E2/E3 (OAuth public) INTERDITS tant que la passerelle partage la machine du
 # nœud de contrôle : la déplacer d'abord (docs/etude-isolation-passerelle-vm.md).
 
+# ── Paramètres (AVANT toute connexion) ─────────────────────────────────────
+# `ff_deploy_scope` validé d'emblée ; un `-e webapp=…` l'emporterait sur les
+# `vars:` de l'import de deploy-webapp.yml : il n'est admis que s'il désigne
+# l'entrée de la passerelle, et jamais avec le scope `fleetforge`.
+- name: Paramètres du déploiement
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tags: [always]
+  tasks:
+    - name: Check the deployment scope and the application named on the command line
+      ansible.builtin.assert:
+        that:
+          - (ff_deploy_scope | default('all')) in ['all', 'fleetforge', 'gateway']
+          - >-
+            webapp is not defined
+            or ((ff_deploy_scope | default('all')) != 'fleetforge'
+                and webapp == (groups['fleetforge_gateways'] | default([]) | first | default('')))
+        fail_msg: >-
+          ff_deploy_scope : all, fleetforge ou gateway (reçu « {{ ff_deploy_scope | default('all') }} ») ; `-e webapp`
+          n'est admis ici que pour l'entrée de la passerelle ({{ groups['fleetforge_gateways'] | default([]) | first | default('aucune') }}),
+          jamais avec ff_deploy_scope=fleetforge — les autres applications passent par deploy-webapp.yml.
+        quiet: true
+
 # ── Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ───────────────────────
 # `ff_deploy_scope=gateway` : les plays de FleetForge s'arrêtent avant toute
 # connexion (`gather_facts` faux, puis

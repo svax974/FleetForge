@@ -1,0 +1,36 @@
+---
+# Comptes de la passerelle MCP (`ffg_*` de `ff_api_accounts`) : bornés AVANT tout tirage et avant d'écrire
+# api-accounts.json, quel que soit `ff_deploy_scope` (revue du 15/11/2026 : `-e ff_deploy_scope=fleetforge` les posait
+# sans passer par la garde de la passerelle). Mêmes règles que gateway-guard.yml : check et run avec EXACTEMENT la liste
+# blanche, la liste de refus minimale et aucun refus qui la touche, `max_hosts` ; run n'accepte que les checks d'un
+# AUTRE compte (`accept_checks_from`, `accept_own_checks: false`) ; read sans liste ni checks. Aucune connexion :
+# fichier joué hors ligne par scripts/test_webapp_hardening_check.py.
+
+- name: Check the bounded accounts of the MCP gateway
+  vars:
+    _denies: "{{ item.deny_playbooks | default([]) }}"
+    _denied_allowed: >-
+      {{ (ffg_allowed_playbooks
+          | select('match', '^(' ~ (_denies | map('regex_replace', '[.]', '[.]') | map('regex_replace', '[?]', '.')
+              | map('regex_replace', '[*]', '.*') | join('|')) ~ ')$') | list) if _denies | length > 0 else [] }}
+  ansible.builtin.assert:
+    that:
+      - item.mode | default('read') in ['read', 'check', 'run']
+      - item.mode | default('read') != 'read' or (item.allow_playbooks is not defined and item.accept_checks_from is not defined)
+      - item.mode | default('read') == 'read' or (item.allow_playbooks | default([]) | sort) == (ffg_allowed_playbooks | sort)
+      - item.mode | default('read') == 'read' or ffg_required_denies | difference(_denies) | length == 0
+      - item.mode | default('read') == 'read' or _denied_allowed | length == 0
+      - item.mode | default('read') == 'read' or item.max_hosts is defined
+      - item.mode | default('read') != 'run' or not (item.accept_own_checks | default(true) | bool)
+      - item.mode | default('read') != 'run' or item.accept_checks_from | default([]) | select('match', '^ffg_') | list | length > 0
+      - not (item.allow_extra_vars | default(false) | bool)
+      - not (item.allow_diff | default(false) | bool)
+    fail_msg: >-
+      Compte de la passerelle `{{ item.user }}` invalide : check/run avec `allow_playbooks` =
+      {{ ffg_allowed_playbooks | join(', ') }} exactement, `deny_playbooks` ⊇ ffg_required_denies
+      (fleetforge-install/defaults) sans toucher la liste blanche, `max_hosts` ; run avec `accept_checks_from` (un compte
+      ffg_ check) et `accept_own_checks: false` ; read sans liste ni checks ; jamais `allow_extra_vars`/`allow_diff`.
+    quiet: true
+  loop: "{{ ff_api_accounts | default([]) | selectattr('user', 'defined') | selectattr('user', 'match', '^ffg_') | list }}"
+  loop_control:
+    label: "{{ item.user }}"

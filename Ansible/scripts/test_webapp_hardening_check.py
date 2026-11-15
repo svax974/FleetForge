@@ -897,12 +897,13 @@ class FirewallScriptTests(unittest.TestCase):
 
 # ── Fichiers de tâches joués en LOCAL (aucun hôte) ───────────────────────
 
-def run_local_play(play_text, inventory=None, extra_files=None, outputs=()):
+def run_local_play(play_text, inventory=None, extra_files=None, outputs=(), playbook=None, args=()):
     """`ansible-playbook -c local` sur un jeu FACTICE ; rend (code, sortie), ou (code, sortie, {fichier: contenu})
-    pour les fichiers `outputs` écrits par le jeu dans `play_tmp`."""
+    pour les fichiers `outputs` écrits par le jeu dans `play_tmp`. `playbook` : un playbook RÉEL du dépôt joué sur
+    l'inventaire factice (le jeu `play_text` est alors ignoré)."""
     with tempfile.TemporaryDirectory() as tmp:
         with open(os.path.join(tmp, "play.yml"), "w", encoding="utf-8") as f:
-            f.write(play_text)
+            f.write(play_text or "")
         with open(os.path.join(tmp, "ansible.cfg"), "w", encoding="utf-8") as f:
             f.write(f"[defaults]\nroles_path={ROLES}\nstdout_callback=default\n")
         for name, content in (extra_files or {}).items():
@@ -914,8 +915,8 @@ def run_local_play(play_text, inventory=None, extra_files=None, outputs=()):
                 yaml.safe_dump(inventory, f)
             inv = ["-i", os.path.join(tmp, "inventory.yml")]
         env = dict(os.environ, ANSIBLE_CONFIG=os.path.join(tmp, "ansible.cfg"), TMPDIR_PLAY=tmp)
-        out = subprocess.run(["ansible-playbook", *inv, "-c", "local", os.path.join(tmp, "play.yml"),
-                              "-e", f"play_tmp={tmp}"],
+        out = subprocess.run(["ansible-playbook", *inv, "-c", "local", playbook or os.path.join(tmp, "play.yml"),
+                              "-e", f"play_tmp={tmp}", *args],
                              capture_output=True, text=True, env=env, timeout=180)
         if not outputs:
             return out.returncode, out.stdout + out.stderr
@@ -1153,6 +1154,64 @@ class GuardTests(unittest.TestCase):
         extra = guard_inventory()
         extra["all"]["children"]["fleetforge_gateways"]["hosts"]["fleetforge-gateway"]["webapp_env_from_vault"]["OTHER_SECRET"] = "vault_x"
         self.assertNotEqual(self.guard(extra)[0], 0)
+
+    def accounts_check(self, accounts):
+        play = textwrap.dedent("""\
+            - hosts: localhost
+              gather_facts: false
+              tasks:
+                - ansible.builtin.include_role:
+                    name: fleetforge-install
+                    tasks_from: api-accounts-gateway
+                - ansible.builtin.debug: {msg: ACCOUNTS=OK}
+            """)
+        return run_local_play(play, args=["-e", json.dumps({"ff_api_accounts": accounts})])
+
+    def test_fleetforge_install_bounds_the_gateway_accounts_whatever_the_scope(self):
+        good = guard_inventory()["all"]["children"]["infras"]["hosts"]["infra1"]["ff_api_accounts"]
+        code, out = self.accounts_check(good)
+        self.assertEqual(code, 0, out[-3000:])
+        for mutate in (lambda a: a[2].update(accept_own_checks=True),
+                       lambda a: a[2].pop("accept_checks_from"),
+                       lambda a: a[1].update(allow_playbooks=["setup-server.yml"]),
+                       lambda a: a[1].update(deny_playbooks=["temp.yml"]),
+                       lambda a: a[1].pop("max_hosts"),
+                       lambda a: a[1].update(allow_extra_vars=True),
+                       lambda a: a[0].update(allow_playbooks=["check-monitoring.yml"])):
+            bad = copy.deepcopy(good)
+            mutate(bad)
+            code, out = self.accounts_check(bad)
+            self.assertNotEqual(code, 0, bad)
+            self.assertIn("Compte de la passerelle", out)
+
+    def real_playbook(self, name, inventory, *args):
+        return run_local_play(None, inventory, playbook=os.path.join(PLAYBOOKS, name),
+                              args=["--tags", "no-such-tag", *args])
+
+    def test_deploy_webapp_runs_the_gateway_guard_for_a_gateway_entry(self):
+        inventory = guard_inventory()
+        inventory["all"]["vars"]["prom_alert_groups"] = ["services"]
+        inventory["all"]["children"]["infras"]["hosts"]["infra1"]["ff_api_accounts"][2]["accept_own_checks"] = True
+        code, out = self.real_playbook("deploy-webapp.yml", inventory, "-e", "webapp=fleetforge-gateway")
+        self.assertNotEqual(code, 0)
+        self.assertIn("Check each upstream against its FleetForge entry", out)
+        self.assertIn("accept_own_checks", out)
+
+    def test_deploy_webapp_refuses_the_gateway_with_the_fleetforge_scope(self):
+        inventory = guard_inventory()
+        inventory["all"]["vars"]["prom_alert_groups"] = ["services"]
+        code, out = self.real_playbook("deploy-webapp.yml", inventory, "-e", "webapp=fleetforge-gateway",
+                                       "-e", "ff_deploy_scope=fleetforge")
+        self.assertNotEqual(code, 0)
+        self.assertIn("ne se déploie qu'avec all ou gateway", out)
+
+    def test_deploy_fleetforge_refuses_a_command_line_webapp_override(self):
+        inventory = guard_inventory()
+        for args in (["-e", "ff_deploy_scope=fleetforge", "-e", "webapp=fleetforge-gateway"],
+                     ["-e", "webapp=agenthub"], ["-e", "ff_deploy_scope=everything"]):
+            code, out = self.real_playbook("deploy-fleetforge.yml", inventory, *args)
+            self.assertNotEqual(code, 0, args)
+            self.assertIn("Check the deployment scope and the application named on the command line", out)
 
     def test_the_gateway_never_carries_the_fleetforge_family_nor_goes_public(self):
         self.assertNotEqual(self.guard(guard_inventory(ansible_roles=["webapp", "fleetforge"]))[0], 0)

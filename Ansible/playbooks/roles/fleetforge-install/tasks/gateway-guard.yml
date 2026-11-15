@@ -15,8 +15,10 @@
 
 - name: Check the deployment scope
   ansible.builtin.assert:
-    that: (ff_deploy_scope | default('all')) in ['all', 'fleetforge', 'gateway']
-    fail_msg: "ff_deploy_scope vaut « {{ ff_deploy_scope | default('') }} » : all, fleetforge ou gateway."
+    that: (ff_deploy_scope | default('all')) in ['all', 'gateway']
+    fail_msg: >-
+      ff_deploy_scope vaut « {{ ff_deploy_scope | default('') }} » : la passerelle ne se déploie qu'avec all ou gateway
+      (`fleetforge` exclut la passerelle, même avec un `-e webapp=…`).
     quiet: true
 
 - name: Check the gateway entry is dedicated, private and hardened
