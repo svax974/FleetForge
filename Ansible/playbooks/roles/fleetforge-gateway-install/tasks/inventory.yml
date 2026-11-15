@@ -67,17 +67,22 @@
          | selectattr('ansible_host', 'defined')
          | selectattr('ansible_host', 'equalto', ansible_host)
          | rejectattr('inventory_hostname', 'equalto', inventory_hostname) | list }}
+    # TOUTES les variables de port (`*port`) des autres entrées de la machine,
+    # pas une liste recopiée : un port ajouté demain est comparé aussi.
     _taken: >-
-      {{ (_neighbours | map(attribute='app_port', default=0) | list)
-         + (_neighbours | map(attribute='back_port', default=0) | list)
-         + (_neighbours | map(attribute='pg_port', default=0) | list)
-         + (_neighbours | map(attribute='redis_port', default=0) | list)
-         + (_neighbours | map(attribute='sync_metrics_port', default=0) | list) }}
+      {%- set ns = namespace(p=[]) -%}
+      {%- for n in _neighbours -%}
+      {%- for k in n.keys() if k is match('^[a-z0-9_]*port$') and k != 'ansible_port' -%}
+      {%- set v = n[k] | string -%}
+      {%- if v is match('^[0-9]+$') -%}{%- set ns.p = ns.p + [v] -%}{%- endif -%}
+      {%- endfor -%}
+      {%- endfor -%}
+      {{ ns.p | join(',') }}
   ansible.builtin.assert:
     that:
       - redis_port is defined
       - (_ours | unique | length) == 4
-      - _ours | intersect(_taken | map('int') | list) | length == 0
+      - _ours | intersect((_taken | string).split(',') | reject('equalto', '') | map('int') | list) | length == 0
       - ffg_docker_subnet is match('^[0-9.]+/24$')
       - ffg_front_ip is defined and ffg_back_lb_ip is defined
       - ffg_front_ip != ffg_back_lb_ip
@@ -87,13 +92,23 @@
       - ffg_eligible_proxies | map('extract', hostvars, 'ansible_host') | intersect(ffg_vpn_addresses) | length == 0
       - ffg_mcp_whitelist_max_v6_prefix | default(128) | int >= 64
       - ffg_mcp_whitelist_max_v6_prefix | default(128) | int <= 128
+      # Hors des plages que Docker attribue par défaut (172.17–172.31, 192.168) :
+      # sinon un autre projet de la machine pourrait recevoir le même sous-réseau.
+      - ffg_docker_subnet is not match('^(172[.](1[6-9]|2[0-9]|3[01])|192[.]168)[.]')
+      # `/mcp` jamais ouvert à une adresse de VPN (proxy2 = vpn1 = NAT
+      # domestique), sauf décision explicite `ffg_mcp_allow_vpn_addresses: true`.
+      - ffg_mcp_allow_vpn_addresses | default(false) | string | lower in ['true', 'false']
+      - (ffg_mcp_allow_vpn_addresses | default(false) | bool)
+        or (ffg_mcp_allowed_hosts | default([]) | map('extract', hostvars, 'ansible_host') | intersect(ffg_vpn_addresses) | length == 0)
     fail_msg: >-
       Réseau de {{ inventory_hostname }} invalide : `redis_port` déclaré ; app/back/pg/redis
       distincts et libres sur la machine (pris par une autre entrée de {{ ansible_host }} :
-      {{ _ours | intersect(_taken | map('int') | list) | join(', ') or 'aucun' }}) ;
+      {{ _ours | intersect((_taken | string).split(',') | reject('equalto', '') | map('int') | list) | join(', ') or 'aucun' }}) ;
       `ffg_docker_subnet` en /24 ; `ffg_front_ip` et `ffg_back_lb_ip` distincts, dans ce /24,
-      hors .0/.1/.255 ; `ufw_app_ports: false` (ports publiés par Docker) ; aucun proxy admis
-      à l'adresse d'un VPN ; `ffg_mcp_whitelist_max_v6_prefix` entre 64 et 128.
+      hors .0/.1/.255, hors des plages Docker par défaut (172.16/12, 192.168/16) ; `ufw_app_ports:
+      false` (ports publiés par Docker) ; aucun proxy admis à l'adresse d'un VPN ;
+      `ffg_mcp_whitelist_max_v6_prefix` entre 64 et 128 ; aucun serveur de `ffg_mcp_allowed_hosts`
+      à l'adresse d'un VPN sans `ffg_mcp_allow_vpn_addresses: true`.
   tags: [always]
 
 # Chaque amont : l'entrée FleetForge qu'il désigne doit admettre la passerelle
@@ -109,6 +124,13 @@
     _check: "{{ _accounts | selectattr('user', 'defined') | selectattr('user', 'equalto', _users.check) | first | default({}) }}"
     _run: "{{ _accounts | selectattr('user', 'defined') | selectattr('user', 'equalto', _users.run) | first | default({}) }}"
     _parc: "{{ _ev.parc_name | default('') }}"
+    # Playbooks de la liste blanche qu'un motif de refus de ffg_check/ffg_run
+    # toucherait (glob FleetForge : `*`, `?`), traduit en regex sans antislash.
+    _denied_allowed: >-
+      {{ ffg_allowed_playbooks
+         | select('match', '^(' ~ (((_check.deny_playbooks | default([])) + (_run.deny_playbooks | default([])))
+             | map('regex_replace', '[.]', '[.]') | map('regex_replace', '[?]', '.') | map('regex_replace', '[*]', '.*')
+             | join('|')) ~ ')$') | list }}
   ansible.builtin.assert:
     that:
       - item.id is defined
@@ -128,6 +150,11 @@
       - _check.max_hosts is defined and _run.max_hosts is defined
       - ffg_required_denies | difference(_check.deny_playbooks | default([])) | length == 0
       - ffg_required_denies | difference(_run.deny_playbooks | default([])) | length == 0
+      # Liste blanche EXACTE (décision du propriétaire), et aucun motif de refus
+      # du compte ne la touche (le refus l'emporte dans FleetForge).
+      - (_check.allow_playbooks | default([]) | sort) == (ffg_allowed_playbooks | sort)
+      - (_run.allow_playbooks | default([]) | sort) == (ffg_allowed_playbooks | sort)
+      - _denied_allowed | length == 0
       - item.parcs | difference(_read.parcs | default([_parc])) | length == 0
       - item.parcs | difference(_check.parcs | default([_parc])) | length == 0
       - item.parcs | difference(_run.parcs | default([_parc])) | length == 0

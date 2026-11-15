@@ -48,8 +48,14 @@ ffg_eligible_proxies: >-
      | rejectattr('ansible_host', 'in', ffg_vpn_addresses)
      | map(attribute='inventory_hostname') | list }}
 
-# Sous-réseau privé /16 à /32 (même grammaire que `_access.inc`).
-ffg_private_cidr_regex: '^(10[.][0-9]{1,3}[.][0-9]{1,3}|172[.](1[6-9]|2[0-9]|3[01])[.][0-9]{1,3}|192[.]168[.][0-9]{1,3})[.][0-9]{1,3}/(1[6-9]|2[0-9]|3[0-2])$'
+# Sous-réseau privé /16 à /32 (même grammaire que `_access.inc`), sans zéro en
+# tête d'un octet (`010` serait lu en octal par certains outils).
+ffg_private_cidr_regex: '^(10[.](0|[1-9][0-9]{0,2})[.](0|[1-9][0-9]{0,2})|172[.](1[6-9]|2[0-9]|3[01])[.](0|[1-9][0-9]{0,2})|192[.]168[.](0|[1-9][0-9]{0,2}))[.](0|[1-9][0-9]{0,2})/(1[6-9]|2[0-9]|3[0-2])$'
+
+# `/mcp` : les adresses des serveurs VPN en sont écartées (whitelist ET
+# serveurs nommés). `true` OUVRE /mcp À TOUT CE QUI SORT PAR LE VPN (et par le
+# NAT qu'il partage) : décision explicite du propriétaire, pour des tests.
+ffg_mcp_allow_vpn_addresses: false
 ffg_ipv4_regex: '^[0-9]{1,3}([.][0-9]{1,3}){3}$'
 
 # Comptes aval par défaut (plan 06 §2.4, noms corrigés à l'étape 6.1).
@@ -84,3 +90,52 @@ ffg_required_denies:
   - "deploy-copyfail-patch*"
   - "deploy-docker-repo*"
   - "temp.yml"
+  # Playbooks « sensibles » (un play sur localhost — le nœud de contrôle —,
+  # all, proxies, infras, vpns ou la supervision, un motif d'hôte templaté) :
+  # couverture exigée par scripts/ffg_isolation_check.py (`coverage`).
+  - "backup-*"
+  - "migrate-*"
+  - "*timescale*"
+  - "deploy-agenthub*"
+  - "deploy-alertmanager*"
+  - "deploy-astar*"
+  - "deploy-backup*"
+  - "deploy-btc-pipeline*"
+  - "deploy-exporter-sys*"
+  - "deploy-freellm*"
+  - "deploy-grass*"
+  - "deploy-llamacpp*"
+  - "deploy-llm-proxy*"
+  - "deploy-mailrelay*"
+  - "deploy-mailserver*"
+  - "deploy-monero*"
+  - "deploy-*monitoring*"
+  - "update-*monitoring*"
+  - "deploy-openclaw*"
+  - "deploy-opencode*"
+  - "deploy-papanglabs-*"
+  - "deploy-prometheus*"
+  - "deploy-rpcbtc*"
+  - "deploy-starnet*"
+  - "deploy-storj*"
+  - "deploy-sync-server*"
+  - "deploy-theta-edge*"
+  - "deploy-wordpress*"
+  - "deploy-xmrig*"
+  - "update-journald-all*"
+  - "update-loadtest-scrape*"
+  - "update-opencode-model*"
+
+# LISTE BLANCHE des comptes `ffg_check` / `ffg_run` (décision du propriétaire,
+# 15/11/2026) : EXACTEMENT ces playbooks, posés en `allow_playbooks` sur les
+# deux comptes et vérifiés par la garde. Aucun motif de `ffg_required_denies`
+# ne doit les toucher (le refus l'emporte dans FleetForge).
+#   • update-prometheus-alerts.yml : rend les règles d'alerte, les valide par
+#     `docker run promtool`, les installe et REDÉMARRE le conteneur Prometheus
+#     (become) — courte coupure de la supervision ;
+#   • check-monitoring.yml : lecture seule (requêtes `uri` à l'API Prometheus
+#     locale, aucun shell/command, aucune tâche `check_mode: false`).
+# `deploy-exporter-sys.yml` reste EXCLU : il ouvre des règles ufw.
+ffg_allowed_playbooks:
+  - update-prometheus-alerts.yml
+  - check-monitoring.yml

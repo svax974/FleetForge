@@ -11,8 +11,13 @@
 {#- Pare-feu : la règle DROP de chaque port publié doit être en place (Docker
     recrée DOCKER-USER vide à chaque démarrage ; l'unité la repose). 0 = ports
     ouverts à tous → ServiceCheckFailing. -#}
+{#- Et dans le BON ORDRE : aucune règle inconditionnelle RETURN/ACCEPT avant la
+    première règle de la passerelle (elle rendrait le DROP décoratif). -#}
+{%- set awkp -%}
+/^-A DOCKER-USER/ { if (!seen && $0 ~ /^-A DOCKER-USER -j (RETURN|ACCEPT) *$/) bad = 1; if (index($0, "fleetforge-gateway:")) seen = 1; if (index($0, "fleetforge-gateway:" p ":deny") && $0 ~ /-j DROP/) ok = 1 } END { exit !(ok && !bad) }
+{%- endset -%}
 {%- for port in [app_port | int, back_port | int] -%}
-{%- set ns.extra = ns.extra + [{"name": "firewall_" ~ port, "kind": "command", "argv": ["/bin/sh", "-c", "iptables -w -S DOCKER-USER | grep -q -- 'fleetforge-gateway:" ~ port ~ ":deny'"], "timeout": 10}] -%}
+{%- set ns.extra = ns.extra + [{"name": "firewall_" ~ port, "kind": "command", "argv": ["/bin/sh", "-c", "iptables -w -S DOCKER-USER | awk -v p=" ~ port ~ " '" ~ awkp ~ "'"], "timeout": 10}] -%}
 {%- endfor -%}
 {%- for u in ffg_upstreams | default([]) -%}
 {%- set cmd = "c=$(docker ps --filter label=com.docker.compose.service=back --format '" ~ fmt ~ "' | awk '$2 ~ /^" ~ ffg_project_name ~ "-back-/ {print $1}' | head -n 1); [ -n \"$c\" ] && exec docker exec \"$c\" wget -q -O /dev/null -T 10 https://" ~ hostvars[u.entry].proxy_hostname ~ "/healthz" -%}

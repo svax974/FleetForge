@@ -101,6 +101,10 @@
       FFG_FRONT_IP: "{{ ffg_front_ip }}"
       FFG_BACK_LB_IP: "{{ ffg_back_lb_ip }}"
       FFG_TRUSTED_PROXIES: "{{ ffg_trusted_proxies | join(',') }}"
+      # Directives nginx du back-lb (insérées par l'interpolation de Compose dans
+      # son heredoc quoté) : relais de confiance pour reconstituer l'adresse
+      # cliente avant de RÉÉCRIRE X-Forwarded-For.
+      FFG_BACK_LB_REALIP: "{{ ffg_trusted_proxies | map('regex_replace', '^', 'set_real_ip_from ') | map('regex_replace', '$', ';') | join(' ') }}"
       # deploy-full.sh lit COMPOSE_FILE_NAME dans back/.env (sourcé après
       # l'environnement) : le fixer ici garantit que le fichier contrôlé plus bas
       # est EXACTEMENT celui qui est déployé.
@@ -246,14 +250,23 @@
     quiet: true
 
 # DEPLOY_FROM_MAIN : deploy-full.sh déploierait origin/main, pas l'arbre dont le
-# compose vient d'être contrôlé. REDIS_PASSWORD : Redis du compose
-# (`--requirepass`) jamais sans mot de passe. `grep -q` : aucune valeur affichée.
+# compose vient d'être contrôlé. REDIS_PASSWORD : jamais vide. WHITELIST,
+# PROXY_HOSTS, BACK_WHITELIST : deploy-full.sh en ferait des règles ufw sur
+# NODE_PORT/DB_PORT à chaque déploiement — le filtrage est celui de ce rôle,
+# rien d'autre. COMPOSE_FILE (lu par docker compose lui-même) et toute ligne
+# `export` des clés de déploiement : le fichier contrôlé ne serait plus celui
+# déployé. `grep -q` / `grep -c` : seuls les NOMS sortent, jamais une valeur.
 - name: Check the deployment switches of the back env file (names only)
   ansible.builtin.shell: >-
     set -o pipefail;
     f={{ (ffg_src ~ ffg_back_env_file) | quote }};
-    if grep -Eqi -- '^[[:space:]]*DEPLOY_FROM_MAIN=["'"'"']?(1|true|yes|on)' "$f"; then echo DEPLOY_FROM_MAIN; fi;
-    if ! grep -Eq -- '^[[:space:]]*REDIS_PASSWORD=["'"'"']?[^"'"'"'[:space:]]' "$f"; then echo REDIS_PASSWORD; fi
+    if grep -Eqi -- '^[[:space:]]*(export[[:space:]]+)?DEPLOY_FROM_MAIN=["'"'"']?(1|true|yes|on)' "$f"; then echo DEPLOY_FROM_MAIN; fi;
+    if ! grep -Eq -- '^[[:space:]]*REDIS_PASSWORD=["'"'"']?[^"'"'"'[:space:]]' "$f"; then echo REDIS_PASSWORD; fi;
+    for k in WHITELIST PROXY_HOSTS BACK_WHITELIST; do
+      if [ "$(grep -Ec -- '^[[:space:]]*(export[[:space:]]+)?'"$k"'=["'"'"']?[^"'"'"'[:space:]]' "$f")" != 0 ]; then echo "$k"; fi;
+    done;
+    if grep -Eq -- '^[[:space:]]*(export[[:space:]]+)?COMPOSE_FILE=' "$f"; then echo COMPOSE_FILE; fi;
+    if grep -Eq -- '^[[:space:]]*export[[:space:]]+(COMPOSE_FILE_NAME|DEPLOY_FROM_MAIN|COMPOSE_FILE)=' "$f"; then echo export; fi
   args:
     executable: /bin/bash
   delegate_to: localhost
@@ -267,8 +280,8 @@
     that: ffg_switches.stdout | trim | length == 0
     fail_msg: >-
       {{ ffg_src }}{{ ffg_back_env_file }} : {{ ffg_switches.stdout_lines | join(', ') }} —
-      DEPLOY_FROM_MAIN doit être absent ou faux (le compose contrôlé doit être celui
-      déployé) et REDIS_PASSWORD non vide.
+      DEPLOY_FROM_MAIN absent ou faux, REDIS_PASSWORD non vide, WHITELIST/PROXY_HOSTS/BACK_WHITELIST
+      vides ou absents, ni COMPOSE_FILE, ni `export` des clés de déploiement.
     quiet: true
 
 # ── Coffre, cibles du déploiement ──────────────────────────────────────────
@@ -298,40 +311,66 @@
   register: ffg_env_saved
   changed_when: "'saved to' in ffg_env_saved.stdout"
 
-# ── Compose durci, contrôlé AVANT tout déploiement ─────────────────────────
-# `ffg_compose_file` est écrit dans back/.env (COMPOSE_FILE_NAME) ET passé dans
-# l'environnement de run.sh : le fichier contrôlé ici est celui déployé.
-- name: Check the compose file is hardened (static, before deploying)
-  ansible.builtin.command:
-    argv:
-      - "{{ ansible_playbook_python }}"
-      - -I
-      - "{{ playbook_dir }}/../scripts/ffg_isolation_check.py"
-      - compose
-      - "{{ ffg_src }}{{ ffg_compose_file }}"
-      - --services
-      - "{{ ffg_hardened_services | join(',') }}"
-  delegate_to: localhost
-  become: false
-  register: ffg_compose_check
-  changed_when: false
-  check_mode: false
-  failed_when: false
-
-- name: Refuse to deploy a compose that is not hardened
-  ansible.builtin.assert:
-    that: ffg_compose_check.rc == 0
-    fail_msg: >-
-      {{ ffg_compose_file }} n'est pas durci — rien n'est déployé :
-      {{ ffg_compose_check.stdout_lines | join(' | ') }}
-    success_msg: "{{ ffg_compose_file }} : compose durci ({{ ffg_hardened_services | join(', ') }})."
-
 # ── Déploiement par les scripts de l'app ───────────────────────────────────
-# Déploiement, attentes de santé, écoutes et durcissement RÉEL dans un seul
-# bloc : au moindre échec, les conteneurs de la passerelle sont ARRÊTÉS
-# (fermé) — jamais une passerelle non vérifiée laissée en marche.
+# Contrôles préalables, déploiement, attentes de santé, écoutes et
+# durcissement RÉEL dans un seul bloc : au moindre échec, les conteneurs de la
+# passerelle sont ARRÊTÉS (fermé). `run.sh` ne part que si le compose ET le
+# pare-feu viennent d'être vérifiés DANS CE PASSAGE (`--start-at-task` ou un
+# filtre de tags qui sauterait les contrôles le laisse de côté, et le bloc
+# échoue).
 - name: Deploy, verify, or stop the gateway
   block:
+    # `ffg_compose_file` est écrit dans back/.env (COMPOSE_FILE_NAME) ET passé
+    # dans l'environnement de run.sh : le fichier contrôlé ici est celui
+    # déployé. `--docker` : refait l'interpolation par `docker compose config`
+    # (aucun hôte contacté) et la compare.
+    - name: Check the compose file is hardened (static, before deploying)
+      ansible.builtin.command:
+        argv:
+          - "{{ ansible_playbook_python }}"
+          - -I
+          - "{{ playbook_dir }}/../scripts/ffg_isolation_check.py"
+          - compose
+          - "{{ ffg_src }}{{ ffg_compose_file }}"
+          - --services
+          - "{{ ffg_hardened_services | join(',') }}"
+          - --docker
+      delegate_to: localhost
+      become: false
+      register: ffg_compose_check
+      changed_when: false
+      check_mode: false
+      failed_when: false
+
+    - name: Refuse to deploy a compose that is not hardened
+      ansible.builtin.assert:
+        that: ffg_compose_check.rc == 0
+        fail_msg: >-
+          {{ ffg_compose_file }} n'est pas durci — rien n'est déployé :
+          {{ ffg_compose_check.stdout_lines | join(' | ') }}
+        success_msg: "{{ ffg_compose_file }} : compose durci ({{ ffg_hardened_services | join(', ') }})."
+
+    # Le pare-feu doit être EN PLACE et ATTEINT avant qu'un conteneur ne parte
+    # (`--tags app` seul, unité en échec après un redémarrage…).
+    - name: Read the firewall state before deploying
+      ansible.builtin.include_role:
+        name: fleetforge-gateway-security
+        tasks_from: firewall-check
+        apply:
+          tags: [always]
+
+    - name: Refuse to deploy without the gateway firewall
+      ansible.builtin.assert:
+        that: ffg_firewall_problems | trim | length == 0
+        fail_msg: >-
+          Pare-feu de la passerelle absent ou contourné ({{ ffg_firewall_problems }}) : aucun
+          conteneur n'est démarré. Jouer d'abord le play « Pare-feu de la passerelle » (tag firewall).
+      when: not ansible_check_mode
+
+    - name: Record that this run checked the compose and the firewall
+      ansible.builtin.set_fact:
+        ffg_predeploy_checked: "{{ ffg_compose_check.rc == 0 and (ffg_firewall_problems | trim | length == 0) }}"
+
     - name: Deploy the gateway (build + push + start, via the app's own tooling)
       ansible.builtin.command:
         argv: "{{ ['./scripts/run.sh', 'prod'] + (['--migrate'] if ffg_migrate | bool else []) + ([] if ffg_update_common | bool else ['--no-update-common']) }}"
@@ -346,6 +385,7 @@
       changed_when: true
       failed_when: false
       no_log: true
+      when: ffg_predeploy_checked | default(false) | bool
 
     # Sortie du script masquée : elle peut citer l'environnement (back/.env porte
     # les mots de passe aval). Seul le code de retour est rapporté.
@@ -424,7 +464,9 @@
 - name: Report how the gateway is exposed
   ansible.builtin.debug:
     msg: >-
-      Passerelle déployée : front 127.0.0.1:{{ app_port }}, back-lb (/mcp)
-      127.0.0.1:{{ back_port }}. Nom public https://{{ proxy_hostname }} (vhost
-      privé ; /mcp : {{ ffg_mcp_allowed_hosts | default([]) | join(', ') or 'personne' }}{{ ' + whitelist (TEST)' if ffg_mcp_allow_whitelist | default(false) | bool else '' }}).
+      Passerelle déployée : front publié sur 0.0.0.0:{{ app_port }}, back-lb (/mcp)
+      sur 0.0.0.0:{{ back_port }}, filtrés dans DOCKER-USER (proxies admis distants ;
+      un proxy de cette machine passe par la boucle locale) ; Postgres/Redis sur
+      127.0.0.1. Nom public https://{{ proxy_hostname }} (vhost privé ; /mcp :
+      {{ ffg_mcp_allowed_hosts | default([]) | join(', ') or 'personne' }}{{ ' + whitelist (TEST)' if ffg_mcp_allow_whitelist | default(false) | bool else '' }}{{ ', adresses VPN ADMISES' if ffg_mcp_allow_vpn_addresses | default(false) | bool else '' }}).
       Coffre : `.private/apps/{{ ffg_app_env_id }}` à committer s'il a changé.
