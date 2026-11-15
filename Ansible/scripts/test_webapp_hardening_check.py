@@ -420,6 +420,70 @@ class ComposeReviewTwoTests(unittest.TestCase):
         self.assertIn("RÉÉCRIT", compose_errors(broken, use_docker=True))
 
 
+def _with(mutate):
+    data = copy.deepcopy(GOOD_COMPOSE)
+    mutate(data)
+    return data
+
+
+def _set(service, key, value):
+    return lambda d: d["services"][service].__setitem__(key, value)
+
+
+def _build(**extra):
+    return lambda d: d["services"]["back"].__setitem__("build", dict({"context": "../back"}, **extra))
+
+
+# Troisième revue (15/11/2026, sondes `ffgrev3/tools/probe.py`) : chacune de ces clés passait rc=0, `--docker` compris.
+WHITELIST_CASES = {
+    "post_start privilégié": (_set("back", "post_start", [{"command": "id", "user": "root", "privileged": True}]), "`post_start`"),
+    "pre_stop privilégié": (_set("back", "pre_stop", [{"command": "id", "user": "root", "privileged": True}]), "`pre_stop`"),
+    "use_api_socket": (_set("back", "use_api_socket", True), "`use_api_socket`"),
+    "provider sur redis": (_set("redis", "provider", {"type": "evil"}), "service redis : clé `provider`"),
+    "build.ssh": (_build(ssh=["default"]), "build : clé `ssh`"),
+    "build.additional_contexts": (_build(additional_contexts={"h": "/home"}), "build : clé `additional_contexts`"),
+    "build.network host": (_build(network="host"), "build : clé `network`"),
+    "build.dockerfile absolu": (_build(dockerfile="/etc/passwd"), "dockerfile `/etc/passwd` hors du contexte"),
+    "build.dockerfile remontant": (_build(dockerfile="../../etc/Dockerfile"), "hors du contexte"),
+    "gpus": (_set("back", "gpus", "all"), "`gpus`"),
+    "oom_kill_disable": (_set("back", "oom_kill_disable", True), "`oom_kill_disable`"),
+    "ulimits": (_set("back", "ulimits", {"nofile": 1048576}), "`ulimits`"),
+    "extra_hosts": (_set("back", "extra_hosts", ["host.docker.internal:host-gateway"]), "`extra_hosts`"),
+    "dns": (_set("back", "dns", ["1.1.1.1"]), "`dns`"),
+    "label_file": (_set("back", "label_file", "/etc/shadow"), "`label_file`"),
+    "cgroupns_mode": (_set("back", "cgroupns_mode", "host"), "`cgroupns_mode`"),
+    "clé racine inconnue": (lambda d: d.update({"models": {"m": {}}}), "clé racine `models`"),
+    "volume long de type tmpfs": (lambda d: d["services"]["back"].__setitem__("volumes", [{"type": "tmpfs", "target": "/x"}]), "type tmpfs"),
+    "port UDP": (_set("db", "ports", [{"target": 5432, "published": "4732", "host_ip": "127.0.0.1", "protocol": "udp"}]), "protocole"),
+    "réseau avec options": (lambda d: d["networks"]["app"].update({"enable_ipv6": True}), "clé `enable_ipv6`"),
+}
+
+
+class ComposeWhitelistTests(unittest.TestCase):
+    """Liste BLANCHE de clés (racine, services, build et voisins, sortie de `docker compose config`)."""
+
+    def test_each_unlisted_key_is_refused_for_the_right_reason(self):
+        for case, (mutate, expected) in WHITELIST_CASES.items():
+            with self.subTest(case):
+                self.assertIn(expected, compose_errors(_with(mutate)))
+
+    def test_a_merge_key_cannot_smuggle_a_key(self):
+        merged = GOOD_COMPOSE_YAML.replace("services:\n", "x-evil: &evil\n  privileged: true\n  pid: host\nservices:\n", 1)
+        merged = merged.replace("  db:\n", "  db:\n    <<: *evil\n", 1)
+        errors = compose_errors(merged)
+        self.assertIn("service db : clé `privileged` hors de la liste blanche", errors)
+        self.assertIn("service db : clé `pid` hors de la liste blanche", errors)
+
+    def test_extensions_and_anchors_stay_usable(self):
+        self.assertEqual(compose_errors(GOOD_COMPOSE_YAML.replace("x-hardened:", "x-code-service:")), "")
+
+    @unittest.skipUnless(shutil.which("docker"), "docker absent : contrôle `docker compose config` non exécuté")
+    def test_the_interpolated_output_goes_through_the_same_list(self):
+        self.assertEqual(compose_errors(GOOD_COMPOSE_YAML, use_docker=True), "")
+        errors = compose_errors(_with(_set("back", "use_api_socket", True)), use_docker=True)
+        self.assertIn("clé `use_api_socket` hors de la liste blanche (docker compose config)", errors)
+
+
 class CoverageTests(unittest.TestCase):
     """Comptes aval : tout playbook sensible est refusé ou dans la liste blanche explicite."""
 

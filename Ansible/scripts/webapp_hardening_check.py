@@ -96,6 +96,33 @@ FORBIDDEN_SERVICE_KEYS = (
     "network_mode", "pid", "ipc", "uts", "cgroup", "cgroup_parent", "secrets", "configs", "links",
     "external_links", "device_cgroup_rules", "runtime", "isolation", "storage_opt",
 )
+# LISTES BLANCHES (revue du 15/11/2026 : une liste de refus laissait passer `post_start`/`pre_stop` privilégiés,
+# `use_api_socket`, `provider`, `build.ssh`, `build.additional_contexts`, `build.network: host`, `gpus`, `ulimits`…).
+# Le MINIMUM dont le compose durci du gabarit (scripts/docker-compose-hardened.yml) a besoin ; toute autre clé échoue,
+# au niveau racine, dans chaque service, dans `build` et ses voisins, et dans la sortie de `docker compose config`.
+# Les clés de fusion YAML (`<<`) sont résolues AVANT : ce qu'elles apportent passe par les mêmes listes.
+ALLOWED_TOP_KEYS = {"services", "networks", "volumes"}  # + extensions `x-*`
+ALLOWED_SERVICE_KEYS = {
+    "image", "build", "env_file", "environment", "restart", "user", "read_only", "tmpfs", "cap_drop", "security_opt",
+    "mem_limit", "cpus", "pids_limit", "deploy", "networks", "volumes", "ports", "expose", "healthcheck", "depends_on",
+    "entrypoint", "command", "container_name", "hostname",
+}
+ALLOWED_BUILD_KEYS = {"context", "dockerfile", "args", "target"}
+ALLOWED_DEPLOY_KEYS = {"replicas", "resources", "placement"}
+ALLOWED_RESOURCES_KEYS = {"limits"}
+ALLOWED_LIMITS_KEYS = {"memory", "cpus", "pids"}
+ALLOWED_HEALTHCHECK_KEYS = {"test", "interval", "timeout", "retries", "start_period", "start_interval", "disable"}
+ALLOWED_DEPENDS_KEYS = {"condition", "required", "restart"}
+ALLOWED_DEPENDS_CONDITIONS = {"service_started", "service_healthy", "service_completed_successfully"}
+ALLOWED_ATTACH_KEYS = {"ipv4_address"}
+ALLOWED_PORT_KEYS = {"target", "published", "host_ip", "protocol", "mode"}
+ALLOWED_VOLUME_MOUNT_KEYS = {"type", "source", "target", "read_only", "volume"}
+ALLOWED_ENV_FILE_KEYS = {"path", "required"}
+ALLOWED_NETWORK_KEYS = {"ipam", "driver"}
+ALLOWED_IPAM_KEYS = {"config"}
+ALLOWED_IPAM_CONFIG_KEYS = {"subnet"}
+ALLOWED_TOP_VOLUME_KEYS = {"driver"}
+DOCKERFILE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]*(/[A-Za-z0-9_][A-Za-z0-9._-]*)*$")
 # Valeurs FACTICES : elles servent à vérifier la FORME (où chaque variable arrive), jamais déployées.
 FAKE_ENV = {
     "PROJECT_NAME": "hardencheck",
@@ -532,6 +559,81 @@ def check_back_lb_config(config, trusted):
 
 # ── compose : contrôle ────────────────────────────────────────────────────
 
+def _keys(where, value, allowed, errors):
+    """Clés d'un mapping hors de la liste blanche (une valeur qui n'est pas un mapping est refusée)."""
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        errors.append(f"{where} : forme inattendue ({type(value).__name__})")
+        return {}
+    for key in value:
+        if key not in allowed:
+            errors.append(f"{where} : clé `{key}` hors de la liste blanche")
+    return value
+
+
+def check_whitelist(data, path, docker=False):
+    """Clés autorisées, partout. `docker` : sortie normalisée de `docker compose config` (noms `<projet>_<clé>`
+    ajoutés aux réseaux et volumes, `name` racine, `deploy.placement`/`resources` vides, montages et ports longs)."""
+    errors = []
+    project = FAKE_ENV["PROJECT_NAME"]
+    for key in data:
+        if key in ALLOWED_TOP_KEYS or str(key).startswith("x-") or (docker and key == "name" and data[key] == project):
+            continue
+        errors.append(f"{path}: clé racine `{key}` hors de la liste blanche")
+    for kind, allowed in (("networks", ALLOWED_NETWORK_KEYS), ("volumes", ALLOWED_TOP_VOLUME_KEYS)):
+        for name, spec in (data.get(kind) or {}).items():
+            spec = dict(spec or {})
+            if docker and spec.get("name") == f"{project}_{name}":
+                spec.pop("name")
+            spec = _keys(f"{path}: {kind[:-1]} {name}", spec, allowed, errors)
+            if kind == "networks":
+                ipam = _keys(f"{path}: network {name} ipam", spec.get("ipam"), ALLOWED_IPAM_KEYS, errors)
+                for entry in _as_list(ipam.get("config")):
+                    _keys(f"{path}: network {name} ipam.config", entry, ALLOWED_IPAM_CONFIG_KEYS, errors)
+    for name, svc in (data.get("services") or {}).items():
+        where = f"{path}: service {name}"
+        svc = _keys(where, svc, ALLOWED_SERVICE_KEYS, errors)
+        if "build" in svc:
+            build = svc["build"] if isinstance(svc["build"], dict) else {"context": svc["build"]}
+            _keys(f"{where} build", build, ALLOWED_BUILD_KEYS, errors)
+            dockerfile = build.get("dockerfile")
+            if dockerfile is not None and (not DOCKERFILE.match(str(dockerfile)) or ".." in str(dockerfile)):
+                errors.append(f"{where} build : dockerfile `{dockerfile}` hors du contexte (chemin relatif simple attendu)")
+        deploy = _keys(f"{where} deploy", svc.get("deploy"), ALLOWED_DEPLOY_KEYS, errors)
+        if deploy.get("placement"):
+            errors.append(f"{where} deploy : placement non vide")
+        resources = _keys(f"{where} deploy.resources", deploy.get("resources"), ALLOWED_RESOURCES_KEYS, errors)
+        _keys(f"{where} deploy.resources.limits", resources.get("limits"), ALLOWED_LIMITS_KEYS, errors)
+        _keys(f"{where} healthcheck", svc.get("healthcheck"), ALLOWED_HEALTHCHECK_KEYS, errors)
+        depends = svc.get("depends_on")
+        if isinstance(depends, dict):
+            for dep, spec in depends.items():
+                spec = _keys(f"{where} depends_on {dep}", spec, ALLOWED_DEPENDS_KEYS, errors)
+                if spec.get("condition", "service_started") not in ALLOWED_DEPENDS_CONDITIONS:
+                    errors.append(f"{where} depends_on {dep} : condition {spec.get('condition')}")
+        nets = svc.get("networks")
+        if isinstance(nets, dict):
+            for net, spec in nets.items():
+                _keys(f"{where} networks.{net}", spec, ALLOWED_ATTACH_KEYS, errors)
+        for port in _as_list(svc.get("ports")):
+            if isinstance(port, dict):
+                _keys(f"{where} ports", port, ALLOWED_PORT_KEYS, errors)
+                if str(port.get("protocol", "tcp")) != "tcp" or str(port.get("mode", "ingress")) not in ("ingress", "host"):
+                    errors.append(f"{where} ports : protocole ou mode inattendu ({port})")
+        for vol in _as_list(svc.get("volumes")):
+            if isinstance(vol, dict):
+                _keys(f"{where} volumes", vol, ALLOWED_VOLUME_MOUNT_KEYS, errors)
+                if vol.get("type", "volume") != "volume":
+                    errors.append(f"{where} volumes : type {vol.get('type')} (volume nommé seulement)")
+                if vol.get("volume"):
+                    errors.append(f"{where} volumes : options de volume ({vol.get('volume')})")
+        for env_file in _as_list(svc.get("env_file")):
+            if isinstance(env_file, dict):
+                _keys(f"{where} env_file", env_file, ALLOWED_ENV_FILE_KEYS, errors)
+    return errors
+
+
 def _structure(raw, path, allowed_binds, front, back_lb):
     errors = []
     services = raw.get("services") or {}
@@ -657,7 +759,16 @@ def docker_config(path):
         )
         if result.returncode != 0:
             return None, "docker compose config échoue : " + (result.stderr.strip().splitlines() or ["?"])[-1][:200]
-        return json.loads(result.stdout), None
+        data = json.loads(result.stdout)
+        # Contextes de build rendus en chemins absolus du répertoire de travail : ramenés à leur forme relative
+        # pour la même liste blanche (tout autre chemin reste tel quel, donc refusé).
+        for svc in (data.get("services") or {}).values():
+            build = (svc or {}).get("build")
+            if isinstance(build, dict) and isinstance(build.get("context"), str):
+                for stack in ("back", "front"):
+                    if build["context"] == os.path.join(tmp, stack):
+                        build["context"] = f"../{stack}"
+        return data, None
 
 
 def _unescape_dollars(value):
@@ -691,7 +802,8 @@ def check_compose(path, hardened, allowed_binds=(), front="front", back_lb="back
     raw = _load(path) or {}
     if not isinstance(raw, dict):
         return [f"{path}: compose illisible"]
-    errors = _structure(raw, path, allowed_binds, front, back_lb)
+    errors = check_whitelist(raw, path)
+    errors += _structure(raw, path, allowed_binds, front, back_lb)
     problems = []
     data = interpolate(raw, FAKE_ENV, problems)
     errors += [f"{path}: {p}" for p in problems]
@@ -701,6 +813,7 @@ def check_compose(path, hardened, allowed_binds=(), front="front", back_lb="back
         if problem:
             errors.append(f"{path}: {problem}")
         else:
+            errors += [f"{e} (docker compose config)" for e in check_whitelist(docker_data, path, docker=True)]
             errors += _compare_with_docker(data, docker_data, path, front, back_lb)
     return errors
 
