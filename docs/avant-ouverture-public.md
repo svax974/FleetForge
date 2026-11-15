@@ -22,11 +22,31 @@ Retirer ou dater un point une fois fait.
   credential `exec`, ≤ /16, imposée par `mcp-access`).
 - **`/mcp` admet l'adresse d'`infra1`, donc toute sa machine** (proxy1, monitor, mail1, www…) : la clé
   `ffg_` et l'allow-list du credential restent les barrières. Rien ne distingue ces services au niveau réseau.
-- **Compose durci à livrer dans le dépôt de l'app** (`COMPOSE_FILE_NAME`) : user
-  `${FFG_RUNTIME_UID}:${FFG_RUNTIME_GID}`, read_only + tmpfs, cap_drop ALL, no-new-privileges (tous les
-  services), mem_limit/cpus, réseau du back de sous-réseau `${FFG_DOCKER_SUBNET}`, ni socket Docker ni
-  vmagent ni montage de l'hôte. Sans lui le déploiement est refusé AVANT `run.sh` (le compose du gabarit
-  échoue au contrôle : 21 écarts relevés le 15/11/2026).
+- **Processus local de la machine partagée (risque résiduel)** : tout processus de la machine d'`infra1`
+  joint les ports publiés de la passerelle par la boucle locale, vu comme le proxy local (de confiance
+  dans TRUST_PROXY), et choisit donc l'adresse qu'il annonce. La clé `ffg_` reste exigée, mais
+  l'allow-list d'adresses d'un credential ne protège plus contre lui. Levé seulement en déplaçant la
+  passerelle (autre machine ou VM : `docs/etude-isolation-passerelle-vm.md`).
+- **Whitelist de test sur `/mcp` filtrée** : IPv4 seule ou /32, IPv6 de préfixe ≥ 128 par défaut ; la
+  plage IPv6 /64 de la whitelist n'y passe que si le propriétaire pose `ffg_mcp_whitelist_max_v6_prefix: 64`.
+- **Fenêtre au redémarrage de Docker** : les conteneurs repartent avant que l'unité
+  `fleetforge-gateway-firewall` ne repose DOCKER-USER (quelques secondes sans filtre sur 4730/4731).
+  Non fermée ; signalée par la sonde `firewall_<port>` (ServiceCheckFailing).
+- **Séparation check / run** : `ffg_run` porte `accept_own_checks: false` (FleetForge `ad6906c`) — ne
+  le retirer qu'en connaissance de cause. Liste blanche `allow_playbooks` des comptes `ffg_*` : à poser
+  par le propriétaire (proposition dans le rapport de l'étape 6.6).
+- **Revue indépendante du 15/11/2026** : défaut haut corrigé (proxy2 = vpn1 admis sur le back-lb,
+  plage 172.16/12, X-Forwarded-For falsifiable) et moyens/bas corrigés ; la REVUE DE LA CORRECTION reste
+  à faire avant tout déploiement réel.
+- **Compose durci à livrer dans le dépôt de l'app** (`scripts/docker-compose.ffg-hardened.yml` par
+  défaut, `ffg_compose_file`, écrit en COMPOSE_FILE_NAME) : user `${FFG_RUNTIME_UID}:${FFG_RUNTIME_GID}`,
+  read_only + tmpfs, cap_drop ALL, aucun cap_add, no-new-privileges (tous les services), mem_limit/cpus,
+  réseau `${FFG_DOCKER_SUBNET}` avec front et back-lb à `${FFG_FRONT_IP}` / `${FFG_BACK_LB_IP}`, back-lb
+  qui réécrit X-Forwarded-For (`set_real_ip_from ${FFG_TRUSTED_PROXIES}` puis `$remote_addr`),
+  Postgres/Redis en `127.0.0.1:`, ni socket Docker ni vmagent, aucun montage de l'hôte ni volume à
+  `driver_opts`, ni `volumes_from`/`include`/`extends`. Sans lui le déploiement est refusé AVANT `run.sh`
+  (le compose du gabarit échoue au contrôle : 26 écarts le 15/11/2026). `REDIS_PASSWORD` non vide et
+  `DEPLOY_FROM_MAIN` absent exigés dans back/.env.
 - **Interpolation des variables compose** (`${FFG_RUNTIME_UID}`…) : supposée lue depuis back/.env par
   deploy-full.sh — NON vérifié ; le contrôle d'exécution (`--tags hardening`) le prouvera.
 - **Permissions de `/home/srvc/fleetforge` et `~/.ssh`** : le compte `ffgateway` ne doit ni les lire ni
