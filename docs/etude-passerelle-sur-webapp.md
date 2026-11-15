@@ -363,6 +363,50 @@ journée, revue comprise), non implémenté.
 - **ufw** : plages, listes, destination à adresse, `allow from X` (tous ports) vus par l'audit. Non couvert : un profil
   d'application ufw (`Nginx Full`…), ports hors de `ufw status`.
 
+### Relecture finale (15/11/2026) : corrigé
+
+- `firewall.yml` : le `register` du gabarit écrasait le chemin du script (`[Errno 2]` à chaque vrai passage, sauté en
+  `--check`) ; contrôle statique des collisions `set_fact`/`vars` × `register` sur tout le dépôt, et firewall.yml joué
+  pour de bon en test (faux iptables, ufw, systemctl).
+- Attentes de santé du déploiement durci en root (la règle `local:deny` rejette `srvc`) ; contrôle statique de
+  `become` sur toute attente locale vers les ports de l'app. svcprobe tourne en root (`svcprobe-install`).
+- Un seul pool IPAM (statique et exécution) ; chaque adresse de conteneur DANS le /24 dédié.
+- Sonde des extra-vars étendue à toutes les `vars:` de tâche, d'inclusion et de bloc.
+- Proxy co-localisé : cgroup v2 et xt_cgroup vérifiés avant tout changement ; règle `local:nginx` exigée ; drop-in
+  `nginx.service.d/<unité pare-feu>.conf` (ExecStartPost : relance du pare-feu à chaque démarrage de nginx) ; sonde
+  `firewall_local_nginx` (processus non root dans le groupe VIVANT de nginx → back-lb) ; xt_cgroup sondé par le script
+  sur une chaîne jetable avant toute insertion ; règles OUTPUT en `--ctstate NEW`.
+- Sondes `firewall_order4` / `firewall_order6` : ordre de DOCKER-USER, INPUT et OUTPUT (IPv4), DOCKER-USER et OUTPUT
+  (IPv6).
+- **Non couvert** : un conteneur d'un AUTRE projet en `network_mode: host`, exécuté en root, passerait la règle OUTPUT
+  `local:root` (le vérificateur refuse `network_mode` pour le projet de la passerelle seulement) — vérification
+  manuelle dans la séquence ci-dessous.
+
+### Séquence de premier passage supervisé (lecture seule, fournie par le relecteur)
+
+Avant (sur la machine d'infra1) :
+1. `stat -fc %T /sys/fs/cgroup` → `cgroup2fs` ; `sudo modinfo xt_cgroup` ; `iptables -m cgroup --help` ;
+   `systemctl --version | head -1` ; `cat /proc/$(cat /run/nginx.pid)/cgroup` ;
+   `docker info -f '{{.SecurityOptions}}'` ; `sudo iptables -S OUTPUT | head` ; `getent hosts infra-priv.<domaine>`.
+2. Aucun autre conteneur en `network_mode: host` sur la machine :
+   `docker ps -q | xargs -r docker inspect -f '{{.Name}} {{.HostConfig.NetworkMode}}' | grep ' host$'` → vide.
+
+Puis `./play.sh web3c deploy-fleetforge.yml --check` (lecture), puis l'exécution.
+
+Après :
+1. `sudo iptables -S DOCKER-USER` ; `sudo iptables -S INPUT | head -20` ; `sudo iptables -S OUTPUT | head -12` — règles
+   `webapp-fleetforge-gateway:*` EN TÊTE, `local:nginx` présentes ; `sudo ip6tables -S OUTPUT | head` ;
+   `systemctl status webapp-fleetforge-gateway-firewall`.
+2. `docker network inspect <projet>_app -f '{{json .IPAM.Config}}'` → UNE entrée ;
+   `docker inspect -f '{{.Name}} {{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}'` de tous les conteneurs du
+   projet → adresses dans le /24 dédié.
+3. En `srvc` : `curl -sS -m3 http://127.0.0.1:4731/api/v1/health` REFUSÉ ; avec `sudo` : 200.
+4. `/mcp` depuis une source admise (200/401 de l'app), puis depuis une source non admise (403 nginx).
+5. `sudo systemctl restart nginx` puis `sudo iptables -S OUTPUT | grep local:nginx` (règles reposées) ; sonde
+   `firewall_local_nginx` à 1.
+6. Depuis la machine : `docker exec <back> wget -q -O- -T5 https://infra-priv.<domaine>/` répond ; un `wget` vers une
+   adresse Internet EXPIRE.
+
 ### Risques résiduels et décisions (quatrième revue)
 
 - **Canal DNS** : le sous-réseau joint les résolveurs de la machine en 53 ; un code compromis peut encoder des données

@@ -82,7 +82,12 @@ du parc**, et les clés de chiffrement à sauvegarder hors du serveur. Restent m
     l'app (OUTPUT) réservé à nginx (groupe de contrôle) et root ; aucune règle ufw supprimée (une règle d'une autre
     origine sur ses ports bloque le déploiement) ; base jamais vierge (marqueur d'état
     `/var/lib/fleetforge/webapp/<entrée>.state`, `-e webapp_hardening_db_migrated=true` après migration) ; faits
-    internes refusés en extra-vars ;
+    internes (y compris les `vars:` de tâche) refusés en extra-vars ; un seul pool IPAM ; proxy sur la même machine :
+    cgroup v2 et xt_cgroup exigés, drop-in nginx qui rejoue le pare-feu. **Premier passage d'une app durcie** : suivre la
+    séquence supervisée en lecture seule de docs/etude-passerelle-sur-webapp.md (« Séquence de premier passage
+    supervisé ») — cgroup v2, xt_cgroup, aucun conteneur tiers en `network_mode: host`, `--check` puis exécution, puis
+    ordre des règles, pool IPAM unique, adresses dans le /24, `curl` local refusé en `srvc` et 200 en root, `/mcp` admis
+    puis refusé, redémarrage de nginx, sortie Internet qui expire ;
   - `webapp_vhost_locations[].access: { hosts, whitelist?, vpn_addresses?, v6_min_prefix? }` (+ `upstream: back`,
     `priority: true`, `raw_uri` : URI brute exigée) — liste NOMMÉE par chemin (`proxy-update/templates/_named_access.inc`),
     contrôlée par `webapp_hardening_check.py vhost` avant chaque pose ; valeurs des locations sous grammaire ;
