@@ -113,6 +113,9 @@
   loop: "{{ ff_api_accounts_vaulted.results | default([]) }}"
   loop_control:
     label: "{{ item.item.key }}"
+  # `item.item.value` est le mot de passe EN CLAIR tiré à l'instant : `label` ne le masque pas dès `-v`.
+  # Les noms des comptes sortent de la tâche suivante.
+  no_log: true
   tags: [secrets]
 
 - name: Remind that the fleet vault has changed

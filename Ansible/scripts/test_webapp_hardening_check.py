@@ -516,7 +516,7 @@ class SecretLoopTests(unittest.TestCase):
     """Une boucle sur une valeur secrète sans `no_log` l'affiche dès `-v` (`loop_control.label` ne masque pas `item`)."""
 
     def roles_copy(self, tmp, edit=None):
-        for role in ("webapp-env-update", "vault-secret-setup", "webapp-secrets-setup"):
+        for role in ("webapp-env-update", "vault-secret-setup", "webapp-secrets-setup", "fleetforge-install"):
             shutil.copytree(os.path.join(ROLES, role), os.path.join(tmp, role))
         if edit:
             path, old, new = edit
@@ -536,6 +536,15 @@ class SecretLoopTests(unittest.TestCase):
                                   "« Report what was rendered »).\n  no_log: true\n", "« Report what was rendered »).\n"))
             errors = check.check_secret_loops(tmp)
         self.assertTrue(any("Write the back env keys that change" in e for e in errors), errors)
+
+    def test_removing_no_log_from_the_vault_store_of_bounded_accounts_is_caught(self):
+        # Ses éléments portent `item.item.value`, le mot de passe tiré en clair : le `label` ne le cache pas dès `-v`.
+        with tempfile.TemporaryDirectory() as tmp:
+            self.roles_copy(tmp, ("fleetforge-install/tasks/api-accounts.yml",
+                                  "dès `-v`.\n  # Les noms des comptes sortent de la tâche suivante.\n  no_log: true\n",
+                                  "dès `-v`.\n  # Les noms des comptes sortent de la tâche suivante.\n"))
+            errors = check.check_secret_loops(tmp)
+        self.assertTrue(any("Store the new bounded account passwords" in e for e in errors), errors)
 
     def test_a_loop_over_a_secret_named_key_or_a_vault_lookup_is_caught(self):
         with tempfile.TemporaryDirectory() as tmp:

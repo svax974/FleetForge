@@ -357,7 +357,7 @@ def _check_roles(roles_dir):
 # l'itération). Toute boucle sur une valeur qui porte un secret exige `no_log: true`.
 SECRET_ROLES = re.compile(r"^(webapp-.*|vault-secret-setup|fleetforge-install)$")
 # Noms d'une clé de .env secrète (une boucle qui les itère porte leurs valeurs).
-SECRET_NAME = re.compile(r"PASSWORD|SECRET|JWT|CRYPT_")
+SECRET_NAME = re.compile(r"PASSWORD|SECRET|JWT|CRYPT_", re.I)
 # Sources d'une VALEUR secrète : variables du coffre, faits qui en sont tirés, contenu lu des .env.
 SECRET_SOURCE = re.compile(
     r"[a-z0-9]_password\b|[a-z0-9]_pass\b|[a-z0-9]_secret\b|vsecret_values|vsecret_items|vsecret_current|wa_secret_env"
@@ -389,10 +389,46 @@ def _with_local_vars(text, local_vars):
     return text
 
 
-def check_secret_loops(roles_dir):
-    """Faits dérivés d'un secret (propagation par les `set_fact`/`vars`), puis boucles sans `no_log` sur eux."""
-    tasks = [(path, task) for path in _task_files(roles_dir) for task in _tasks_in(_load(path) or [])]
-    secret = set()
+def _all_task_files(playbooks_dir):
+    """Tout le dépôt Ansible : fichiers de tâches de TOUS les rôles, et les plays des playbooks."""
+    roles_dir = os.path.join(playbooks_dir, "roles")
+    for role in sorted(os.listdir(roles_dir)):
+        for sub in ("tasks", "handlers"):
+            tasks_dir = os.path.join(roles_dir, role, sub)
+            for fname in sorted(os.listdir(tasks_dir)) if os.path.isdir(tasks_dir) else []:
+                if fname.endswith((".yml", ".yaml")):
+                    yield os.path.join(tasks_dir, fname), None
+    for fname in sorted(os.listdir(playbooks_dir)):
+        if fname.endswith((".yml", ".yaml")) and not fname.startswith("zz-"):
+            yield os.path.join(playbooks_dir, fname), "plays"
+
+
+def _tasks_of(path, kind):
+    try:
+        doc = _load(path) or []
+    except yaml.YAMLError:
+        return []
+    if kind != "plays":
+        return list(_tasks_in(doc))
+    out = []
+    for play in doc if isinstance(doc, list) else []:
+        if isinstance(play, dict):
+            for section in ("pre_tasks", "tasks", "post_tasks", "handlers"):
+                out += list(_tasks_in(play.get(section)))
+    return out
+
+
+def check_secret_loops(roles_dir, everything=False):
+    """Faits dérivés d'un secret (propagation par les `set_fact`/`vars`, résultats `register` d'une tâche `no_log`),
+    puis boucles sans `no_log` sur eux. `everything` : tout le dépôt Ansible (`roles_dir` est alors le dossier
+    `playbooks`), sinon les rôles de la famille `webapp`, `vault-secret-setup` et `fleetforge-install`."""
+    if everything:
+        files = list(_all_task_files(roles_dir))
+    else:
+        files = [(p, None) for p in _task_files(roles_dir)]
+    tasks = [(path, task) for path, kind in files for task in _tasks_of(path, kind)]
+    # Résultat ENREGISTRÉ d'une tâche `no_log` : ses `results`/`stdout` portent la valeur protégée.
+    secret = {t["register"] for _, t in tasks if t.get("no_log") is True and isinstance(t.get("register"), str)}
     changed = True
     while changed:
         changed = False
