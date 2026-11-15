@@ -51,6 +51,7 @@
 #   webapp_pages_managed  false : le projet Pages n'est pas géré ici (déjà géré à part, ex. un projet partagé par plusieurs environnements) :
 #                         ni projet, ni domaine, ni DNS, et `VITE_API_URL` n'est pas touché
 #   webapp_vhost_file     nom du vhost écrit à la main dans parcs/<parc>/nginx/sites-enabled/ (défaut : `<webapp_project>.conf`)
+#   webapp_trust_proxy    TRUST_PROXY imposé (chaîne) : app jointe directement par Cloudflare, sans proxy du parc (défaut : proxies du parc)
 #   webapp_run_env        { VARIABLE: valeur } ajoutées à l'environnement de `run.sh` (hooks propres à l'app ; jamais un secret)
 #   webapp_upstream_checks  sondes svcprobe `upstream_<id>` : [{ id, url }], URL https lue DEPUIS le conteneur back
 

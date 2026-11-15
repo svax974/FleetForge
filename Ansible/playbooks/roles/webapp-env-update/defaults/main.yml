@@ -17,10 +17,14 @@ webapp_env_app_id: ""
 # met alors tout le monde dans le même compteur. Avec la liste, req.ip est la
 # dernière adresse de X-Forwarded-For qui n'est PAS un relais connu : réseaux privés
 # (conteneurs, pont Docker, boucle locale) + adresses des proxies du parc.
+#
+# `webapp_trust_proxy` (attribut d'entrée, chaîne) l'emporte : une app jointe DIRECTEMENT par Cloudflare, sans proxy du parc
+# (TradeKong), fait confiance aux plages Cloudflare (mot-clé `cloudflare` ou liste CIDR), pas aux proxies.
 webapp_env_trust_proxy: >-
-  {{ (['loopback', 'linklocal', 'uniquelocal']
+  {{ webapp_trust_proxy if (webapp_trust_proxy | default('') | length > 0)
+     else ((['loopback', 'linklocal', 'uniquelocal']
       + (groups['proxies'] | default([]) | map('extract', hostvars, 'ansible_host') | list))
-     | unique | join(',') }}
+     | unique | join(',')) }}
 
 # Nom sous lequel le navigateur joint l'API quand le front est sur Cloudflare Pages
 # (`cloudflare_front: true`) : VITE_API_URL en est déduit. Vide : VITE_API_URL n'est pas touché.

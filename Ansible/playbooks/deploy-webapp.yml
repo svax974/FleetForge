@@ -229,7 +229,10 @@
   become: true
   tags: [security]
   roles:
-    - webapp-security
+    # `webapp_proxy: external` (VPS joint directement, ex. par Cloudflare) : aucun filtrage posé ici. Un DROP sur les ports publiés
+    # couperait ce trafic, que l'inventaire ne décrit pas (aucune source à admettre).
+    - role: webapp-security
+      when: (hostvars[webapp_target].webapp_proxy | default('internal')) != 'external'
 
 # ── Silence pendant le déploiement ─────────────────────────────────────────
 # `deploy-full.sh` coupe le service le temps de la bascule : sans silence, ServiceDown part et la veille analyse une

@@ -389,17 +389,6 @@
   become: false
   no_log: true
 
-- name: Fail when a manual key is missing
-  ansible.builtin.fail:
-    msg: >-
-      {{ wa_src }}{{ wa_front_env_file }} : à renseigner à la main (une seule fois, jamais devinable) :
-      {{ wa_missing_manual | join(', ') }}. Les poser dans le .env puis `./app-env.sh save {{ wa_app_id }}` —
-      ou `-e webapp_allow_missing_manual=true` pour déployer sans (l'app démarrera dégradée).
-  when:
-    - wa_missing_manual | length > 0
-    - not (webapp_allow_missing_manual | default(false) | bool)
-    - not ansible_check_mode
-
 # `webapp_env_required` : clés que back/.env doit porter NON VIDES après le rendu (une app qui démarre sans elles
 # échouerait plus tard, et moins clairement). Noms seulement.
 - name: Find the required back keys with no value (names only)
@@ -417,17 +406,6 @@
   delegate_to: localhost
   become: false
   no_log: true
-  when:
-    - webapp_env_required is defined
-    - not ansible_check_mode
-
-- name: Fail when a required back key is empty
-  ansible.builtin.assert:
-    that: wa_missing_required | default([]) | length == 0
-    fail_msg: >-
-      {{ wa_src }}{{ wa_back_env_file }} : {{ wa_missing_required | default([]) | join(', ') }} vide(s) ou absente(s)
-      (`webapp_env_required` de {{ inventory_hostname }}).
-    quiet: true
   when:
     - webapp_env_required is defined
     - not ansible_check_mode
@@ -453,3 +431,28 @@
       .env de {{ wa_app_id }} ({{ wa_env }}) : {{ wa_back_todo | length }} clé(s) back et {{ wa_front_todo | length }}
       clé(s) front à jour ({{ (wa_back_todo.keys() | list + wa_front_todo.keys() | list) | join(', ') or '—' }}).
       {{ 'Coffre mis à jour : à committer dans le dépôt privé du parc.' if wa_env_saved is changed else '' }}
+
+# ── 8. Refus, APRÈS la sauvegarde ──────────────────────────────────────────
+# Les `.env` rendus sont déjà dans le coffre : un refus ici ne laisse plus le fichier local et le coffre divergents, ce qui
+# bloquerait le passage suivant (garde `.env` ↔ coffre).
+- name: Fail when a manual key is missing
+  ansible.builtin.fail:
+    msg: >-
+      {{ wa_src }}{{ wa_front_env_file }} : à renseigner à la main (une seule fois, jamais devinable) :
+      {{ wa_missing_manual | join(', ') }}. Les poser dans le .env puis `./app-env.sh save {{ wa_app_id }}` —
+      ou `-e webapp_allow_missing_manual=true` pour déployer sans (l'app démarrera dégradée).
+  when:
+    - wa_missing_manual | length > 0
+    - not (webapp_allow_missing_manual | default(false) | bool)
+    - not ansible_check_mode
+
+- name: Fail when a required back key is empty
+  ansible.builtin.assert:
+    that: wa_missing_required | default([]) | length == 0
+    fail_msg: >-
+      {{ wa_src }}{{ wa_back_env_file }} : {{ wa_missing_required | default([]) | join(', ') }} vide(s) ou absente(s)
+      (`webapp_env_required` de {{ inventory_hostname }}).
+    quiet: true
+  when:
+    - webapp_env_required is defined
+    - not ansible_check_mode
