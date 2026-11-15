@@ -23,6 +23,8 @@
 #   back_port        port du back d'une application front+back
 #   access_mode      private (défaut) | public — filtrage du vhost (_access.inc)
 #   access_linked    entrées autorisées en plus sur un vhost privé (serveurs liés)
+#   access_local_cidrs sous-réseaux Docker PRIVÉS (/16 à /32) d'un serveur lié,
+#                    admis seulement par un proxy de la MÊME machine que lui
 #   server_type      proxy | monitoring | vpn | db | backup | app | misc (affichage)
 #   monitor_port     port de scrape node_exporter public (NAT domestique)
 #   svcprobe_port    port de scrape svcprobe public (NAT domestique)
@@ -147,6 +149,41 @@ all:
               pgbak_user: monapp
               pgbak_dest_host: backup-monapp         # entrée du groupe `backups`
               pgbak_cron_minute: "10"
+
+        # ── Passerelle MCP de FleetForge (deploy-fleetforge.yml, tag gateway) ──
+        # Entrée DÉDIÉE, jamais dans `infras` (même quand elle partage la
+        # machine de FleetForge : copier alors son ansible_host/provider). Son
+        # amont (une entrée de `infras`) la nomme dans `access_linked` et porte
+        # dans `ff_api_accounts` les comptes bornés ffg_read (read), ffg_check
+        # (check, max_hosts, deny_playbooks ⊇ *-fleetforge.yml,
+        # *-fleetforge-gateway.yml) et ffg_run (run, idem, accept_checks_from:
+        # [ffg_check]) — vérifié par le play de garde, sans connexion.
+        fleetforge_gateways:
+          hosts:
+            fleetforge-gateway:
+              hostname: ffg-priv.{{ domain_name }}
+              proxy_hostname: ffg.{{ domain_name }}
+              ansible_host: 203.0.113.50
+              provider: ovh
+              server_type: app
+              app_port: 4730        # front (publié 4730:80)
+              back_port: 4731       # back-lb : sert /mcp
+              pg_port: 4732         # Postgres, 127.0.0.1 seulement
+              access_mode: private  # E1 : jamais public
+              # Sous-réseau Docker dédié du back (FFG_DOCKER_SUBNET du compose
+              # durci) ; admis par le vhost de l'amont sur un proxy CO-LOCALISÉ.
+              ffg_docker_subnet: 172.30.73.0/24
+              access_local_cidrs: [172.30.73.0/24]
+              # /mcp : seuls ces serveurs (vide = personne), puis deny all.
+              ffg_mcp_allowed_hosts: [infra1]
+              # Accès de TEST : la whitelist aussi sur /mcp. false hors tests,
+              # et avant toute exposition E2/E3.
+              ffg_mcp_allow_whitelist: false
+              ffg_upstreams:
+                - { id: main, entry: infra1, parcs: [monparc] }
+              # Chemins que le compte dédié ne doit ni lire ni traverser.
+              ffg_protected_paths: ["/home/{{ remote_username }}/fleetforge"]
+              ansible_roles: [fleetforge-gateway]
 
         # ── Destinations de sauvegarde (une entrée par sauvegarde) ────────────
         backups:

@@ -129,4 +129,26 @@ archives ; retirer EN MÊME TEMPS l'entrée d'inventaire ou son `proxy_hostname`
   destination : `deploy-backup.yml --tags retarget --limit sync_servers` (`retarget-backups-web3c.yml` ne couvre
   que tradekong/ctdapi).
 
+# Passerelle MCP de FleetForge (`fleetforge-gateway`)
+
+App Nest privée (dépôt séparé) devant l'API d'automatisation de FleetForge, déployée par **le même
+playbook** que FleetForge : `deploy-fleetforge.yml` (plays du groupe `fleetforge_gateways`, tag `gateway`).
+`deploy-fleetforge-gateway.yml` n'en est qu'un alias (`ff_deploy_scope: gateway`), exigé par la règle
+« famille = suffixe du playbook ». Mode d'emploi, prérequis et exposition : en-tête de `deploy-fleetforge.yml`.
+
+- **Entrée dédiée** (jamais `infras`), même quand elle partage la machine d'`infra1` (premier déploiement) :
+  la déplacer = changer son `ansible_host`. Garde statique sans connexion en tête des plays.
+- **Comptes aval** `ffg_read` / `ffg_check` / `ffg_run` dans `ff_api_accounts` de l'entrée FleetForge, qui
+  nomme la passerelle dans `access_linked` ; mots de passe au vault du parc, écrits dans le `.env` de l'app
+  (`no_log`) puis rechiffrés au coffre `.private/apps/fleetforge-gateway`.
+- **Exposition E1** : vhost privé ; `/mcp` limité à `ffg_mcp_allowed_hosts` (+ whitelist si
+  `ffg_mcp_allow_whitelist`, accès de TEST) puis `deny all` (partiel `proxy-update/templates/_fleetforge_gateway.inc`).
+  Ports publiés filtrés dans DOCKER-USER (proxies distants seulement).
+- **Durcissement** : compte Unix dédié `ffgateway`, compose durci exigé (contrôle statique avant
+  déploiement, `docker inspect` après — conteneurs arrêtés en cas d'écart).
+- **Contrôles statiques** : `scripts/ffg_isolation_check.py` et ses tests
+  (`python3 -I scripts/test_ffg_isolation_check.py`, tenus par `cargo test -p fleetforge-core --test gateway_isolation`).
+- Retrait : `remove-fleetforge-gateway.yml`, `purge-fleetforge-gateway.yml -e confirm=yes` (FleetForge intact).
+- Étude d'isolation par VM légère : `../docs/etude-isolation-passerelle-vm.md`.
+
 ## Notes

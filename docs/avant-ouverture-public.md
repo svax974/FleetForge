@@ -3,6 +3,40 @@
 Points à traiter ou à revoir avant la mise en production ou la distribution.
 Retirer ou dater un point une fois fait.
 
+## Passerelle MCP : déploiement E1 (ajouté le 15/11/2026)
+
+Étape 6.6 du lot 6 (`fleetforge-gateway`) : plays du groupe `fleetforge_gateways` dans
+`deploy-fleetforge.yml`, entrée dédiée de l'inventaire web3c. RIEN n'a été joué sur une machine.
+
+- **Revue Opus indépendante AVANT tout déploiement réel** : pare-feu DOCKER-USER
+  (`fleetforge-gateway-security`), `_access.inc` (`access_local_cidrs`), vhost
+  `_fleetforge_gateway.inc` (`/mcp`), comptes `ffg_*` et leur liste de refus, transmission des mots de
+  passe (`fleetforge-gateway-deploy`, `no_log`), contrôle de durcissement (`tasks/runtime.yml`).
+- **Choix de la machine** : premier déploiement sur la MÊME machine qu'`infra1` (décision du
+  15/11/2026). La déplacer = changer `ansible_host` (et `provider`, `access_local_cidrs`) de l'entrée.
+- **E2/E3 (OAuth public) INTERDITS tant que la passerelle partage la machine du nœud de contrôle** :
+  prérequis de bascule = la déplacer d'abord (autre machine, ou VM légère :
+  `docs/etude-isolation-passerelle-vm.md`). Le play de garde refuse tout `access_mode` autre que `private`.
+- **Accès de test à `/mcp`** : `ffg_mcp_allow_whitelist: true` sur l'entrée — à passer à `false` dès la
+  fin des tests et AVANT toute exposition E2/E3 (la whitelist n'élargit pas l'allow-list propre à chaque
+  credential `exec`, ≤ /16, imposée par `mcp-access`).
+- **`/mcp` admet l'adresse d'`infra1`, donc toute sa machine** (proxy1, monitor, mail1, www…) : la clé
+  `ffg_` et l'allow-list du credential restent les barrières. Rien ne distingue ces services au niveau réseau.
+- **Compose durci à livrer dans le dépôt de l'app** (`COMPOSE_FILE_NAME`) : user
+  `${FFG_RUNTIME_UID}:${FFG_RUNTIME_GID}`, read_only + tmpfs, cap_drop ALL, no-new-privileges (tous les
+  services), mem_limit/cpus, réseau du back de sous-réseau `${FFG_DOCKER_SUBNET}`, ni socket Docker ni
+  vmagent ni montage de l'hôte. Sans lui le déploiement est refusé AVANT `run.sh` (le compose du gabarit
+  échoue au contrôle : 21 écarts relevés le 15/11/2026).
+- **Interpolation des variables compose** (`${FFG_RUNTIME_UID}`…) : supposée lue depuis back/.env par
+  deploy-full.sh — NON vérifié ; le contrôle d'exécution (`--tags hardening`) le prouvera.
+- **Permissions de `/home/srvc/fleetforge` et `~/.ssh`** : le compte `ffgateway` ne doit ni les lire ni
+  les traverser. Non vérifié sur la machine ; le premier `--tags hardening` le dira (échec = chmod à faire).
+- **Sauvegarde de la base de la passerelle** : données `pgbak_*` posées, NON activée (aucune destination
+  hors de la machine d'`infra1`). À décider.
+- **CNAME `ffg.web3c.cc`** : publié par la synchronisation DNS générique dès que l'entrée existe, avant
+  tout déploiement (vhost rendu par les proxies : sans backend joignable tant que l'app n'est pas là).
+- **Liste de refus des comptes `ffg_check`/`ffg_run`** (Q8 du plan) et `max_hosts: 5` : à confirmer.
+
 ## API d'automatisation : mode `check` et checks par compte (ajouté le 11/11/2026)
 
 Lot 6.1 de la passerelle MCP (`fleetforge-gateway`) ; détail dans RUNNING.md, « API d'automatisation ».
