@@ -78,8 +78,11 @@ du parc**, et les clés de chiffrement à sauvegarder hors du serveur. Restent m
     moindre écart, vhost qui réécrit X-Forwarded-For, sondes `firewall_<port>` ;
     Sortie du sous-réseau bornée : `webapp_hardening.egress_allow: [{name, proxies: true | inventory_host | host, port,
     proto}]` (vide = rien, hors réponses, trafic interne et DNS de la machine), FORWARD pour une autre machine, INPUT
-    pour celle-ci ; aucune règle ufw supprimée (une règle d'une autre origine sur ses ports bloque le déploiement) ;
-    base jamais vierge (`-e webapp_hardening_db_migrated=true` après migration) ;
+    pour celle-ci — jamais un proxy DISTANT (MASQUERADE : il verrait l'adresse de la machine) ; trafic LOCAL vers
+    l'app (OUTPUT) réservé à nginx (groupe de contrôle) et root ; aucune règle ufw supprimée (une règle d'une autre
+    origine sur ses ports bloque le déploiement) ; base jamais vierge (marqueur d'état
+    `/var/lib/fleetforge/webapp/<entrée>.state`, `-e webapp_hardening_db_migrated=true` après migration) ; faits
+    internes refusés en extra-vars ;
   - `webapp_vhost_locations[].access: { hosts, whitelist?, vpn_addresses?, v6_min_prefix? }` (+ `upstream: back`,
     `priority: true`, `raw_uri` : URI brute exigée) — liste NOMMÉE par chemin (`proxy-update/templates/_named_access.inc`),
     contrôlée par `webapp_hardening_check.py vhost` avant chaque pose ; valeurs des locations sous grammaire ;

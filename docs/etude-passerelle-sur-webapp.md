@@ -94,7 +94,7 @@ webapp_vhost_locations:
   - { path: /.well-known/, priority: true, access: { hosts: [] } }
 webapp_env_from_vault: { FFG_UPSTREAM_MAIN_READ_PASSWORD: ff_api_password_ffg_read, … }
 webapp_env_required: [FFG_UPSTREAMS, REDIS_PASSWORD]
-webapp_upstream_checks: [{ id: main, url: "https://{{ hostvars['infra1'].proxy_hostname }}/healthz" }]
+webapp_upstream_checks: [{ id: main, url: "https://{{ hostvars['infra1'].hostname }}/healthz" }]
 ```
 
 Le profil exige en plus (garde sans connexion, `webapp-setup` `tasks_from: hardening-guard`) : `ufw_app_ports: false`, ni
@@ -228,6 +228,10 @@ Ce que `webapp_hardening_check.py compose` exige ; tout écart = déploiement re
   machine : un seul projet compose, donc un seul réseau).
 - **Vérification** : `python3 -I Ansible/scripts/webapp_hardening_check.py compose <dépôt>/scripts/docker-compose-hardened.yml
   --docker` doit répondre 0 ; le compose de référence des tests (`GOOD_COMPOSE_YAML`) en est un exemple complet qui passe.
+- **Borne réelle** : le vérificateur refuse ce qu'il SAIT reconnaître (liste blanche de clés, un seul réseau, aucun
+  port publié par un service de code, aucun secret interpolé hors de son service) ; il ne prouve pas l'absence de
+  tout contournement par une forme qu'il ne connaît pas. La borne de confiance reste la REVUE du fichier
+  `docker-compose-hardened.yml` du gabarit à chaque changement (diff relu, puis `compose … --docker` à 0).
 
 ## Réalisation (phase B, 15/11/2026)
 
@@ -264,15 +268,16 @@ Conforme à l'étude, avec ces précisions :
 
 Un paquet d'un conteneur traverse **FORWARD** (donc `DOCKER-USER`) quand sa destination est une AUTRE machine, et
 **INPUT** quand sa destination est une adresse de L'HÔTE (passerelle du pont `.1`, adresse publique) — c'est le cas de
-la passerelle, qui joint FleetForge par `https://infra.<domaine>` (CNAME vers le front privé : proxy1, sur la MÊME
-machine, et proxy3) et le relais SMTP `mail1` (même machine). Le pare-feu du profil pose donc, en tête :
+la passerelle, qui joint FleetForge par `https://<hostname d'infra1>` (`infra-priv.<domaine>`, enregistrement A de la
+machine, servi par proxy1 SEUL — quatrième revue, ci-dessous) et le relais SMTP `mail1` (même machine). Le pare-feu
+du profil pose donc, en tête :
 - `DOCKER-USER` : réponses (ESTABLISHED/RELATED), trafic interne au sous-réseau, destinations de `egress_allow` qui
   ne sont pas cette machine, DNS des résolveurs de la machine, puis `-s <sous-réseau> -j DROP` (Internet, métadonnées
   169.254.169.254…) ;
 - `INPUT` : réponses, destinations de `egress_allow` qui sont cette machine (443 pour proxy1, 587 pour mail1), puis
   `-s <sous-réseau> -j DROP` (sshd, exporters, tout le reste de l'hôte). L'ACCEPT précède ufw : le relais n'admet en
   ufw que `172.17.0.0/16` (Alertmanager), pas le sous-réseau dédié.
-`egress_allow` de la passerelle : `upstream` (proxies admis, 443) et `smtp` (`mail1`, 587 = port de soumission
+`egress_allow` de la passerelle : `upstream` (`inventory_host: proxy1`, 443) et `smtp` (`mail1`, 587 = port de soumission
 utilisé par les autres clients du parc : Alertmanager, Roundcube). DNS : les résolveurs non locaux de la machine,
 lus sur place (le résolveur embarqué de Docker les interroge depuis l'espace réseau du conteneur ; un résolveur de
 boucle locale passe par l'hôte). Supervision : aucune sortie (svcprobe est scruté en ENTRÉE ; pas de vmagent, pas de
@@ -309,9 +314,66 @@ journée, revue comprise), non implémenté.
 9. **Destinations NON ouvertes** (à ouvrir seulement sur décision) : Prowl (`PROWL_API_URL`, notifications, optionnel),
    Telegram / Web Push (module `interaction`, prévu pour l'approbation des runs réels au lot 6.4 : entrée à ajouter à
    `egress_allow` le moment venu), authentification Google / wallet (non activées : `authMethods` = e-mail seulement).
-10. **Processus local** : une règle `OUTPUT -m owner` réservant `NODE_PORT`/`VITE_PORT` locaux à nginx (proxy1) et root
-   fermerait le cas d'un processus de la machine qui se présente depuis le pont (relais de confiance) et forge
-   `X-Forwarded-For` — non posée (impact sur svcprobe, utilisateur de nginx à vérifier) ; à décider.
-11. **Premier déploiement interrompu** : si `run.sh` échoue après avoir créé le répertoire de l'app mais avant le volume,
-   le rejeu est refusé (déploiement antérieur sans base) jusqu'à `-e webapp_hardening_db_migrated=true` : friction
-   assumée plutôt qu'une base vierge silencieuse.
+10. **Processus local** : TRANCHÉ à la quatrième revue — règles `OUTPUT` posées (voir plus bas) : nginx par son groupe
+   de contrôle, root, puis REJECT. Alternative écartée : `--uid-owner www-data` (WordPress, apache/php, tourne aussi en
+   www-data et passerait).
+11. **Premier déploiement interrompu** : TRANCHÉ à la quatrième revue — la preuve d'un déploiement antérieur est le
+   marqueur d'état écrit après un déploiement SAIN ; un premier passage interrompu se rejoue sans drapeau.
+
+## Quatrième revue (15/11/2026) : ce qui a changé
+
+- **Amont joint par le proxy CO-LOCALISÉ seulement** (HAUTE). Par un proxy DISTANT, le paquet de la passerelle sortait
+  par FORWARD puis MASQUERADE : le proxy distant voyait l'adresse PUBLIQUE de la machine, que le vhost FleetForge admet
+  au titre d'infra1 (`access_linked`) et que d'autres vhosts admettent au titre de la supervision — la passerelle
+  héritait de ces droits. Désormais : la garde générique du profil (`hardening.yml`) refuse toute sortie FORWARD vers
+  l'adresse d'un proxy ; la garde de la passerelle exige `upstream = {inventory_host: <proxy de cette machine>, port:
+  443}` et une entrée FleetForge sur la même machine portant `hostname` ; `FFG_UPSTREAMS.baseUrl` = `https://<hostname
+  de l'amont>` ; le vhost FleetForge du parc (dépôt privé) ajoute ce nom à `server_name` sur le seul proxy co-localisé
+  (rendu vérifié : proxy1 seul ; certificat générique `/etc/letsencrypt/live/<domaine>`). Le trafic arrive en INPUT,
+  sous l'adresse du conteneur, admise par `access_local_cidrs` sur ce proxy seulement.
+- **Un seul réseau** (HAUTE) : compose (vérificateur statique) et exécution (`violations.yml`) — TOUT conteneur du
+  projet, services tiers compris, sur un seul réseau, celui du sous-réseau dédié.
+- **Boucles secrètes** : `no_log` sur le stockage des mots de passe des comptes bornés (`api-accounts.yml`). Balayage
+  du dépôt entier (`check_secret_loops(…, everything=True)`) : restent signalées, et jugées FAUX POSITIFS après
+  vérification — `cloudflare-origin-pull` « Fail clearly when a hostname is not active » et `check-monitoring.yml`
+  « Rapport des séries » (résultats `register` d'une tâche `no_log` : Ansible y masque l'`invocation`, en-têtes et mot de
+  passe compris, éprouvé en local jusqu'à `-vvv` ; les éléments ne portent que des noms), `papangmetrics-deploy`
+  (clés PUBLIQUES JWT), `scripting-security` (chemins et modes), `deploy-dmarc-exporter`/`deploy-mailrelay` « Validate
+  required variables » (NOMS de variables), `remove-dns-records.yml` (enregistrements ; le jeton est un paramètre
+  `no_log` du module). Le mode `playbook` du vérificateur garde son périmètre (familles webapp, vault-secret-setup,
+  fleetforge-install).
+- **fail2ban / ufw devant nos règles** : admis seulement un saut vers une chaîne DÉCLARÉE qui ne fait que DROP, REJECT,
+  RETURN (ou saut vers une telle chaîne ; profondeur 4, cycle refusé) ; ACCEPT/RETURN directs et chaîne inconnue
+  refusés. Lecture de la table filter entière. L'unité du pare-feu démarre après docker, fail2ban, ufw et nginx, en est
+  `PartOf` (stop/restart propagés) et `WantedBy` (start propagé). **Non couvert** : `ufw reload` et
+  `fail2ban-client reload` ne redémarrent pas d'unité — la sonde `firewall_*` et le contrôle à l'exécution le signalent.
+- **Trafic local (OUTPUT)** : ports publiés en destination locale et ports des conteneurs en destination interne (après
+  le DNAT d'OUTPUT) : nginx (`-m cgroup --path <groupe de l'unité, lu sur la machine>`), root (docker-proxy, svcprobe),
+  puis REJECT ; IPv6 aussi. Raisonné, NON éprouvé sur la machine : cgroup v2 et `xt_cgroup` supposés ; si le module
+  manque, l'insertion échoue et le script aussi — l'app reste alors fermée (unité en échec, contrôle préalable refuse).
+  nginx arrêté au passage : pas de règle nginx (fermé) jusqu'au redémarrage de nginx, qui relance l'unité.
+- **Extra-vars internes refusées** : les trois playbooks de la famille posent une sonde sur chaque fait interne
+  (`set_fact`, `register`, `vars` d'inclusion — liste littérale, couverture vérifiée par test) et la relisent : seule
+  une extra-var la masque.
+- **Noms de comptes de la passerelle** : `ffg_upstreams[].users` d'une entrée `fleetforge_gateways` = noms `ffg_*`.
+- **PROJECT_NAME possédé** par le profil durci ; **marqueur d'état** `/var/lib/fleetforge/webapp/<entrée>.state`
+  (projet, volume ; root 0644) écrit après un déploiement sain : avec lui, volume absent/vide, projet ou volume
+  différents (renommage) ou marqueur illisible ⇒ refus ; sans lui, rejeu libre. Nommé d'après l'ENTRÉE (et non le
+  projet, comme proposé) : un projet renommé retrouve ainsi l'ancien marqueur. Retiré par la purge.
+- **ufw** : plages, listes, destination à adresse, `allow from X` (tous ports) vus par l'audit. Non couvert : un profil
+  d'application ufw (`Nginx Full`…), ports hors de `ufw status`.
+
+### Risques résiduels et décisions (quatrième revue)
+
+- **Canal DNS** : le sous-réseau joint les résolveurs de la machine en 53 ; un code compromis peut encoder des données
+  dans des noms interrogés (tunnel DNS vers un domaine qu'il contrôle). Fermer demanderait un résolveur filtrant
+  (liste de noms admis) pour le sous-réseau — non fait, à décider.
+- **MASQUERADE** : toute sortie FORWARD de la machine porte l'adresse publique, donc l'identité d'infra1 (et de la
+  supervision) pour les vhosts du parc ; c'est pourquoi aucun proxy ne peut être une destination FORWARD du profil.
+- **Relais SMTP** : le compte SASL de la passerelle sur `mail1` doit être LIÉ à une adresse d'expéditeur
+  (`smtpd_sender_login_maps` + `reject_sender_login_mismatch`) et limité en débit — sinon un code compromis envoie au
+  nom de n'importe quelle adresse du domaine. À faire par le propriétaire ; le rôle mail n'est pas modifié ici.
+- **`proxy_update_dir`** (play vhost de `deploy-webapp.yml`) : défaut préexistant, corrigé indépendamment par un autre
+  commit (22bba7c) ; aucune modification de cette série n'en dépend.
+- **400 avant allow/deny** : une URI brute hors grammaire répond 400 avant le filtre d'adresses de `/mcp` — accepté
+  (aucune donnée servie).
