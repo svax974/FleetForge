@@ -2,8 +2,16 @@
 Description=Restrict the published ports of {{ wa_app.wa_project }} to the remote proxies (webapp hardening)
 # Docker recrée DOCKER-USER vide à chaque démarrage : reposer les règles APRÈS
 # lui, sans quoi l'application serait exposée jusqu'au prochain passage Ansible.
-After=docker.service
+# fail2ban et ufw insèrent leurs sauts EN TÊTE d'INPUT (et de DOCKER-USER si
+# configurés) : démarrer après eux, et être redémarré avec eux (`PartOf` :
+# un restart/stop de l'un se propage ici, le script réinsère alors nos règles
+# devant). Une unité absente (pas de fail2ban) est ignorée par systemd.
+# Non couvert : `ufw reload` / `fail2ban-client reload` (pas de restart d'unité)
+# — la sonde `firewall_*` et le contrôle à l'exécution le signalent ; seul un
+# saut vers une chaîne qui ne fait que refuser est admis devant nos règles.
+After=docker.service fail2ban.service ufw.service
 Requires=docker.service
+PartOf=docker.service fail2ban.service ufw.service
 
 [Service]
 Type=oneshot

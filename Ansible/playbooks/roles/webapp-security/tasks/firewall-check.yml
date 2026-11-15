@@ -13,33 +13,31 @@
   ansible.builtin.set_fact:
     wa_app: "{{ hostvars[webapp_target | default(inventory_hostname)] }}"
 
-- name: Read the IPv4 DOCKER-USER chain
+# Table filter ENTIÈRE (et non la seule chaîne) : une règle de fail2ban insérée devant les nôtres saute vers sa chaîne
+# `f2b-*`, admise seulement si celle-ci ne fait que refuser ou rendre la main (firewall-problems.yml) — il faut la lire.
+# Chaîne DOCKER-USER absente : aucune ligne `-A DOCKER-USER`, rapportée comme « aucune règle ».
+- name: Read the IPv4 filter table
   ansible.builtin.command:
-    argv: [iptables, -w, -S, DOCKER-USER]
+    argv: [iptables, -w, -S]
   become: true
   register: wa_chain4
   changed_when: false
   failed_when: false
   check_mode: false
 
-- name: Read the IPv6 DOCKER-USER chain
+- name: Read the IPv6 filter table
   ansible.builtin.command:
-    argv: [ip6tables, -w, -S, DOCKER-USER]
+    argv: [ip6tables, -w, -S]
   become: true
   register: wa_chain6
   changed_when: false
   failed_when: false
   check_mode: false
 
-# Sortie du sous-réseau vers l'HÔTE (passerelle du pont, adresse publique) : chaîne INPUT.
-- name: Read the IPv4 INPUT chain
-  ansible.builtin.command:
-    argv: [iptables, -w, -S, INPUT]
-  become: true
-  register: wa_chain_input
-  changed_when: false
-  failed_when: false
-  check_mode: false
+# Sortie du sous-réseau vers l'HÔTE (passerelle du pont, adresse publique) : chaîne INPUT, de la même lecture.
+- name: Keep the IPv4 table for the INPUT chain
+  ansible.builtin.set_fact:
+    wa_chain_input: "{{ wa_chain4 }}"
 
 - name: Work out the firewall problems
   ansible.builtin.include_tasks:

@@ -1089,6 +1089,42 @@ class FirewallProblemsTests(unittest.TestCase):
             with self.subTest(rule):
                 self.assertIn("précède les règles", self.problems([rule]))
 
+    F2B = ["-N f2b-sshd", "-A f2b-sshd -s 198.51.100.66/32 -j REJECT --reject-with icmp-port-unreachable",
+           "-A f2b-sshd -j RETURN"]
+
+    def test_a_refusing_chain_jumped_to_first_is_admitted(self):
+        # Quatrième revue : fail2ban (et ufw) s'insèrent devant nos règles après un redémarrage. Un saut vers une
+        # chaîne qui ne fait que refuser ou rendre la main ne peut rien accepter : admis, en DOCKER-USER et en INPUT.
+        jump = "-A DOCKER-USER -p tcp -m multiport --dports 4730 -j f2b-sshd"
+        self.assertEqual(self.problems(self.F2B + [jump]), "")
+        nested = ["-N f2b-outer", "-A f2b-outer -j f2b-sshd", "-A f2b-outer -j RETURN"]
+        self.assertEqual(self.problems(self.F2B + nested + ["-A DOCKER-USER -j f2b-outer"]), "")
+        in_jump = "-A INPUT -p tcp -m multiport --dports 22 -j f2b-sshd"
+        self.assertEqual(self.problems([], input_rules=self.F2B + [in_jump] + OUR_INPUT), "")
+
+    def test_a_chain_that_may_accept_is_refused_in_front(self):
+        cases = {
+            "accept": ["-N f2b-bad", "-A f2b-bad -s 198.51.100.66/32 -j REJECT", "-A f2b-bad -j ACCEPT",
+                       "-A DOCKER-USER -j f2b-bad"],
+            "unknown": ["-A DOCKER-USER -j f2b-missing"],
+            "nested": self.F2B + ["-N outer", "-A outer -j ufw-x", "-N ufw-x", "-A ufw-x -j ACCEPT", "-A DOCKER-USER -j outer"],
+            "cycle": ["-N loop-a", "-N loop-b", "-A loop-a -j loop-b", "-A loop-b -j loop-a", "-A DOCKER-USER -j loop-a"],
+            "goto": ["-N g1", "-A g1 -j ACCEPT", "-A DOCKER-USER -g g1"],
+            "no target": ["-N quiet", "-A quiet -s 198.51.100.66/32", "-A DOCKER-USER -j quiet"],
+        }
+        for label, before in cases.items():
+            with self.subTest(label):
+                self.assertIn("précède les règles", self.problems(before))
+        ufw = ["-N ufw-before-input", "-A ufw-before-input -i lo -j ACCEPT", "-A INPUT -j ufw-before-input"]
+        self.assertIn("iptables INPUT", self.problems([], input_rules=ufw + OUR_INPUT))
+
+    def test_an_ip6tables_table_without_docker_user_is_not_a_problem(self):
+        play_rules = json.dumps(["-P INPUT ACCEPT", "-N f2b-sshd"])
+        play = (FIREWALL_PROBLEMS_PLAY.replace("wa_chain6: {rc: 1}", "wa_chain6: {rc: 0, stdout_lines: " + play_rules + "}")
+                .replace("__RULES__", json.dumps(OUR_RULES)).replace("__INPUT__", json.dumps(OUR_INPUT)))
+        code, out, files = run_local_play(play, outputs=["problems.txt"])
+        self.assertEqual(files.get("problems.txt"), "", out[-3000:])
+
 
 @unittest.skipUnless(shutil.which("awk"), "awk absent")
 class DockerPortsPurgeTests(unittest.TestCase):

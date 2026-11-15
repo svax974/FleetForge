@@ -1,7 +1,15 @@
 ---
-# Calcul de `wa_firewall_problems` à partir des chaînes lues par firewall-check.yml (`wa_chain4`, `wa_chain6`) et des
-# faits de l'app (`wa_app`). Aucune commande : fichier séparé pour être éprouvé hors ligne
-# (scripts/test_webapp_hardening_check.py).
+# Calcul de `wa_firewall_problems` à partir de la table filter lue par firewall-check.yml (`wa_chain4`, `wa_chain6` :
+# `iptables -S` ENTIÈRE ; `wa_chain_input` : idem, pour INPUT) et des faits de l'app (`wa_app`). Aucune commande :
+# fichier séparé pour être éprouvé hors ligne (scripts/test_webapp_hardening_check.py).
+#
+# Règles ADMISES devant celles de l'app (insérées en tête, mais fail2ban ou ufw peuvent s'insérer devant après elles) :
+#   • un refus : `-j DROP`, `-j REJECT` ;
+#   • un saut (`-j`/`-g`) vers une chaîne qui ne fait QUE refuser ou rendre la main : toutes ses règles en DROP,
+#     REJECT, RETURN ou saut vers une telle chaîne (fail2ban : `-A f2b-sshd -s X -j REJECT`, `-A f2b-sshd -j RETURN`).
+#     Chaîne déclarée (`-N`), profondeur bornée (4), un cycle n'est jamais admis (il faudrait qu'il le soit déjà).
+# REFUSÉS : ACCEPT ou RETURN directs (même restreints par `-i`/`-s`), saut vers une chaîne inconnue, vers une chaîne
+# qui accepte (chaînes ufw : ACCEPT), règle sans cible.
 - name: Work out the firewall problems from the chains
   vars:
     _tag: "{{ wa_app.wa_h_tag }}"
@@ -11,21 +19,46 @@
       - { family: ip6tables, result: "{{ wa_chain6 }}", required: false }
   ansible.builtin.set_fact:
     wa_firewall_problems: >-
+      {%- macro refusing_chains(lines) -%}
+        {#- Chaînes « refus seulement », par niveaux : niveau 0 = aucune règle hors DROP/REJECT/RETURN ; niveau k+1 =
+            sauts seulement vers le niveau k. -#}
+        {%- set declared = lines | select('match', '^-N ') | map('regex_replace', '^-N ([^ ]+).*$', '\\1') | list -%}
+        {%- set lv = namespace(safe=[]) -%}
+        {%- for depth in range(5) -%}
+          {%- set nxt = namespace(safe=[]) -%}
+          {%- for c in declared -%}
+            {%- set ok = namespace(v=true) -%}
+            {%- for r in lines if r.startswith('-A ' ~ c ~ ' ') -%}
+              {%- set t = r | regex_search(' -[jg] ([^ ]+)', '\\1') -%}
+              {%- if not t or not (t[0] in ['DROP', 'REJECT', 'RETURN'] or t[0] in lv.safe) -%}{%- set ok.v = false -%}{%- endif -%}
+            {%- endfor -%}
+            {%- if ok.v -%}{%- set nxt.safe = nxt.safe + [c] -%}{%- endif -%}
+          {%- endfor -%}
+          {%- set lv.safe = nxt.safe -%}
+        {%- endfor -%}
+        {{ lv.safe | join(' ') }}
+      {%- endmacro -%}
+      {%- macro admitted(rule, safe) -%}
+        {%- set t = rule | regex_search(' -[jg] ([^ ]+)', '\\1') -%}
+        {{ 'yes' if t and (t[0] in ['DROP', 'REJECT'] or (t[0] in safe and rule is search(' -[jg] '))) else 'no' }}
+      {%- endmacro -%}
       {%- set ns = namespace(p=[]) -%}
       {%- for fam in _families -%}
-        {%- if (fam.result.rc | default(1)) != 0 -%}
-          {%- if fam.required -%}{%- set ns.p = ns.p + [fam.family ~ ' : chaîne DOCKER-USER illisible'] -%}{%- endif -%}
+        {#- Table lue mais SANS chaîne DOCKER-USER (ip6tables sans Docker IPv6) : comme une lecture en échec. -#}
+        {%- set _lines = fam.result.stdout_lines | default([]) -%}
+        {%- if (fam.result.rc | default(1)) != 0
+               or (_lines | select('match', '^-[NA] DOCKER-USER( |$)') | list | length) == 0 -%}
+          {%- if fam.required -%}{%- set ns.p = ns.p + [fam.family ~ ' : chaîne DOCKER-USER illisible ou absente'] -%}{%- endif -%}
         {%- else -%}
-          {%- set rules = fam.result.stdout_lines | default([]) | select('match', '^-A DOCKER-USER ') | list -%}
+          {%- set all_lines = fam.result.stdout_lines | default([]) -%}
+          {%- set safe = refusing_chains(all_lines).split() -%}
+          {%- set rules = all_lines | select('match', '^-A DOCKER-USER ') | list -%}
           {%- set ours = rules | select('search', _tag ~ ':') | list -%}
           {%- if ours | length == 0 -%}
             {%- set ns.p = ns.p + [fam.family ~ ' : aucune règle de ' ~ _tag] -%}
           {%- else -%}
             {%- set first = rules.index(ours | first) -%}
-            {#- Les règles de l'app sont insérées EN TÊTE : toute règle qui les précède et qui n'est pas un refus
-                (RETURN/ACCEPT conditionnel ou non — `-i <iface>`, `-s <x>` —, saut vers une autre chaîne…) peut
-                accepter le trafic visé avant le DROP. -#}
-            {%- for r in rules[:first] if not (r is search(' -j (DROP|REJECT)( |$)')) -%}
+            {%- for r in rules[:first] if admitted(r, safe) | trim != 'yes' -%}
               {%- set ns.p = ns.p + [fam.family ~ ' : « ' ~ r ~ ' » précède les règles de ' ~ _tag] -%}
             {%- endfor -%}
           {%- endif -%}
@@ -45,12 +78,14 @@
       {%- if (wa_chain_input.rc | default(1)) != 0 -%}
         {%- set ns.p = ns.p + ['iptables : chaîne INPUT illisible'] -%}
       {%- else -%}
-        {%- set inrules = wa_chain_input.stdout_lines | default([]) | select('match', '^-A INPUT ') | list -%}
+        {%- set in_lines = wa_chain_input.stdout_lines | default([]) -%}
+        {%- set in_safe = refusing_chains(in_lines).split() -%}
+        {%- set inrules = in_lines | select('match', '^-A INPUT ') | list -%}
         {%- set inours = inrules | select('search', _tag ~ ':host:') | list -%}
         {%- if inours | length == 0 -%}
           {%- set ns.p = ns.p + ['iptables : aucune règle INPUT de ' ~ _tag] -%}
         {%- else -%}
-          {%- for r in inrules[:inrules.index(inours | first)] if not (r is search(' -j (DROP|REJECT)( |$)')) -%}
+          {%- for r in inrules[:inrules.index(inours | first)] if admitted(r, in_safe) | trim != 'yes' -%}
             {%- set ns.p = ns.p + ['iptables INPUT : « ' ~ r ~ ' » précède les règles de ' ~ _tag] -%}
           {%- endfor -%}
         {%- endif -%}
