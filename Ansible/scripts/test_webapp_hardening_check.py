@@ -1470,6 +1470,28 @@ class GuardTests(unittest.TestCase):
             self.assertNotEqual(code, 0, bad)
             self.assertIn("Compte de la passerelle", out)
 
+    def test_the_account_names_a_gateway_uses_must_carry_the_ffg_prefix(self):
+        # Quatrième revue : `users: {run: deployer}` faisait utiliser à la passerelle un compte que les bornes des
+        # comptes `ffg_*` ne voient pas.
+        play = textwrap.dedent("""\
+            - hosts: infra1
+              gather_facts: false
+              tasks:
+                - ansible.builtin.include_role:
+                    name: fleetforge-install
+                    tasks_from: api-accounts-gateway
+                - ansible.builtin.debug: {msg: ACCOUNTS=OK}
+            """)
+        for users, ok in (({"run": "ffg_run2"}, True), ({"run": "deployer"}, False), ({"admin": "ffg_x"}, False),
+                          ("ffg_run", False)):
+            with self.subTest(users):
+                inventory = guard_inventory(ffg_upstreams=[{"id": "main", "entry": "infra1", "parcs": ["demo"], "users": users}])
+                inventory["all"]["children"]["infras"]["hosts"]["infra1"]["ansible_connection"] = "local"
+                code, out = run_local_play(play, inventory)
+                self.assertEqual(code == 0, ok, out[-2000:])
+                if not ok:
+                    self.assertIn("ffg_upstreams[].users", out)
+
     def real_playbook(self, name, inventory, *args):
         return run_local_play(None, inventory, playbook=os.path.join(PLAYBOOKS, name),
                               args=["--tags", "no-such-tag", *args])

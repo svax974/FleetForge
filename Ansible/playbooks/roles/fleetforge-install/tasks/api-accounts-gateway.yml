@@ -6,6 +6,24 @@
 # AUTRE compte (`accept_checks_from`, `accept_own_checks: false`) ; read sans liste ni checks. Aucune connexion :
 # fichier joué hors ligne par scripts/test_webapp_hardening_check.py.
 
+# Les comptes que la passerelle UTILISE sont ceux de `ffg_upstreams[].users` (défaut `ffg_default_users`) : un nom
+# renommé hors du préfixe `ffg_` (`users: {run: deployer}`) échapperait aux bornes ci-dessous. Préfixe IMPOSÉ, pour
+# toute entrée de `fleetforge_gateways` du parc (quatrième revue).
+- name: Check the account names the gateways use
+  vars:
+    _named: >-
+      {{ groups['fleetforge_gateways'] | default([]) | map('extract', hostvars) | map(attribute='ffg_upstreams', default=[])
+         | flatten | select('mapping') | map(attribute='users', default={}) | list }}
+  ansible.builtin.assert:
+    that:
+      - _named | reject('mapping') | list | length == 0
+      - _named | map('dict2items') | flatten | map(attribute='key') | reject('in', ['read', 'check', 'run']) | list | length == 0
+      - _named | map('dict2items') | flatten | map(attribute='value') | map('string') | reject('match', '^ffg_[a-z0-9_]{1,27}$') | list | length == 0
+    fail_msg: >-
+      `ffg_upstreams[].users` d'une passerelle (groupe `fleetforge_gateways`) : un mapping {read, check, run} de noms
+      `ffg_<…>` (minuscules, chiffres, _) — tout autre nom échapperait aux bornes des comptes de la passerelle.
+    quiet: true
+
 - name: Check the bounded accounts of the MCP gateway
   vars:
     _denies: "{{ item.deny_playbooks | default([]) }}"
