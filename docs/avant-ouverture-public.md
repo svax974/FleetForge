@@ -32,30 +32,52 @@ Retirer ou dater un point une fois fait.
 - **Fenêtre au redémarrage de Docker** : les conteneurs repartent avant que l'unité
   `fleetforge-gateway-firewall` ne repose DOCKER-USER (quelques secondes sans filtre sur 4730/4731).
   Non fermée ; signalée par la sonde `firewall_<port>` (ServiceCheckFailing).
-- **Séparation check / run** : `ffg_run` porte `accept_own_checks: false` (FleetForge `ad6906c`) — ne
-  le retirer qu'en connaissance de cause. Liste blanche `allow_playbooks` des comptes `ffg_*` : à poser
-  par le propriétaire (proposition dans le rapport de l'étape 6.6).
-- **Revue indépendante du 15/11/2026** : défaut haut corrigé (proxy2 = vpn1 admis sur le back-lb,
-  plage 172.16/12, X-Forwarded-For falsifiable) et moyens/bas corrigés ; la REVUE DE LA CORRECTION reste
-  à faire avant tout déploiement réel.
-- **Compose durci à livrer dans le dépôt de l'app** (`scripts/docker-compose.ffg-hardened.yml` par
-  défaut, `ffg_compose_file`, écrit en COMPOSE_FILE_NAME) : user `${FFG_RUNTIME_UID}:${FFG_RUNTIME_GID}`,
-  read_only + tmpfs, cap_drop ALL, aucun cap_add, no-new-privileges (tous les services), mem_limit/cpus,
-  réseau `${FFG_DOCKER_SUBNET}` avec front et back-lb à `${FFG_FRONT_IP}` / `${FFG_BACK_LB_IP}`, back-lb
-  qui réécrit X-Forwarded-For (`set_real_ip_from ${FFG_TRUSTED_PROXIES}` puis `$remote_addr`),
-  Postgres/Redis en `127.0.0.1:`, ni socket Docker ni vmagent, aucun montage de l'hôte ni volume à
-  `driver_opts`, ni `volumes_from`/`include`/`extends`. Sans lui le déploiement est refusé AVANT `run.sh`
-  (le compose du gabarit échoue au contrôle : 26 écarts le 15/11/2026). `REDIS_PASSWORD` non vide et
-  `DEPLOY_FROM_MAIN` absent exigés dans back/.env.
+- **Séparation check / run** : `ffg_run` porte `accept_own_checks: false` — ne le retirer qu'en
+  connaissance de cause.
+- **Liste blanche des comptes `ffg_check`/`ffg_run`** (décidée le 15/11/2026, posée) :
+  `update-prometheus-alerts.yml` (rend, valide par promtool et installe les règles, puis REDÉMARRE le
+  conteneur Prometheus : courte coupure de supervision) et `check-monitoring.yml` (lecture seule).
+  `deploy-exporter-sys.yml` reste exclu (règles ufw). `*-monitoring.yml` remplacé par `deploy-*monitoring*`
+  et `update-*monitoring*` pour que check-monitoring.yml reste lançable. Tout playbook « sensible »
+  (localhost, all, proxies, infras, vpns, supervision, motif templaté) est refusé — contrôle
+  `ffg_isolation_check.py coverage`, approximatif pour les groupes imbriqués et les `delegate_to`.
+- **`ffg_mcp_allow_vpn_addresses`** (décidé `false` le 15/11/2026) : `true` OUVRE /mcp À TOUT CE QUI SORT
+  PAR LE VPN (proxy2 = vpn1 = NAT domestique) — seulement pour des tests depuis chez soi, à remettre à
+  `false` ensuite et avant toute exposition E2/E3.
+- **ufw actif en `deny` entrant** : hypothèse VÉRIFIÉE par `fleetforge-gateway-security` (le rôle échoue
+  sinon) ; sans elle, un port lié en `[::]` par docker-proxy ou une règle posée par `deploy-full.sh`
+  passerait hors DOCKER-USER.
+- **Revues indépendantes du 15/11/2026** (deux) : défauts haut et moyens corrigés ; la REVUE DE LA
+  TROISIÈME SÉRIE de correctifs reste à faire avant tout déploiement réel.
+- **Compose durci à livrer par le GABARIT** (le `scripts/` de la passerelle est un lien vers vx-public ;
+  rien n'est créé dans son dépôt). Nom attendu `ffg_compose_file` (`scripts/docker-compose.ffg-hardened.yml`
+  par défaut, écrit en COMPOSE_FILE_NAME) : services back, back-worker, back-lb, front, db, redis et rien
+  d'autre ; `restart: unless-stopped` ; user `${FFG_RUNTIME_UID}:${FFG_RUNTIME_GID}`, read_only + tmpfs,
+  cap_drop ALL, aucun cap_add, `security_opt: [no-new-privileges:true]` seul, mem_limit/cpus ; réseau
+  `${FFG_DOCKER_SUBNET}` avec front et back-lb à `${FFG_FRONT_IP}` / `${FFG_BACK_LB_IP}` ; ports
+  `0.0.0.0:${VITE_PORT}:80`, `0.0.0.0:${NODE_PORT}:${NODE_PORT}` EXACTEMENT, les autres en `127.0.0.1:` ;
+  back-lb écrivant sa configuration nginx par un heredoc QUOTÉ (`<<'NGINX'`) avec `${FFG_BACK_LB_REALIP}`,
+  `real_ip_header X-Forwarded-For` et `proxy_set_header X-Forwarded-For $$remote_addr` dans chaque
+  location ; Redis configuré par fichier (jamais `--requirepass`/`-a`) ; ni `secrets`/`configs`, ni volume
+  ou réseau `external`/`name`/`driver_opts`, ni `env_file`/`build` hors `../back`/`../front`, ni socket
+  Docker ni vmagent. Sans lui le déploiement est refusé AVANT `run.sh` (contrôle par interpolation ET
+  `docker compose config` ; le compose du gabarit actuel est refusé). Exigés aussi dans back/.env :
+  `REDIS_PASSWORD` non vide ; `DEPLOY_FROM_MAIN`, `COMPOSE_FILE`, `WHITELIST`, `PROXY_HOSTS`,
+  `BACK_WHITELIST` et toute ligne `export` de ces clés absents.
 - **Interpolation des variables compose** (`${FFG_RUNTIME_UID}`…) : supposée lue depuis back/.env par
   deploy-full.sh — NON vérifié ; le contrôle d'exécution (`--tags hardening`) le prouvera.
 - **Permissions de `/home/srvc/fleetforge` et `~/.ssh`** : le compte `ffgateway` ne doit ni les lire ni
   les traverser. Non vérifié sur la machine ; le premier `--tags hardening` le dira (échec = chmod à faire).
-- **Sauvegarde de la base de la passerelle** : données `pgbak_*` posées, NON activée (aucune destination
-  hors de la machine d'`infra1`). À décider.
+- **Sauvegarde de la base de la passerelle** : données `pgbak_*` posées, NON activée (décision du
+  15/11/2026 : estimation seulement). Coût estimé pour l'ajouter à la famille `backup` existante : une
+  entrée de destination dans le groupe `backups` sur une machine AUTRE que celle d'`infra1` (les
+  `backup-*` de web3c y sont toutes) ou réutiliser une destination existante hors de cette machine ;
+  `pgbak_dest_host` + `backup` dans `ansible_roles` de l'entrée ; ajouter l'entrée au play
+  `postgres-backup-install` de `deploy-backup.yml` (motif d'hôtes en dur) et à `prom_alert_backup_max_age_hours`
+  ; vérifier `pgbak_db`/`pgbak_user` contre le back/.env ; ~S (une demi-journée, revue comprise).
 - **CNAME `ffg.web3c.cc`** : publié par la synchronisation DNS générique dès que l'entrée existe, avant
   tout déploiement (vhost rendu par les proxies : sans backend joignable tant que l'app n'est pas là).
-- **Liste de refus des comptes `ffg_check`/`ffg_run`** (Q8 du plan) et `max_hosts: 5` : à confirmer.
+- **`max_hosts: 5`** des comptes `ffg_check`/`ffg_run` : à confirmer.
 
 ## API d'automatisation : mode `check` et checks par compte (ajouté le 11/11/2026)
 
