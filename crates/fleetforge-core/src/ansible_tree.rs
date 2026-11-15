@@ -340,6 +340,23 @@ impl TreeReader {
         parts.filter(|p| !p.is_empty()).map(|p| p.join("/"))
     }
 
+    /// Does a DIRECTORY component of this path (relative to `playbooks/`, the
+    /// last component excluded) go through a symlink, or not exist? Ansible
+    /// joins such a path lexically, the OS resolves it physically: a path
+    /// through a linked directory is not judged by its written name.
+    pub fn has_linked_dir(&self, relative_to_playbooks: &Path) -> bool {
+        let parts: Vec<Component> = relative_to_playbooks.components().collect();
+        let mut current = self.playbooks.clone();
+        for part in parts.iter().take(parts.len().saturating_sub(1)) {
+            current.push(part);
+            let linked = std::fs::symlink_metadata(&current).map(|m| m.file_type().is_symlink() || !m.is_dir());
+            if linked.unwrap_or(true) {
+                return true;
+            }
+        }
+        false
+    }
+
     /// NOMS des variables que les group_vars / host_vars de l'arbre déclarent
     /// (clés de premier niveau) — jamais leurs valeurs, qui ne sortent pas de
     /// ce module. Un fichier chiffré en entier n'en donne aucun.

@@ -1402,6 +1402,7 @@ async fn aliases_are_judged_on_written_and_resolved_names() {
     let server = start_with(am_port, |root| {
         let playbooks = root.join("ansible/playbooks");
         symlink("deploy-demo.yml", playbooks.join("denied-alias.yml")).unwrap();
+        symlink("denied-alias.yml", playbooks.join("a2-alias.yml")).unwrap();
         symlink("remove-demo.yml", playbooks.join("to-denied-alias.yml")).unwrap();
         symlink("deploy-demo.yml", playbooks.join("allowed-alias.yml")).unwrap();
         symlink("deploy-demo.yml", playbooks.join("unlisted-alias.yml")).unwrap();
@@ -1436,6 +1437,100 @@ async fn aliases_are_judged_on_written_and_resolved_names() {
     assert_eq!(launch(ALIAS_ALLOWER, "unlisted-alias.yml").await, allowed, "unlisted alias, listed target");
     assert_eq!(launch(ALIAS_ALLOWER, "listed-alias.yml").await, forbidden, "listed alias, unlisted target");
     assert_eq!(launch(ALIAS_ALLOWER, "remove-demo.yml").await, forbidden);
+
+    // The written name is judged as resolve_playbook reads it (trimmed), and
+    // every link crossed on the way (a2 → denied-alias → deploy-demo).
+    let mut wrong = Vec::new();
+    for playbook in ["denied-alias.yml ", " denied-alias.yml", "a2-alias.yml"] {
+        let outcome = launch(ALIAS_DENIER, playbook).await;
+        if outcome != forbidden {
+            wrong.push(format!("{playbook:?} → {outcome:?}"));
+        }
+    }
+    assert!(wrong.is_empty(), "spaces, intermediate link: expected 403:\n{}", wrong.join("\n"));
+}
+
+const CHAIN_RUNNER: (&str, &str) = ("chain-runner", "mot-de-passe-chain-runner");
+
+/// A bounded account fails CLOSED on any import chain FleetForge cannot
+/// judge: every form Ansible accepts but the static walk could not follow
+/// would otherwise run a denied playbook behind a harmless name.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bounded_account_fails_closed_on_an_unjudgeable_import_chain() {
+    use std::os::unix::fs::symlink;
+    let (am_port, _) = fake_alertmanager().await;
+    let accounts = json!([{
+        "user": CHAIN_RUNNER.0, "password_hash": hash_with_binary(CHAIN_RUNNER.1), "parcs": ["web3c"], "mode": "run",
+        "deny_playbooks": ["*-fleetforge.yml"]
+    }]);
+    let server = start_with(am_port, |root| {
+        let ansible = root.join("ansible");
+        let pb = ansible.join("playbooks");
+        let play = "---\n- hosts: all\n  tasks: []\n";
+        let import = |target: &str| format!("---\n- import_playbook: {target}\n");
+        let padding = format!("# {}\n", "x".repeat(1024 * 1024 + 16));
+        write(&pb.join("deploy-fleetforge.yml"), play);
+        write(&pb.join("harmless.yml"), play);
+        write(&pb.join("roles/harmless-sub.yml"), play);
+        write(&ansible.join("elsewhere/keep.txt"), "x\n");
+        symlink("../elsewhere", pb.join("lnk")).unwrap();
+        symlink("roles", pb.join("rl")).unwrap();
+        write(&pb.join("form-a.yml"), "---\n- ansible.legacy.import_playbook: deploy-fleetforge.yml\n");
+        write(&pb.join("form-b.yml"), &import("../playbooks/deploy-fleetforge.yml"));
+        write(&pb.join("form-c.yml"), &import(&pb.join("deploy-fleetforge.yml").display().to_string()));
+        write(&pb.join("form-d.yml"), "---\n- import_playbook: \"{{ 'deploy-' ~ 'fleetforge.yml' }}\"\n");
+        write(&pb.join("form-e.yml"), "---\n- <<: {import_playbook: deploy-fleetforge.yml}\n");
+        write(&pb.join("form-f.yml"), &import("dup.yml"));
+        write(&pb.join("dup.yml"), "---\n- import_playbook: deploy-fleetforge.yml\n  when: true\n  when: true\n");
+        write(&pb.join("form-g.yml"), &import("big.yml"));
+        write(&pb.join("big.yml"), &format!("{}{padding}", import("deploy-fleetforge.yml")));
+        write(&pb.join("form-h.yml"), &import("chain-1.yml"));
+        for i in 1..60 {
+            write(&pb.join(format!("chain-{i}.yml")), &import(&format!("chain-{}.yml", i + 1)));
+        }
+        write(&pb.join("chain-60.yml"), &import("deploy-fleetforge.yml"));
+        write(&pb.join("form-i.yml"), &import("lnk/../harmless.yml"));
+        write(&pb.join("form-j.yml"), &import("rl/harmless-sub.yml"));
+        write(&pb.join("form-k.yml"), "---\n- include_playbook: deploy-fleetforge.yml\n");
+        write(&pb.join("head-vault.yml"), "$ANSIBLE_VAULT;1.1;AES256\n6162\n");
+        write(&pb.join("head-big.yml"), &format!("{}{padding}", import("deploy-fleetforge.yml")));
+        write(&pb.join("head-dup.yml"), "---\n- import_playbook: deploy-fleetforge.yml\n  when: true\n  when: true\n");
+        write(&pb.join("deploy-plain.yml"), &import("harmless.yml"));
+        let file = accounts_file(root, accounts);
+        vec![("FLEETFORGE_API_ACCOUNTS_FILE".into(), file.display().to_string())]
+    })
+    .await;
+    let api = Api { http: Client::new(), server: &server };
+    let body = |playbook: &str| json!({ "parc": "web3c", "playbook": playbook, "limit": ["proxy1"], "check": true, "detach": true });
+
+    // Every form is tried, then all outcomes are reported at once.
+    let mut wrong = Vec::new();
+    for playbook in [
+        "form-a.yml", "form-b.yml", "form-c.yml", "form-d.yml", "form-e.yml", "form-f.yml", "form-g.yml", "form-h.yml",
+        "form-i.yml", "form-j.yml", "form-k.yml", "head-vault.yml", "head-big.yml", "head-dup.yml",
+    ] {
+        let (status, answer) = api.call(CHAIN_RUNNER, "run_ansible_playbook", body(playbook)).await;
+        if (status, code(&answer)) != (StatusCode::FORBIDDEN, "forbidden_playbook") {
+            wrong.push(format!("{playbook} → {status} {answer}"));
+            if status == StatusCode::OK {
+                api.wait_run_as(CHAIN_RUNNER, answer["run_id"].as_str().unwrap()).await;
+            }
+        }
+        let tree = server.root.display().to_string();
+        assert!(!answer.to_string().contains(&tree), "no path of the machine in the refusal: {answer}");
+    }
+    assert!(wrong.is_empty(), "expected 403 forbidden_playbook:\n{}", wrong.join("\n"));
+    assert!(api.stub_log().is_empty(), "no refusal reaches ansible-playbook: {}", api.stub_log());
+
+    // A plain import still runs for the bounded account…
+    let (status, answer) = api.call(CHAIN_RUNNER, "run_ansible_playbook", body("deploy-plain.yml")).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    api.wait_run_as(CHAIN_RUNNER, answer["run_id"].as_str().unwrap()).await;
+    // … and the operator (not bounded) is unchanged.
+    let (status, answer) = api.call(OPERATOR, "run_ansible_playbook", body("form-a.yml")).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    api.wait_run_as(OPERATOR, answer["run_id"].as_str().unwrap()).await;
 }
 
 impl Api<'_> {

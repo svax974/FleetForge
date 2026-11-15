@@ -413,11 +413,7 @@ pub fn resolve_playbook(playbooks_dir: &str, reference: &str) -> Result<PathBuf>
     let dir = Path::new(playbooks_dir)
         .canonicalize()
         .map_err(|e| Fault::new(FaultKind::NotConfigured, format!("dossier des playbooks : {e}")))?;
-    let candidate = if Path::new(reference).is_absolute() {
-        PathBuf::from(reference)
-    } else {
-        dir.join(reference.strip_prefix("playbooks/").unwrap_or(reference))
-    };
+    let candidate = playbook_candidate(&dir, reference);
     let unknown = || Fault::new(FaultKind::UnknownPlaybook, format!("playbook inconnu : {reference}"));
     let resolved = candidate.canonicalize().map_err(|_| unknown())?;
     let stem = resolved.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
@@ -428,6 +424,44 @@ pub fn resolve_playbook(playbooks_dir: &str, reference: &str) -> Result<PathBuf>
         return Err(unknown().into());
     }
     Ok(resolved)
+}
+
+/// The path a playbook reference designates before any link is followed
+/// (`reference` already trimmed): absolute as is, otherwise in `dir`.
+fn playbook_candidate(dir: &Path, reference: &str) -> PathBuf {
+    if Path::new(reference).is_absolute() {
+        PathBuf::from(reference)
+    } else {
+        dir.join(reference.strip_prefix("playbooks/").unwrap_or(reference))
+    }
+}
+
+/// File names of the symlinks crossed from `start` to its final target
+/// (`start` included when it is a link; the target itself excluded), at
+/// most 40 hops: `a2.yml` → `alias.yml` → `deploy-x.yml` gives
+/// `[a2.yml, alias.yml]`. Names only — what `deny_playbooks` judges.
+pub fn link_names(start: &Path) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut current = start.to_path_buf();
+    for _ in 0..40 {
+        let is_link = std::fs::symlink_metadata(&current).is_ok_and(|m| m.file_type().is_symlink());
+        let Some(target) = is_link.then(|| std::fs::read_link(&current).ok()).flatten() else { break };
+        if let Some(name) = current.file_name().and_then(|n| n.to_str()) {
+            names.push(name.to_string());
+        }
+        current = match current.parent() {
+            Some(parent) if target.is_relative() => parent.join(target),
+            _ => target,
+        };
+    }
+    names
+}
+
+/// [`link_names`] of a playbook reference, read as [`resolve_playbook`]
+/// reads it.
+pub fn playbook_link_names(playbooks_dir: &str, reference: &str) -> Vec<String> {
+    let Ok(dir) = Path::new(playbooks_dir).canonicalize() else { return Vec::new() };
+    link_names(&playbook_candidate(&dir, reference.trim()))
 }
 
 /// Chemin relatif d'un playbook résolu, pour les empreintes et l'affichage.

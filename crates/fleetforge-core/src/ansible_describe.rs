@@ -667,31 +667,105 @@ fn builtin(name: &str) -> bool {
     MAGIC.contains(&name) || KEYWORDS.contains(&name) || name.starts_with("ansible_")
 }
 
-/// Playbooks importés (`import_playbook` de nom statique) par `playbook`,
-/// transitivement — sans analyser ses rôles.
-pub fn imported_playbooks(reader: &TreeReader, playbook: &str) -> Vec<String> {
-    let mut found: Vec<String> = Vec::new();
+/// Files the import chain walk reads at most, the playbook included.
+pub const MAX_CHAIN_FILES: usize = 50;
+
+/// One import of a chain: the path as written (joined to the importing
+/// file's directory, relative to `playbooks/`) and its resolved name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChainImport {
+    pub written: String,
+    pub resolved: String,
+}
+
+/// An import path FleetForge can judge by its name: components of
+/// `[A-Za-z0-9_.-]`, none empty, `.` or `..`, not absolute. Anything else —
+/// a template (`{{ }}`, `{% %}`, `{# #}`), an absolute path, `..` (Ansible
+/// joins it without resolving the links the OS follows) — has no name to
+/// judge.
+fn judgeable_relative(path: &str) -> Option<PathBuf> {
+    let mut out = PathBuf::new();
+    for part in path.split('/') {
+        let plain = !part.is_empty()
+            && part != "."
+            && part != ".."
+            && part.chars().all(|c| c.is_ascii_alphanumeric() || "_.-".contains(c));
+        if !plain {
+            return None;
+        }
+        out.push(part);
+    }
+    Some(out)
+}
+
+/// The playbooks `playbook` imports, transitively, for `deny_playbooks` —
+/// FAILING CLOSED: `Err` (a reason that quotes neither file content nor an
+/// import value) whenever Ansible could run something this walk cannot name:
+/// a file of the chain (the playbook itself included) unreadable, refused,
+/// vault-encrypted, over [`MAX_SCAN_BYTES`] or not parseable (a duplicated
+/// key that Ansible's YAML loader accepts); a play that is not a mapping; a
+/// YAML merge key `<<`; any key whose last dotted segment is
+/// `import_playbook` (`ansible.builtin.`, `ansible.legacy.`, any FQCN) with a
+/// name [`judgeable_relative`] refuses, or `include_playbook`; a path through
+/// a linked directory; an import that does not resolve inside `playbooks/`;
+/// more than [`MAX_CHAIN_FILES`] files.
+pub fn import_chain(reader: &TreeReader, playbook: &str) -> std::result::Result<Vec<ChainImport>, String> {
+    let mut found: Vec<ChainImport> = Vec::new();
+    let mut seen: BTreeSet<PathBuf> = BTreeSet::from([PathBuf::from(playbook)]);
     let mut queue = vec![PathBuf::from(playbook)];
     let mut read = 0;
     while let Some(current) = queue.pop() {
         read += 1;
-        if read > 50 {
-            break;
+        if read > MAX_CHAIN_FILES {
+            return Err(format!("plus de {MAX_CHAIN_FILES} fichiers dans la chaîne d'imports"));
         }
-        let Some(text) = reader.read_text(&current, MAX_SCAN_BYTES) else { continue };
-        let Ok(Value::Sequence(items)) = serde_yaml::from_str::<Value>(&text) else { continue };
+        let shown = current.to_string_lossy().to_string();
+        let text = reader.read_text(&current, MAX_SCAN_BYTES).ok_or_else(|| {
+            format!("{shown} : illisible (absent, refusé, chiffré, binaire ou au-delà de {MAX_SCAN_BYTES} octets)")
+        })?;
+        let items = match serde_yaml::from_str::<Value>(&text) {
+            Ok(Value::Sequence(items)) => items,
+            Ok(Value::Null) => Vec::new(),
+            Ok(_) => return Err(format!("{shown} : n'est pas une liste de plays")),
+            Err(_) => return Err(format!("{shown} : YAML non analysable (clé en double ?)")),
+        };
         for item in &items {
-            let Some(target) = module(item, "import_playbook").and_then(scalar) else { continue };
-            let Some(sub) = simple_relative(&target) else { continue };
-            let resolved = current.parent().unwrap_or(Path::new("")).join(sub);
-            let shown = resolved.to_string_lossy().to_string();
-            if !found.contains(&shown) {
-                found.push(shown);
-                queue.push(resolved);
+            let Value::Mapping(map) = item else {
+                return Err(format!("{shown} : élément qui n'est pas un play"));
+            };
+            for (key, value) in map {
+                let Some(key) = key.as_str() else { continue };
+                if key == "<<" {
+                    return Err(format!("{shown} : clé de fusion YAML `<<`"));
+                }
+                if key.ends_with("include_playbook") {
+                    return Err(format!("{shown} : include_playbook"));
+                }
+                if !key.ends_with("import_playbook") {
+                    continue;
+                }
+                if key.rsplit('.').next() != Some("import_playbook") {
+                    return Err(format!("{shown} : clé d'import inconnue"));
+                }
+                let Some(sub) = value.as_str().and_then(judgeable_relative) else {
+                    return Err(format!("{shown} : import_playbook au nom non jugeable (gabarit, chemin absolu, `..`)"));
+                };
+                let written = current.parent().unwrap_or(Path::new("")).join(sub);
+                let written_shown = written.to_string_lossy().to_string();
+                if reader.has_linked_dir(&written) {
+                    return Err(format!("{written_shown} : import à travers un lien de dossier"));
+                }
+                let Some(resolved) = reader.real_name(&written) else {
+                    return Err(format!("{written_shown} : import absent ou hors de l'arbre playbooks/"));
+                };
+                if seen.insert(written.clone()) {
+                    found.push(ChainImport { written: written_shown, resolved });
+                    queue.push(written);
+                }
             }
         }
     }
-    found
+    Ok(found)
 }
 
 /// Décrit `playbook` (nom d'un fichier directement sous `playbooks/`).
@@ -711,6 +785,11 @@ pub fn describe(reader: &TreeReader, playbook: &str) -> Result<Description> {
     walker.walk_playbook(Path::new(playbook), &mut plays, 0);
     if plays.is_empty() && walker.files == 0 {
         return fail(FaultKind::UnknownPlaybook, format!("playbook illisible : {playbook}"));
+    }
+    // What a bounded account would be refused (`import_chain`): said here
+    // too, so that a caller that fails closed on `notes` judges alike.
+    if let Err(why) = import_chain(reader, playbook) {
+        walker.notes.insert(format!("chaîne d'imports non jugeable : {why}"));
     }
 
     let mut all = Acc::default();
@@ -996,6 +1075,43 @@ mod tests {
         // Pas de donnée de parc dans la description.
         let json = serde_json::to_string(&d).unwrap();
         assert!(!json.contains("$ANSIBLE_VAULT"));
+    }
+
+    /// The fail-closed chain refuses no playbook of the repository: every
+    /// real import is a plain name. A playbook added with an unjudgeable
+    /// import must be listed here on purpose (a bounded account would be
+    /// refused it).
+    #[test]
+    fn every_real_playbook_chain_is_judgeable() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Ansible");
+        let reader = TreeReader::new(&root, &[]).unwrap();
+        let mut names: Vec<String> = std::fs::read_dir(root.join("playbooks"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_file())
+            .filter_map(|e| e.file_name().to_str().map(String::from))
+            .filter(|n| !n.starts_with('.') && (n.ends_with(".yml") || n.ends_with(".yaml")))
+            .collect();
+        names.sort();
+        assert!(names.len() > 100, "{} playbooks", names.len());
+        let refused: Vec<String> = names
+            .iter()
+            .filter_map(|n| import_chain(&reader, n).err().map(|why| format!("{n} : {why}")))
+            .collect();
+        assert!(refused.is_empty(), "refused for a bounded account:\n{}", refused.join("\n"));
+        for (playbook, imports) in [
+            ("update-prometheus-alerts.yml", vec![]),
+            ("check-monitoring.yml", vec![]),
+            ("deploy-fleetforge.yml", vec!["deploy-webapp.yml"]),
+            ("deploy-agenthub.yml", vec!["deploy-webapp.yml"]),
+            ("deploy-openclaw.yml", vec!["deploy-llamacpp.yml"]),
+            ("deploy-timescaledb-standalone.yml", vec!["deploy-timescaledb.yml"]),
+        ] {
+            let chain = import_chain(&reader, playbook).unwrap();
+            let written: Vec<&str> = chain.iter().map(|i| i.written.as_str()).collect();
+            assert_eq!(written, imports, "{playbook}");
+            assert!(chain.iter().all(|i| i.written == i.resolved), "{chain:?}");
+        }
     }
 
     #[test]

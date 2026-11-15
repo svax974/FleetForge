@@ -1151,30 +1151,34 @@ impl Core {
     /// par nom de fichier : de quoi appliquer `deny_playbooks` à ce qu'un
     /// playbook inoffensif ferait jouer par ricochet.
     ///
-    /// The playbook is named after its RESOLVED file; each import both as
-    /// written and as resolved (an import of `harmless.yml`, a link to a
-    /// denied playbook, is judged on the target too). An import that does not
-    /// resolve to a readable file inside `playbooks/` is refused: what Ansible
-    /// would run there has no name to judge.
+    /// The first entry is the RESOLVED playbook (what runs). Then every name
+    /// to judge: the requested one as `resolve_playbook` reads it (trimmed),
+    /// each symlink crossed on the way, and for each import its written
+    /// path, the links it crosses and its resolved name. A chain that cannot
+    /// be judged ([`ansible_describe::import_chain`]) fails CLOSED:
+    /// `ForbiddenPlaybook`.
     pub fn playbook_chain(&self, parc: &str, playbook: &str, commit: Option<&str>) -> Result<Vec<String>> {
         let parc = self.parc_by_name(parc)?;
         let view = self.tree_view(Some(&parc.name), commit)?;
-        let resolved = automation::resolve_playbook(&view.playbooks_str(), playbook)?;
+        let playbooks = view.playbooks_str();
+        let resolved = automation::resolve_playbook(&playbooks, playbook)?;
         let name = automation::playbook_name(&resolved);
         let reader = self.tree_reader(&view)?;
+        let imports = ansible_describe::import_chain(&reader, &name).map_err(|why| {
+            Fault::new(FaultKind::ForbiddenPlaybook, format!("chaîne d'imports de {name} non jugeable : {why}"))
+        })?;
         let mut chain = vec![name.clone()];
-        for import in ansible_describe::imported_playbooks(&reader, &name) {
-            let Some(real) = reader.real_name(std::path::Path::new(&import)) else {
-                return fault::fail(
-                    FaultKind::ForbiddenPlaybook,
-                    format!("import_playbook {import} : absent ou hors de l'arbre playbooks/, son nom réel ne peut être jugé"),
-                );
-            };
-            for n in [import, real] {
-                if !chain.contains(&n) {
-                    chain.push(n);
-                }
+        let mut judge = |n: String| {
+            if !chain.contains(&n) {
+                chain.push(n);
             }
+        };
+        judge(playbook.trim().to_string());
+        automation::playbook_link_names(&playbooks, playbook).into_iter().for_each(&mut judge);
+        for import in imports {
+            automation::link_names(&reader.playbooks_dir().join(&import.written)).into_iter().for_each(&mut judge);
+            judge(import.written);
+            judge(import.resolved);
         }
         Ok(chain)
     }
