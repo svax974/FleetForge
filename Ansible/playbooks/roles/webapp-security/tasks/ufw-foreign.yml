@@ -1,15 +1,47 @@
 ---
-# Calcul de `wa_ufw_foreign` depuis `wa_ufw_numbered` (sortie de `ufw status numbered`) : les règles dont la
-# DESTINATION est le port du front ou du back-lb (`4730`, `4730/tcp`, `4730/udp`, `4730 (v6)`…). Aucune commande :
-# éprouvé hors ligne (scripts/test_webapp_hardening_check.py).
+# Calcul de `wa_ufw_foreign` depuis `wa_ufw_numbered` (sortie de `ufw status numbered`) : les règles qui TOUCHENT le
+# port du front ou du back-lb. Aucune commande : éprouvé hors ligne (scripts/test_webapp_hardening_check.py).
+#
+# Colonne « To » (tout ce qui précède l'action ALLOW/DENY/REJECT/LIMIT [IN|OUT|FWD]), débarrassée de ` (v6)` et
+# ` on <interface>`, puis :
+#   • spécification de port (dernier mot) : `4730`, `4730/tcp`, plage `4700:4800/tcp`, liste `4730,4731/tcp`, mélange
+#     `80,4700:4800/tcp`, éventuellement précédée d'une adresse (`192.0.2.10 4730/tcp`) — retenue si l'un de nos ports
+#     y tombe, quelle que soit l'action (comme avant) ;
+#   • SANS port (`Anywhere`, une adresse, `allow from X` = tous les ports) : retenue si elle OUVRE en entrée (ALLOW ou
+#     LIMIT, IN ou sans direction) — un refus sur tous les ports n'ouvre rien ;
+#   • ligne illisible (aucune action reconnue) : retenue (fermé).
+# Non couvert (décision) : un profil d'application ufw (`Nginx Full`, `OpenSSH`) — ses ports sont dans
+# /etc/ufw/applications.d, hors de cette sortie ; retenu seulement si son nom se lit comme une spécification de port.
 - name: Find the ufw rules on the application ports
   vars:
-    _ports: "{{ [wa_app.wa_front_port | string, wa_app.wa_back_port | string] }}"
+    _ports: "{{ [wa_app.wa_front_port | int, wa_app.wa_back_port | int] }}"
   ansible.builtin.set_fact:
     wa_ufw_foreign: >-
       {%- set out = [] -%}
       {%- for line in (wa_ufw_numbered.stdout_lines | default([])) if line is match('^[[] *[0-9]+[]]') -%}
-      {%- set dest = (line | regex_replace('^[[] *[0-9]+[]][ ]*', '')).split(' ')[0] -%}
-      {%- if dest.split('/')[0] in _ports -%}{%- set _ = out.append(line | trim) -%}{%- endif -%}
+      {%- set body = line | regex_replace('^[[] *[0-9]+[]][ ]*', '') -%}
+      {#- Antislashs DOUBLÉS : une chaîne Jinja décode `\1` en caractère de contrôle. -#}
+      {%- set m = body | regex_search('^(.*?)[ ]+(ALLOW|DENY|REJECT|LIMIT)([ ]+(IN|OUT|FWD))?([ ]|$)', '\\1', '\\2', '\\4') -%}
+      {%- if not m -%}
+        {%- set _ = out.append(line | trim) -%}
+      {%- else -%}
+        {%- set to = m[0] | regex_replace('[ ]*[(]v6[)]', '') | regex_replace('[ ]+on[ ]+[^ ]+', '') | trim -%}
+        {%- set words = to.split() -%}
+        {%- set last = words | last | default('') -%}
+        {%- if last is match('^[0-9][0-9,:]*(/(tcp|udp))?$') -%}
+          {%- set hit = namespace(v=false) -%}
+          {%- for part in last.split('/')[0].split(',') if part | length > 0 -%}
+            {%- set bounds = part.split(':') -%}
+            {%- set lo = bounds[0] | int -%}
+            {%- set hi = bounds[-1] | int -%}
+            {%- for p in _ports if lo <= p and p <= hi -%}{%- set hit.v = true -%}{%- endfor -%}
+          {%- endfor -%}
+          {%- if hit.v -%}{%- set _ = out.append(line | trim) -%}{%- endif -%}
+        {%- elif m[1] in ['ALLOW', 'LIMIT'] and m[2] in ['', 'IN', None]
+                 and (words | length) == 1
+                 and (last == 'Anywhere' or last is match('^[0-9a-fA-F:.]+(/[0-9]{1,3})?$')) -%}
+          {%- set _ = out.append(line | trim) -%}
+        {%- endif -%}
+      {%- endif -%}
       {%- endfor -%}
       {{ out }}

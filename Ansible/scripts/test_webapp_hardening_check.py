@@ -1291,7 +1291,58 @@ class RuntimeViolationsTests(unittest.TestCase):
         self.assertIn("db-1 : réseau hors du sous-réseau dédié", self.violations(__DB_NETS__=other))
 
 
-# Inventaire FACTICE d'un parc : proxies (dont un à l'adresse du VPN), FleetForge, AgentHub, la passerelle durcie.
+UFW_PLAY = """\
+- hosts: localhost
+  gather_facts: false
+  tasks:
+    - ansible.builtin.include_role:
+        name: webapp-security
+        tasks_from: ufw-foreign
+      vars:
+        wa_app: {wa_front_port: 4730, wa_back_port: 4731}
+        wa_ufw_numbered: {stdout_lines: "{{ lookup('file', play_tmp ~ '/ufw.txt').splitlines() }}"}
+    - ansible.builtin.copy: {content: "{{ wa_ufw_foreign | to_json }}", dest: "{{ play_tmp }}/foreign.json"}
+"""
+
+
+@unittest.skipUnless(shutil.which("ansible-playbook"), "ansible-playbook absent")
+class UfwForeignTests(unittest.TestCase):
+    """`ufw-foreign.yml` sur des sorties `ufw status numbered` factices (quatrième revue : plages, listes, adresse de
+    destination, `allow from X` sur tous les ports échappaient au contrôle)."""
+
+    def foreign(self, rules):
+        text = "Status: active\n\n     To                         Action      From\n     --                         ------      ----\n"
+        text += "".join(f"[{i + 1:2}] {r}\n" for i, r in enumerate(rules))
+        code, out, files = run_local_play(UFW_PLAY, extra_files={"ufw.txt": text}, outputs=["foreign.json"])
+        self.assertIn("foreign.json", files, out[-3000:])
+        return [line.split("] ", 1)[1] for line in json.loads(files["foreign.json"])]
+
+    def test_rules_touching_the_ports_are_found(self):
+        caught = [
+            "4730/tcp                   ALLOW IN    Anywhere",
+            "4731                       DENY IN     Anywhere",
+            "4700:4800/tcp              ALLOW IN    Anywhere",
+            "4730,4731/tcp              ALLOW IN    Anywhere",
+            "80,4725:4735/tcp           ALLOW IN    Anywhere",
+            "192.0.2.10 4730/tcp        ALLOW IN    Anywhere",
+            "4731/tcp (v6)              ALLOW IN    Anywhere (v6)",
+            "4730/tcp on eth0           ALLOW IN    Anywhere",
+            "Anywhere                   ALLOW IN    203.0.113.5",
+            "192.0.2.10                 ALLOW IN    203.0.113.5",
+            "Anywhere (v6)              ALLOW IN    2001:db8::/64",
+            "Anywhere on eth0           LIMIT IN    Anywhere",
+            "Anywhere                   ALLOW       203.0.113.6",
+        ]
+        ignored = [
+            "22/tcp                     ALLOW IN    Anywhere",
+            "4700:4729/tcp              ALLOW IN    Anywhere",
+            "4732,4740/tcp              ALLOW IN    Anywhere",
+            "47300/tcp                  ALLOW IN    Anywhere",
+            "Anywhere                   DENY IN     198.51.100.7",
+            "Anywhere                   ALLOW OUT   Anywhere on eth0 (out)",
+        ]
+        self.assertEqual(self.foreign(caught + ignored), caught)
+
 def guard_inventory(**gateway):
     gw = {
         "ansible_host": "192.0.2.10", "ansible_connection": "local", "ansible_roles": ["webapp"],
