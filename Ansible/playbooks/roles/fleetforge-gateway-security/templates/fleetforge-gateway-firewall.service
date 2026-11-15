@@ -1,0 +1,14 @@
+[Unit]
+Description=Restrict the FleetForge gateway published ports to the remote proxies
+# Docker recrée DOCKER-USER vide à chaque démarrage : reposer les règles APRÈS
+# lui, sans quoi la passerelle serait exposée jusqu'au prochain passage Ansible.
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart={{ ffg_firewall_script }}
+
+[Install]
+WantedBy=multi-user.target

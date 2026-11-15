@@ -1,0 +1,12 @@
+---
+# Retire la passerelle MCP de FleetForge : conteneurs, sonde, pare-feu
+# DOCKER-USER (règles posées, quel que soit l'inventaire courant), compte Unix
+# dédié. Conserve ses volumes (base), le CNAME et le vhost (voir
+# purge-fleetforge-gateway.yml). Ne touche JAMAIS à FleetForge.
+#
+#   ./play.sh web3c remove-fleetforge-gateway.yml
+- name: Remove the FleetForge gateway
+  hosts: fleetforge_gateways
+  remote_user: "{{ remote_username }}"
+  roles:
+    - fleetforge-gateway-remove

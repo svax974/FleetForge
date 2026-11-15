@@ -1,0 +1,112 @@
+---
+# Contrôle STATIQUE de l'entrée de la passerelle : asserts locaux, aucune
+# connexion (joué par le play de garde de deploy-fleetforge.yml, tag `always`,
+# et en tête de ce rôle). Tout ce qui suit lit l'inventaire : un défaut ici
+# serait un déploiement « réussi » sur une passerelle mal isolée.
+
+- name: Check the deployment scope
+  ansible.builtin.assert:
+    that: (ff_deploy_scope | default('all')) in ['all', 'fleetforge', 'gateway']
+    fail_msg: "ff_deploy_scope vaut « {{ ff_deploy_scope | default('') }} » : all, fleetforge ou gateway."
+    quiet: true
+  tags: [always]
+
+# Entrée DÉDIÉE (CLAUDE.md § 2) : jamais l'entrée de FleetForge elle-même, même
+# quand la passerelle partage sa machine. Les familles ne se mélangent pas : la
+# famille `fleetforge` désigne un nœud de contrôle Ansible.
+- name: Check the gateway entry is dedicated and private
+  ansible.builtin.assert:
+    that:
+      - inventory_hostname not in (groups['infras'] | default([]))
+      - "'fleetforge' not in (ansible_roles | default([]))"
+      - groups['infras'] | default([]) | map('extract', hostvars) | selectattr('ansible_roles', 'defined')
+        | map(attribute='ansible_roles') | select('contains', 'fleetforge-gateway') | list | length == 0
+      # E1 : vhost privé, rien de public. Une passerelle qui partage la machine
+      # du nœud de contrôle ne sera JAMAIS publique (prérequis E2/E3 : la
+      # déplacer d'abord, voir docs/avant-ouverture-public.md).
+      - access_mode is defined
+      - access_mode == 'private'
+      - hostname is defined
+      - proxy_hostname is defined
+      - proxy_hostname is search('[.]' ~ (domain_name | regex_escape) ~ '$')
+      - proxy_hostname != 'proxy.' ~ domain_name
+      - app_port is defined and back_port is defined and pg_port is defined
+      - ([app_port | int, back_port | int, pg_port | int] | unique | length) == 3
+      - ffg_project_name is match('^[a-z][a-z0-9-]{0,40}$')
+      - ffg_unix_user is match('^[a-z_][a-z0-9_-]{0,30}$')
+      - ffg_unix_user != remote_username
+      - ffg_docker_subnet is defined
+      - ffg_docker_subnet is match(ffg_private_cidr_regex)
+      - ffg_docker_subnet in (access_local_cidrs | default([]))
+      - (ffg_protected_paths_base + (ffg_protected_paths | default([]))) | reject('match', '^/[A-Za-z0-9._/-]+$') | list | length == 0
+      - ffg_mcp_allowed_hosts | default([]) is not string
+      - ffg_mcp_allowed_hosts | default([]) | difference(groups['all']) | length == 0
+      - ffg_mcp_allow_whitelist | default(false) | string | lower in ['true', 'false']
+    fail_msg: >-
+      Entrée {{ inventory_hostname }} invalide pour la passerelle : entrée
+      dédiée hors du groupe `infras`, sans la famille `fleetforge` (et aucune
+      entrée de `infras` avec `fleetforge-gateway`) ; `access_mode: private`
+      (E1) ; `hostname`, `proxy_hostname` (nom de la zone, pas le front des
+      proxies) ; `app_port`, `back_port`, `pg_port` distincts ;
+      `ffg_docker_subnet` privé /16 à /32 ET listé dans `access_local_cidrs` ;
+      `ffg_protected_paths` absolus sans métacaractère ;
+      `ffg_mcp_allowed_hosts` une liste d'entrées de l'inventaire ;
+      `ffg_mcp_allow_whitelist` booléen.
+  tags: [always]
+
+# Chaque amont : l'entrée FleetForge qu'il désigne doit admettre la passerelle
+# (`access_linked`) et porter les trois comptes BORNÉS attendus — jamais le
+# compte d'AgentHub (`ff_api_user`) ni un compte plus large.
+- name: Check each upstream against its FleetForge entry
+  vars:
+    _e: "{{ item.entry | default('') }}"
+    _ev: "{{ hostvars[_e] if _e in hostvars else {} }}"
+    _users: "{{ ffg_default_users | combine(item.users | default({})) }}"
+    _accounts: "{{ _ev.ff_api_accounts | default([]) }}"
+    _read: "{{ _accounts | selectattr('user', 'defined') | selectattr('user', 'equalto', _users.read) | first | default({}) }}"
+    _check: "{{ _accounts | selectattr('user', 'defined') | selectattr('user', 'equalto', _users.check) | first | default({}) }}"
+    _run: "{{ _accounts | selectattr('user', 'defined') | selectattr('user', 'equalto', _users.run) | first | default({}) }}"
+    _parc: "{{ _ev.parc_name | default('') }}"
+  ansible.builtin.assert:
+    that:
+      - item.id is defined
+      - item.id is match('^[a-z][a-z0-9_]{0,31}$')
+      - _e in (groups['infras'] | default([]))
+      - _ev.proxy_hostname is defined
+      - inventory_hostname in (_ev.access_linked | default([]))
+      - item.parcs is defined and item.parcs is not string and item.parcs | length > 0
+      - (_users.values() | unique | list | length) == 3
+      - (_ev.ff_api_user | default('')) not in _users.values()
+      - _read.mode | default('read') == 'read' and _read.user is defined
+      - _check.mode | default('') == 'check'
+      - _run.mode | default('') == 'run'
+      - _users.check in (_run.accept_checks_from | default([]))
+      - _check.max_hosts is defined and _run.max_hosts is defined
+      - ffg_required_denies | difference(_check.deny_playbooks | default([])) | length == 0
+      - ffg_required_denies | difference(_run.deny_playbooks | default([])) | length == 0
+      - item.parcs | difference(_read.parcs | default([_parc])) | length == 0
+      - item.parcs | difference(_check.parcs | default([_parc])) | length == 0
+      - item.parcs | difference(_run.parcs | default([_parc])) | length == 0
+    fail_msg: >-
+      Amont « {{ item.id | default('?') }} » de {{ inventory_hostname }} : l'entrée
+      `{{ _e }}` doit être du groupe `infras`, déclarer `proxy_hostname`, nommer
+      {{ inventory_hostname }} dans `access_linked`, et porter dans
+      `ff_api_accounts` {{ _users.read }} (read), {{ _users.check }} (check,
+      max_hosts) et {{ _users.run }} (run, max_hosts, accept_checks_from:
+      [{{ _users.check }}]) couvrant les parcs {{ item.parcs | default([]) | join(', ') }},
+      check et run refusant {{ ffg_required_denies | join(', ') }} ; trois noms
+      distincts, aucun égal au compte d'AgentHub (`ff_api_user`).
+  loop: "{{ ffg_upstreams | default([]) }}"
+  loop_control:
+    label: "{{ item.id | default('?') }} → {{ item.entry | default('?') }}"
+  tags: [always]
+
+- name: Check at least one upstream is declared
+  ansible.builtin.assert:
+    that:
+      - ffg_upstreams | default([]) is not string
+      - ffg_upstreams | default([]) | length > 0
+      - ffg_upstreams | map(attribute='id') | unique | list | length == ffg_upstreams | length
+    fail_msg: "{{ inventory_hostname }} : `ffg_upstreams` (liste d'amonts {id, entry, parcs}, ids uniques) est vide ou invalide."
+    quiet: true
+  tags: [always]

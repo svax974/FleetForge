@@ -1,0 +1,76 @@
+---
+# Convention `<service>-monitoring` : sonde déclarative svcprobe
+# (`service_up{service="fleetforge-gateway"}` + `service_check_up{check=…}`),
+# cible et ouverture de scrape partagées (svcprobe-install). Règles d'alerte :
+# groupe générique `services` (play d'alertes de deploy-fleetforge.yml).
+
+- name: Check the values written into the probe command
+  ansible.builtin.assert:
+    that:
+      - ffg_project_name is match('^[a-z][a-z0-9-]{0,40}$')
+      - ffg_upstreams | default([]) | map(attribute='entry') | map('extract', hostvars, 'proxy_hostname')
+        | reject('match', '^[a-z0-9][a-z0-9.-]{0,252}$') | list | length == 0
+      - ffg_upstreams | default([]) | map(attribute='id') | reject('match', '^[a-z][a-z0-9_]{0,31}$') | list | length == 0
+    fail_msg: "Nom de projet, nom public d'un amont ou id d'amont hors grammaire : ils entrent dans la commande de la sonde."
+    quiet: true
+  tags: [monitoring]
+
+# `public: true` : les defaults de svcprobe-install (svcprobe_checks_dir…)
+# doivent rester visibles ici.
+- name: Ensure the shared probe is installed
+  ansible.builtin.include_role:
+    name: svcprobe-install
+    public: true
+    apply:
+      tags: [monitoring]
+  tags: [monitoring]
+
+- name: Deploy the gateway probe
+  ansible.builtin.template:
+    src: check.json.j2
+    dest: "{{ svcprobe_checks_dir }}/fleetforge-gateway.json"
+    owner: root
+    group: root
+    mode: '0644'
+  become: true
+  tags: [monitoring]
+
+- name: Verify the probe answers
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ svcprobe_listen_port }}/metrics"
+    return_content: true
+  register: ffg_probe
+  retries: 6
+  delay: 5
+  until: ffg_probe.status is defined and ffg_probe.status == 200
+  changed_when: false
+  tags: [monitoring]
+
+- name: Fail when the probe reports the gateway down
+  ansible.builtin.fail:
+    msg: >-
+      La sonde annonce `service_up{service="fleetforge-gateway"} 0` alors que le
+      déploiement vient de réussir : sonde mal écrite, ou
+      {{ ffg_svcprobe_health_url }} ne répond pas.
+  when: >-
+    'service_up{service="fleetforge-gateway"} 0' in (ffg_probe.content | default(''))
+  tags: [monitoring]
+
+# Un amont à 0 juste après le déploiement : l'entrée FleetForge ne nomme pas la
+# passerelle (`access_linked`), le sous-réseau Docker n'est pas admis par un
+# proxy co-localisé (`access_local_cidrs`), ou FleetForge est arrêté.
+- name: Warn when a secondary check reports down
+  ansible.builtin.debug:
+    msg: >-
+      Sonde(s) secondaire(s) à 0 :
+      {{ ffg_probe.content.split('\n')
+         | select('search', 'service_check_up[{]service="fleetforge-gateway"')
+         | select('search', ' 0$') | list }}
+  when: >-
+    ffg_probe.content | default('') is search('service_check_up[{]service="fleetforge-gateway",[^}]*[}] 0')
+  tags: [monitoring]
+
+- name: Report the probe result
+  ansible.builtin.debug:
+    msg: "{{ ffg_probe.content.split('\n') | select('search', 'fleetforge-gateway') | list }}"
+  tags: [monitoring]

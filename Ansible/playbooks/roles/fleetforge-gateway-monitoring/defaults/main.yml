@@ -1,0 +1,20 @@
+---
+# Supervision de la passerelle MCP de FleetForge (CLAUDE.md, obligation
+# `-monitoring`). L'app ne lie pas le module `infra` : pas de /metrics. Sonde
+# déclarative svcprobe (port 9110, boucle locale), règles génériques du groupe
+# `services` (ServiceDown, ServiceCheckFailing) :
+#   • service_up : santé de l'API à travers le front (chemin du vhost) ;
+#   • front, back_lb_health, postgres : distinguent quelle pièce manque ;
+#   • upstream_<id> : DEPUIS le conteneur back, l'URL d'automatisation de
+#     FleetForge (`https://<proxy_hostname de l'amont>/healthz`, sans
+#     authentification) — prouve le chemin réel passerelle → proxy (vhost
+#     privé, `access_linked`/`access_local_cidrs`) → FleetForge. À 0 alors
+#     que service_up vaut 1 : la passerelle répond mais ne peut plus rien
+#     piloter (amont tombé, vhost qui la refuse, DNS) — état DÉGRADÉ que la
+#     sonde binaire manquerait.
+ffg_project_name: fleetforge-gateway
+ffg_svcprobe_health_url: "http://127.0.0.1:{{ app_port }}/api/v1/health"
+ffg_svcprobe_front_url: "http://127.0.0.1:{{ app_port }}/"
+ffg_svcprobe_back_lb_health_url: "http://127.0.0.1:{{ back_port }}/api/v1/health"
+ffg_postgres_container: "{{ ffg_project_name }}_postgres"
+ffg_upstream_probe_timeout: 20

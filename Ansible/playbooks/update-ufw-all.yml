@@ -244,6 +244,16 @@
         tasks_from: firewall
       when: prometheus_host is defined
 
+# Passerelle MCP de FleetForge : ports publiés par Docker, donc DOCKER-USER
+# (son script purge puis repose ses règles : un proxy retiré perd son accès).
+# Groupe absent de l'inventaire (papanglabs) : play ignoré.
+- name: FleetForge gateway (Docker-published ports)
+  hosts: fleetforge_gateways
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - fleetforge-gateway-security
+
 # ── Note : retrait d'une autorisation ──────────────────────────────────────
 # Ce playbook AJOUTE les règles correspondant à la configuration courante.
 # Pour qu'une IP sortie de la whitelist perde réellement son accès, il faut

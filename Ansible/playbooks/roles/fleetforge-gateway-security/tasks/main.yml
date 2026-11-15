@@ -1,0 +1,110 @@
+---
+# Voir defaults/main.yml. Joué AVANT le déploiement de l'app (aucune fenêtre
+# où un port publié serait ouvert) puis rejoué par update-ufw-all.yml quand la
+# liste des proxies change. Le contrôle du durcissement des conteneurs, lui,
+# vit dans tasks/runtime.yml (après le déploiement).
+
+# Les valeurs entrent dans un script root : grammaire tenue avant le rendu.
+- name: Check the values written into the firewall script
+  ansible.builtin.assert:
+    that:
+      - ffg_front_port | string is match('^[0-9]{2,5}$')
+      - ffg_back_port | string is match('^[0-9]{2,5}$')
+      - ffg_front_port | int != ffg_back_port | int
+      - ffg_internal_cidr is match('^[0-9]{1,3}([.][0-9]{1,3}){3}/[0-9]{1,2}$')
+      - ffg_remote_proxies | reject('match', '^[0-9]{1,3}([.][0-9]{1,3}){3}$') | list | length == 0
+      - ffg_firewall_script is match('^/[A-Za-z0-9._/-]+$')
+    fail_msg: "Ports, sous-réseau interne et adresses des proxies : formes numériques IPv4 attendues."
+    quiet: true
+
+- name: Deploy the gateway firewall script
+  ansible.builtin.template:
+    src: fleetforge-gateway-firewall.sh.j2
+    dest: "{{ ffg_firewall_script }}"
+    owner: root
+    group: root
+    mode: '0750'
+  become: true
+  notify: reapply fleetforge-gateway firewall
+
+- name: Deploy the gateway firewall unit
+  ansible.builtin.template:
+    src: fleetforge-gateway-firewall.service
+    dest: "/etc/systemd/system/{{ ffg_firewall_unit }}.service"
+    owner: root
+    group: root
+    mode: '0644'
+  become: true
+  notify: reapply fleetforge-gateway firewall
+
+- name: Enable and start the gateway firewall unit
+  ansible.builtin.systemd:
+    name: "{{ ffg_firewall_unit }}"
+    state: started
+    enabled: true
+    daemon_reload: true
+  become: true
+
+# Une règle ufw sur un port publié est décorative ; posée à la main, elle
+# raconterait une autre histoire que la chaîne réelle.
+- name: Remove any decorative ufw rule on the gateway ports
+  community.general.ufw:
+    rule: "{{ item.0 }}"
+    proto: tcp
+    port: "{{ item.1 | string }}"
+    delete: true
+  loop: "{{ ['allow', 'deny'] | product([ffg_front_port, ffg_back_port]) | list }}"
+  become: true
+
+# Les handlers tournent en fin de play : application immédiate, puis contrôle
+# de l'état RÉEL de la chaîne.
+- name: Apply the rules now
+  ansible.builtin.command:
+    argv: ["{{ ffg_firewall_script }}"]
+  become: true
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Read back the IPv4 DOCKER-USER chain
+  ansible.builtin.command:
+    argv: [iptables, -w, -S, DOCKER-USER]
+  become: true
+  register: ffg_chain4
+  changed_when: false
+  check_mode: false
+
+# Chaîne absente = Docker en IPv4 seul : rien à vérifier en IPv6.
+- name: Read back the IPv6 DOCKER-USER chain
+  ansible.builtin.command:
+    argv: [ip6tables, -w, -S, DOCKER-USER]
+  become: true
+  register: ffg_chain6
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Verify each published port ends in a DROP (IPv4, and IPv6 when the chain exists)
+  ansible.builtin.assert:
+    that:
+      - (item.0.rc != 0 and item.0.family == 'ip6tables')
+        or item.0.stdout is search('--ctorigdstport ' ~ item.1 ~ ' .*fleetforge-gateway:' ~ item.1 ~ ':deny.*-j DROP')
+    fail_msg: >-
+      {{ item.0.family }} : aucun DROP sur le port {{ item.1 }} dans DOCKER-USER —
+      la passerelle serait joignable sans passer par les proxies. Vérifier
+      `systemctl status {{ ffg_firewall_unit }}` et `{{ item.0.family }} -S DOCKER-USER`.
+    quiet: true
+  loop: >-
+    {{ [ffg_chain4 | combine({'family': 'iptables'}), ffg_chain6 | combine({'family': 'ip6tables'})]
+       | product([ffg_front_port, ffg_back_port]) | list }}
+  loop_control:
+    label: "{{ item.0.family }} {{ item.1 }}"
+  when: not ansible_check_mode
+
+- name: Report the exposure
+  ansible.builtin.debug:
+    msg: >-
+      Ports {{ ffg_front_port }} (front) et {{ ffg_back_port }} (back-lb, `/mcp`)
+      filtrés dans DOCKER-USER : {{ ('proxies distants ' ~ (ffg_remote_proxies | join(', ')))
+      if ffg_remote_proxies | length > 0 else 'aucune source externe' }}, puis DROP
+      (IPv6 : DROP). Un proxy de cette machine passe par 127.0.0.1. Contrôle depuis
+      une machine hors proxies : `nc -z {{ ansible_host }} {{ ffg_back_port }}` doit échouer.

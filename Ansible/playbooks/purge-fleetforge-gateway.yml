@@ -1,0 +1,11 @@
+---
+# Supprime la passerelle MCP de FleetForge ET ses données : suppression, plus
+# volumes (base : credentials MCP, audit, approbations, lancements), images et
+# CNAME. Destructif. Ne touche JAMAIS à FleetForge.
+#
+#   ./play.sh web3c purge-fleetforge-gateway.yml -e confirm=yes
+- name: Purge the FleetForge gateway
+  hosts: fleetforge_gateways
+  remote_user: "{{ remote_username }}"
+  roles:
+    - fleetforge-gateway-purge

@@ -1,0 +1,370 @@
+---
+# Voir defaults/main.yml (partage « famille Ansible » / « code de l'app »).
+
+- name: Check the paths and names used below
+  ansible.builtin.assert:
+    that:
+      - ffg_src is match('^/[A-Za-z0-9._/ -]+/$')
+      - ffg_back_env_file is match('^[A-Za-z0-9._/-]+$')
+      - ffg_front_env_file is match('^[A-Za-z0-9._/-]+$')
+      - ffg_app_env_id is match('^[a-z0-9][a-z0-9_-]*$')
+      - ffg_project_name is match('^[a-z][a-z0-9-]{0,40}$')
+      - ffg_unix_user is match('^[a-z_][a-z0-9_-]{0,30}$')
+    quiet: true
+
+# ── .env de prod : coffre → dépôt app (modèle agenthub-deploy) ─────────────
+- name: Check for the vaulted prod env files in the private parc repository
+  ansible.builtin.stat:
+    path: "{{ playbook_dir }}/../.private/apps/{{ ffg_app_env_id }}"
+  delegate_to: localhost
+  become: false
+  register: ffg_env_vault_dir
+
+- name: Compare the local prod env files with the vault
+  ansible.builtin.command:
+    argv: [./app-env.sh, status, "{{ ffg_app_env_id }}"]
+    chdir: "{{ playbook_dir }}/.."
+  delegate_to: localhost
+  become: false
+  register: ffg_env_status
+  changed_when: false
+  check_mode: false
+  when: ffg_env_vault_dir.stat.isdir | default(false)
+
+- name: Fail when a local env file differs from the vault
+  vars:
+    ffg_env_differing: >-
+      {{ ffg_env_status.stdout_lines | default([])
+         | select('search', '[ ]differs[ ]*$') | map('split') | map(attribute=1) | list }}
+  ansible.builtin.fail:
+    msg: >-
+      Le .env {{ ffg_env_differing | join(' et ') }} de {{ ffg_src }} diffère du coffre. Le
+      local fait foi : `./app-env.sh save {{ ffg_app_env_id }}` ; le coffre fait foi :
+      `./app-env.sh restore {{ ffg_app_env_id }}`. Passer outre : -e ffg_env_overwrite_local=true.
+  when:
+    - ffg_env_vault_dir.stat.isdir | default(false)
+    - ffg_env_differing | length > 0
+    - not (ffg_env_overwrite_local | bool)
+
+- name: Restore the gateway prod env files from the vault
+  ansible.builtin.command:
+    argv: [./app-env.sh, restore, "{{ ffg_app_env_id }}"]
+    chdir: "{{ playbook_dir }}/.."
+  delegate_to: localhost
+  become: false
+  register: ffg_env_restore
+  changed_when: "'restored from' in ffg_env_restore.stdout"
+  when: ffg_env_vault_dir.stat.isdir | default(false)
+
+- name: Look for the prod env files on the control machine
+  ansible.builtin.stat:
+    path: "{{ ffg_src }}{{ item }}"
+  delegate_to: localhost
+  become: false
+  loop: ["{{ ffg_back_env_file }}", "{{ ffg_front_env_file }}"]
+  register: ffg_env_stat
+
+- name: Fail when an env file is absent
+  ansible.builtin.fail:
+    msg: >-
+      {{ ffg_src }}{{ item.item }} introuvable : il porte les secrets applicatifs
+      de prod (CRYPT_*, JWT_SECRET, DB_PASSWORD…) et n'est jamais généré ici.
+      Le préparer depuis back/.env.example de l'app, puis rejouer.
+  loop: "{{ ffg_env_stat.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: not item.stat.exists
+
+# ── Ce que l'inventaire décide ─────────────────────────────────────────────
+- name: Read the uid and gid of the dedicated account on the gateway host
+  ansible.builtin.command:
+    argv: [getent, passwd, "{{ ffg_unix_user }}"]
+  register: ffg_passwd
+  changed_when: false
+  check_mode: false
+
+- name: Compute the non-secret settings
+  vars:
+    _f: "{{ ffg_passwd.stdout.split(':') }}"
+    _upstreams: >-
+      [{% for u in ffg_upstreams %}{"id": {{ u.id | to_json }}, "baseUrl": {{ ('https://' ~ hostvars[u.entry].proxy_hostname) | to_json }}, "parcs": {{ u.parcs | to_json }}{% if u.users is defined %}, "users": {{ u.users | to_json }}{% endif %}}{{ '' if loop.last else ', ' }}{% endfor %}]
+  ansible.builtin.set_fact:
+    ffg_back_settings:
+      PROJECT_NAME: "{{ ffg_project_name }}"
+      NODE_PORT: "{{ back_port }}"
+      FRONT_PORT: "{{ app_port }}"
+      DB_PORT: "{{ pg_port }}"
+      FFG_RUNTIME_UID: "{{ _f[2] }}"
+      FFG_RUNTIME_GID: "{{ _f[3] }}"
+      FFG_DOCKER_SUBNET: "{{ ffg_docker_subnet }}"
+    ffg_upstreams_json: "{{ _upstreams | trim }}"
+
+- name: Check the non-secret settings
+  ansible.builtin.assert:
+    that:
+      - ffg_back_settings.FFG_RUNTIME_UID is match('^[0-9]+$')
+      - ffg_back_settings.FFG_RUNTIME_GID is match('^[0-9]+$')
+      - ffg_back_settings.FFG_RUNTIME_UID | int > 0
+      - ffg_upstreams_json is match('^[][{}A-Za-z0-9 ",:._/-]+$')
+      - ffg_upstreams_json | from_json | length == ffg_upstreams | length
+    fail_msg: "uid/gid du compte dédié ou FFG_UPSTREAMS hors grammaire (aucune apostrophe, aucun espace de nom inconnu)."
+    quiet: true
+
+- name: Pin the non-secret settings in the back env file
+  ansible.builtin.lineinfile:
+    path: "{{ ffg_src }}{{ ffg_back_env_file }}"
+    regexp: '^[ ]*{{ item.key }}='
+    line: '{{ item.key }}="{{ item.value }}"'
+    mode: '0600'
+  loop: "{{ ffg_back_settings | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  delegate_to: localhost
+  become: false
+  diff: false
+
+# JSON entre apostrophes : lu tel quel par `source` et par l'env_file de compose.
+- name: Pin FFG_UPSTREAMS in the back env file
+  ansible.builtin.lineinfile:
+    path: "{{ ffg_src }}{{ ffg_back_env_file }}"
+    regexp: '^[ ]*FFG_UPSTREAMS='
+    line: "FFG_UPSTREAMS='{{ ffg_upstreams_json }}'"
+    mode: '0600'
+  delegate_to: localhost
+  become: false
+  diff: false
+
+- name: Pin VITE_PORT in the front env file
+  ansible.builtin.lineinfile:
+    path: "{{ ffg_src }}{{ ffg_front_env_file }}"
+    regexp: '^[ ]*VITE_PORT='
+    line: 'VITE_PORT="{{ app_port }}"'
+    mode: '0600'
+  delegate_to: localhost
+  become: false
+  diff: false
+
+# ── Mots de passe des comptes aval (no_log, jamais affichés) ──────────────
+# Source : le vault du parc (`ff_api_password_<compte>`). Au premier
+# déploiement, fleetforge-install vient de les tirer dans CE run (fait
+# `ff_api_new_passwords` de l'entrée FleetForge) : ils ne sont pas encore
+# rechargés depuis le group_vars, d'où le repli.
+- name: List the downstream password variables (names only)
+  ansible.builtin.set_fact:
+    ffg_password_slots: >-
+      {{ ffg_password_slots | default([]) + [{
+           'var': 'FFG_UPSTREAM_' ~ (item.0.id | upper) ~ '_' ~ (item.1 | upper) ~ '_PASSWORD',
+           'user': (ffg_default_users | combine(item.0.users | default({})))[item.1],
+           'entry': item.0.entry }] }}
+  loop: "{{ ffg_upstreams | product(['read', 'check', 'run']) | list }}"
+  loop_control:
+    label: "{{ item.0.id }} {{ item.1 }}"
+
+# Un mot de passe manquant n'est PAS remplacé par un vide : l'app refuserait
+# de démarrer, et le message dirait pourquoi trop tard. Seuls les NOMS des
+# comptes fautifs sortent de cette tâche (no_log : la condition lit le secret).
+- name: Find the downstream passwords that are missing or malformed (names only)
+  vars:
+    _pw: >-
+      {{ lookup('ansible.builtin.vars', 'ff_api_password_' ~ item.user, default='')
+         or ((hostvars[item.entry].ff_api_new_passwords | default({}))[item.user] | default('')) }}
+  ansible.builtin.set_fact:
+    ffg_missing_passwords: "{{ ffg_missing_passwords | default([]) + [item.user] }}"
+  loop: "{{ ffg_password_slots }}"
+  loop_control:
+    label: "{{ item.var }}"
+  when: not (_pw | trim is match('^[A-Za-z0-9]{24,256}$'))
+  no_log: true
+
+- name: Fail when a downstream password is missing
+  ansible.builtin.assert:
+    that: ffg_missing_passwords | default([]) | length == 0
+    fail_msg: >-
+      Mot de passe absent ou malformé au vault du parc pour
+      {{ ffg_missing_passwords | default([]) | join(', ') }} (`ff_api_password_<compte>`).
+      Déployer d'abord FleetForge sur l'entrée amont (deploy-fleetforge.yml, qui
+      les tire au premier passage, tag `secrets`), puis committer le group_vars du parc.
+    quiet: true
+
+- name: Write the downstream passwords into the back env file
+  vars:
+    _pw: >-
+      {{ lookup('ansible.builtin.vars', 'ff_api_password_' ~ item.user, default='')
+         or ((hostvars[item.entry].ff_api_new_passwords | default({}))[item.user] | default('')) }}
+  ansible.builtin.lineinfile:
+    path: "{{ ffg_src }}{{ ffg_back_env_file }}"
+    regexp: '^[ ]*{{ item.var }}='
+    line: '{{ item.var }}="{{ _pw | trim }}"'
+    mode: '0600'
+  loop: "{{ ffg_password_slots }}"
+  loop_control:
+    label: "{{ item.var }}"
+  delegate_to: localhost
+  become: false
+  diff: false
+  no_log: true
+
+# ── Interdits du back/.env ─────────────────────────────────────────────────
+# vmagent (profil `metrics`, lancé dès qu'une URL de remote_write est posée)
+# monte le SOCKET DOCKER : interdit pour la passerelle. Postgres/Redis restent
+# sur la boucle locale (INFRA_BIND absent ou 127.0.0.1). Seuls les noms des
+# variables fautives sont affichés.
+- name: Look for forbidden settings in the back env file
+  ansible.builtin.shell: >-
+    set -o pipefail;
+    grep -E '^[[:space:]]*(PROMETHEUS_REMOTE_WRITE_URLS?=["'"'"']?[^"'"'"'[:space:]]|INFRA_BIND=)' {{ (ffg_src ~ ffg_back_env_file) | quote }}
+    | grep -Ev '^[[:space:]]*INFRA_BIND=["'"'"']?(127[.]0[.]0[.]1)?["'"'"']?[[:space:]]*$'
+    | cut -d= -f1 || true
+  args:
+    executable: /bin/bash
+  delegate_to: localhost
+  become: false
+  register: ffg_forbidden_env
+  changed_when: false
+  check_mode: false
+
+- name: Fail on a forbidden setting
+  ansible.builtin.assert:
+    that: ffg_forbidden_env.stdout | trim | length == 0
+    fail_msg: >-
+      {{ ffg_src }}{{ ffg_back_env_file }} pose {{ ffg_forbidden_env.stdout_lines | join(', ') }} :
+      ni vmagent (socket Docker monté), ni Postgres/Redis hors boucle locale pour la passerelle.
+    quiet: true
+
+# ── Coffre, cibles du déploiement ──────────────────────────────────────────
+# Après les variables ci-dessus : webapp-env-update les resauvegarde avec les
+# siennes dans le coffre.
+- name: Pin the deployment targets in the prod env files
+  ansible.builtin.include_role:
+    name: webapp-env-update
+  vars:
+    webapp_env_src: "{{ ffg_src }}"
+    webapp_env_back_file: "{{ ffg_back_env_file }}"
+    webapp_env_front_file: "{{ ffg_front_env_file }}"
+    webapp_env_app_id: "{{ ffg_app_env_id }}"
+
+# Premier déploiement : le dossier du coffre n'existe pas encore,
+# webapp-env-update ne sauvegarde pas — `save` le crée.
+- name: Save the env files into the vault
+  ansible.builtin.command:
+    argv: [./app-env.sh, save, "{{ ffg_app_env_id }}"]
+    chdir: "{{ playbook_dir }}/.."
+  delegate_to: localhost
+  become: false
+  register: ffg_env_saved
+  changed_when: "'saved to' in ffg_env_saved.stdout"
+
+# ── Compose durci, contrôlé AVANT tout déploiement ─────────────────────────
+- name: Work out the compose file the deployment will use
+  ansible.builtin.set_fact:
+    ffg_compose_file: >-
+      {{ (lookup('ansible.builtin.file', ffg_src ~ ffg_back_env_file, errors='ignore')
+          | default('', true) | regex_findall('^[ ]*COMPOSE_FILE_NAME=["\']?([^"\'\n]*)', multiline=True)
+          | last | default('', true)) or ffg_default_compose_file }}
+  no_log: true
+
+- name: Check the compose path
+  ansible.builtin.assert:
+    that:
+      - ffg_compose_file is match('^[A-Za-z0-9._/-]+$')
+      - "'..' not in ffg_compose_file"
+    fail_msg: "COMPOSE_FILE_NAME hors grammaire (chemin relatif au dépôt, sans `..`)."
+    quiet: true
+
+- name: Check the compose file is hardened (static, before deploying)
+  ansible.builtin.command:
+    argv:
+      - "{{ ansible_playbook_python }}"
+      - -I
+      - "{{ playbook_dir }}/../scripts/ffg_isolation_check.py"
+      - compose
+      - "{{ ffg_src }}{{ ffg_compose_file }}"
+      - --services
+      - "{{ ffg_hardened_services | join(',') }}"
+  delegate_to: localhost
+  become: false
+  register: ffg_compose_check
+  changed_when: false
+  check_mode: false
+  failed_when: false
+
+- name: Refuse to deploy a compose that is not hardened
+  ansible.builtin.assert:
+    that: ffg_compose_check.rc == 0
+    fail_msg: >-
+      {{ ffg_compose_file }} n'est pas durci — rien n'est déployé :
+      {{ ffg_compose_check.stdout_lines | join(' | ') }}
+    success_msg: "{{ ffg_compose_file }} : compose durci ({{ ffg_hardened_services | join(', ') }})."
+
+# ── Déploiement par les scripts de l'app ───────────────────────────────────
+- name: Deploy the gateway (build + push + start, via the app's own tooling)
+  ansible.builtin.command:
+    argv: "{{ ['./scripts/run.sh', 'prod'] + (['--migrate'] if ffg_migrate | bool else []) + ([] if ffg_update_common | bool else ['--no-update-common']) }}"
+    chdir: "{{ ffg_src }}"
+  delegate_to: localhost
+  become: false
+  environment:
+    BACK_ENV_FILE: "{{ ffg_back_env_file }}"
+    FRONT_ENV_FILE: "{{ ffg_front_env_file }}"
+  register: ffg_deploy_run
+  changed_when: true
+  failed_when: false
+  no_log: true
+
+# Sortie du script masquée : elle peut citer l'environnement (back/.env porte
+# les mots de passe aval). Seul le code de retour est rapporté.
+- name: Fail when the deployment script failed (exit code only)
+  ansible.builtin.assert:
+    that: (ffg_deploy_run.rc | default(1)) == 0
+    fail_msg: >-
+      scripts/run.sh prod a échoué (code {{ ffg_deploy_run.rc | default('?') }}). Sortie
+      masquée ici ; la relire en relançant à la main depuis {{ ffg_src }} :
+      `BACK_ENV_FILE={{ ffg_back_env_file }} ./scripts/run.sh prod --no-update-common`.
+    success_msg: "scripts/run.sh prod : code 0."
+  when: not ansible_check_mode
+
+# Contrôles SUR l'hôte, en boucle locale (hors DOCKER-USER).
+- name: Wait for the front to answer
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ app_port }}/"
+    status_code: [200, 301, 302]
+  register: ffg_front_ready
+  until: ffg_front_ready.status is defined and ffg_front_ready.status in [200, 301, 302]
+  retries: "{{ ffg_health_retries }}"
+  delay: "{{ ffg_health_delay }}"
+  changed_when: false
+
+- name: Wait for the API health endpoint
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ back_port }}/api/v1/health"
+    status_code: [200]
+  register: ffg_back_ready
+  until: ffg_back_ready.status is defined and ffg_back_ready.status == 200
+  retries: "{{ ffg_health_retries }}"
+  delay: "{{ ffg_health_delay }}"
+  changed_when: false
+
+- name: Collect the listeners of the Postgres host port
+  ansible.builtin.shell: >-
+    set -o pipefail;
+    ss -ltnH | awk '{print $4}' | grep -E ':'{{ pg_port | int | string | quote }}'$' || true
+  args:
+    executable: /bin/bash
+  register: ffg_pg_listeners
+  changed_when: false
+  check_mode: false
+
+- name: Fail when Postgres listens outside loopback
+  ansible.builtin.assert:
+    that:
+      - ffg_pg_listeners.stdout_lines | reject('match', '^(127[.]0[.]0[.]1|[[]::1[]]):') | list | length == 0
+    fail_msg: "Postgres de la passerelle écoute hors boucle locale ({{ ffg_pg_listeners.stdout_lines | join(', ') }})."
+    success_msg: "Postgres de la passerelle sur la boucle locale uniquement."
+
+- name: Report how the gateway is exposed
+  ansible.builtin.debug:
+    msg: >-
+      Passerelle déployée : front 127.0.0.1:{{ app_port }}, back-lb (/mcp)
+      127.0.0.1:{{ back_port }}. Nom public https://{{ proxy_hostname }} (vhost
+      privé ; /mcp : {{ ffg_mcp_allowed_hosts | default([]) | join(', ') or 'personne' }}{{ ' + whitelist (TEST)' if ffg_mcp_allow_whitelist | default(false) | bool else '' }}).
+      Coffre : `.private/apps/{{ ffg_app_env_id }}` à committer s'il a changé.

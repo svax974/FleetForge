@@ -1,0 +1,68 @@
+---
+# Pare-feu et durcissement de la passerelle MCP de FleetForge.
+#
+# Ports PUBLIÉS PAR DOCKER (compose du gabarit : front `app_port:80`, back-lb
+# `back_port:back_port`) : ufw ne les voit pas (CLAUDE.md, « Ports publiés par
+# Docker »). Ce rôle travaille dans `DOCKER-USER` avec SON script et SON unité
+# (modèle freellm-security : la machine peut n'avoir aucun host_vars, et la
+# passerelle ne doit pas dépendre de la liste d'une autre entrée).
+#
+# Règles, IPv4 et IPv6, sur les seules connexions DNATées vers ces ports
+# (`--ctstate DNAT --ctorigdstport`, le front écoutant sur 80 dans son
+# conteneur) :
+#   • front et back-lb : proxies DISTANTS seulement (un proxy de la même
+#     machine passe par 127.0.0.1, chaîne OUTPUT, hors DOCKER-USER) ;
+#   • back-lb : plus le réseau interne des conteneurs (relais front → back-lb) ;
+#   • puis DROP. Ni whitelist, ni vpns, ni Prometheus : les humains passent par
+#     le vhost privé, `/mcp` par sa liste nommée, la supervision par svcprobe
+#     sur la boucle locale.
+# Le script PURGE les règles qu'il a posées avant de reposer les voulues :
+# additif ET soustractif, sans toucher à rien d'autre dans la chaîne.
+
+ffg_project_name: fleetforge-gateway
+ffg_unix_user: ffgateway
+ffg_front_port: "{{ app_port }}"
+ffg_back_port: "{{ back_port }}"
+ffg_pg_port: "{{ pg_port }}"
+
+ffg_allowed_proxies: "{{ groups['proxies'] | default([]) }}"
+ffg_remote_proxies: >-
+  {{ ffg_allowed_proxies
+     | map('extract', hostvars, 'ansible_host')
+     | select('defined')
+     | reject('equalto', ansible_host)
+     | unique | list }}
+
+# Relais front → back-lb : le trafic entre conteneurs traverse FORWARD, donc
+# DOCKER-USER. Réseau interne de la machine, NON cloisonné (CLAUDE.md § 1,
+# « allow_internal ») : la passerelle authentifie chaque requête, et isoler
+# vraiment demande une autre machine (docs/etude-isolation-passerelle-vm.md).
+ffg_internal_cidr: "{{ docker_ports_internal_cidr | default('172.16.0.0/12') }}"
+
+ffg_firewall_script: /usr/local/sbin/fleetforge-gateway-firewall.sh
+ffg_firewall_unit: fleetforge-gateway-firewall
+
+# ── Durcissement vérifié à l'exécution (tasks/runtime.yml) ─────────────────
+# Services compose qui portent le CODE de la passerelle (et donc les mots de
+# passe aval) : durcissement complet exigé. Les autres conteneurs du projet
+# (front, back-lb, postgres) : socle (ni privilège, ni socket Docker, ni
+# montage interdit, ni espace de noms de l'hôte, no-new-privileges).
+ffg_hardened_services: [back, back-worker]
+
+# Sources de montage interdites à TOUT conteneur du projet, en plus des
+# chemins protégés (ffg_protected_paths_base + `ffg_protected_paths` de
+# l'entrée) et de leurs parents.
+ffg_forbidden_mount_sources:
+  - /var/run/docker.sock
+  - /run/docker.sock
+  - /var/run/docker
+  - /run/containerd
+  - /root
+  - /etc
+  - /
+ffg_protected_paths_base:
+  - "/home/{{ remote_username }}/.ssh"
+ffg_forbidden_groups: [docker, sudo, adm, lxd, root, "{{ remote_username }}"]
+
+# Échec du contrôle : arrêter les conteneurs de la passerelle (fermé).
+ffg_stop_on_hardening_failure: true

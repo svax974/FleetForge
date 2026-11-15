@@ -1,0 +1,22 @@
+---
+# Alias MINCE : la passerelle MCP de FleetForge seule. Tout le déploiement vit
+# dans deploy-fleetforge.yml (un seul playbook pour les deux services,
+# décision du 15/11/2026) ; ce fichier n'y ajoute RIEN.
+#
+# Pourquoi il existe quand même : le dépôt l'exige. La famille d'un hôte est le
+# suffixe du `deploy-<famille>.yml` qui la déploie (CLAUDE.md § 2), et les
+# applications ne reconnaissent `fleetforge-gateway` comme famille — inscription
+# automatique dans `ansible_roles`, rôle `fleetforge-gateway-install` rattaché —
+# que si ce fichier existe (`fleetforge-core/src/families.rs`, `is_family`).
+# Sans lui, la passerelle n'aurait pas de famille propre ; avec la famille
+# `fleetforge`, elle passerait pour un nœud de contrôle Ansible.
+#
+#   ./play.sh web3c deploy-fleetforge-gateway.yml
+#   ./play.sh web3c deploy-fleetforge-gateway.yml --tags hardening
+#
+# Les comptes `check`/`run` de la passerelle refusent `*-fleetforge.yml` ET
+# `*-fleetforge-gateway.yml` : elle ne se redéploie pas elle-même.
+- name: Deploy only the FleetForge gateway
+  ansible.builtin.import_playbook: deploy-fleetforge.yml
+  vars:
+    ff_deploy_scope: gateway

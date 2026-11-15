@@ -1,0 +1,77 @@
+---
+# Voir defaults/main.yml : compte dédié + CNAME, rien n'est construit ici.
+
+- name: Check the gateway inventory entry
+  ansible.builtin.include_tasks:
+    file: inventory.yml
+    apply:
+      tags: [always]
+  tags: [always]
+
+# ── Compte Unix dédié ──────────────────────────────────────────────────────
+# Compte système sans shell ni home : il n'existe que pour donner aux
+# conteneurs de l'app un uid qui n'est PAS celui de srvc (le gabarit fixe
+# `1000:1000`, souvent l'uid de srvc sur la machine). Le compose durci de l'app
+# l'utilise via FFG_RUNTIME_UID / FFG_RUNTIME_GID (fleetforge-gateway-deploy).
+- name: Create the dedicated group
+  ansible.builtin.group:
+    name: "{{ ffg_unix_user }}"
+    system: true
+  become: true
+
+- name: Create the dedicated account (no shell, no home, no extra group)
+  ansible.builtin.user:
+    name: "{{ ffg_unix_user }}"
+    group: "{{ ffg_unix_user }}"
+    groups: []
+    append: false
+    system: true
+    shell: /usr/sbin/nologin
+    create_home: false
+    home: /nonexistent
+    password_lock: true
+  become: true
+
+- name: Read the groups of the dedicated account
+  ansible.builtin.command:
+    argv: [id, -nG, "{{ ffg_unix_user }}"]
+  register: ffg_account_groups
+  changed_when: false
+  check_mode: false
+  failed_when: false
+
+# Un groupe docker, sudo ou celui de srvc annulerait toute l'isolation : docker
+# vaut root, le groupe de srvc ouvre ses fichiers (clés, vault, arbre Ansible).
+- name: Fail when the dedicated account belongs to a privileged group
+  ansible.builtin.assert:
+    that:
+      - ffg_account_groups.rc == 0 or ansible_check_mode
+      - (ffg_account_groups.stdout | default('')).split() | intersect(ffg_forbidden_groups) | length == 0
+    fail_msg: >-
+      Le compte {{ ffg_unix_user }} appartient à {{ (ffg_account_groups.stdout | default('')).split()
+      | intersect(ffg_forbidden_groups) | join(', ') }} : il doit rester hors de
+      {{ ffg_forbidden_groups | join(', ') }}. Le retirer à la main
+      (`gpasswd -d {{ ffg_unix_user }} <groupe>`), puis rejouer.
+    quiet: true
+
+# ── DNS : alias CNAME vers le front des proxies ─────────────────────────────
+# Même mécanisme qu'agenthub-install / llm-proxy-install : `proxy_hostname` de
+# l'entrée, `access_mode: private` → front `proxy-private.<domaine>`.
+- name: Ensure the service CNAME to the canonical proxy front
+  ansible.builtin.include_role:
+    name: cloudflare-dns-update
+    tasks_from: cnames
+    apply:
+      tags: [dns]
+  vars:
+    cfdns_cname_scope:
+      - "{{ inventory_hostname }}"
+  tags: [dns]
+
+- name: Report the gateway prerequisites
+  ansible.builtin.debug:
+    msg: >-
+      Compte {{ ffg_unix_user }} prêt (sans shell, hors {{ ffg_forbidden_groups | join('/') }}).
+      CNAME {{ proxy_hostname }} → front privé des proxies. Certificat : wildcard
+      *.{{ domain_name }}. Le vhost (/mcp limité aux serveurs nommés) est posé par
+      le play `proxy-conf` de deploy-fleetforge.yml.

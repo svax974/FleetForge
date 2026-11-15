@@ -294,6 +294,7 @@ pub fn get_service_label(service_name: &str) -> (String, String) {
         "llamacpp"         => ("llama.cpp (IA)".into(),      "Moteur d'inférence LLM llama.cpp (llama-server).".into()),
         "llamacpp-model"   => ("Modèle llama.cpp".into(),    "Modèle GGUF déployé via llama.cpp.".into()),
         "fleetforge"    => ("FleetForge (web)".into(), "L'application de gestion du parc elle-même, servie en HTTP. La machine qui la porte est un nœud de contrôle Ansible.".into()),
+        "fleetforge-gateway" => ("Passerelle MCP FleetForge".into(), "Passerelle MCP (app Nest privée) devant l'API d'automatisation de FleetForge, avec trois comptes bornés ; pas un nœud de contrôle.".into()),
         "monitoring"       => ("Monitoring".into(),          "Stack Prometheus + Grafana (Docker).".into()),
         "prometheus"       => ("Prometheus".into(),          "Collecte et stockage de métriques.".into()),
         "alertmanager"     => ("Alertmanager".into(),        "Routage et notification par e-mail des alertes Prometheus.".into()),

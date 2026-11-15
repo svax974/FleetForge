@@ -1,0 +1,6 @@
+---
+# Suppression + données : volumes et images du projet (préfixe seulement),
+# CNAME public. Les copies des .env de prod dans le coffre du dépôt privé
+# (.private/apps/fleetforge-gateway) ne sont pas touchées : à retirer à la main
+# si l'app disparaît. Destructif — `-e confirm=yes`.
+ffg_project_name: fleetforge-gateway

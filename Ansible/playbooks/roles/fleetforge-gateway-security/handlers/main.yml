@@ -1,0 +1,7 @@
+---
+- name: reapply fleetforge-gateway firewall
+  ansible.builtin.systemd:
+    name: "{{ ffg_firewall_unit }}"
+    state: restarted
+    daemon_reload: true
+  become: true

@@ -1,0 +1,63 @@
+#!/bin/bash
+# Pare-feu des ports publiés de la passerelle MCP de FleetForge — géré par
+# Ansible (fleetforge-gateway-security), ne pas éditer.
+#
+# Docker insère ses DNAT en amont d'ufw : seule DOCKER-USER voit ce trafic. Les
+# règles ne visent que les connexions DNATées vers un port PUBLIÉ
+# (`--ctstate DNAT --ctorigdstport`) : le trafic direct entre conteneurs d'un
+# même réseau n'est pas concerné, et le front qui écoute sur 80 dans son
+# conteneur est bien filtré sur son port publié.
+#
+# Rejoué au démarrage APRÈS docker.service (Docker recrée DOCKER-USER vide).
+# Idempotent : purge d'abord les règles portant son commentaire, puis repose.
+set -euo pipefail
+
+TAG="fleetforge-gateway"
+FRONT_PORT={{ ffg_front_port | int }}
+BACK_PORT={{ ffg_back_port | int }}
+PROXIES=({{ ffg_remote_proxies | join(' ') }})
+INTERNAL={{ ffg_internal_cidr }}
+
+# Purge par NUMÉRO (réinjecter une spec à commentaire la ferait découper par le
+# shell). L'awk lit TOUTE la sortie, sans `exit` : fermer le tube tôt tue
+# iptables par SIGPIPE et, avec `pipefail`, le script (docker-ports-security,
+# constat du 08/10/2026).
+purge() {
+  local cmd="$1" n
+  "${cmd}" -w -L DOCKER-USER -n >/dev/null 2>&1 || return 0
+  while true; do
+    n=$("${cmd}" -w -L DOCKER-USER --line-numbers -n \
+        | awk -v t="/* ${TAG}:" 'index($0, t) && !done {print $1; done=1}')
+    [ -z "${n}" ] && break
+    "${cmd}" -w -D DOCKER-USER "${n}"
+  done
+}
+
+# `--ctdir ORIGINAL` est INDISPENSABLE : la réponse (conteneur → client) porte
+# elle aussi l'état DNAT et le port d'origine ; sans lui elle tomberait dans le
+# DROP final, y compris pour une source autorisée.
+rule() {
+  local cmd="$1" port="$2" target="$3" what="$4"; shift 4
+  "${cmd}" -w -A DOCKER-USER "$@" -p tcp \
+    -m conntrack --ctstate DNAT --ctorigdstport "${port}" --ctdir ORIGINAL \
+    -m comment --comment "${TAG}:${port}:${what}" -j "${target}"
+}
+
+purge iptables
+for port in "${FRONT_PORT}" "${BACK_PORT}"; do
+  for src in "${PROXIES[@]}"; do
+    rule iptables "${port}" RETURN proxy -s "${src}"
+  done
+done
+rule iptables "${BACK_PORT}" RETURN internal -s "${INTERNAL}"
+for port in "${FRONT_PORT}" "${BACK_PORT}"; do
+  rule iptables "${port}" DROP deny
+done
+
+# IPv6 : Docker publie aussi sur [::]. Aucune source IPv6 admise.
+if ip6tables -w -L DOCKER-USER -n >/dev/null 2>&1; then
+  purge ip6tables
+  for port in "${FRONT_PORT}" "${BACK_PORT}"; do
+    rule ip6tables "${port}" DROP deny
+  done
+fi

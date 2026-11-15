@@ -1,0 +1,12 @@
+---
+# Retire la passerelle MCP de FleetForge sans toucher à ses données (volumes
+# Postgres, dossier partagé) : conteneurs des projets compose de deploy-full.sh,
+# sonde svcprobe, pare-feu DOCKER-USER (script, unité ET règles posées, quel
+# que soit l'inventaire courant) et compte Unix dédié. Le CNAME et le vhost
+# restent (purge / gabarit du parc). Les comptes aval `ffg_*` vivent sur
+# l'entrée FleetForge : les retirer de son `ff_api_accounts`, puis
+# `deploy-fleetforge.yml --limit <entrée FleetForge>`.
+ffg_project_name: fleetforge-gateway
+ffg_unix_user: ffgateway
+ffg_firewall_script: /usr/local/sbin/fleetforge-gateway-firewall.sh
+ffg_firewall_unit: fleetforge-gateway-firewall
