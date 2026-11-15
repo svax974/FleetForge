@@ -1,0 +1,15 @@
+---
+# Calcul de `wa_ufw_foreign` depuis `wa_ufw_numbered` (sortie de `ufw status numbered`) : les règles dont la
+# DESTINATION est le port du front ou du back-lb (`4730`, `4730/tcp`, `4730/udp`, `4730 (v6)`…). Aucune commande :
+# éprouvé hors ligne (scripts/test_webapp_hardening_check.py).
+- name: Find the ufw rules on the application ports
+  vars:
+    _ports: "{{ [wa_app.wa_front_port | string, wa_app.wa_back_port | string] }}"
+  ansible.builtin.set_fact:
+    wa_ufw_foreign: >-
+      {%- set out = [] -%}
+      {%- for line in (wa_ufw_numbered.stdout_lines | default([])) if line is match('^[[] *[0-9]+[]]') -%}
+      {%- set dest = (line | regex_replace('^[[] *[0-9]+[]][ ]*', '')).split(' ')[0] -%}
+      {%- if dest.split('/')[0] in _ports -%}{%- set _ = out.append(line | trim) -%}{%- endif -%}
+      {%- endfor -%}
+      {{ out }}

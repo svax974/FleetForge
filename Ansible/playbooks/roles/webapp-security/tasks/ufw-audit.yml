@@ -1,0 +1,27 @@
+---
+# Règles ufw (IPv4 et IPv6, toute source) dont la destination est un port publié d'une application durcie. Le profil
+# n'en pose AUCUNE (`ufw_app_ports: false`) : une telle règle n'est donc pas la sienne, et la règle du dépôt
+# (CLAUDE.md, « Règles ufw : additives ET soustractives ») veut qu'elle soit SIGNALÉE, pas supprimée. Elle n'est pas
+# anodine pour autant : ufw filtre ce qui arrive en INPUT (docker-proxy sur `[::]`, port ouvert par deploy-full.sh),
+# un ALLOW y rouvrirait le port. Les appelants décident : firewall.yml REFUSE de continuer, webapp-remove le signale.
+# Pose `wa_ufw_foreign` (lignes de `ufw status numbered` qui visent ces ports).
+
+- name: Read the facts of the hardened application
+  ansible.builtin.set_fact:
+    wa_app: "{{ hostvars[webapp_target | default(inventory_hostname)] }}"
+
+- name: Read the numbered ufw rules
+  ansible.builtin.command:
+    argv: [ufw, status, numbered]
+  become: true
+  register: wa_ufw_numbered
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Find the ufw rules on the application ports
+  ansible.builtin.include_tasks:
+    file: ufw-foreign.yml
+    apply:
+      tags: [always]
+  tags: [always]

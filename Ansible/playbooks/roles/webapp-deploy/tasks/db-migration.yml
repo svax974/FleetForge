@@ -1,0 +1,43 @@
+---
+# Une app ne démarre JAMAIS silencieusement sur une base VIERGE (exigence du propriétaire, revue du 15/11/2026).
+# Cas couverts, à partir de ce qui a été lu sur la machine (hardened.yml) :
+#   (a) bascule depuis le compose du gabarit : volume `${PROJECT_NAME}_postgres_data` présent, volume attendu absent ;
+#   (b) renommage (projet ou hôte) : un AUTRE volume `<projet>-…_postgres_data` existe, l'attendu est absent ;
+#   (c) le conteneur `${PROJECT_NAME}_postgres` existe sur un volume qui n'est pas l'attendu ;
+#   (d) déploiement antérieur connu (répertoire de l'app sur l'hôte) alors que le volume attendu est absent ou VIDE
+#       (pas de PG_VERSION).
+# Seul chemin autorisé : `-e webapp_hardening_db_migrated=true`, après la procédure de migration
+# (docs/etude-passerelle-sur-webapp.md, « Migration de la base »).
+# Entrées : wa_h_volumes (noms), wa_h_pg_mounts (volumes montés par `<projet>_postgres`, vide sans conteneur),
+# wa_h_prior_deploy (bool), wa_h_expected_initialised (bool : PG_VERSION présent dans le volume attendu),
+# wa_h_back_host (première cible de BACK_HOSTS). Aucune commande : éprouvé hors ligne.
+- name: Work out whether the database would start empty
+  vars:
+    _project: "{{ wa_project | lower }}"
+    _expected: "{{ _project ~ '-back-' ~ (wa_h_back_host | lower | regex_replace('[^a-z0-9]', '-')) ~ '_postgres_data' }}"
+    _old: "{{ wa_project ~ '_postgres_data' }}"
+    _others: >-
+      {{ wa_h_volumes | select('match', '^' ~ (_project | regex_escape) ~ '-.+_postgres_data$')
+         | reject('equalto', _expected) | list }}
+    _expected_present: "{{ _expected in wa_h_volumes }}"
+    _reasons: >-
+      {%- set r = [] -%}
+      {%- if _old in wa_h_volumes and not _expected_present -%}{%- set _ = r.append('ancien volume ' ~ _old ~ ' (compose du gabarit), ' ~ _expected ~ ' absent') -%}{%- endif -%}
+      {%- if _others | length > 0 and not _expected_present -%}{%- set _ = r.append('autre volume du même projet : ' ~ (_others | join(', ')) ~ ' (renommage ?)') -%}{%- endif -%}
+      {%- if wa_h_pg_mounts | select('search', '_postgres_data$') | reject('equalto', _expected) | list | length > 0 -%}{%- set _ = r.append('le conteneur ' ~ wa_project ~ '_postgres utilise ' ~ (wa_h_pg_mounts | join(', '))) -%}{%- endif -%}
+      {%- if wa_h_prior_deploy | bool and not (_expected_present and wa_h_expected_initialised | bool) -%}{%- set _ = r.append('déploiement antérieur sur cet hôte, volume ' ~ _expected ~ (' VIDE' if _expected_present else ' absent')) -%}{%- endif -%}
+      {{ r }}
+  ansible.builtin.set_fact:
+    wa_h_db_reasons: "{{ _reasons }}"
+    wa_h_db_expected_volume: "{{ _expected }}"
+
+- name: Refuse to start the application on an empty database
+  ansible.builtin.assert:
+    that: wa_h_db_reasons | length == 0 or (webapp_hardening_db_migrated | default(false) | bool)
+    fail_msg: >-
+      {{ wa_project }} démarrerait sur une base VIERGE ({{ wa_h_db_reasons | join(' ; ') }}). Rien n'a été déployé.
+      Procédure : (1) dump de la base en place (`docker exec {{ wa_project }}_postgres pg_dump -Fc …`, ou le dump pris
+      par deploy-full.sh avant bascule) ; (2) déploiement avec `-e webapp_hardening_db_migrated=true` ; (3) restauration
+      dans {{ wa_h_db_expected_volume }} (`pg_restore` dans le nouveau conteneur) ; (4) comparaison des comptages de
+      lignes des tables clés avant d'ouvrir l'app (docs/etude-passerelle-sur-webapp.md, « Migration de la base »).
+    quiet: true

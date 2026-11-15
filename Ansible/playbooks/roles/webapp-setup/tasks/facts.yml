@@ -161,6 +161,37 @@
   when: (webapp_vhost_locations | default([]) | selectattr('access', 'defined') | list | length) > 0
   tags: [always]
 
+# Chaque valeur de `webapp_vhost_locations` entre telle quelle dans le vhost (`location <path>`, `client_max_body_size`,
+# `proxy_read_timeout`, `if ($request_uri …)`) : grammaire tenue, jamais de saut de ligne, `;`, `{`, `}`, guillemet ni
+# espace — une valeur hostile ajouterait une directive au vhost de tous les proxies.
+- name: Check the grammar of the vhost locations
+  vars:
+    _locations: "{{ webapp_vhost_locations | default([]) }}"
+    _bad: >-
+      {%- set ns = namespace(b=[]) -%}
+      {%- for l in _locations -%}
+      {%- set path = l.path | default('') | string -%}
+      {%- if l.regex | default(false) | bool -%}
+        {%- if not (path is match('^[/^]/?[A-Za-z0-9._~/()|?*+^$-]*$')) -%}{%- set ns.b = ns.b + ['path'] -%}{%- endif -%}
+      {%- elif not (path is match('^/[A-Za-z0-9._~/-]*$')) -%}{%- set ns.b = ns.b + ['path'] -%}{%- endif -%}
+      {%- if l.body is defined and not ((l.body | string) is match('^[0-9]{1,6}[kKmMgG]?$')) -%}{%- set ns.b = ns.b + ['body'] -%}{%- endif -%}
+      {%- if l.timeout is defined and not ((l.timeout | string) is match('^[0-9]{1,5}(ms|s|m|h)?$')) -%}{%- set ns.b = ns.b + ['timeout'] -%}{%- endif -%}
+      {%- if l.mode is defined and l.mode not in ['private', 'public'] -%}{%- set ns.b = ns.b + ['mode'] -%}{%- endif -%}
+      {%- if l.raw_uri is defined and not ((l.raw_uri | string) is match('^[/^]/?[]A-Za-z0-9._~/()|?*+^$[-]*$')) -%}{%- set ns.b = ns.b + ['raw_uri'] -%}{%- endif -%}
+      {%- endfor -%}
+      {{ ns.b | unique | join(', ') }}
+  ansible.builtin.assert:
+    that:
+      - _locations is not string
+      - _bad | trim | length == 0
+    fail_msg: >-
+      {{ inventory_hostname }} : `webapp_vhost_locations` hors grammaire ({{ _bad }}) — path `/…` (lettres, chiffres,
+      . _ ~ / -, et pour `regex: true` les métacaractères ( ) | ? * + ^ $), body `<n>[k|m|g]`, timeout `<n>[ms|s|m|h]`,
+      mode private|public, raw_uri `^/…` ; jamais d'espace, de `;`, `{`, `}`, guillemet ni saut de ligne.
+    quiet: true
+  when: webapp_vhost_locations is defined
+  tags: [always]
+
 - name: Work out the hardening profile
   ansible.builtin.include_tasks:
     file: hardening.yml

@@ -6,6 +6,32 @@
 # Exception assumée à « srvc pilote ce qu'il déploie » (CLAUDE.md § 2) : une app durcie détient des secrets d'un autre
 # service et peut partager sa machine avec un nœud de contrôle. Une évasion de conteneur ne doit hériter ni des clés
 # SSH, ni de l'arbre Ansible, ni du vault de srvc. srvc garde la main (docker, journaux).
+#
+# MARQUEUR (champ GECOS, `webapp_account_marker`) : un compte qui EXISTE déjà sans ce marqueur n'appartient pas à ce
+# déploiement — il n'est ni réécrit ici, ni supprimé par webapp-remove (revue du 15/11/2026 : `runtime_user` pouvait
+# désigner un compte système existant).
+
+- name: Name the marker of the dedicated account
+  ansible.builtin.set_fact:
+    wa_h_account_marker: "webapp-hardening {{ wa_project }}"
+
+- name: Read the dedicated account if it already exists
+  ansible.builtin.command:
+    argv: [getent, passwd, "{{ wa_h_user }}"]
+  register: wa_account_existing
+  changed_when: false
+  check_mode: false
+  failed_when: false
+
+- name: Refuse an existing account this deployment did not create
+  ansible.builtin.assert:
+    that: >-
+      wa_account_existing.rc != 0
+      or ((wa_account_existing.stdout | default('')).split(':')[4] | default('')) == wa_h_account_marker
+    fail_msg: >-
+      Le compte {{ wa_h_user }} existe déjà sur {{ inventory_hostname }} sans le marqueur « {{ wa_h_account_marker }} » :
+      il n'appartient pas à ce déploiement (compte système ou d'une autre app). Choisir un autre `runtime_user`.
+    quiet: true
 
 - name: Create the dedicated group
   ansible.builtin.group:
@@ -16,6 +42,7 @@
 - name: Create the dedicated account (no shell, no home, no extra group)
   ansible.builtin.user:
     name: "{{ wa_h_user }}"
+    comment: "{{ wa_h_account_marker }}"
     group: "{{ wa_h_user }}"
     groups: []
     append: false

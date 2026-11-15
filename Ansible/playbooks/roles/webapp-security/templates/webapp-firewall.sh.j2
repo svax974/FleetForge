@@ -1,54 +1,78 @@
 #!/bin/bash
-# Pare-feu des ports publiés de {{ wa_app.wa_project }} (profil durci `webapp_hardening`) — géré par Ansible
-# (webapp-security, tasks/firewall.yml), ne pas éditer.
+# Pare-feu de {{ wa_app.wa_project }} (profil durci `webapp_hardening`) — géré par Ansible (webapp-security,
+# tasks/firewall.yml), ne pas éditer.
 #
-# Docker insère ses DNAT en amont d'ufw : seule DOCKER-USER voit ce trafic. Les
-# règles ne visent que les connexions DNATées vers un port PUBLIÉ
-# (`--ctstate DNAT --ctorigdstport`) : le trafic direct entre conteneurs d'un
-# même réseau n'est pas concerné, et le front qui écoute sur 80 dans son
-# conteneur est bien filtré sur son port publié.
+# ENTRÉE — ports publiés. Docker insère ses DNAT en amont d'ufw : seule DOCKER-USER voit ce trafic. Les règles ne
+# visent que les connexions DNATées vers un port PUBLIÉ (`--ctstate DNAT --ctorigdstport`) : le front qui écoute sur
+# 80 dans son conteneur est bien filtré sur son port publié. Proxies admis distants, + le sous-réseau dédié vers le
+# back-lb, puis DROP (IPv4 et IPv6).
 #
-# Les règles sont INSÉRÉES EN TÊTE de DOCKER-USER : un RETURN inconditionnel
-# placé avant elles (ancien défaut de Docker, autre rôle) les rendrait
-# décoratives. Elles ne touchent que ces deux ports.
+# SORTIE — depuis le sous-réseau dédié (revue du 15/11/2026 : le back pouvait joindre Internet entier, les
+# métadonnées du VPS en 169.254.169.254, et les services de l'hôte par la passerelle du pont) :
+#   • FORWARD (DOCKER-USER) : un paquet d'un conteneur vers une AUTRE machine traverse FORWARD. Admis : les
+#     réponses (ESTABLISHED/RELATED), le trafic interne au sous-réseau, la liste EXPLICITE `egress_allow` et le DNS
+#     des résolveurs de la machine ; tout le reste DROP.
+#   • INPUT : un paquet d'un conteneur vers une adresse de L'HÔTE (passerelle du pont, adresse publique) ne passe
+#     PAS par FORWARD mais par INPUT. Admis : les réponses, et les entrées de `egress_allow` dont la destination est
+#     cette machine (la passerelle joint FleetForge par https://<amont> via proxy1, et le relais SMTP mail1, tous
+#     deux sur cette machine) ; tout le reste DROP (sshd, exporters…).
+#   DNS : le résolveur embarqué de Docker (127.0.0.11, dans le conteneur) interroge les résolveurs de la machine
+#   depuis l'espace réseau du CONTENEUR quand ils ne sont pas en boucle locale : ils sont lus sur la machine et
+#   admis en 53 (udp, tcp).
 #
-# Rejoué au démarrage APRÈS docker.service (Docker recrée DOCKER-USER vide).
-# Idempotent : purge d'abord les règles portant son commentaire, puis repose.
+# Toutes les règles sont INSÉRÉES EN TÊTE de leur chaîne : un RETURN/ACCEPT placé avant elles par un autre script
+# les rendrait décoratives (vérifié par firewall-check.yml et la sonde `firewall_<port>`).
+#
+# Rejoué au démarrage APRÈS docker.service (Docker recrée DOCKER-USER vide). Idempotent et SANS FENÊTRE : les
+# nouvelles règles (génération GEN) sont insérées en tête D'ABORD, puis les anciennes générations retirées — jamais
+# un instant sans DROP.
 set -euo pipefail
 
 TAG="{{ wa_app.wa_h_tag }}"
+GEN="g$(date +%s%N)"
 FRONT_PORT={{ wa_app.wa_front_port | int }}
 BACK_PORT={{ wa_app.wa_back_port | int }}
 PROXIES=({{ wa_app.wa_h_remote_proxies | join(' ') }})
 INTERNAL={{ wa_app.wa_h_subnet }}
+HOST_ADDR={{ wa_app.ansible_host }}
+# Sorties admises (`webapp_hardening.egress_allow`, une ligne documentée par destination) vers d'autres machines :
+# « adresse:port:proto » ; vers L'HÔTE lui-même : « port:proto ».
+{% for e in wa_app.wa_h_egress %}
+#   {{ e.name }} → {{ e.dest }}:{{ e.port | int }}/{{ e.proto }}{{ ' (cette machine : INPUT)' if e.dest == wa_app.ansible_host else '' }}
+{% endfor %}
+EGRESS_REMOTE=({% for e in wa_app.wa_h_egress_remote %}{{ e.dest }}:{{ e.port | int }}:{{ e.proto }}{{ '' if loop.last else ' ' }}{% endfor %})
+EGRESS_HOST=({% for e in wa_app.wa_h_egress_host %}{{ e.port | int }}:{{ e.proto }}{{ '' if loop.last else ' ' }}{% endfor %})
+# Résolveurs DNS de la machine (lus sur place), joints depuis l'espace réseau du conteneur : 53 udp et tcp.
+DNS_SERVERS=({{ wa_dns_resolvers | join(' ') }})
 
-# Purge par NUMÉRO (réinjecter une spec à commentaire la ferait découper par le
-# shell). L'awk lit TOUTE la sortie, sans `exit` : fermer le tube tôt tue
-# iptables par SIGPIPE et, avec `pipefail`, le script (docker-ports-security,
-# constat du 08/10/2026).
-purge() {
-  local cmd="$1" n
-  "${cmd}" -w -L DOCKER-USER -n >/dev/null 2>&1 || return 0
+# Purge des générations PRÉCÉDENTES seulement (commentaire de l'app sans `:${GEN}`), par NUMÉRO (réinjecter une spec à
+# commentaire la ferait découper par le shell). L'awk lit TOUTE la sortie, sans `exit` : fermer le tube tôt tue
+# iptables par SIGPIPE et, avec `pipefail`, le script (constat du 08/10/2026).
+purge_old() {
+  local cmd="$1" chain="$2" n
+  "${cmd}" -w -L "${chain}" -n >/dev/null 2>&1 || return 0
   while true; do
-    n=$("${cmd}" -w -L DOCKER-USER --line-numbers -n \
-        | awk -v t="/* ${TAG}:" 'index($0, t) && !done {print $1; done=1}')
+    n=$("${cmd}" -w -L "${chain}" --line-numbers -n \
+        | awk -v t="/* ${TAG}:" -v g=":${GEN} */" 'index($0, t) && !index($0, g) && !done {print $1; done=1}')
     [ -z "${n}" ] && break
-    "${cmd}" -w -D DOCKER-USER "${n}"
+    "${cmd}" -w -D "${chain}" "${n}"
   done
 }
 
-# Règles voulues, dans l'ORDRE d'évaluation ; insérées ensuite en tête, de la
-# dernière à la première. `--ctdir ORIGINAL` est INDISPENSABLE : la réponse
-# (conteneur → client) porte elle aussi l'état DNAT et le port d'origine ; sans
-# lui elle tomberait dans le DROP final, y compris pour une source autorisée.
+# Règles voulues, dans l'ORDRE d'évaluation ; insérées ensuite en tête, de la dernière à la première.
+# `--ctdir ORIGINAL` est INDISPENSABLE à l'entrée : la réponse (conteneur → client) porte elle aussi l'état DNAT et le
+# port d'origine ; sans lui elle tomberait dans le DROP final, y compris pour une source autorisée.
 RULES4=()
 RULES6=()
+RULES_INPUT=()
+comment() { echo "-m comment --comment ${TAG}:$1:${GEN}"; }
 add() {
   local family="$1" port="$2" target="$3" what="$4" src="${5:-}"
-  local spec="${src:+-s ${src} }-p tcp -m conntrack --ctstate DNAT --ctorigdstport ${port} --ctdir ORIGINAL -m comment --comment ${TAG}:${port}:${what} -j ${target}"
+  local spec="${src:+-s ${src} }-p tcp -m conntrack --ctstate DNAT --ctorigdstport ${port} --ctdir ORIGINAL $(comment "${port}:${what}") -j ${target}"
   if [ "${family}" = 4 ]; then RULES4+=("${spec}"); else RULES6+=("${spec}"); fi
 }
 
+# ── Entrée ──
 for port in "${FRONT_PORT}" "${BACK_PORT}"; do
   for src in ${PROXIES[@]+"${PROXIES[@]}"}; do
     add 4 "${port}" RETURN proxy "${src}"
@@ -60,24 +84,54 @@ for port in "${FRONT_PORT}" "${BACK_PORT}"; do
   add 6 "${port}" DROP deny
 done
 
-# Insertion en tête, de la dernière règle à la première (ordre final = ordre
-# voulu). Liste retournée par construction : le gabarit Jinja interdit la
-# syntaxe de longueur de tableau de bash (elle ouvrirait un commentaire).
+# ── Sortie vers d'autres machines (FORWARD) ──
+RULES4+=("-s ${INTERNAL} -m conntrack --ctstate ESTABLISHED,RELATED $(comment egress:reply) -j RETURN")
+RULES4+=("-s ${INTERNAL} -d ${INTERNAL} $(comment egress:internal) -j RETURN")
+for entry in ${EGRESS_REMOTE[@]+"${EGRESS_REMOTE[@]}"}; do
+  IFS=: read -r dest port proto <<<"${entry}"
+  RULES4+=("-s ${INTERNAL} -d ${dest} -p ${proto} --dport ${port} -m conntrack --ctstate NEW $(comment egress:allow) -j RETURN")
+done
+for dns in ${DNS_SERVERS[@]+"${DNS_SERVERS[@]}"}; do
+  [ "${dns}" = "${HOST_ADDR}" ] && continue
+  for proto in udp tcp; do
+    RULES4+=("-s ${INTERNAL} -d ${dns} -p ${proto} --dport 53 -m conntrack --ctstate NEW $(comment egress:dns) -j RETURN")
+  done
+done
+RULES4+=("-s ${INTERNAL} $(comment egress:deny) -j DROP")
+
+# ── Sortie vers l'hôte lui-même (INPUT) ──
+RULES_INPUT+=("-s ${INTERNAL} -m conntrack --ctstate ESTABLISHED,RELATED $(comment host:reply) -j ACCEPT")
+for entry in ${EGRESS_HOST[@]+"${EGRESS_HOST[@]}"}; do
+  IFS=: read -r port proto <<<"${entry}"
+  RULES_INPUT+=("-s ${INTERNAL} -d ${HOST_ADDR} -p ${proto} --dport ${port} -m conntrack --ctstate NEW $(comment host:allow) -j ACCEPT")
+done
+for dns in ${DNS_SERVERS[@]+"${DNS_SERVERS[@]}"}; do
+  [ "${dns}" = "${HOST_ADDR}" ] || continue
+  for proto in udp tcp; do
+    RULES_INPUT+=("-s ${INTERNAL} -d ${HOST_ADDR} -p ${proto} --dport 53 -m conntrack --ctstate NEW $(comment host:dns) -j ACCEPT")
+  done
+done
+RULES_INPUT+=("-s ${INTERNAL} $(comment host:deny) -j DROP")
+
+# Insertion en tête, de la dernière règle à la première (ordre final = ordre voulu). Liste retournée par
+# construction : le gabarit Jinja interdit la syntaxe de longueur de tableau de bash (elle ouvrirait un commentaire).
 insert_all() {
-  local cmd="$1"; shift
+  local cmd="$1" chain="$2"; shift 2
   local reversed=() rule
   for rule in "$@"; do reversed=("${rule}" ${reversed[@]+"${reversed[@]}"}); done
   for rule in "${reversed[@]}"; do
     # shellcheck disable=SC2086  # la spec est découpée volontairement (aucune valeur libre)
-    "${cmd}" -w -I DOCKER-USER 1 ${rule}
+    "${cmd}" -w -I "${chain}" 1 ${rule}
   done
 }
 
-purge iptables
-insert_all iptables "${RULES4[@]}"
+insert_all iptables DOCKER-USER "${RULES4[@]}"
+purge_old iptables DOCKER-USER
+insert_all iptables INPUT "${RULES_INPUT[@]}"
+purge_old iptables INPUT
 
-# IPv6 : Docker publie aussi sur [::]. Aucune source IPv6 admise.
+# IPv6 : Docker publie aussi sur [::]. Aucune source IPv6 admise (le sous-réseau dédié est IPv4 seul).
 if ip6tables -w -L DOCKER-USER -n >/dev/null 2>&1; then
-  purge ip6tables
-  insert_all ip6tables "${RULES6[@]}"
+  insert_all ip6tables DOCKER-USER "${RULES6[@]}"
+  purge_old ip6tables DOCKER-USER
 fi

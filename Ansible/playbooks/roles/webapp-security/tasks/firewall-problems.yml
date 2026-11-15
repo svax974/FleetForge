@@ -1,0 +1,61 @@
+---
+# Calcul de `wa_firewall_problems` à partir des chaînes lues par firewall-check.yml (`wa_chain4`, `wa_chain6`) et des
+# faits de l'app (`wa_app`). Aucune commande : fichier séparé pour être éprouvé hors ligne
+# (scripts/test_webapp_hardening_check.py).
+- name: Work out the firewall problems from the chains
+  vars:
+    _tag: "{{ wa_app.wa_h_tag }}"
+    _subnet: "{{ wa_app.wa_h_subnet }}"
+    _families:
+      - { family: iptables, result: "{{ wa_chain4 }}", required: true }
+      - { family: ip6tables, result: "{{ wa_chain6 }}", required: false }
+  ansible.builtin.set_fact:
+    wa_firewall_problems: >-
+      {%- set ns = namespace(p=[]) -%}
+      {%- for fam in _families -%}
+        {%- if (fam.result.rc | default(1)) != 0 -%}
+          {%- if fam.required -%}{%- set ns.p = ns.p + [fam.family ~ ' : chaîne DOCKER-USER illisible'] -%}{%- endif -%}
+        {%- else -%}
+          {%- set rules = fam.result.stdout_lines | default([]) | select('match', '^-A DOCKER-USER ') | list -%}
+          {%- set ours = rules | select('search', _tag ~ ':') | list -%}
+          {%- if ours | length == 0 -%}
+            {%- set ns.p = ns.p + [fam.family ~ ' : aucune règle de ' ~ _tag] -%}
+          {%- else -%}
+            {%- set first = rules.index(ours | first) -%}
+            {#- Les règles de l'app sont insérées EN TÊTE : toute règle qui les précède et qui n'est pas un refus
+                (RETURN/ACCEPT conditionnel ou non — `-i <iface>`, `-s <x>` —, saut vers une autre chaîne…) peut
+                accepter le trafic visé avant le DROP. -#}
+            {%- for r in rules[:first] if not (r is search(' -j (DROP|REJECT)( |$)')) -%}
+              {%- set ns.p = ns.p + [fam.family ~ ' : « ' ~ r ~ ' » précède les règles de ' ~ _tag] -%}
+            {%- endfor -%}
+          {%- endif -%}
+          {%- for port in [wa_app.wa_front_port | string, wa_app.wa_back_port | string] -%}
+            {%- if (rules | select('search', '--ctorigdstport ' ~ port ~ ' .*' ~ _tag ~ ':' ~ port ~ ':deny.*-j DROP') | list | length) == 0 -%}
+              {%- set ns.p = ns.p + [fam.family ~ ' : aucun DROP sur le port ' ~ port] -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {#- Sortie du sous-réseau dédié vers d'autres machines : DROP final présent. -#}
+          {%- if fam.family == 'iptables'
+                 and (rules | select('search', '-s ' ~ _subnet ~ ' .*' ~ _tag ~ ':egress:deny.*-j DROP') | list | length) == 0 -%}
+            {%- set ns.p = ns.p + ['iptables : aucun DROP de sortie du sous-réseau ' ~ _subnet] -%}
+          {%- endif -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {#- Sortie du sous-réseau vers l'HÔTE (INPUT) : règles de l'app en tête, DROP final présent. -#}
+      {%- if (wa_chain_input.rc | default(1)) != 0 -%}
+        {%- set ns.p = ns.p + ['iptables : chaîne INPUT illisible'] -%}
+      {%- else -%}
+        {%- set inrules = wa_chain_input.stdout_lines | default([]) | select('match', '^-A INPUT ') | list -%}
+        {%- set inours = inrules | select('search', _tag ~ ':host:') | list -%}
+        {%- if inours | length == 0 -%}
+          {%- set ns.p = ns.p + ['iptables : aucune règle INPUT de ' ~ _tag] -%}
+        {%- else -%}
+          {%- for r in inrules[:inrules.index(inours | first)] if not (r is search(' -j (DROP|REJECT)( |$)')) -%}
+            {%- set ns.p = ns.p + ['iptables INPUT : « ' ~ r ~ ' » précède les règles de ' ~ _tag] -%}
+          {%- endfor -%}
+        {%- endif -%}
+        {%- if (inrules | select('search', '-s ' ~ _subnet ~ ' .*' ~ _tag ~ ':host:deny.*-j DROP') | list | length) == 0 -%}
+          {%- set ns.p = ns.p + ['iptables : aucun DROP du sous-réseau ' ~ _subnet ~ ' vers l hôte (INPUT)'] -%}
+        {%- endif -%}
+      {%- endif -%}
+      {{ ns.p | join(' ; ') }}

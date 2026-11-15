@@ -15,6 +15,48 @@
 # REDIS_PASSWORD : jamais vide. WHITELIST, PROXY_HOSTS, BACK_WHITELIST : deploy-full.sh en ferait des règles ufw —
 # le filtrage est celui du profil, rien d'autre. COMPOSE_FILE (lu par docker compose lui-même) et toute ligne `export`
 # des clés de déploiement : le fichier contrôlé ne serait plus celui déployé. INFRA_BIND hors boucle locale.
+# Grammaire STRICTE du back/.env (revue du 15/11/2026) : `lineinfile` ne remplace que la DERNIÈRE ligne d'une clé, et
+# `source` exécute tout le fichier (`X=1; COMPOSE_FILE_NAME=…`, tabulation, `export`…). Seules passent : lignes vides,
+# commentaires, et `CLÉ=valeur` dont la valeur est entre guillemets doubles (sans `"`, `$`, `` ` ``, `\`), entre
+# apostrophes (sans `'`), ou nue sans métacaractère ; et AUCUNE clé n'apparaît deux fois. Seuls des NUMÉROS de ligne et
+# des NOMS sortent, jamais une valeur.
+- name: Check the grammar of the back env file (line numbers and names only)
+  ansible.builtin.command:
+    argv:
+      - "{{ ansible_playbook_python }}"
+      - -I
+      - -c
+      - |
+        import re, sys, collections
+        ok = re.compile(r'''^([A-Z_][A-Z0-9_]*)=("[^"$`\\]*"|'[^']*'|[A-Za-z0-9_./:,@%+=-]*)[ ]*(#.*)?$''')
+        bad, keys = [], collections.Counter()
+        for number, line in enumerate(open(sys.argv[1], encoding="utf-8").read().split("\n"), 1):
+            if (line.strip() == "" and "\t" not in line) or line.lstrip(" ").startswith("#"):
+                continue
+            match = ok.match(line)
+            if match is None:
+                bad.append(f"ligne {number}")
+            else:
+                keys[match.group(1)] += 1
+        bad += [f"{k} en double" for k, n in sorted(keys.items()) if n > 1]
+        print("\n".join(bad))
+      - "{{ wa_src }}{{ wa_back_env_file }}"
+  delegate_to: localhost
+  become: false
+  register: wa_h_env_grammar
+  changed_when: false
+  check_mode: false
+
+- name: Fail on a back env line outside the grammar or a duplicated key
+  ansible.builtin.assert:
+    that: wa_h_env_grammar.stdout | trim | length == 0
+    fail_msg: >-
+      {{ wa_src }}{{ wa_back_env_file }} : {{ wa_h_env_grammar.stdout_lines | join(', ') }} — profil durci : seulement
+      `CLÉ=valeur` (valeur "entre guillemets" sans " $ ` \, 'entre apostrophes', ou nue sans métacaractère), commentaires
+      et lignes vides ; aucune clé en double ; ni `export`, ni `;`, ni tabulation.
+    quiet: true
+  when: not ansible_check_mode
+
 - name: Look for forbidden settings in the back env file (names only)
   ansible.builtin.shell: >-
     set -o pipefail;
@@ -47,33 +89,67 @@
     quiet: true
   when: not ansible_check_mode
 
+# ── Base existante : jamais de bascule silencieuse sur un volume vide ─────
+- name: Read the first deployment target of the back env file
+  vars:
+    wa_read_tpl: "(?m)^[ ]*BACK_HOSTS=[\"']?([^\"'\\n#]*)"
+  ansible.builtin.set_fact:
+    wa_h_back_host: >-
+      {{ ((lookup('ansible.builtin.file', wa_src ~ wa_back_env_file, errors='ignore') | default('', true)
+          | regex_findall(wa_read_tpl) | last | default(ansible_host)).split(',') | first | trim | regex_replace('^.*@', '')) or ansible_host }}
+  delegate_to: localhost
+  become: false
+  when: webapp_phase in ['all', 'deploy']
+
+# Volumes, volume monté par `<projet>_postgres`, répertoire de l'app (déploiement antérieur), et base initialisée dans
+# le volume attendu (PG_VERSION) : NOMS et booléens seulement.
+- name: Read the database state of the machine
+  ansible.builtin.shell: >-
+    set -o pipefail;
+    expected={{ ((wa_project | lower) ~ '-back-' ~ (wa_h_back_host | lower | regex_replace('[^a-z0-9]', '-')) ~ '_postgres_data') | quote }};
+    echo "== volumes"; docker volume ls --format '{% raw %}{{.Name}}{% endraw %}';
+    echo "== mounts"; docker inspect --format '{% raw %}{{range .Mounts}}{{.Name}}{{"\n"}}{{end}}{% endraw %}' {{ (wa_project ~ '_postgres') | quote }} 2>/dev/null || true;
+    echo "== prior"; if [ -d {{ ('/home/' ~ remote_username ~ '/' ~ wa_project) | quote }} ]; then echo yes; fi;
+    echo "== initialised";
+    mp=$(docker volume inspect --format '{% raw %}{{.Mountpoint}}{% endraw %}' "$expected" 2>/dev/null || true);
+    if [ -n "$mp" ] && [ -f "$mp/PG_VERSION" ]; then echo yes; fi
+  args:
+    executable: /bin/bash
+  become: true
+  register: wa_h_db_state
+  changed_when: false
+  check_mode: false
+  when: webapp_phase in ['all', 'deploy']
+
+- name: Check the database would not start empty
+  ansible.builtin.include_tasks:
+    file: db-migration.yml
+    apply:
+      tags: [always]
+  vars:
+    _sections: >-
+      {%- set out = {'volumes': [], 'mounts': [], 'prior': [], 'initialised': []} -%}
+      {%- set ns = namespace(cur='') -%}
+      {%- for l in wa_h_db_state.stdout_lines | default([]) -%}
+      {%- if l.startswith('== ') -%}{%- set ns.cur = l[3:] -%}{%- elif l | trim and ns.cur in out -%}{%- set _ = out[ns.cur].append(l | trim) -%}{%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+    wa_h_volumes: "{{ _sections.volumes }}"
+    wa_h_pg_mounts: "{{ _sections.mounts }}"
+    wa_h_prior_deploy: "{{ _sections.prior | length > 0 }}"
+    wa_h_expected_initialised: "{{ _sections.initialised | length > 0 }}"
+  when: webapp_phase in ['all', 'deploy']
+
 # ── 2-3. Bloc fermé ────────────────────────────────────────────────────────
 - name: Deploy, verify, or stop the hardened application
   block:
+    # Déjà joué par le play de garde (avant toute connexion) ; rejoué ICI, juste avant run.sh : le fichier a pu
+    # changer entre-temps.
     - name: Check the compose file is hardened (static, before deploying)
-      ansible.builtin.command:
-        argv:
-          - "{{ ansible_playbook_python }}"
-          - -I
-          - "{{ playbook_dir }}/../scripts/webapp_hardening_check.py"
-          - compose
-          - "{{ wa_src }}{{ wa_h_compose_file }}"
-          - --services
-          - "{{ wa_h_services | join(',') }}"
-          - --docker
-      delegate_to: localhost
-      become: false
-      register: wa_h_compose_check
-      changed_when: false
-      check_mode: false
-      failed_when: false
-
-    - name: Refuse to deploy a compose that is not hardened
-      ansible.builtin.assert:
-        that: wa_h_compose_check.rc == 0
-        fail_msg: >-
-          {{ wa_h_compose_file }} n'est pas durci — rien n'est déployé : {{ wa_h_compose_check.stdout_lines | join(' | ') }}
-        success_msg: "{{ wa_h_compose_file }} : compose durci ({{ wa_h_services | join(', ') }})."
+      ansible.builtin.include_tasks:
+        file: compose-check.yml
+        apply:
+          tags: [always]
 
     # Le pare-feu doit être EN PLACE et ATTEINT avant qu'un conteneur ne parte (`--tags image` seul, unité en échec
     # après un redémarrage…).

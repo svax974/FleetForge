@@ -185,13 +185,17 @@ all:
                 front_ip: 10.73.231.10
                 back_lb_ip: 10.73.231.11
                 protected_paths: ["/run/fleetforge"]
+                # Sorties du sous-réseau (tout le reste refusé) : l'amont par les proxies, le relais SMTP du parc.
+                egress_allow:
+                  - { name: upstream, proxies: true, port: 443 }
+                  - { name: smtp, inventory_host: mail1, port: 587 }
               access_local_cidrs: [10.73.231.0/24]
               # /mcp : seuls ces serveurs (vide = personne), puis deny all.
               # `whitelist: true` = accès de TEST (false hors tests, et avant
               # toute exposition E2/E3) ; adresses VPN toujours écartées.
               webapp_vhost_locations:
                 - { path: '^/mcp(/.*)?$', regex: true, upstream: back, body: 128k, buffering: false, timeout: 180s,
-                    access: { hosts: [infra1], whitelist: false } }
+                    raw_uri: '^/mcp(/|[?]|$)', access: { hosts: [infra1], whitelist: false } }
                 - { path: /.well-known/, priority: true, access: { hosts: [] } }
               ffg_upstreams:
                 - { id: main, entry: infra1, parcs: [monparc] }

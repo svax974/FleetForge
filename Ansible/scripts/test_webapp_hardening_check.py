@@ -615,7 +615,7 @@ class PlaybookTests(unittest.TestCase):
         self.assertTrue(any("garde" in e for e in self.mutated(mutate)))
 
         def mutate_infras(plays):
-            plays[0].pop("pre_tasks")
+            next(p for p in plays if p.get("hosts") == "infras").pop("pre_tasks")
         self.assertTrue(any("ff_deploy_scope == 'gateway'" in e for e in self.mutated(mutate_infras)))
 
     def test_the_import_is_optional_and_follows_the_scope(self):
@@ -678,7 +678,7 @@ def _env():
 
 
 MCP = {"path": "^/mcp(/.*)?$", "regex": True, "upstream": "back", "body": "128k", "buffering": False, "timeout": "180s",
-       "access": {"hosts": ["infra1", "agenthub"], "whitelist": True}}
+       "raw_uri": "^/mcp(/|[?]|$)", "access": {"hosts": ["infra1", "agenthub"], "whitelist": True}}
 WELL_KNOWN = {"path": "/.well-known/", "priority": True, "access": {"hosts": []}}
 INVENTORY = {
     "proxy1": {"ansible_host": "192.0.2.10"},
@@ -863,6 +863,13 @@ class VhostTests(unittest.TestCase):
             INVENTORY["vpn1"]["ansible_host"] = "198.51.100.1"
             INVENTORY["fleetforge-gateway"]["access_local_cidrs"] = ["10.73.231.0/24"]
 
+    def test_the_raw_uri_of_mcp_is_checked_before_relaying(self):
+        block = check.mcp_block(render_vhost())
+        self.assertIn('if ($request_uri !~* "^/mcp(/|[?]|$)") {', block)
+        self.assertIn("return 400;", block)
+        self.assertEqual(vhost_errors(render_vhost()), [])
+        self.assertNotIn("$request_uri !~*", render_vhost(entry="plain"), "sans raw_uri : rendu inchangé")
+
     def test_a_location_without_access_keeps_the_entry_mode(self):
         text = render_vhost(entry="plain")
         block = text.split("location /api/ {", 1)[1].split("}", 1)[0]
@@ -879,13 +886,37 @@ class FirewallScriptTests(unittest.TestCase):
         with open(path, encoding="utf-8") as f:
             source = f.read()
         wa_app = {"wa_project": "fleetforge-gateway", "wa_h_tag": "webapp-fleetforge-gateway", "wa_front_port": 4730,
-                  "wa_back_port": 4731, "wa_h_remote_proxies": proxies, "wa_h_subnet": "10.73.231.0/24"}
-        return jinja2.Template(source, undefined=jinja2.StrictUndefined).render(wa_app=wa_app)
+                  "wa_back_port": 4731, "wa_h_remote_proxies": proxies, "wa_h_subnet": "10.73.231.0/24",
+                  "ansible_host": "192.0.2.10"}
+        remote = [{"name": "upstream", "dest": p, "port": 443, "proto": "tcp"} for p in proxies]
+        host = [{"name": "upstream", "dest": "192.0.2.10", "port": 443, "proto": "tcp"},
+                {"name": "smtp", "dest": "192.0.2.10", "port": 587, "proto": "tcp"}]
+        wa_app.update(wa_h_egress=remote + host, wa_h_egress_remote=remote, wa_h_egress_host=host)
+        return jinja2.Template(source, undefined=jinja2.StrictUndefined).render(wa_app=wa_app, wa_dns_resolvers=["198.51.100.53"])
+
+    def test_the_outbound_rules_are_rendered_and_never_broad(self):
+        script = self.render(["192.0.2.30"])
+        self.assertIn("EGRESS_REMOTE=(192.0.2.30:443:tcp)", script)
+        self.assertIn("EGRESS_HOST=(443:tcp 587:tcp)", script)
+        self.assertIn("DNS_SERVERS=(198.51.100.53)", script)
+        self.assertIn("#   smtp → 192.0.2.10:587/tcp (cette machine : INPUT)", script)
+        self.assertIn('RULES4+=("-s ${INTERNAL} $(comment egress:deny) -j DROP")', script)
+        self.assertIn('RULES_INPUT+=("-s ${INTERNAL} $(comment host:deny) -j DROP")', script)
+        allows = [l for l in script.splitlines() if ("RULES4+=" in l or "RULES_INPUT+=" in l) and ("-j RETURN" in l or "-j ACCEPT" in l)]
+        self.assertEqual(len(allows), 7)
+        for line in allows:
+            self.assertIn("-s ${INTERNAL}", line, "toute sortie admise part du seul sous-réseau dédié")
+            self.assertTrue("ESTABLISHED,RELATED" in line or "-d ${" in line, f"sortie sans destination : {line}")
+        code = "\n".join(l for l in script.splitlines() if not l.lstrip().startswith("#"))
+        self.assertNotIn("0.0.0.0/0", code)
+        self.assertNotIn("169.254", code)
 
     def test_the_script_renders_inserts_on_top_and_drops_each_port(self):
         script = self.render(["192.0.2.30"])
-        self.assertIn("-I DOCKER-USER 1", script)
-        self.assertNotIn("-A DOCKER-USER", script)
+        self.assertIn('-I "${chain}" 1', script)
+        self.assertNotIn(" -A ", script)
+        self.assertIn("insert_all iptables DOCKER-USER", script)
+        self.assertIn("insert_all iptables INPUT", script)
         self.assertIn('TAG="webapp-fleetforge-gateway"', script)
         self.assertIn("PROXIES=(192.0.2.30)", script)
         self.assertIn("INTERNAL=10.73.231.0/24", script)
@@ -893,6 +924,133 @@ class FirewallScriptTests(unittest.TestCase):
         self.assertIn('add 4 "${port}" DROP deny', script)
         self.assertIn('add 6 "${port}" DROP deny', script)
         self.assertIn("PROXIES=()", self.render([]))
+
+    @unittest.skipUnless(shutil.which("bash") and shutil.which("awk"), "bash ou awk absent")
+    def test_a_replay_never_leaves_a_port_without_its_drop(self):
+        """Rejeu sur une chaîne qui porte l'ancienne génération : un `iptables` FACTICE note l'état après CHAQUE
+        modification. Aucun instant sans DROP par port ; l'ancienne génération retirée ; une règle étrangère gardée."""
+        shim = textwrap.dedent("""\
+            #!/usr/bin/env python3
+            import json, sys, os
+            state = os.environ["FW_STATE"]
+            chains = json.load(open(state))
+            args = [a for a in sys.argv[1:] if a != "-w"]
+            if args[0] in ("-L", "-I", "-D") and args[1] not in chains:
+                sys.exit(1)
+            def show(rules):
+                for i, r in enumerate(rules, 1):
+                    print(f"{i} {r['target']} 6 -- 0.0.0.0/0 0.0.0.0/0 /* {r['comment']} */")
+            if args[0] == "-L":
+                if "--line-numbers" in args: print("Chain " + args[1]); print("num target"); show(chains[args[1]])
+                sys.exit(0)
+            rules = chains[args[1]]
+            if args[0] == "-I":
+                spec = args[3:]
+                rules.insert(int(args[2]) - 1, {"target": spec[spec.index("-j") + 1], "comment": spec[spec.index("--comment") + 1]})
+            elif args[0] == "-D":
+                del rules[int(args[2]) - 1]
+            else:
+                sys.exit(2)
+            json.dump(chains, open(state, "w"))
+            du, inp = chains["DOCKER-USER"], chains["INPUT"]
+            ok = all(any(r["target"] == "DROP" and f":{p}:deny" in r["comment"] for r in du) for p in (4730, 4731)) \\
+                and any(r["target"] == "DROP" and ":egress:deny" in r["comment"] for r in du) \\
+                and any(r["target"] == "DROP" and ":host:deny" in r["comment"] for r in inp)
+            with open(os.environ["FW_LOG"], "a") as log:
+                log.write("ok\\n" if ok else "NODROP\\n")
+            """)
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, text in (("iptables", shim), ("ip6tables", "#!/bin/sh\nexit 1\n")):
+                path = os.path.join(tmp, name)
+                with open(path, "w") as f:
+                    f.write(text)
+                os.chmod(path, 0o755)
+            old = [{"target": t, "comment": f"webapp-fleetforge-gateway:{p}:{w}:gOLD"}
+                   for p in (4730, 4731) for t, w in (("RETURN", "proxy"), ("DROP", "deny"))]
+            old.append({"target": "DROP", "comment": "webapp-fleetforge-gateway:egress:deny:gOLD"})
+            old.append({"target": "DROP", "comment": "llm-proxy — back-lb deny"})
+            old_input = [{"target": "DROP", "comment": "webapp-fleetforge-gateway:host:deny:gOLD"},
+                         {"target": "ufw-before-input", "comment": "ufw"}]
+            with open(os.path.join(tmp, "state.json"), "w") as f:
+                json.dump({"DOCKER-USER": old, "INPUT": old_input}, f)
+            with open(os.path.join(tmp, "fw.sh"), "w") as f:
+                f.write(self.render(["192.0.2.30"]))
+            env = dict(os.environ, PATH=f"{tmp}:{os.environ['PATH']}", FW_STATE=os.path.join(tmp, "state.json"),
+                       FW_LOG=os.path.join(tmp, "log"))
+            run = subprocess.run(["bash", os.path.join(tmp, "fw.sh")], capture_output=True, text=True, env=env)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            with open(os.path.join(tmp, "log")) as f:
+                log = f.read().split()
+            with open(os.path.join(tmp, "state.json")) as f:
+                chains = json.load(f)
+        final, final_input = chains["DOCKER-USER"], chains["INPUT"]
+        self.assertNotIn("NODROP", log, "fenêtre sans DROP pendant le rejeu")
+        self.assertFalse([r for r in final + final_input if r["comment"].endswith(":gOLD")], "ancienne génération restée")
+        self.assertIn({"target": "DROP", "comment": "llm-proxy — back-lb deny"}, final)
+        self.assertEqual(final[-1]["comment"], "llm-proxy — back-lb deny", "règles de l'app EN TÊTE")
+        self.assertEqual(final_input[-1]["comment"], "ufw", "règles INPUT de l'app EN TÊTE, ufw intact")
+        self.assertEqual([r["comment"].split(":")[1:3] for r in final_input[:-1]],
+                         [["host", "reply"], ["host", "allow"], ["host", "allow"], ["host", "deny"]])
+
+
+FIREWALL_PROBLEMS_PLAY = """\
+- hosts: localhost
+  gather_facts: false
+  tasks:
+    - ansible.builtin.include_role:
+        name: webapp-security
+        tasks_from: firewall-problems
+      vars:
+        wa_app: {wa_h_tag: webapp-fleetforge-gateway, wa_front_port: 4730, wa_back_port: 4731, wa_h_subnet: 10.73.231.0/24}
+        wa_chain4:
+          rc: 0
+          stdout_lines: __RULES__
+        wa_chain6: {rc: 1}
+        wa_chain_input:
+          rc: 0
+          stdout_lines: __INPUT__
+    - ansible.builtin.copy: {content: "{{ wa_firewall_problems }}", dest: "{{ play_tmp }}/problems.txt"}
+"""
+OUR_RULES = [
+    "-A DOCKER-USER -s 192.0.2.30/32 -p tcp -m conntrack --ctstate DNAT --ctorigdstport 4730 --ctdir ORIGINAL -m comment --comment webapp-fleetforge-gateway:4730:proxy:g1 -j RETURN",
+    "-A DOCKER-USER -p tcp -m conntrack --ctstate DNAT --ctorigdstport 4730 --ctdir ORIGINAL -m comment --comment webapp-fleetforge-gateway:4730:deny:g1 -j DROP",
+    "-A DOCKER-USER -p tcp -m conntrack --ctstate DNAT --ctorigdstport 4731 --ctdir ORIGINAL -m comment --comment webapp-fleetforge-gateway:4731:deny:g1 -j DROP",
+    "-A DOCKER-USER -s 10.73.231.0/24 -m conntrack --ctstate RELATED,ESTABLISHED -m comment --comment webapp-fleetforge-gateway:egress:reply:g1 -j RETURN",
+    "-A DOCKER-USER -s 10.73.231.0/24 -m comment --comment webapp-fleetforge-gateway:egress:deny:g1 -j DROP",
+]
+OUR_INPUT = [
+    "-A INPUT -s 10.73.231.0/24 -m conntrack --ctstate RELATED,ESTABLISHED -m comment --comment webapp-fleetforge-gateway:host:reply:g1 -j ACCEPT",
+    "-A INPUT -s 10.73.231.0/24 -m comment --comment webapp-fleetforge-gateway:host:deny:g1 -j DROP",
+    "-A INPUT -j ufw-before-logging-input",
+]
+
+
+@unittest.skipUnless(shutil.which("ansible-playbook"), "ansible-playbook absent")
+class FirewallProblemsTests(unittest.TestCase):
+    """Toute règle qui précède celles de l'app et peut accepter le trafic est un écart (pas seulement un RETURN nu)."""
+
+    def problems(self, before, rules=None, input_rules=None):
+        play = (FIREWALL_PROBLEMS_PLAY.replace("__RULES__", json.dumps(before + (OUR_RULES if rules is None else rules)))
+                .replace("__INPUT__", json.dumps(OUR_INPUT if input_rules is None else input_rules)))
+        code, out, files = run_local_play(play, outputs=["problems.txt"])
+        self.assertIn("problems.txt", files, out[-3000:])
+        return files["problems.txt"]
+
+    def test_the_outbound_drops_are_required(self):
+        self.assertIn("aucun DROP de sortie", self.problems([], rules=OUR_RULES[:3]))
+        self.assertIn("vers l hôte", self.problems([], input_rules=OUR_INPUT[:1] + OUR_INPUT[2:]))
+        self.assertIn("aucune règle INPUT", self.problems([], input_rules=OUR_INPUT[2:]))
+        self.assertIn("précède les règles", self.problems([], input_rules=["-A INPUT -i docker0 -j ACCEPT"] + OUR_INPUT))
+
+    def test_the_rules_on_top_are_conforming(self):
+        self.assertEqual(self.problems([]), "")
+        self.assertEqual(self.problems(["-A DOCKER-USER -s 203.0.113.9/32 -j DROP"]), "")
+
+    def test_any_rule_that_may_accept_before_ours_is_reported(self):
+        for rule in ["-A DOCKER-USER -j RETURN", "-A DOCKER-USER -i eth0 -j ACCEPT", "-A DOCKER-USER -i docker0 -j RETURN",
+                     "-A DOCKER-USER -s 0.0.0.0/0 -p tcp --dport 4731 -j ACCEPT", "-A DOCKER-USER -j OTHER-CHAIN"]:
+            with self.subTest(rule):
+                self.assertIn("précède les règles", self.problems([rule]))
 
 
 @unittest.skipUnless(shutil.which("awk"), "awk absent")
@@ -980,15 +1138,31 @@ class MonitoringProbeTests(unittest.TestCase):
 
     def test_the_probe_lists_firewall_and_upstream_checks(self):
         checks = self.checks()
-        self.assertEqual([c["name"] for c in checks], ["front", "firewall_4730", "firewall_4731", "upstream_main"])
+        self.assertEqual([c["name"] for c in checks],
+                         ["front", "firewall_4730", "firewall_4731", "firewall_egress", "upstream_main"])
+        self.assertIn("webapp-fleetforge-gateway:egress:deny", checks[3]["argv"][2])
+        self.assertIn("webapp-fleetforge-gateway:host:deny", checks[3]["argv"][2])
         firewall = checks[2]["argv"][2]
         self.assertIn("awk -v t=webapp-fleetforge-gateway -v p=4731", firewall)
         self.assertIn('t ":" p ":deny"', firewall)
-        self.assertIn("RETURN|ACCEPT", firewall, "l'ordre des règles est vérifié aussi")
-        upstream = checks[3]["argv"][2]
+        self.assertIn("DROP|REJECT", firewall, "l'ordre des règles est vérifié aussi")
+        upstream = checks[4]["argv"][2]
         self.assertIn("https://infra.example.test/healthz", upstream)
         self.assertIn('{{.Label "com.docker.compose.project"}}', upstream)
         self.assertIn("/^fleetforge-gateway-back-/", upstream)
+
+    @unittest.skipUnless(shutil.which("awk"), "awk absent")
+    def test_the_firewall_probe_fails_on_any_rule_that_may_accept_first(self):
+        command = self.checks()[2]["argv"][2]
+        program = command[command.index("'") + 1:command.rindex("'")]
+
+        def probe(chain):
+            return subprocess.run(["awk", "-v", "t=webapp-fleetforge-gateway", "-v", "p=4731", program],
+                                  input="\n".join(chain) + "\n", capture_output=True, text=True).returncode
+        self.assertEqual(probe(OUR_RULES), 0)
+        self.assertEqual(probe(["-A DOCKER-USER -i eth0 -j ACCEPT"] + OUR_RULES), 1)
+        self.assertEqual(probe(["-A DOCKER-USER -s 203.0.113.9/32 -j RETURN"] + OUR_RULES), 1)
+        self.assertEqual(probe(OUR_RULES[:2]), 1, "pas de DROP sur 4731")
 
     def test_a_hostile_upstream_url_is_refused(self):
         code, out = run_local_play(MONITORING_PLAY.replace("https://infra.example.test/healthz", "https://x/; rm -rf /"))
@@ -1077,9 +1251,12 @@ def guard_inventory(**gateway):
         "ansible_host": "192.0.2.10", "ansible_connection": "local", "ansible_roles": ["webapp"],
         "hostname": "ffg-priv.example.test", "proxy_hostname": "ffg.example.test", "access_mode": "private",
         "app_port": 4730, "back_port": 4731, "webapp_db_engine": "postgres", "ufw_app_ports": False,
+        "webapp_update_common": False,
         "access_local_cidrs": ["10.73.231.0/24"],
         "webapp_hardening": {"runtime_user": "ffgateway", "docker_subnet": "10.73.231.0/24",
-                             "front_ip": "10.73.231.10", "back_lb_ip": "10.73.231.11", "protected_paths": ["/run/fleetforge"]},
+                             "front_ip": "10.73.231.10", "back_lb_ip": "10.73.231.11", "protected_paths": ["/run/fleetforge"],
+                             "egress_allow": [{"name": "upstream", "proxies": True, "port": 443},
+                                              {"name": "smtp", "inventory_host": "mail1", "port": 587}]},
         "webapp_vhost_locations": [MCP, WELL_KNOWN],
         "ffg_upstreams": [{"id": "main", "entry": "infra1", "parcs": ["demo"]}],
         "webapp_env_from_vault": {"FFG_UPSTREAM_MAIN_READ_PASSWORD": "ff_api_password_ffg_read",
@@ -1104,7 +1281,7 @@ def guard_inventory(**gateway):
             "infras": {"hosts": {"infra1": {"ansible_host": "192.0.2.10", "proxy_hostname": "infra.example.test",
                                             "access_linked": ["agenthub", "fleetforge-gateway"], "ff_api_user": "agenthub",
                                             "ff_api_accounts": accounts, "fleetforge_port": 9750}}},
-            "apps": {"hosts": {"agenthub": {"ansible_host": "203.0.113.7"}}},
+            "apps": {"hosts": {"agenthub": {"ansible_host": "203.0.113.7"}, "mail1": {"ansible_host": "192.0.2.10"}}},
             "fleetforge_gateways": {"hosts": {"fleetforge-gateway": gw}},
         }}}
 
@@ -1234,6 +1411,87 @@ class GuardTests(unittest.TestCase):
             self.assertNotEqual(code, 0, args)
             self.assertIn("Check the deployment scope and the application named on the command line", out)
 
+    def test_the_outbound_list_is_explicit_and_narrow(self):
+        base = guard_inventory()["all"]["children"]["fleetforge_gateways"]["hosts"]["fleetforge-gateway"]["webapp_hardening"]
+        ok = base["egress_allow"]
+        for extra in ({"name": "any", "host": "0.0.0.0", "port": 443}, {"name": "meta", "host": "169.254.169.254", "port": 80},
+                      {"name": "wide", "host": "10.0.0.0/8", "port": 443}, {"name": "x", "host": "192.0.2.30", "port": "443; x"},
+                      {"name": "lo", "host": "127.0.0.1", "port": 22}, {"name": "ping", "host": "192.0.2.30", "port": 1, "proto": "icmp"},
+                      {"name": "ghost", "inventory_host": "nobody", "port": 25}, {"name": "Bad name", "host": "192.0.2.30", "port": 25}):
+            with self.subTest(extra):
+                code, out = self.guard(guard_inventory(webapp_hardening=dict(base, egress_allow=ok + [extra])))
+                self.assertNotEqual(code, 0)
+        play = GUARD_PLAY.replace("GUARD=OK {{ wa_h_trust_proxy }}",
+                                  "GUARD=OK remote={{ wa_h_egress_remote | map(attribute='dest') | join(',') }}"
+                                  " host={{ wa_h_egress_host | map(attribute='name') | join(',') }}")
+        code, out = run_local_play(play, guard_inventory(), {"apps.yml": "fleetforge-gateway: /nonexistent/app/\n"})
+        self.assertEqual(code, 0, out[-3000:])
+        # L'amont par les proxies ADMIS — proxy1 est cette machine (INPUT, 443), proxy2 (VPN) jamais — et le relais
+        # SMTP mail1, sur cette machine aussi (INPUT, 587).
+        self.assertIn("GUARD=OK remote= host=upstream,smtp", out)
+
+    def test_the_gateway_requires_its_named_outbound_destinations(self):
+        base = guard_inventory()["all"]["children"]["fleetforge_gateways"]["hosts"]["fleetforge-gateway"]["webapp_hardening"]
+        for kept in ([], [base["egress_allow"][0]], [base["egress_allow"][1]]):
+            with self.subTest(kept):
+                code, out = self.guard(guard_inventory(webapp_hardening=dict(base, egress_allow=kept)))
+                self.assertNotEqual(code, 0)
+                self.assertIn("egress_allow", out)
+
+    def test_the_profile_requires_frozen_libraries(self):
+        code, out = self.guard(guard_inventory(webapp_update_common=True))
+        self.assertNotEqual(code, 0)
+        self.assertIn("webapp_update_common", out)
+
+    def test_a_reserved_or_shared_runtime_account_is_refused(self):
+        base = guard_inventory()["all"]["children"]["fleetforge_gateways"]["hosts"]["fleetforge-gateway"]["webapp_hardening"]
+        for user in ("root", "srvc", "nobody", "www-data"):
+            with self.subTest(user):
+                self.assertNotEqual(self.guard(guard_inventory(webapp_hardening=dict(base, runtime_user=user)))[0], 0)
+        inventory = guard_inventory()
+        inventory["all"]["children"]["apps"]["hosts"]["other"] = {
+            "ansible_host": "203.0.113.40", "webapp_hardening": {"runtime_user": "ffgateway"}}
+        self.assertNotEqual(self.guard(inventory)[0], 0)
+
+    def test_hostile_vhost_location_values_are_refused(self):
+        for bad in ({"path": "/api/; allow all"}, {"path": "/api/", "timeout": "1; allow all"},
+                    {"path": "/api/", "body": "1m\n allow all"}, {"path": "/x {"}, {"path": "/api/", "mode": "open"},
+                    {"path": "^/mcp(/.*)?$", "regex": True, "raw_uri": "^/mcp\" { return 200; } #"}):
+            with self.subTest(bad):
+                code, out = self.guard(guard_inventory(webapp_vhost_locations=[MCP, WELL_KNOWN, bad]))
+                self.assertNotEqual(code, 0)
+                self.assertIn("hors grammaire", out)
+
+    def test_the_gateway_mcp_location_must_check_the_raw_uri(self):
+        no_raw = {k: v for k, v in MCP.items() if k != "raw_uri"}
+        code, out = self.guard(guard_inventory(webapp_vhost_locations=[no_raw, WELL_KNOWN]))
+        self.assertNotEqual(code, 0)
+        self.assertIn("raw_uri", out)
+
+    def test_the_rendered_vhost_is_checked_before_being_deployed(self):
+        play = textwrap.dedent("""\
+            - hosts: proxy1
+              gather_facts: false
+              tasks:
+                - ansible.builtin.include_role:
+                    name: proxy-update
+                    tasks_from: webapp-site-check
+                  vars:
+                    webapp_vhost_entries: [fleetforge-gateway]
+                    nginx_version: "1.26.0"
+                - ansible.builtin.debug: {msg: "SITECHECK rc={{ proxy_webapp_vhost_check.rc }} tmp={{ proxy_webapp_check_tmp.path }}"}
+            """)
+        inventory = guard_inventory()
+        inventory["all"]["children"]["proxies"]["hosts"]["proxy1"]["ansible_connection"] = "local"
+        code, out = run_local_play(play, inventory, args=["-e", f"webapp_hardening_checker={os.path.join(HERE, 'webapp_hardening_check.py')}"])
+        self.assertEqual(code, 0, out[-3000:])
+        tmp = re.search(r"SITECHECK rc=0 tmp=(\S+?)\"", out)
+        self.assertIsNotNone(tmp, out[-2000:])
+        self.assertFalse(os.path.exists(tmp.group(1)), "le rendu temporaire est retiré")
+        deploy = check._load(os.path.join(ROLES, "proxy-update", "tasks", "deploy-webapp-site.yml"))
+        names = [t.get("name") for t in deploy]
+        self.assertLess(names.index("Check the named access lists of the rendered vhost"), names.index("Deploy the generic vhost"))
+
     def test_a_port_already_filtered_by_docker_ports_security_is_refused(self):
         inventory = guard_inventory()
         inventory["all"]["children"]["infras"]["hosts"]["infra1"]["docker_ports_rules"] = [{"port": 4731, "comment": "x"}]
@@ -1244,6 +1502,107 @@ class GuardTests(unittest.TestCase):
     def test_the_gateway_never_carries_the_fleetforge_family_nor_goes_public(self):
         self.assertNotEqual(self.guard(guard_inventory(ansible_roles=["webapp", "fleetforge"]))[0], 0)
         self.assertNotEqual(self.guard(guard_inventory(access_mode="public"))[0], 0)
+
+
+@unittest.skipUnless(shutil.which("ansible-playbook"), "ansible-playbook absent")
+class DbMigrationTests(unittest.TestCase):
+    """Bascule vers le compose durci : jamais sur une base VIDE sans migration déclarée."""
+
+    EXPECTED = "fleetforge-gateway-back-192-0-2-10_postgres_data"
+
+    def decide(self, volumes, mounts=(), prior=False, initialised=True, *args):
+        state = {"wa_project": "fleetforge-gateway", "wa_h_volumes": list(volumes), "wa_h_pg_mounts": list(mounts),
+                 "wa_h_prior_deploy": prior, "wa_h_expected_initialised": initialised, "wa_h_back_host": "192.0.2.10"}
+        play = textwrap.dedent("""\
+            - hosts: localhost
+              gather_facts: false
+              tasks:
+                - ansible.builtin.include_role:
+                    name: webapp-deploy
+                    tasks_from: db-migration
+            """)
+        return run_local_play(play, args=["-e", json.dumps(state), *args])
+
+    def test_an_old_volume_without_a_new_one_is_refused_unless_migrated(self):
+        old = ["fleetforge-gateway_postgres_data", "other_postgres_data"]
+        code, out = self.decide(old)
+        self.assertNotEqual(code, 0)
+        self.assertIn("VIERGE", out)
+        self.assertEqual(self.decide(old, (), False, True, "-e", "webapp_hardening_db_migrated=true")[0], 0)
+
+    def test_a_renamed_project_or_host_is_refused(self):
+        code, out = self.decide(["fleetforge-gateway-back-old-host_postgres_data"])
+        self.assertNotEqual(code, 0)
+        self.assertIn("renommage", out)
+
+    def test_a_postgres_container_on_another_volume_is_refused(self):
+        code, out = self.decide([self.EXPECTED, "x_postgres_data"], mounts=["x_postgres_data"])
+        self.assertNotEqual(code, 0)
+        self.assertIn("utilise", out)
+
+    def test_a_prior_deployment_with_a_missing_or_empty_volume_is_refused(self):
+        self.assertNotEqual(self.decide([], prior=True)[0], 0)
+        code, out = self.decide([self.EXPECTED], mounts=[self.EXPECTED], prior=True, initialised=False)
+        self.assertNotEqual(code, 0)
+        self.assertIn("VIDE", out)
+
+    def test_a_first_deployment_or_an_already_hardened_one_passes(self):
+        self.assertEqual(self.decide([])[0], 0)
+        self.assertEqual(self.decide(["fleetforge-gateway_postgres_data", self.EXPECTED], mounts=[self.EXPECTED],
+                                     prior=True)[0], 0)
+
+
+class EnvGrammarTests(unittest.TestCase):
+    """back/.env d'une app durcie : grammaire stricte et aucune clé en double (programme de hardened.yml, joué tel quel)."""
+
+    @classmethod
+    def setUpClass(cls):
+        tasks = check._load(os.path.join(ROLES, "webapp-deploy", "tasks", "hardened.yml"))
+        task = next(t for t in tasks if t.get("name", "").startswith("Check the grammar of the back env file"))
+        cls.program = task["ansible.builtin.command"]["argv"][3]
+
+    def report(self, text):
+        with tempfile.NamedTemporaryFile("w", suffix=".env", delete=False) as f:
+            f.write(text)
+        try:
+            return subprocess.run([shutil.which("python3") or "python3", "-I", "-c", self.program, f.name],
+                                  capture_output=True, text=True).stdout.split("\n")
+        finally:
+            os.unlink(f.name)
+
+    def test_the_rendered_forms_pass(self):
+        ok = ('# commentaire\n\nBACK_HOSTS="192.0.2.10"\nFFG_UPSTREAMS=\'[{"id": "main"}]\'\nNODE_PORT=4731\n'
+              'JWT_SECRET="abc+/="\n  # indenté\n')
+        self.assertEqual([l for l in self.report(ok) if l], [])
+
+    def test_each_bypass_is_reported_without_its_value(self):
+        for text, expected in [('X=1; COMPOSE_FILE_NAME=scripts/evil.yml\n', "ligne 1"),
+                               ('export COMPOSE_FILE_NAME=x\n', "ligne 1"),
+                               ('\tCOMPOSE_FILE_NAME=x\n', "ligne 1"),
+                               ('A="$(id)"\n', "ligne 1"),
+                               ('A=`id`\n', "ligne 1"),
+                               ('TRUST_PROXY="1.2.3.4"\nTRUST_PROXY="0.0.0.0/0"\n', "TRUST_PROXY en double")]:
+            with self.subTest(text):
+                lines = self.report(text)
+                self.assertIn(expected, lines)
+                self.assertFalse([l for l in lines if "evil" in l or "0.0.0.0" in l or "id" in l.split()])
+
+
+class AccountMarkerTests(unittest.TestCase):
+    """Le compte dédié n'est créé que s'il n'existe pas sans marqueur, et n'est supprimé que s'il porte le marqueur."""
+
+    def test_account_creation_and_removal_follow_the_marker(self):
+        account = check._load(os.path.join(ROLES, "webapp-install", "tasks", "account.yml"))
+        names = [t.get("name") for t in account]
+        self.assertLess(names.index("Refuse an existing account this deployment did not create"),
+                        names.index("Create the dedicated account (no shell, no home, no extra group)"))
+        create = account[names.index("Create the dedicated account (no shell, no home, no extra group)")]
+        self.assertEqual(create["ansible.builtin.user"]["comment"], "{{ wa_h_account_marker }}")
+        removal = check._load(os.path.join(ROLES, "webapp-remove", "tasks", "hardened.yml"))
+        deleting = [t for t in removal if "block" in t and any("ansible.builtin.user" in b for b in t["block"])]
+        self.assertEqual(len(deleting), 1)
+        self.assertIn("'webapp-hardening ' ~ wa_project", deleting[0]["when"])
+        self.assertFalse([t for t in removal if "ansible.builtin.user" in t], "aucune suppression hors du bloc marqué")
 
 
 class EligibleProxiesTests(unittest.TestCase):

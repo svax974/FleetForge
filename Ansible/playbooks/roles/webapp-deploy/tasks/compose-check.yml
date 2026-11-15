@@ -1,0 +1,30 @@
+---
+# Contrôle STATIQUE du compose durci (scripts/webapp_hardening_check.py compose … --docker : liste blanche de clés,
+# interpolation, `docker compose config`), sur le poste de contrôle, aucun hôte contacté. Joué deux fois : par le play
+# de garde de deploy-webapp.yml AVANT toute connexion, puis dans le bloc fermé de hardened.yml juste avant run.sh.
+# Pose `wa_h_compose_check` ; échoue si le compose n'est pas durci.
+
+- name: Check the compose file is hardened (static, no host contacted)
+  ansible.builtin.command:
+    argv:
+      - "{{ ansible_playbook_python }}"
+      - -I
+      - "{{ playbook_dir }}/../scripts/webapp_hardening_check.py"
+      - compose
+      - "{{ wa_src }}{{ wa_h_compose_file }}"
+      - --services
+      - "{{ wa_h_services | join(',') }}"
+      - --docker
+  delegate_to: localhost
+  become: false
+  register: wa_h_compose_check
+  changed_when: false
+  check_mode: false
+  failed_when: false
+
+- name: Refuse a compose that is not hardened
+  ansible.builtin.assert:
+    that: wa_h_compose_check.rc == 0
+    fail_msg: >-
+      {{ wa_h_compose_file }} n'est pas durci — rien n'est déployé : {{ wa_h_compose_check.stdout_lines | join(' | ') }}
+    success_msg: "{{ wa_h_compose_file }} : compose durci ({{ wa_h_services | join(', ') }})."

@@ -25,7 +25,8 @@
   vars:
     _named_mcp: >-
       {{ webapp_vhost_locations | default([]) | selectattr('access', 'defined')
-         | selectattr('path', 'search', 'mcp') | selectattr('upstream', 'defined') | selectattr('upstream', 'equalto', 'back') | list }}
+         | selectattr('path', 'search', 'mcp') | selectattr('upstream', 'defined') | selectattr('upstream', 'equalto', 'back')
+         | selectattr('raw_uri', 'defined') | list }}
   ansible.builtin.assert:
     that:
       - inventory_hostname not in (groups['infras'] | default([]))
@@ -41,11 +42,19 @@
       - proxy_hostname is search('[.]' ~ (domain_name | regex_escape) ~ '$')
       - proxy_hostname != 'proxy.' ~ domain_name
       - _named_mcp | length > 0
+      # Sorties du sous-réseau (pare-feu du profil) : l'amont par les proxies admis en 443, et le relais SMTP (connexion
+      # par code e-mail, `authMethods: ["email"]`) — exigées NOMMÉMENT : sans elles, la passerelle ne pilote rien ou
+      # n'envoie aucun code, sans erreur visible au déploiement.
+      - webapp_hardening.egress_allow | default([]) | selectattr('name', 'defined') | selectattr('name', 'equalto', 'upstream')
+        | selectattr('proxies', 'defined') | selectattr('port', 'equalto', 443) | list | length == 1
+      - webapp_hardening.egress_allow | default([]) | selectattr('name', 'defined') | selectattr('name', 'equalto', 'smtp') | list | length == 1
     fail_msg: >-
       Entrée {{ inventory_hostname }} invalide pour la passerelle : entrée dédiée hors du groupe `infras`, famille
       `webapp` (jamais `fleetforge`), `webapp_hardening`, `access_mode: private` (E1), `hostname`, `proxy_hostname`
       (nom de la zone, pas le front des proxies), et une location `/mcp` de `webapp_vhost_locations` relayée au back-lb
-      (`upstream: back`) derrière une liste nommée (`access`).
+      (`upstream: back`) derrière une liste nommée (`access`), URI brute contrôlée (`raw_uri`) ; `webapp_hardening.egress_allow`
+      avec `{name: upstream, proxies: true, port: 443}` et une entrée `smtp` (relais du parc : à renseigner par le
+      propriétaire avant le premier déploiement).
     quiet: true
 
 # Chaque amont : l'entrée FleetForge qu'il désigne doit admettre la passerelle (`access_linked`) et porter les trois

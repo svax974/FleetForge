@@ -21,16 +21,17 @@
   failed_when: false
 
 # Par leur COMMENTAIRE (`<étiquette>:`), sans se fier à l'inventaire courant.
-- name: Remove the rules of the application from DOCKER-USER
+- name: Remove the rules of the application from DOCKER-USER and INPUT
   ansible.builtin.shell: |
     set -euo pipefail
-    for cmd in iptables ip6tables; do
-      "${cmd}" -w -L DOCKER-USER -n >/dev/null 2>&1 || continue
+    for pair in iptables:DOCKER-USER ip6tables:DOCKER-USER iptables:INPUT; do
+      cmd="${pair%%:*}"; chain="${pair#*:}"
+      "${cmd}" -w -L "${chain}" -n >/dev/null 2>&1 || continue
       while true; do
-        n=$("${cmd}" -w -L DOCKER-USER --line-numbers -n | awk -v t={{ ('/* ' ~ wa_h_tag ~ ':') | quote }} 'index($0, t) && !done {print $1; done=1}')
+        n=$("${cmd}" -w -L "${chain}" --line-numbers -n | awk -v t={{ ('/* ' ~ wa_h_tag ~ ':') | quote }} 'index($0, t) && !done {print $1; done=1}')
         [ -z "${n}" ] && break
-        "${cmd}" -w -D DOCKER-USER "${n}"
-        echo "removed ${cmd} ${n}"
+        "${cmd}" -w -D "${chain}" "${n}"
+        echo "removed ${cmd} ${chain} ${n}"
       done
     done
   args:
@@ -39,12 +40,18 @@
   register: wa_h_rules_removed
   changed_when: "'removed' in wa_h_rules_removed.stdout"
 
-- name: Remove every ufw rule on the application ports
+# Le profil ne pose aucune règle ufw : rien à retirer. Une règle d'une autre origine sur ces ports est SIGNALÉE.
+- name: Look for ufw rules on the application ports
   ansible.builtin.include_role:
     name: webapp-security
-    tasks_from: ufw-purge
+    tasks_from: ufw-audit
     apply:
       tags: [always]
+
+- name: Report ufw rules left on the application ports
+  ansible.builtin.debug:
+    msg: "Règles ufw d'une autre origine sur les ports de {{ wa_project }}, laissées en place : {{ wa_ufw_foreign | join(' | ') }}"
+  when: wa_ufw_foreign | length > 0
 
 - name: Remove the firewall unit and script of the application
   ansible.builtin.file:
@@ -60,17 +67,37 @@
     daemon_reload: true
   become: true
 
-- name: Remove the dedicated account
-  ansible.builtin.user:
-    name: "{{ wa_h_user }}"
-    state: absent
-  become: true
+# Seulement le compte que CE déploiement a créé (marqueur GECOS posé par webapp-install/account.yml) : un compte
+# existant d'une autre origine ne se supprime jamais.
+- name: Read the dedicated account
+  ansible.builtin.command:
+    argv: [getent, passwd, "{{ wa_h_user }}"]
+  register: wa_h_account
+  changed_when: false
+  check_mode: false
+  failed_when: false
 
-- name: Remove the dedicated group
-  ansible.builtin.group:
-    name: "{{ wa_h_user }}"
-    state: absent
-  become: true
+- name: Remove the dedicated account and group (only when this deployment created them)
+  when: ((wa_h_account.stdout | default('')).split(':')[4] | default('')) == 'webapp-hardening ' ~ wa_project
+  block:
+    - name: Remove the dedicated account
+      ansible.builtin.user:
+        name: "{{ wa_h_user }}"
+        state: absent
+      become: true
+
+    - name: Remove the dedicated group
+      ansible.builtin.group:
+        name: "{{ wa_h_user }}"
+        state: absent
+      become: true
+
+- name: Report an account left in place
+  ansible.builtin.debug:
+    msg: >-
+      Compte {{ wa_h_user }} LAISSÉ en place : {{ 'absent' if wa_h_account.rc != 0 else 'il ne porte pas le marqueur de ce
+      déploiement (webapp-hardening ' ~ wa_project ~ ')' }}.
+  when: ((wa_h_account.stdout | default('')).split(':')[4] | default('')) != 'webapp-hardening ' ~ wa_project
 
 - name: Remind what the profile does not remove
   ansible.builtin.debug:

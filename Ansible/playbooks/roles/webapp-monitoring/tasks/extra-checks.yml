@@ -3,7 +3,7 @@
 # (scripts/test_webapp_hardening_check.py). Aucune commande.
 #
 # Profil durci : `firewall_<port>` — la règle DROP de chaque port publié est dans DOCKER-USER ET atteinte (aucune
-# règle inconditionnelle RETURN/ACCEPT avant la première règle de l'app). Docker recrée la chaîne vide à chaque
+# règle autre qu'un DROP/REJECT avant la première règle de l'app). Docker recrée la chaîne vide à chaque
 # démarrage, l'unité de l'app la repose : 0 = ports publiés ouverts → ServiceCheckFailing.
 # `webapp_upstream_checks` : `upstream_<id>`, l'URL d'un amont lue DEPUIS le conteneur back (chemin réel app → amont).
 # À 0 alors que service_up vaut 1 : l'app répond mais ne joint plus son amont (amont tombé, vhost qui la refuse, DNS).
@@ -22,7 +22,7 @@
 - name: Describe the extra checks of the application
   vars:
     _awk: >-
-      /^-A DOCKER-USER/ { if (!seen && $0 ~ /^-A DOCKER-USER -j (RETURN|ACCEPT) *$/) bad = 1; if (index($0, t ":")) seen = 1;
+      /^-A DOCKER-USER/ { if (index($0, t ":")) seen = 1; if (!seen && $0 !~ / -j (DROP|REJECT)( |$)/) bad = 1;
       if (index($0, t ":" p ":deny") && $0 ~ /-j DROP/) ok = 1 } END { exit !(ok && !bad) }
     _fmt: "{{ webapp_probe_ps_format }}"
     _firewall: >-
@@ -32,6 +32,9 @@
       {%- set _ = out.append({'name': 'firewall_' ~ port, 'kind': 'command', 'timeout': 10,
             'argv': ['/bin/sh', '-c', "iptables -w -S DOCKER-USER | awk -v t=" ~ wa_h_tag ~ " -v p=" ~ port ~ " '" ~ _awk ~ "'"]}) -%}
       {%- endfor -%}
+      {#- Sortie du sous-réseau dédié : DROP final présent vers les autres machines ET vers l'hôte. -#}
+      {%- set _ = out.append({'name': 'firewall_egress', 'kind': 'command', 'timeout': 10,
+            'argv': ['/bin/sh', '-c', "iptables -w -S DOCKER-USER | grep -q -- '" ~ wa_h_tag ~ ":egress:deny' && iptables -w -S INPUT | grep -q -- '" ~ wa_h_tag ~ ":host:deny'"]}) -%}
       {%- endif -%}
       {{ out }}
     _upstreams: >-

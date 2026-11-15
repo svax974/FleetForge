@@ -125,6 +125,13 @@
         tasks_from: facts
       when: webapp_hardening is defined
 
+    # Le compose durci est contrôlé ICI, avant le CNAME, le compte, le vhost et le pare-feu (sur le poste).
+    - name: Check the hardened compose before any connection
+      ansible.builtin.include_role:
+        name: webapp-deploy
+        tasks_from: compose-check
+      when: webapp_hardening is defined
+
 # ── Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ───────────────────────
 - name: Contrôle préalable
   hosts: webapp_target
