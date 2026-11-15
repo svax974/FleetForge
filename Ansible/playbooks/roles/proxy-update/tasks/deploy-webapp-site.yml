@@ -36,6 +36,16 @@
     tasks_from: nginx
   when: groups['all'] | map('extract', hostvars) | selectattr('cloudflare_front', 'defined') | selectattr('cloudflare_front') | list | length > 0
 
+# Listes NOMMÉES (`webapp_vhost_locations[].access`) : le rendu est contrôlé AVANT d'être posé et rechargé
+# (scripts/webapp_hardening_check.py vhost : allow étroits, aucune adresse VPN sauf décision, `deny all` en dernier).
+- name: Check the named access lists of the rendered vhost
+  ansible.builtin.include_tasks:
+    file: webapp-site-check.yml
+  when:
+    - hostvars[webapp_vhost_entries | first].webapp_vhost_locations | default([]) | selectattr('access', 'defined') | list | length > 0
+    - not (hostvars[webapp_vhost_entries | first].webapp_hardening is defined
+           and ansible_host in (groups['vpns'] | default([]) | map('extract', hostvars, 'ansible_host') | list))
+
 - name: Deploy the generic vhost
   vars:
     wa_first: "{{ hostvars[webapp_vhost_entries | first] }}"

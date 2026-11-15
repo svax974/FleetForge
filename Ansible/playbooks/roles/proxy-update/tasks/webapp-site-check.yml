@@ -1,0 +1,61 @@
+---
+# Contrôle du vhost générique RENDU (listes nommées), sur le poste de contrôle, AVANT de le poser et de recharger nginx.
+# Le rendu porte des adresses du parc : fichier temporaire 0600, retiré aussitôt.
+
+- name: Render the vhost into a temporary file of the control machine
+  ansible.builtin.tempfile:
+    state: file
+    suffix: .conf
+  delegate_to: localhost
+  become: false
+  register: proxy_webapp_check_tmp
+  changed_when: false
+  check_mode: false
+
+- name: Check the rendered vhost, then remove the temporary file
+  block:
+    - name: Write the rendered vhost
+      ansible.builtin.copy:
+        content: "{{ lookup('ansible.builtin.template', 'webapp.conf.j2') }}"
+        dest: "{{ proxy_webapp_check_tmp.path }}"
+        mode: '0600'
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      check_mode: false
+      diff: false
+
+    - name: Run the vhost check of the named access lists
+      vars:
+        _named: "{{ hostvars[webapp_vhost_entries | first].webapp_vhost_locations | selectattr('access', 'defined') | map(attribute='access') | list }}"
+        _vpn_allowed: "{{ _named | map(attribute='vpn_addresses', default=false) | map('bool') | select | list | length > 0 }}"
+        _forbid: "{{ [] if _vpn_allowed else (groups['vpns'] | default([]) | map('extract', hostvars, 'ansible_host') | list) }}"
+        _v6: "{{ _named | map(attribute='v6_min_prefix', default=128) | map('int') | min }}"
+      ansible.builtin.command:
+        argv: >-
+          {{ [ansible_playbook_python, '-I', webapp_hardening_checker | default(playbook_dir ~ '/../scripts/webapp_hardening_check.py'), 'vhost',
+              proxy_webapp_check_tmp.path, '--v6-min-prefix', _v6 | string]
+             + (_forbid | map('regex_replace', '^', '--forbid=') | list | map('split', '=') | flatten | list) }}
+      delegate_to: localhost
+      become: false
+      register: proxy_webapp_vhost_check
+      changed_when: false
+      check_mode: false
+      failed_when: false
+
+    - name: Refuse a vhost whose named access lists are not narrow
+      ansible.builtin.assert:
+        that: proxy_webapp_vhost_check.rc == 0
+        fail_msg: >-
+          Vhost de {{ webapp_vhost_entries | join(', ') }} refusé avant d'être posé sur {{ inventory_hostname }} :
+          {{ proxy_webapp_vhost_check.stdout_lines | map('regex_replace', '^[^:]*: ', '') | join(' | ') }}
+        quiet: true
+  always:
+    - name: Remove the temporary rendered vhost
+      ansible.builtin.file:
+        path: "{{ proxy_webapp_check_tmp.path }}"
+        state: absent
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      check_mode: false

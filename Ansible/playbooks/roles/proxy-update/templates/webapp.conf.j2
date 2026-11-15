@@ -92,6 +92,13 @@ server {
 {% for _l in _h.webapp_vhost_locations | default([]) %}
 
     location {{ '^~ ' if _l.priority | default(false) else '' }}{{ '~* ' if _l.regex | default(false) else '' }}{{ _l.path }} {
+{% if _l.raw_uri is defined %}
+        # nginx choisit la location sur l'URI NORMALISÉE (`/x/../mcp` → `/mcp`) mais relaie l'URI BRUTE : refusée si
+        # elle n'a pas la forme attendue.
+        if ($request_uri !~* "{{ _l.raw_uri }}") {
+            return 400;
+        }
+{% endif %}
 {% if _l.access is defined %}
 {% set named_access = _l.access %}
 {# Le partiel perd sa fin de ligne finale au rendu : la remettre, sinon `deny all;` et `proxy_pass` partagent une ligne. #}
