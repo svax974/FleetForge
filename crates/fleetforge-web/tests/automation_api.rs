@@ -1378,6 +1378,66 @@ async fn deny_playbooks_and_max_hosts_bound_an_account() {
     assert_eq!(status, StatusCode::OK, "{d}");
 }
 
+const ALIAS_DENIER: (&str, &str) = ("alias-denier", "mot-de-passe-alias-denier");
+const ALIAS_ALLOWER: (&str, &str) = ("alias-allower", "mot-de-passe-alias-allower");
+
+/// Names judged for an alias (symlink) of a playbook: `deny_playbooks` on the
+/// name AS WRITTEN and on the resolved name; `allow_playbooks` on the resolved
+/// name only (what runs, and what the check fingerprint hashes).
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn aliases_are_judged_on_written_and_resolved_names() {
+    use std::os::unix::fs::symlink;
+    let (am_port, _) = fake_alertmanager().await;
+    let accounts = json!([
+        {
+            "user": ALIAS_DENIER.0, "password_hash": hash_with_binary(ALIAS_DENIER.1), "parcs": ["web3c"], "mode": "run",
+            "deny_playbooks": ["denied-alias.yml", "remove-*.yml"]
+        },
+        {
+            "user": ALIAS_ALLOWER.0, "password_hash": hash_with_binary(ALIAS_ALLOWER.1), "parcs": ["web3c"], "mode": "run",
+            "allow_playbooks": ["deploy-demo.yml", "listed-alias.yml", "allowed-alias.yml"]
+        }
+    ]);
+    let server = start_with(am_port, |root| {
+        let playbooks = root.join("ansible/playbooks");
+        symlink("deploy-demo.yml", playbooks.join("denied-alias.yml")).unwrap();
+        symlink("remove-demo.yml", playbooks.join("to-denied-alias.yml")).unwrap();
+        symlink("deploy-demo.yml", playbooks.join("allowed-alias.yml")).unwrap();
+        symlink("deploy-demo.yml", playbooks.join("unlisted-alias.yml")).unwrap();
+        symlink("remove-demo.yml", playbooks.join("listed-alias.yml")).unwrap();
+        let file = accounts_file(root, accounts);
+        vec![("FLEETFORGE_API_ACCOUNTS_FILE".into(), file.display().to_string())]
+    })
+    .await;
+    let api = Api { http: Client::new(), server: &server };
+    let launch = |who: (&'static str, &'static str), playbook: &'static str| {
+        let api = &api;
+        async move {
+            let body = json!({ "parc": "web3c", "playbook": playbook, "limit": ["proxy1"], "check": true, "detach": true });
+            let (status, answer) = api.call(who, "run_ansible_playbook", body).await;
+            if status == StatusCode::OK {
+                api.wait_run_as(who, answer["run_id"].as_str().unwrap()).await;
+            }
+            (status, code(&answer).to_string())
+        }
+    };
+    let forbidden = (StatusCode::FORBIDDEN, "forbidden_playbook".to_string());
+    let allowed = (StatusCode::OK, String::new());
+
+    // deny_playbooks: the alias as written, and its target.
+    assert_eq!(launch(ALIAS_DENIER, "denied-alias.yml").await, forbidden, "an alias denied by name, target permitted");
+    assert_eq!(launch(ALIAS_DENIER, "to-denied-alias.yml").await, forbidden, "an alias of a denied target");
+    assert_eq!(launch(ALIAS_DENIER, "allowed-alias.yml").await, allowed, "neither name denied");
+    assert_eq!(launch(ALIAS_DENIER, "deploy-demo.yml").await, allowed, "the target itself stays permitted");
+
+    // allow_playbooks: the resolved name only.
+    assert_eq!(launch(ALIAS_ALLOWER, "allowed-alias.yml").await, allowed, "listed alias, listed target");
+    assert_eq!(launch(ALIAS_ALLOWER, "unlisted-alias.yml").await, allowed, "unlisted alias, listed target");
+    assert_eq!(launch(ALIAS_ALLOWER, "listed-alias.yml").await, forbidden, "listed alias, unlisted target");
+    assert_eq!(launch(ALIAS_ALLOWER, "remove-demo.yml").await, forbidden);
+}
+
 impl Api<'_> {
     /// Attend que plus aucun run n'occupe le parc : un nouveau lancement ne
     /// serait sinon refusé `run_busy`.

@@ -362,7 +362,10 @@ async fn start_playbook(state: &AppState, role: Role, scope: &Scope, request: La
         let (parc, wanted, name) = (inventory.clone(), commit.clone(), playbook.clone());
         let c = core.clone();
         let chain = tokio::task::spawn_blocking(move || c.playbook_chain(&parc, &name, wanted.as_deref())).await??;
-        if let Some(denied) = chain.iter().find(|n| scope.denies(base_name(n))) {
+        // deny_playbooks: the name AS WRITTEN too (an alias denied by name
+        // stays denied when its target is permitted), then the resolved chain.
+        // allow_playbooks below judges the resolved name only: what runs.
+        if let Some(denied) = std::iter::once(&playbook).chain(chain.iter()).find(|n| scope.denies(base_name(n))) {
             return Err(anyhow!(Fault::new(
                 FaultKind::ForbiddenPlaybook,
                 format!("playbook interdit à ce compte : {denied}"),
