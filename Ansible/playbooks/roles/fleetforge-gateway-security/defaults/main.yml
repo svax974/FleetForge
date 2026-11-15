@@ -96,8 +96,10 @@ ffg_forbidden_groups: [docker, sudo, adm, lxd, root, "{{ remote_username }}"]
 # (mots de passe aval, DB_PASSWORD, JWT_SECRET, CRYPT_*). `!unsafe` : Ansible ne
 # doit pas interpréter les accolades de Go.
 ffg_inspect_format: !unsafe '{"Name":{{json .Name}},"HostConfig":{{json .HostConfig}},"Mounts":{{json .Mounts}},"User":{{json .Config.User}},"Labels":{{json .Config.Labels}},"Networks":{{json .NetworkSettings.Networks}}}'
-ffg_network_format: !unsafe '{"Name":{{json .Name}},"IPAM":{{json .IPAM}},"Containers":{{json .Containers}}}'
-ffg_volume_format: !unsafe '{"Name":{{json .Name}},"Driver":{{json .Driver}},"Options":{{json .Options}}}'
+ffg_network_format: !unsafe '{"Name":{{json .Name}},"IPAM":{{json .IPAM}},"Containers":{{json .Containers}},"Labels":{{json .Labels}}}'
+ffg_volume_format: !unsafe '{"Name":{{json .Name}},"Driver":{{json .Driver}},"Options":{{json .Options}},"Labels":{{json .Labels}}}'
+# Port du conteneur front (nginx du gabarit : 80) ; publié EXACTEMENT sur app_port.
+ffg_front_container_port: 80
 
 # Échec du contrôle : arrêter les conteneurs de la passerelle (fermé).
 ffg_stop_on_hardening_failure: true

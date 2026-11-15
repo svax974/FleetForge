@@ -25,6 +25,30 @@
       {{ ffg_ps_stop.stdout_lines | select('match', '^[0-9a-f]+ ' ~ (ffg_project_name | regex_escape) ~ '-(back|front)-')
          | map('split') | map('first') | list }}
   become: true
+  failed_when: false
   when:
     - _ids | length > 0
     - not ansible_check_mode
+
+# Relecture : un `docker stop` qui échoue (ou un conteneur relancé par une
+# politique `restart: always`) ne doit pas passer pour un arrêt.
+- name: List the gateway containers still running
+  ansible.builtin.command:
+    argv: [docker, ps, --format, '{% raw %}{{.ID}} {{.Label "com.docker.compose.project"}}{% endraw %}']
+  become: true
+  register: ffg_ps_after_stop
+  changed_when: false
+  check_mode: false
+
+- name: Fail when a gateway container is still running
+  ansible.builtin.assert:
+    that: >-
+      ffg_ps_after_stop.stdout_lines
+      | select('match', '^[0-9a-f]+ ' ~ (ffg_project_name | regex_escape) ~ '-(back|front)-') | list | length == 0
+    fail_msg: >-
+      Des conteneurs de la passerelle tournent ENCORE après l'arrêt de sécurité
+      ({{ ffg_ps_after_stop.stdout_lines | select('match', '^[0-9a-f]+ ' ~ (ffg_project_name | regex_escape) ~ '-(back|front)-')
+      | map('split') | map('last') | unique | join(', ') }}) : les arrêter à la main
+      (`docker ps` sur {{ inventory_hostname }}) avant toute autre action.
+    quiet: true
+  when: not ansible_check_mode

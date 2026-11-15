@@ -1,7 +1,7 @@
 ---
 # Calcul des écarts de durcissement, À PARTIR des lectures de tasks/runtime.yml
 # (ffg_passwd, ffg_groups, ffg_path_probe, ffg_containers, ffg_net_inspect,
-# ffg_vol_inspect). Aucune commande : fichier séparé pour être éprouvé hors
+# ffg_vol_inspect, ffg_firewall_problems). Aucune commande : fichier séparé pour être éprouvé hors
 # ligne sur des descriptions factices (scripts/test_ffg_isolation_check.py).
 - name: Work out the hardening violations
   vars:
@@ -13,6 +13,7 @@
     ffg_violations: >-
       {%- set ns = namespace(v=[], seen=[]) -%}
       {%- if _runtime_user == '' -%}{%- set ns.v = ns.v + ['compte ' ~ ffg_unix_user ~ ' absent'] -%}{%- endif -%}
+      {%- if (ffg_firewall_problems | default('') | trim) -%}{%- set ns.v = ns.v + ['pare-feu : ' ~ ffg_firewall_problems] -%}{%- endif -%}
       {%- for g in (ffg_groups.stdout | default('')).split() | intersect(ffg_forbidden_groups) -%}
         {%- set ns.v = ns.v + ['compte ' ~ ffg_unix_user ~ ' dans le groupe ' ~ g] -%}
       {%- endfor -%}
@@ -24,6 +25,14 @@
         {%- if vol.Driver | default('local') != 'local' or 'device' in opts or 'bind' in (opts.o | default('')) -%}
           {%- set ns.v = ns.v + ['volume ' ~ vol.Name ~ ' : pilote ou options de montage de l hôte'] -%}
         {%- endif -%}
+        {#- Volume d'un AUTRE projet (external/name dans le compose) : sa base serait lue. -#}
+        {%- if not (vol.Name | default('')).startswith(ffg_project_name ~ '-')
+               or not ((vol.Labels | default({}, true))['com.docker.compose.project'] | default('')).startswith(ffg_project_name ~ '-') -%}
+          {%- set ns.v = ns.v + ['volume ' ~ vol.Name ~ ' : hors du projet ' ~ ffg_project_name] -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {%- for net in _networks if not ((net.Labels | default({}, true))['com.docker.compose.project'] | default('')).startswith(ffg_project_name ~ '-') -%}
+        {%- set ns.v = ns.v + ['réseau ' ~ net.Name ~ ' : hors du projet ' ~ ffg_project_name] -%}
       {%- endfor -%}
       {%- for c in ffg_containers -%}
         {%- set name = c.Name | regex_replace('^/', '') -%}
@@ -47,6 +56,27 @@
         {%- for m in c.Mounts | default([], true) if m.Type | default('') == 'bind' and (m.Source | default('')) not in ffg_allowed_bind_sources -%}
           {%- set ns.v = ns.v + [name ~ ' : montage de l hôte ' ~ (m.Source | default('?')) ~ ' (aucun bind autorisé hors ffg_allowed_bind_sources)'] -%}
         {%- endfor -%}
+        {#- Ports publiés : front et back-lb EXACTEMENT leur port, sur 0.0.0.0 ;
+            tout autre conteneur : boucle locale seulement. -#}
+        {%- set pb = hc.PortBindings | default({}, true) -%}
+        {%- set pbns = namespace(f=[]) -%}
+        {%- for cport, binds in pb.items() -%}{%- for b in binds | default([], true) -%}
+          {%- set pbns.f = pbns.f + [cport ~ '=' ~ (b.HostIp | default('')) ~ ':' ~ (b.HostPort | default(''))] -%}
+        {%- endfor -%}{%- endfor -%}
+        {%- set flat = pbns.f -%}
+        {%- if svc == ffg_front_service -%}
+          {%- if flat != [(ffg_front_container_port | string) ~ '/tcp=0.0.0.0:' ~ (app_port | string)] -%}
+            {%- set ns.v = ns.v + [name ~ ' : ports publiés ' ~ (flat | join(',')) ~ ' au lieu de ' ~ ffg_front_container_port ~ '/tcp=0.0.0.0:' ~ app_port] -%}
+          {%- endif -%}
+        {%- elif svc == ffg_back_lb_service -%}
+          {%- if flat != [(back_port | string) ~ '/tcp=0.0.0.0:' ~ (back_port | string)] -%}
+            {%- set ns.v = ns.v + [name ~ ' : ports publiés ' ~ (flat | join(',')) ~ ' au lieu de ' ~ back_port ~ '/tcp=0.0.0.0:' ~ back_port] -%}
+          {%- endif -%}
+        {%- else -%}
+          {%- for f in flat if not f.split('=', 1)[1].startswith('127.0.0.1:') -%}
+            {%- set ns.v = ns.v + [name ~ ' : port publié hors boucle locale ' ~ f] -%}
+          {%- endfor -%}
+        {%- endif -%}
         {%- for n in nets | list if not n.startswith(ffg_project_name ~ '-') -%}
           {%- set ns.v = ns.v + [name ~ ' : réseau étranger au projet ' ~ n] -%}
         {%- endfor -%}

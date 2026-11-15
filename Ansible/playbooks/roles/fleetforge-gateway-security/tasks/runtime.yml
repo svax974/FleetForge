@@ -86,7 +86,17 @@
   register: ffg_vol_inspect
   changed_when: false
   check_mode: false
+  no_log: true
   when: _volumes | length > 0
+
+# L'ordre et la présence des DROP de la passerelle (même contrôle qu'avant le
+# déploiement) : un pare-feu perdu depuis (unité en échec) se voit ici.
+- name: Verify the gateway firewall is in place and reached
+  ansible.builtin.include_tasks:
+    file: firewall-check.yml
+    apply:
+      tags: [always]
+  tags: [always]
 
 - name: Read the dedicated account
   ansible.builtin.command:
@@ -147,5 +157,7 @@
       {{ ffg_hardened_services | join(', ') }} : user "${FFG_RUNTIME_UID}:${FFG_RUNTIME_GID}",
       read_only (+ tmpfs), cap_drop [ALL], mem_limit et cpus ; pour tous : no-new-privileges, aucun
       cap_add, aucun montage de l'hôte ni volume à driver_opts, ni socket Docker ni vmagent ; front et
-      back-lb sur le réseau ${FFG_DOCKER_SUBNET} aux adresses ${FFG_FRONT_IP} / ${FFG_BACK_LB_IP}.
+      back-lb sur le réseau ${FFG_DOCKER_SUBNET} aux adresses ${FFG_FRONT_IP} / ${FFG_BACK_LB_IP},
+      publiant EXACTEMENT 0.0.0.0:{{ app_port }} / 0.0.0.0:{{ back_port }}, tout autre port en 127.0.0.1 ;
+      volumes et réseaux du seul projet ; pare-feu DOCKER-USER en place.
     success_msg: "Durcissement conforme : {{ ffg_containers | length }} conteneur(s), compte {{ ffg_unix_user }} isolé."

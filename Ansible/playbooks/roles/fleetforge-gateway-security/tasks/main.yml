@@ -68,74 +68,53 @@
   changed_when: false
   when: not ansible_check_mode
 
-- name: Read back the IPv4 DOCKER-USER chain
-  ansible.builtin.command:
-    argv: [iptables, -w, -S, DOCKER-USER]
-  become: true
-  register: ffg_chain4
-  changed_when: false
-  check_mode: false
+- name: Read the firewall state
+  ansible.builtin.include_tasks:
+    file: firewall-check.yml
+    apply:
+      tags: [always]
 
-# Chaîne absente = Docker en IPv4 seul : rien à vérifier en IPv6.
-- name: Read back the IPv6 DOCKER-USER chain
+- name: Fail when the gateway firewall is missing or bypassed
+  ansible.builtin.assert:
+    that: ffg_firewall_problems | trim | length == 0
+    fail_msg: >-
+      Pare-feu de la passerelle NON conforme : {{ ffg_firewall_problems }}. Vérifier
+      `systemctl status {{ ffg_firewall_unit }}` et `iptables -S DOCKER-USER` ; rejouer
+      le rôle (le script insère ses règles en tête).
+    quiet: true
+  when: not ansible_check_mode
+
+# ufw ne filtre pas les ports publiés par Docker, mais il filtre ce qui arrive
+# en INPUT : docker-proxy sur `[::]` si une liaison IPv6 apparaissait, et les
+# règles que `deploy-full.sh` poserait sur NODE_PORT/DB_PORT (WHITELIST,
+# PROXY_HOSTS : refusées dans back/.env). HYPOTHÈSE vérifiée ici : ufw actif,
+# politique entrante `deny`.
+- name: Read the ufw status
   ansible.builtin.command:
-    argv: [ip6tables, -w, -S, DOCKER-USER]
+    argv: [ufw, status, verbose]
   become: true
-  register: ffg_chain6
+  register: ffg_ufw_status
   changed_when: false
   failed_when: false
   check_mode: false
 
-- name: Verify each published port ends in a DROP (IPv4, and IPv6 when the chain exists)
+- name: Fail when ufw is not active with an incoming deny policy
   ansible.builtin.assert:
     that:
-      - (item.0.rc != 0 and item.0.family == 'ip6tables')
-        or item.0.stdout is search('--ctorigdstport ' ~ item.1 ~ ' .*fleetforge-gateway:' ~ item.1 ~ ':deny.*-j DROP')
+      - ffg_ufw_status.stdout is search('Status:[ ]+active')
+      - ffg_ufw_status.stdout is search('Default:[ ]+deny [(]incoming[)]')
     fail_msg: >-
-      {{ item.0.family }} : aucun DROP sur le port {{ item.1 }} dans DOCKER-USER —
-      la passerelle serait joignable sans passer par les proxies. Vérifier
-      `systemctl status {{ ffg_firewall_unit }}` et `{{ item.0.family }} -S DOCKER-USER`.
+      ufw n'est pas actif avec une politique entrante `deny` sur {{ inventory_hostname }} :
+      ce qui arrive en INPUT (docker-proxy, règles posées par deploy-full.sh) ne serait pas filtré.
     quiet: true
-  loop: >-
-    {{ [ffg_chain4 | combine({'family': 'iptables'}), ffg_chain6 | combine({'family': 'ip6tables'})]
-       | product([ffg_front_port, ffg_back_port]) | list }}
-  loop_control:
-    label: "{{ item.0.family }} {{ item.1 }}"
   when: not ansible_check_mode
-
-# Le DROP doit être ATTEINT : aucune règle inconditionnelle RETURN/ACCEPT ne
-# précède la première règle de la passerelle (sinon elles sont décoratives).
-- name: Verify no unconditional RETURN or ACCEPT precedes the gateway rules
-  vars:
-    _rules: "{{ item.stdout_lines | default([]) | select('match', '^-A DOCKER-USER ') | list }}"
-    _first: "{{ (_rules | select('search', 'fleetforge-gateway:') | first | default('')) }}"
-    _first_index: "{{ _rules.index(_first) if _first in _rules else -1 }}"
-    _bypass: >-
-      {{ _rules[: (_first_index | int if _first_index | int >= 0 else 0)]
-         | select('match', '^-A DOCKER-USER -j (RETURN|ACCEPT)[ ]*$') | list }}
-  ansible.builtin.assert:
-    that:
-      - (item.rc | default(1)) != 0 or (_first_index | int) >= 0
-      - _bypass | length == 0
-    fail_msg: >-
-      {{ item.family }} : {{ 'aucune règle de la passerelle dans DOCKER-USER'
-      if (_first_index | int) < 0 else 'une règle inconditionnelle ' ~ (_bypass | join(' ; ')) ~ ' précède les règles de la passerelle' }} —
-      elles ne seraient jamais atteintes. Rejouer le rôle (le script les insère en tête).
-    quiet: true
-  loop:
-    - "{{ ffg_chain4 | combine({'family': 'iptables'}) }}"
-    - "{{ ffg_chain6 | combine({'family': 'ip6tables'}) }}"
-  loop_control:
-    label: "{{ item.family }}"
-  when:
-    - not ansible_check_mode
-    - (item.rc | default(1)) == 0
 
 - name: Report the exposure
   ansible.builtin.debug:
     msg: >-
-      Ports {{ ffg_front_port }} (front) et {{ ffg_back_port }} (back-lb, `/mcp`)
-      filtrés dans DOCKER-USER : {{ ('proxies distants ' ~ (ffg_remote_proxies | join(', ')))
+      Ports {{ ffg_front_port }} (front) et {{ ffg_back_port }} (back-lb, `/mcp`), publiés
+      sur 0.0.0.0, filtrés dans DOCKER-USER : {{ ('proxies distants ' ~ (ffg_remote_proxies | join(', ')))
       if ffg_remote_proxies | length > 0 else 'aucune source externe' }}, puis DROP
-      (IPv6 : DROP). Un proxy de cette machine passe par 127.0.0.1. Contrôle depuis
-      une machine hors proxies : `nc -z {{ ansible_host }} {{ ffg_back_port }}` doit échouer.
+      (IPv6 : DROP). Un proxy de cette machine passe par 127.0.0.1 (boucle locale, hors
+      DOCKER-USER). Contrôle depuis une machine hors proxies : `nc -z {{ ansible_host }}
+      {{ ffg_back_port }}` doit échouer.
