@@ -27,7 +27,7 @@
     wa_h_back_lb_ip, wa_h_compose_check, wa_h_compose_file, wa_h_db_expected_volume, wa_h_db_reasons,
     wa_h_db_state, wa_h_egress, wa_h_egress_host, wa_h_egress_remote, wa_h_eligible_proxies, wa_h_env,
     wa_h_env_grammar, wa_h_firewall_script, wa_h_firewall_unit, wa_h_forbidden_groups, wa_h_front_ip,
-    wa_h_infra_listeners, wa_h_passwd, wa_h_predeploy_checked, wa_h_protected_paths, wa_h_realip,
+    wa_h_infra_listeners, wa_h_nginx_cgroup, wa_nginx_cgroup, wa_h_passwd, wa_h_predeploy_checked, wa_h_protected_paths, wa_h_realip,
     wa_h_remote_proxies, wa_h_rules_removed, wa_h_run, wa_h_services, wa_h_subnet, wa_h_switches, wa_h_tag,
     wa_h_trust_proxy, wa_h_trusted_relays, wa_h_user, wa_h_vpn_addresses, wa_health_url, wa_images,
     wa_infra_listen, wa_inspect, wa_lib_branch, wa_machine, wa_machine_key, wa_machine_rules, wa_migrate,
