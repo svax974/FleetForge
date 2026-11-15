@@ -227,6 +227,17 @@ Ce que `webapp_hardening_check.py compose` exige ; tout écart = déploiement re
 - **Vérification** : `python3 -I Ansible/scripts/webapp_hardening_check.py compose <dépôt>/scripts/docker-compose-hardened.yml
   --docker` doit répondre 0 ; le compose de référence des tests (`GOOD_COMPOSE_YAML`) en est un exemple complet qui passe.
 
+## Réalisation (phase B, 15/11/2026)
+
+Conforme à l'étude, avec ces précisions :
+- garde du profil : `webapp-setup/tasks/hardening.yml` (incluse par `facts.yml` et par un play sans connexion de
+  `deploy-webapp.yml`) ; garde FleetForge : `fleetforge-install/tasks/gateway-guard.yml` ;
+- les sondes supplémentaires vivent dans `webapp-monitoring/tasks/extra-checks.yml` (éprouvé hors ligne) ;
+- `facts.yml` valide les listes `access` de TOUTE entrée qui en déclare (aucune aujourd'hui hors la passerelle) ;
+- le vhost d'une entrée sans profil et sans `access` est rendu octet pour octet comme avant (preuve : rendus avant/après
+  de `social-manager` et `llm-proxy` sur les trois proxies, faits `wa_*` identiques) ; `--list-tasks` n'ajoute que des
+  inclusions ou des `end_play` conditionnés par `webapp_hardening`, `webapp_upstream_checks` ou `webapp_optional`.
+
 ## 9. Choix à valider par le propriétaire
 
 1. Allow-list par chemin portée par `webapp_vhost_locations[].access` (plutôt qu'un `webapp_path_access` séparé).

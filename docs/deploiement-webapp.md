@@ -67,6 +67,20 @@ du parc**, et les clés de chiffrement à sauvegarder hors du serveur. Restent m
   login` du constructeur, rétention, sonde. Rien à poser à la main.
 - Famille unique `webapp` ; les besoins propres (WebSocket, git smart-HTTP, runner AgentHub) = vhost écrit à la main
   `parcs/<parc>/nginx/sites-enabled/<projet>.conf` (prioritaire sur le gabarit générique) ou `webapp_vhost_locations`.
+- Ce que la famille ne couvre pas = attributs d'hôte OPTIONNELS (absents : rendu, tâches et .env inchangés), jamais un jeu
+  de rôles dédié (décision du 15/11/2026, première application : la passerelle MCP de FleetForge —
+  `docs/etude-passerelle-sur-webapp.md`) :
+  - `webapp_hardening: { runtime_user, docker_subnet, front_ip, back_lb_ip, protected_paths?, services?,
+    allowed_bind_sources?, compose_file? }` — profil DURCI : garde sans connexion, compte Unix dédié, pare-feu DOCKER-USER
+    propre à l'app (proxies admis distants, règles en tête, unité `webapp-<projet>-firewall`), compose durci
+    (`scripts/docker-compose-hardened.yml` du gabarit, § 8 de l'étude) contrôlé par `scripts/webapp_hardening_check.py`
+    AVANT `run.sh`, durcissement RÉEL vérifié après (`--tags hardening` pour le recontrôle seul), conteneurs ARRÊTÉS au
+    moindre écart, vhost qui réécrit X-Forwarded-For, sondes `firewall_<port>` ;
+  - `webapp_vhost_locations[].access: { hosts, whitelist?, vpn_addresses?, v6_min_prefix? }` (+ `upstream: back`,
+    `priority: true`) — liste NOMMÉE par chemin (`proxy-update/templates/_named_access.inc`) ;
+  - `webapp_env_from_vault: { CLÉ: variable du coffre }`, `webapp_env_required: [CLÉS]`, `webapp_upstream_checks: [{ id, url }]`.
+- `deploy-webapp.yml` s'importe dans un autre playbook avec `webapp_optional: true` (sans `webapp` : rien n'est visé,
+  aucune connexion) — c'est ainsi que `deploy-fleetforge.yml` déploie sa passerelle.
 
 ## État au 15/11/2026
 

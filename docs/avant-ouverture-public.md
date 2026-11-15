@@ -5,19 +5,23 @@ Retirer ou dater un point une fois fait.
 
 ## Passerelle MCP : déploiement E1 (ajouté le 15/11/2026)
 
-Étape 6.6 du lot 6 (`fleetforge-gateway`) : plays du groupe `fleetforge_gateways` dans
-`deploy-fleetforge.yml`, entrée dédiée de l'inventaire web3c. RIEN n'a été joué sur une machine.
+Étape 6.6 du lot 6 (`fleetforge-gateway`) : entrée dédiée de l'inventaire web3c, famille GÉNÉRIQUE
+`webapp` avec le profil durci `webapp_hardening` (décision du 15/11/2026 : plus de rôles dédiés), déployée
+par `deploy-fleetforge.yml` (garde du groupe `fleetforge_gateways` puis import de `deploy-webapp.yml`) —
+`docs/etude-passerelle-sur-webapp.md`. RIEN n'a été joué sur une machine.
 
-- **Revue Opus indépendante AVANT tout déploiement réel** : pare-feu DOCKER-USER
-  (`fleetforge-gateway-security`), `_access.inc` (`access_local_cidrs`), vhost
-  `_fleetforge_gateway.inc` (`/mcp`), comptes `ffg_*` et leur liste de refus, transmission des mots de
-  passe (`fleetforge-gateway-deploy`, `no_log`), contrôle de durcissement (`tasks/runtime.yml`).
+- **Revue Opus indépendante AVANT tout déploiement réel**, dans sa forme FINALE (famille `webapp`) :
+  pare-feu DOCKER-USER (`webapp-security/tasks/firewall.yml`), `_access.inc` (`access_local_cidrs`), vhost
+  générique (`webapp.conf.j2` + `_named_access.inc`, `/mcp`), comptes `ffg_*` et leur liste de refus
+  (`fleetforge-install/tasks/gateway-guard.yml`), transmission des mots de passe (`webapp_env_from_vault`,
+  `no_log`), déploiement fermé (`webapp-deploy/tasks/hardened.yml`), contrôle de durcissement
+  (`webapp-security/tasks/runtime.yml`).
 - **Choix de la machine** : premier déploiement sur la MÊME machine qu'`infra1` (décision du
   15/11/2026). La déplacer = changer `ansible_host` (et `provider`, `access_local_cidrs`) de l'entrée.
 - **E2/E3 (OAuth public) INTERDITS tant que la passerelle partage la machine du nœud de contrôle** :
   prérequis de bascule = la déplacer d'abord (autre machine, ou VM légère :
   `docs/etude-isolation-passerelle-vm.md`). Le play de garde refuse tout `access_mode` autre que `private`.
-- **Accès de test à `/mcp`** : `ffg_mcp_allow_whitelist: true` sur l'entrée — à passer à `false` dès la
+- **Accès de test à `/mcp`** : `whitelist: true` dans l'`access` de la location `/mcp` de l'entrée — à passer à `false` dès la
   fin des tests et AVANT toute exposition E2/E3 (la whitelist n'élargit pas l'allow-list propre à chaque
   credential `exec`, ≤ /16, imposée par `mcp-access`).
 - **`/mcp` admet l'adresse d'`infra1`, donc toute sa machine** (proxy1, monitor, mail1, www…) : la clé
@@ -28,9 +32,9 @@ Retirer ou dater un point une fois fait.
   l'allow-list d'adresses d'un credential ne protège plus contre lui. Levé seulement en déplaçant la
   passerelle (autre machine ou VM : `docs/etude-isolation-passerelle-vm.md`).
 - **Whitelist de test sur `/mcp` filtrée** : IPv4 seule ou /32, IPv6 de préfixe ≥ 128 par défaut ; la
-  plage IPv6 /64 de la whitelist n'y passe que si le propriétaire pose `ffg_mcp_whitelist_max_v6_prefix: 64`.
+  plage IPv6 /64 de la whitelist n'y passe que si le propriétaire pose `v6_min_prefix: 64` dans l'`access`.
 - **Fenêtre au redémarrage de Docker** : les conteneurs repartent avant que l'unité
-  `fleetforge-gateway-firewall` ne repose DOCKER-USER (quelques secondes sans filtre sur 4730/4731).
+  `webapp-fleetforge-gateway-firewall` ne repose DOCKER-USER (quelques secondes sans filtre sur 4730/4731).
   Non fermée ; signalée par la sonde `firewall_<port>` (ServiceCheckFailing).
 - **Séparation check / run** : `ffg_run` porte `accept_own_checks: false` — ne le retirer qu'en
   connaissance de cause.
@@ -40,32 +44,37 @@ Retirer ou dater un point une fois fait.
   `deploy-exporter-sys.yml` reste exclu (règles ufw). `*-monitoring.yml` remplacé par `deploy-*monitoring*`
   et `update-*monitoring*` pour que check-monitoring.yml reste lançable. Tout playbook « sensible »
   (localhost, all, proxies, infras, vpns, supervision, motif templaté) est refusé — contrôle
-  `ffg_isolation_check.py coverage`, approximatif pour les groupes imbriqués et les `delegate_to`.
-- **`ffg_mcp_allow_vpn_addresses`** (décidé `false` le 15/11/2026) : `true` OUVRE /mcp À TOUT CE QUI SORT
-  PAR LE VPN (proxy2 = vpn1 = NAT domestique) — seulement pour des tests depuis chez soi, à remettre à
-  `false` ensuite et avant toute exposition E2/E3.
-- **ufw actif en `deny` entrant** : hypothèse VÉRIFIÉE par `fleetforge-gateway-security` (le rôle échoue
+  `webapp_hardening_check.py coverage`, approximatif pour les groupes imbriqués et les `delegate_to`.
+- **`vpn_addresses`** de l'`access` de `/mcp` (décidé `false` le 15/11/2026) : `true` OUVRE /mcp À TOUT CE
+  QUI SORT PAR LE VPN (proxy2 = vpn1 = NAT domestique) — seulement pour des tests depuis chez soi, à
+  remettre à `false` ensuite et avant toute exposition E2/E3.
+- **ufw actif en `deny` entrant** : hypothèse VÉRIFIÉE par le pare-feu du profil durci (le play échoue
   sinon) ; sans elle, un port lié en `[::]` par docker-proxy ou une règle posée par `deploy-full.sh`
   passerait hors DOCKER-USER.
-- **Revues indépendantes du 15/11/2026** (deux) : défauts haut et moyens corrigés ; la REVUE DE LA
-  TROISIÈME SÉRIE de correctifs reste à faire avant tout déploiement réel.
-- **Compose durci à livrer par le GABARIT** (le `scripts/` de la passerelle est un lien vers vx-public ;
-  rien n'est créé dans son dépôt). Nom attendu `ffg_compose_file` (`scripts/docker-compose.ffg-hardened.yml`
-  par défaut, écrit en COMPOSE_FILE_NAME) : services back, back-worker, back-lb, front, db, redis et rien
-  d'autre ; `restart: unless-stopped` ; user `${FFG_RUNTIME_UID}:${FFG_RUNTIME_GID}`, read_only + tmpfs,
-  cap_drop ALL, aucun cap_add, `security_opt: [no-new-privileges:true]` seul, mem_limit/cpus ; réseau
-  `${FFG_DOCKER_SUBNET}` avec front et back-lb à `${FFG_FRONT_IP}` / `${FFG_BACK_LB_IP}` ; ports
-  `0.0.0.0:${VITE_PORT}:80`, `0.0.0.0:${NODE_PORT}:${NODE_PORT}` EXACTEMENT, les autres en `127.0.0.1:` ;
-  back-lb écrivant sa configuration nginx par un heredoc QUOTÉ (`<<'NGINX'`) avec `${FFG_BACK_LB_REALIP}`,
-  `real_ip_header X-Forwarded-For` et `proxy_set_header X-Forwarded-For $$remote_addr` dans chaque
-  location ; Redis configuré par fichier (jamais `--requirepass`/`-a`) ; ni `secrets`/`configs`, ni volume
-  ou réseau `external`/`name`/`driver_opts`, ni `env_file`/`build` hors `../back`/`../front`, ni socket
-  Docker ni vmagent. Sans lui le déploiement est refusé AVANT `run.sh` (contrôle par interpolation ET
-  `docker compose config` ; le compose du gabarit actuel est refusé). Exigés aussi dans back/.env :
-  `REDIS_PASSWORD` non vide ; `DEPLOY_FROM_MAIN`, `COMPOSE_FILE`, `WHITELIST`, `PROXY_HOSTS`,
-  `BACK_WHITELIST` et toute ligne `export` de ces clés absents.
-- **Interpolation des variables compose** (`${FFG_RUNTIME_UID}`…) : supposée lue depuis back/.env par
+- **Revues indépendantes du 15/11/2026** (deux) : défauts haut et moyens corrigés ; troisième série de
+  correctifs faite, puis bascule sur la famille `webapp` (même logique, portée en attributs d'hôte). La
+  REVUE de cette forme finale reste à faire avant tout déploiement réel.
+- **Compose durci à livrer par le GABARIT** (`scripts/docker-compose-hardened.yml` du gabarit vx-public ;
+  le `scripts/` de la passerelle en est un lien, rien n'est créé dans son dépôt) : spécification EXACTE dans
+  `docs/etude-passerelle-sur-webapp.md` § 8 (variables `HARDEN_*`, Redis authentifié par fichier). Sans lui
+  le déploiement est refusé AVANT `run.sh` (contrôle par interpolation ET `docker compose config` ; le
+  compose du gabarit actuel est refusé). Exigés aussi dans back/.env (noms seulement) : `REDIS_PASSWORD` non
+  vide ; `DEPLOY_FROM_MAIN`, `COMPOSE_FILE`, `WHITELIST`, `PROXY_HOSTS`, `BACK_WHITELIST`,
+  `PROMETHEUS_REMOTE_WRITE_URL(S)`, `INFRA_BIND` hors boucle locale et toute ligne `export` de ces clés absents.
+- **Interpolation des variables compose** (`${HARDEN_RUNTIME_UID}`…) : supposée lue depuis back/.env par
   deploy-full.sh — NON vérifié ; le contrôle d'exécution (`--tags hardening`) le prouvera.
+- **Front et back sur la MÊME machine** (FRONT_HOSTS = BACK_HOSTS) : `deploy-full.sh` met alors le front
+  dans le projet compose du back, d'où un seul réseau dédié. Vérifié par lecture du script, pas par un run.
+- **Ne pas lancer `deploy-fleetforge.yml --limit fleetforge-gateway` depuis l'application** : `families.rs`
+  inscrirait la famille `fleetforge` sur l'entrée si elle quittait la machine d'`infra1` (la garde fait
+  alors échouer le run, et l'inscription est retirée). Utiliser `-e ff_deploy_scope=gateway`.
+- **Premier déploiement par `webapp`** : les secrets de l'app (CRYPT_*, JWT_SECRET, METRICS_TOKEN,
+  DB_PASSWORD, REDIS_PASSWORD) sont ADOPTÉS du back/.env existant ou tirés, puis mis au coffre
+  `group_vars/web3c.yml` (préfixe `fleetforge_gateway_`) : à COMMITTER. DB_NAME/DB_USER par défaut
+  `fleetforgegateway` (clés « si absentes ») ; `pgbak_db`/`pgbak_user` alignés, à vérifier.
+- **Alertes** : `deploy-webapp.yml` exige le groupe `services` dans `prom_alert_groups` mais ne recharge
+  plus les règles (l'ancien play « Règles d'alerte de la passerelle » a disparu) ; `services` est déjà
+  chargé sur web3c. `X-Robots-Tag noindex` de l'ancien vhost : abandonné.
 - **Permissions de `/home/srvc/fleetforge` et `~/.ssh`** : le compte `ffgateway` ne doit ni les lire ni
   les traverser. Non vérifié sur la machine ; le premier `--tags hardening` le dira (échec = chmod à faire).
 - **Sauvegarde de la base de la passerelle** : données `pgbak_*` posées, NON activée (décision du

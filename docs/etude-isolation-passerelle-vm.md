@@ -63,7 +63,7 @@ modification du noyau de l'hôte du nœud de contrôle se décide, elle ne s'ess
   traitent alors comme une machine ordinaire (identifiée par adresse + port SSH, CLAUDE.md § 2).
 - **Proxies → passerelle** : proxy1 (sur l'hôte) joint directement l'adresse privée de la VM ; les
   proxies distants passent par un DNAT de l'hôte vers la VM, filtré dans la chaîne FORWARD (même
-  règle qu'aujourd'hui : proxies distants seulement). Le vhost (`_fleetforge_gateway.inc`) vise déjà
+  règle qu'aujourd'hui : proxies distants seulement). Le vhost (générique, `webapp.conf.j2`) vise déjà
   `ansible_host:app_port` : il faudrait alors une adresse de service distincte de l'adresse SSH
   (variable à ajouter à l'entrée).
 - **Passerelle → FleetForge** : par l'URL d'automatisation (`https://infra.<domaine>`). Depuis la VM,
@@ -102,8 +102,8 @@ Chiffres d'ordre de grandeur (documentation publique des projets), **non mesuré
 - Nouvelle famille d'**hôte de VM** (création, pont, DNAT, filtrage, sonde « VM en marche ») sur
   l'entrée canonique de l'hôte — rôle à écrire (`<famille>-install/-remove/-purge/-security/-monitoring`).
 - La VM : entrée du parc ordinaire, `setup-server.yml --limit <vm>` puis l'entrée dédiée de la passerelle
-  y pointe (`ansible_host` + ports). Aucun rôle de la passerelle ne change : ils ne contiennent ni
-  adresse ni chemin de machine (vérifié par `scripts/ffg_isolation_check.py`).
+  y pointe (`ansible_host` + ports). Aucun rôle ne change (famille `webapp`, profil `webapp_hardening`) :
+  ils ne contiennent ni adresse ni chemin de machine (vérifié par `scripts/webapp_hardening_check.py`).
 - gVisor : rôle d'installation de `runsc` sur l'hôte (dépôt APT officiel), `runtime: runsc` dans le
   compose durci de l'app, contrôle `docker inspect … .HostConfig.Runtime` dans `tasks/runtime.yml`.
 
@@ -122,12 +122,13 @@ Chiffres d'ordre de grandeur (documentation publique des projets), **non mesuré
 ### Séquence de migration depuis le déploiement sur l'hôte
 
 1. Créer la VM (ou la machine), `setup-server.yml --limit <vm>` ; inscrire ses ports au registre.
-2. `remove-fleetforge-gateway.yml` sur l'emplacement ACTUEL (avant de changer l'adresse) — les volumes
-   restent ; exporter la base (`pg_dump`) si elle porte déjà des credentials/audit.
+2. `remove-webapp.yml -e webapp=fleetforge-gateway` sur l'emplacement ACTUEL (avant de changer l'adresse) —
+   les volumes restent ; exporter la base (`pg_dump`) si elle porte déjà des credentials/audit.
 3. Changer l'entrée dédiée : `ansible_host` (+ `ansible_port`, `monitor_port`, `svcprobe_port` derrière
    le NAT de l'hôte), `provider`, `access_local_cidrs` (pont de la VM, ou vide sur une autre machine),
-   `ffg_docker_subnet` si besoin.
-4. `deploy-fleetforge-gateway.yml` (garde, pare-feu, vhost, app, durcissement, supervision) ; restaurer
+   `webapp_hardening.docker_subnet` si besoin.
+4. `deploy-fleetforge.yml -e ff_deploy_scope=gateway` (garde, pare-feu, vhost, app, durcissement,
+   supervision) ; restaurer
    la base ; vérifier les sondes `upstream_<id>` et `service_up`.
 5. `deploy-fleetforge.yml -e ff_deploy_scope=fleetforge --tags proxy-conf` (vhost de FleetForge :
    nouvelle adresse dans `access_linked`), puis `purge` des restes sur l'hôte.
@@ -135,6 +136,6 @@ Chiffres d'ordre de grandeur (documentation publique des projets), **non mesuré
 ### Condition de bascule vers E2/E3 (OAuth public)
 
 Aucune exposition publique tant que la passerelle partage le **noyau** du nœud de contrôle. Préalables :
-passerelle sur une autre machine ou dans une VM matérielle (pas gVisor seul) ; `ffg_mcp_allow_whitelist:
-false` ; revue du lot 4 (OAuth) et de l'E2 ; plages d'adresses du consommateur vérifiées ; revue Opus
+passerelle sur une autre machine ou dans une VM matérielle (pas gVisor seul) ; `whitelist: false` dans
+l'`access` de `/mcp` ; revue du lot 4 (OAuth) et de l'E2 ; plages d'adresses du consommateur vérifiées ; revue Opus
 indépendante du réseau de la VM (§ 4, « Rien d'autre »).
