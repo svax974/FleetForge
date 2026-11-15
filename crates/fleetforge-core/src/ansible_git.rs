@@ -110,25 +110,33 @@ pub fn parse_commit(spec: &str) -> Result<CommitSpec> {
 /// Longest commit subject rendered, in characters.
 pub const SUBJECT_MAX_CHARS: usize = 200;
 
-/// Characters that reorder or hide text without being `char::is_control`
-/// (bidirectional overrides and isolates, zero-width characters, BOM): a
+/// Characters a subject does NOT keep — the complement of a whitelist:
+/// letters, digits, punctuation, symbols (Unicode L*, N*, P*, S*) and the
+/// space U+0020, minus the Hangul fillers (letters that render as nothing).
+/// Controls, format characters (bidi, zero-width, Unicode tags: invisible
+/// text a model would read), marks (variation selectors), separators other
+/// than U+0020, private use and unassigned code points are all replaced: a
 /// subject shown for an approval must read as what it is.
-fn is_invisible_format(c: char) -> bool {
-    matches!(c, '\u{061C}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{FEFF}')
+fn unsafe_in_subject() -> &'static regex::Regex {
+    static R: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    R.get_or_init(|| {
+        regex::Regex::new(r"[^\p{L}\p{N}\p{P}\p{S} ]|[\x{115F}\x{1160}\x{3164}\x{FFA0}]").expect("valid pattern")
+    })
 }
 
-/// Subject of a raw commit object (`git cat-file commit`): the first
-/// non-blank line of its message, each control or invisible formatting
-/// character replaced by a space, trimmed, at most [`SUBJECT_MAX_CHARS`]
-/// characters. Empty when the object has no message.
+/// One message line, cleaned: each character outside the whitelist replaced
+/// by a space, trimmed, at most [`SUBJECT_MAX_CHARS`] characters.
+fn clean_subject(line: &str) -> String {
+    let clean = unsafe_in_subject().replace_all(line, " ");
+    clean.trim().chars().take(SUBJECT_MAX_CHARS).collect::<String>().trim_end().to_string()
+}
+
+/// Subject of a raw commit object (`git cat-file commit`): the first line
+/// of its message that is not empty ONCE CLEANED ([`clean_subject`]). Empty
+/// when the object has no such line.
 pub fn subject_line(raw_commit: &str) -> String {
     let Some((_, message)) = raw_commit.split_once("\n\n") else { return String::new() };
-    let Some(first) = message.split('\n').find(|l| !l.trim().is_empty()) else { return String::new() };
-    let clean: String = first
-        .chars()
-        .map(|c| if c.is_control() || is_invisible_format(c) { ' ' } else { c })
-        .collect();
-    clean.trim().chars().take(SUBJECT_MAX_CHARS).collect::<String>().trim_end().to_string()
+    message.split('\n').map(clean_subject).find(|l| !l.is_empty()).unwrap_or_default()
 }
 
 /// Nom de branche suivie : segments `[A-Za-z0-9._-]` séparés par `/`, sans
@@ -1025,6 +1033,15 @@ mod tests {
         assert_eq!(subject_line(&raw("a\u{1b}[31mred\tb\r\n")), "a [31mred b", "controls replaced, CR included");
         assert_eq!(subject_line(&raw("x\u{202e}cba\u{200b}y\u{2066}z\u{feff}\u{85}w")), "x cba y z  w", "bidi, zero-width, BOM, C1");
         assert_eq!(subject_line(&raw("éàü 日本 ✓\n")), "éàü 日本 ✓", "UTF-8 kept");
+        // Whitelist: letters, digits, punctuation, symbols and U+0020 only.
+        assert_eq!(subject_line(&raw("a\u{E0049}\u{E0047}\u{E004E}b")), "a   b", "Unicode tags (invisible text)");
+        assert_eq!(subject_line(&raw("a\u{2028}b\u{2029}c")), "a b c", "line and paragraph separators");
+        assert_eq!(subject_line(&raw("soft\u{00AD}hyphen\u{180E}mvs")), "soft hyphen mvs");
+        assert_eq!(subject_line(&raw("emoji\u{FE0F}vs\u{E0100}x")), "emoji vs x", "variation selectors");
+        assert_eq!(subject_line(&raw("h\u{3164}f\u{115F}g\u{1160}k\u{FFA0}z")), "h f g k z", "Hangul fillers");
+        assert_eq!(subject_line(&raw("i\u{FFF9}a\u{FFFA}b\u{FFFB}")), "i a b", "interlinear annotations");
+        assert_eq!(subject_line(&raw("nb\u{00A0}sp\u{3000}x")), "nb sp x", "other spaces");
+        assert_eq!(subject_line(&raw("\u{200B}\u{2028}\nReal subject\n")), "Real subject", "a line of invisible characters is skipped");
         assert_eq!(subject_line(&raw("bad \u{fffd} byte")), "bad \u{fffd} byte", "lossy decoding stays valid UTF-8");
         let long = "é".repeat(500);
         let subject = subject_line(&raw(&long));
