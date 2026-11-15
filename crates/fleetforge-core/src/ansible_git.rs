@@ -107,6 +107,30 @@ pub fn parse_commit(spec: &str) -> Result<CommitSpec> {
     Ok(CommitSpec::Sha(spec.to_ascii_lowercase()))
 }
 
+/// Longest commit subject rendered, in characters.
+pub const SUBJECT_MAX_CHARS: usize = 200;
+
+/// Characters that reorder or hide text without being `char::is_control`
+/// (bidirectional overrides and isolates, zero-width characters, BOM): a
+/// subject shown for an approval must read as what it is.
+fn is_invisible_format(c: char) -> bool {
+    matches!(c, '\u{061C}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{FEFF}')
+}
+
+/// Subject of a raw commit object (`git cat-file commit`): the first
+/// non-blank line of its message, each control or invisible formatting
+/// character replaced by a space, trimmed, at most [`SUBJECT_MAX_CHARS`]
+/// characters. Empty when the object has no message.
+pub fn subject_line(raw_commit: &str) -> String {
+    let Some((_, message)) = raw_commit.split_once("\n\n") else { return String::new() };
+    let Some(first) = message.split('\n').find(|l| !l.trim().is_empty()) else { return String::new() };
+    let clean: String = first
+        .chars()
+        .map(|c| if c.is_control() || is_invisible_format(c) { ' ' } else { c })
+        .collect();
+    clean.trim().chars().take(SUBJECT_MAX_CHARS).collect::<String>().trim_end().to_string()
+}
+
 /// Nom de branche suivie : segments `[A-Za-z0-9._-]` séparés par `/`, sans
 /// `..`, sans segment vide ni commençant par `.` ou `-`, sans `.lock` final.
 pub fn validate_branch_name(name: &str) -> Result<()> {
@@ -362,6 +386,20 @@ impl GitTree {
             synced_at: self.synced_at(),
             commits_cached: self.cached().len(),
         })
+    }
+
+    /// Subject of a commit already resolved ([`subject_line`]), read from the
+    /// raw object by `git cat-file commit` — no hook, no pager, no textconv,
+    /// no network, nothing of the tree executed. Empty when `sha` is not a
+    /// full lowercase sha or git cannot read it: never an error.
+    pub fn commit_subject(&self, sha: &str) -> String {
+        if parse_commit(sha).ok() != Some(CommitSpec::Sha(sha.to_string())) {
+            return String::new();
+        }
+        match self.run(&["cat-file", "commit", sha], false, LOCAL_TIMEOUT) {
+            Ok(got) if got.success() => subject_line(&got.stdout),
+            _ => String::new(),
+        }
     }
 
     fn has_commit(&self, sha: &str) -> Result<bool> {
@@ -976,6 +1014,38 @@ mod tests {
             "0123456789abcdef0123456789abcdef01234567 ", "a..b", "0123456789abcdef0123456789abcdef0123456\n",
         ] {
             assert!(parse_commit(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_subject_is_one_bounded_clean_line() {
+        let raw = |message: &str| format!("tree 0123\nparent 4567\nauthor t <t@example.org> 1 +0000\n\n{message}");
+        assert_eq!(subject_line(&raw("Fix the proxy\n\nBody line\nmore\n")), "Fix the proxy");
+        assert_eq!(subject_line(&raw("\n\n  Leading blank lines skipped  \nsecond\n")), "Leading blank lines skipped");
+        assert_eq!(subject_line(&raw("a\u{1b}[31mred\tb\r\n")), "a [31mred b", "controls replaced, CR included");
+        assert_eq!(subject_line(&raw("x\u{202e}cba\u{200b}y\u{2066}z\u{feff}\u{85}w")), "x cba y z  w", "bidi, zero-width, BOM, C1");
+        assert_eq!(subject_line(&raw("éàü 日本 ✓\n")), "éàü 日本 ✓", "UTF-8 kept");
+        assert_eq!(subject_line(&raw("bad \u{fffd} byte")), "bad \u{fffd} byte", "lossy decoding stays valid UTF-8");
+        let long = "é".repeat(500);
+        let subject = subject_line(&raw(&long));
+        assert_eq!(subject.chars().count(), SUBJECT_MAX_CHARS);
+        assert!(long.starts_with(&subject));
+        assert_eq!(subject_line(&raw(&format!("{} tail", "a".repeat(199)))).len(), 199, "no trailing space at the cut");
+        // A signed commit: the signature is a header, never the subject.
+        let signed = "tree 0123\ngpgsig -----BEGIN PGP SIGNATURE-----\n \n abc\n -----END PGP SIGNATURE-----\n\nSigned subject\n";
+        assert_eq!(subject_line(signed), "Signed subject");
+        for empty in ["", "tree 0123\n", &raw(""), &raw("\n\n   \n")] {
+            assert_eq!(subject_line(empty), "", "{empty:?}");
+        }
+    }
+
+    #[test]
+    fn a_commit_subject_is_read_from_the_clone_and_never_fails() {
+        let fx = Fixture::new("subject");
+        let head = fx.tree.head().unwrap();
+        assert_eq!(fx.tree.commit_subject(&head), "first");
+        for bad in [head.to_ascii_uppercase(), "0".repeat(40), "HEAD".to_string(), "--help".to_string(), String::new()] {
+            assert_eq!(fx.tree.commit_subject(&bad), "", "{bad:?}");
         }
     }
 

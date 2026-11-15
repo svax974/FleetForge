@@ -120,6 +120,13 @@ pub struct TreeStatus {
 #[derive(Debug, Clone, Serialize)]
 pub struct DescribeAnswer {
     pub commit: Option<String>,
+    /// Name of the file RESOLVED and described (symlinks followed, inside
+    /// `playbooks/`): an alias is described, and named, as its target.
+    pub playbook: String,
+    /// First line of the message of `commit`, bounded and without control
+    /// characters ([`ansible_git::subject_line`]); empty without a commit
+    /// (rsync tree) or when git cannot read it.
+    pub commit_subject: String,
     #[serde(flatten)]
     pub description: ansible_describe::Description,
 }
@@ -1131,20 +1138,44 @@ impl Core {
         let parc = self.parc_by_name(parc)?;
         let view = self.tree_view(Some(&parc.name), commit)?;
         let resolved = automation::resolve_playbook(&view.playbooks_str(), playbook)?;
-        let description = ansible_describe::describe(&self.tree_reader(&view)?, &automation::playbook_name(&resolved))?;
-        Ok(DescribeAnswer { commit: view.commit.clone(), description })
+        let name = automation::playbook_name(&resolved);
+        let description = ansible_describe::describe(&self.tree_reader(&view)?, &name)?;
+        let commit_subject = match (self.git.get(), view.commit.as_deref()) {
+            (Some(git), Some(sha)) => git.commit_subject(sha),
+            _ => String::new(),
+        };
+        Ok(DescribeAnswer { commit: view.commit.clone(), playbook: name, commit_subject, description })
     }
 
     /// Le playbook et ceux qu'il importe (`import_playbook`, transitivement),
     /// par nom de fichier : de quoi appliquer `deny_playbooks` à ce qu'un
     /// playbook inoffensif ferait jouer par ricochet.
+    ///
+    /// The playbook is named after its RESOLVED file; each import both as
+    /// written and as resolved (an import of `harmless.yml`, a link to a
+    /// denied playbook, is judged on the target too). An import that does not
+    /// resolve to a readable file inside `playbooks/` is refused: what Ansible
+    /// would run there has no name to judge.
     pub fn playbook_chain(&self, parc: &str, playbook: &str, commit: Option<&str>) -> Result<Vec<String>> {
         let parc = self.parc_by_name(parc)?;
         let view = self.tree_view(Some(&parc.name), commit)?;
         let resolved = automation::resolve_playbook(&view.playbooks_str(), playbook)?;
         let name = automation::playbook_name(&resolved);
+        let reader = self.tree_reader(&view)?;
         let mut chain = vec![name.clone()];
-        chain.extend(ansible_describe::imported_playbooks(&self.tree_reader(&view)?, &name));
+        for import in ansible_describe::imported_playbooks(&reader, &name) {
+            let Some(real) = reader.real_name(std::path::Path::new(&import)) else {
+                return fault::fail(
+                    FaultKind::ForbiddenPlaybook,
+                    format!("import_playbook {import} : absent ou hors de l'arbre playbooks/, son nom réel ne peut être jugé"),
+                );
+            };
+            for n in [import, real] {
+                if !chain.contains(&n) {
+                    chain.push(n);
+                }
+            }
+        }
         Ok(chain)
     }
 

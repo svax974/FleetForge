@@ -1139,6 +1139,78 @@ async fn the_tree_tools_read_code_only_on_an_rsync_tree() {
     assert!(failed || error["code"].is_string() || error.is_object(), "{error}");
 }
 
+/// Aliases (symlinks) of playbooks and imports: `describe_playbook` names what
+/// FleetForge would really run, so that a gateway judges the RESOLVED names.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn describe_playbook_names_the_resolved_playbook_and_imports() {
+    use std::os::unix::fs::symlink;
+    let (am_port, _) = fake_alertmanager().await;
+    let server = start_with(am_port, |root| {
+        let ansible = root.join("ansible");
+        write_tree_fixture(&ansible);
+        let playbooks = ansible.join("playbooks");
+        symlink("deploy-tagged.yml", playbooks.join("tagged-alias.yml")).unwrap();
+        symlink("nothing.yml", playbooks.join("dangling.yml")).unwrap();
+        write(&ansible.join("outside/elsewhere.yml"), "---\n- hosts: all\n  tasks: []\n");
+        symlink("../outside/elsewhere.yml", playbooks.join("outside-alias.yml")).unwrap();
+        write(&playbooks.join("deploy-via-alias.yml"), "---\n- import_playbook: tagged-alias.yml\n");
+        write(&playbooks.join("deploy-via-outside.yml"), "---\n- import_playbook: outside-alias.yml\n");
+        write(&playbooks.join("deploy-via-missing.yml"), "---\n- import_playbook: nothing-here.yml\n");
+        vec![]
+    })
+    .await;
+    let api = Api { http: Client::new(), server: &server };
+    let describe = |playbook: &str| api.agent("describe_playbook", json!({ "parc": "web3c", "playbook": playbook }));
+
+    // A plain playbook: every former field unchanged, plus the new ones.
+    let (status, plain) = describe("deploy-tagged.yml").await;
+    assert_eq!(status, StatusCode::OK, "{plain}");
+    let mut keys: Vec<&str> = plain.as_object().unwrap().keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        ["commit", "commit_subject", "imports", "imports_resolved", "needs_no_limit", "notes", "playbook", "plays", "tags", "vars"],
+        "{plain}"
+    );
+    assert_eq!(
+        (plain["playbook"].clone(), plain["commit"].clone(), plain["commit_subject"].clone()),
+        (json!("deploy-tagged.yml"), Value::Null, json!("")),
+        "rsync tree: no commit, empty subject"
+    );
+    assert_eq!((plain["imports"].clone(), plain["imports_resolved"].clone()), (json!([]), json!([])));
+
+    // An alias is described as its target, under the target's name.
+    let (status, alias) = describe("tagged-alias.yml").await;
+    assert_eq!(status, StatusCode::OK, "{alias}");
+    assert_eq!(alias, plain, "same description, resolved name included");
+    let (_, prefixed) = describe("playbooks/tagged-alias.yml").await;
+    assert_eq!(prefixed["playbook"], json!("deploy-tagged.yml"));
+
+    // Links leaving the tree, or pointing at nothing: refused as before.
+    for bad in ["outside-alias.yml", "dangling.yml", "leak.yml"] {
+        let (status, answer) = describe(bad).await;
+        assert_eq!((status, code(&answer)), (StatusCode::NOT_FOUND, "unknown_playbook"), "{bad} → {answer}");
+    }
+
+    // Imports: the name as written, and the name resolved (null when it does not resolve inside the tree).
+    let (_, via) = describe("deploy-via-alias.yml").await;
+    assert_eq!((via["imports"].clone(), via["imports_resolved"].clone()), (json!(["tagged-alias.yml"]), json!(["deploy-tagged.yml"])), "{via}");
+    assert_eq!(via["playbook"], json!("deploy-via-alias.yml"));
+    let (_, outside) = describe("deploy-via-outside.yml").await;
+    assert_eq!((outside["imports"].clone(), outside["imports_resolved"].clone()), (json!(["outside-alias.yml"]), json!([null])), "{outside}");
+    assert!(!outside["notes"].as_array().unwrap().is_empty(), "an unreadable import is noted: {outside}");
+    let (_, absent) = describe("deploy-via-missing.yml").await;
+    assert_eq!(absent["imports_resolved"], json!([null]), "import of a missing file: {absent}");
+    let (_, present) = describe("deploy-importer.yml").await;
+    assert_eq!(present["imports_resolved"], json!(["update-security-ssh.yml"]), "a plain import: {present}");
+
+    // The same answer through MCP.
+    let (failed, by_mcp) = api.tool(AGENTHUB, "describe_playbook", json!({ "parc": "web3c", "playbook": "tagged-alias.yml" })).await;
+    assert!(!failed, "{by_mcp}");
+    assert_eq!((by_mcp["playbook"].clone(), by_mcp["imports_resolved"].clone()), (json!("deploy-tagged.yml"), json!([])), "{by_mcp}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn tags_skip_tags_and_no_limit_belong_to_the_check_gate() {
     let (am_port, _) = fake_alertmanager().await;
@@ -1233,6 +1305,18 @@ async fn deny_playbooks_and_max_hosts_bound_an_account() {
     let server = start_with(am_port, |root| {
         write_tree_fixture(&root.join("ansible"));
         write(&root.join("ansible/playbooks/deploy-fleetforge.yml"), "---\n- hosts: all\n  tasks: []\n");
+        // Aliases of a denied playbook, directly and through an import; an
+        // import whose real target leaves the tree (its name cannot be judged).
+        #[cfg(unix)]
+        {
+            let playbooks = root.join("ansible/playbooks");
+            std::os::unix::fs::symlink("deploy-fleetforge.yml", playbooks.join("ff-alias.yml")).unwrap();
+            std::os::unix::fs::symlink("deploy-fleetforge.yml", playbooks.join("harmless.yml")).unwrap();
+            write(&playbooks.join("deploy-innocent.yml"), "---\n- import_playbook: harmless.yml\n");
+            write(&root.join("ansible/outside/elsewhere.yml"), "---\n- hosts: all\n  tasks: []\n");
+            std::os::unix::fs::symlink("../outside/elsewhere.yml", playbooks.join("outside-alias.yml")).unwrap();
+            write(&playbooks.join("deploy-sneaky.yml"), "---\n- import_playbook: outside-alias.yml\n");
+        }
         let file = accounts_file(root, accounts);
         vec![("FLEETFORGE_API_ACCOUNTS_FILE".into(), file.display().to_string())]
     })
@@ -1249,6 +1333,14 @@ async fn deny_playbooks_and_max_hosts_bound_an_account() {
         let (status, answer) = api.call(DENIED_RUNNER, "run_ansible_playbook", run(playbook, json!({ "limit": ["proxy1"] }))).await;
         assert_eq!((status, code(&answer)), (StatusCode::FORBIDDEN, "forbidden_playbook"), "{playbook} → {answer}");
     }
+    // Judged on RESOLVED names: an alias of a denied playbook, the same
+    // through an import, and an import whose real target cannot be named.
+    #[cfg(unix)]
+    for playbook in ["ff-alias.yml", "deploy-innocent.yml", "deploy-sneaky.yml"] {
+        let (status, answer) = api.call(DENIED_RUNNER, "run_ansible_playbook", run(playbook, json!({ "limit": ["proxy1"] }))).await;
+        assert_eq!((status, code(&answer)), (StatusCode::FORBIDDEN, "forbidden_playbook"), "{playbook} → {answer}");
+    }
+    assert!(api.stub_log().is_empty(), "no refusal reaches ansible-playbook: {}", api.stub_log());
     // Le compte hérité (sans borne) peut les lancer.
     let (status, _) = api.agent("run_ansible_playbook", run("update-security-ssh.yml", json!({ "limit": ["proxy1"] }))).await;
     assert_eq!(status, StatusCode::OK);
@@ -1433,6 +1525,7 @@ async fn a_git_tree_runs_one_precise_commit() {
     assert_eq!((status, code(&answer)), (StatusCode::FORBIDDEN, "path_refused"));
     let (_, d) = api.agent("describe_playbook", json!({ "parc": "web3c", "playbook": "deploy-demo.yml" })).await;
     assert_eq!((d["commit"].clone(), d["tags"].clone()), (json!(c1), json!(["one"])), "{d}");
+    assert_eq!((d["commit_subject"].clone(), d["playbook"].clone()), (json!("first"), json!("deploy-demo.yml")), "{d}");
 
     // ── Un run part d'un commit précis, consigné au registre ──────────────
     let (status, started) = api.agent("run_ansible_playbook", launch(json!({ "check": true }))).await;
@@ -1450,7 +1543,8 @@ async fn a_git_tree_runs_one_precise_commit() {
 
     // ── Un correctif arrive : la synchronisation avance la tête ───────────
     write(&origin.join("Ansible/playbooks/roles/demo-install/tasks/main.yml"), "---\n- name: A\n  debug: msg=two\n  tags: [two]\n");
-    git(&origin, &["commit", "-q", "-am", "second"]);
+    // Several lines, an escape sequence, a tab, a bidi override, non-ASCII text.
+    git(&origin, &["commit", "-q", "-am", "second: été\u{1b}[31m red\tx \u{202e}cba\n\nbody line"]);
     let c2 = git(&origin, &["rev-parse", "HEAD"]);
     let (status, synced) = api.agent("sync_tree", json!({ "parc": "web3c" })).await;
     assert_eq!(status, StatusCode::OK, "{synced}");
@@ -1479,7 +1573,10 @@ async fn a_git_tree_runs_one_precise_commit() {
     assert!(old_file["content"].as_str().unwrap().contains("one") && new_file["content"].as_str().unwrap().contains("two"));
     assert_eq!((old_file["commit"].clone(), new_file["commit"].clone()), (json!(c1), json!(c2)));
     let (_, d) = api.agent("describe_playbook", json!({ "parc": "web3c", "playbook": "deploy-demo.yml", "commit": c1 })).await;
-    assert_eq!(d["tags"], json!(["one"]));
+    assert_eq!((d["tags"].clone(), d["commit_subject"].clone()), (json!(["one"]), json!("first")));
+    // The subject of the commit DESCRIBED (here the head), first line only, controls replaced.
+    let (_, d) = api.agent("describe_playbook", json!({ "parc": "web3c", "playbook": "deploy-demo.yml" })).await;
+    assert_eq!((d["commit"].clone(), d["commit_subject"].clone()), (json!(c2), json!("second: été [31m red x  cba")), "{d}");
 
     // ── Refus : références, commits, grammaire ────────────────────────────
     for reference in ["dev", "origin/main", "refs/heads/main", "infra/papanglabs/x", "infra/web3c/a/b", "--upload-pack=id"] {
@@ -1512,7 +1609,8 @@ async fn a_git_tree_runs_one_precise_commit() {
     // ── Une branche de correctif du hub : récupérée, contrôlée, jamais suivie ─
     git(&origin, &["checkout", "-q", "-b", "infra/web3c/fix1", &c2]);
     write(&origin.join("Ansible/playbooks/roles/demo-install/tasks/main.yml"), "---\n- name: A\n  debug: msg=three\n  tags: [three]\n");
-    git(&origin, &["commit", "-q", "-am", "fix"]);
+    let long_subject = format!("fix {}", "é".repeat(300));
+    git(&origin, &["commit", "-q", "-am", &long_subject]);
     let fix = git(&origin, &["rev-parse", "HEAD"]);
     git(&origin, &["checkout", "-q", "main"]);
     let (status, synced) = api.agent("sync_tree", json!({ "parc": "web3c", "ref": "infra/web3c/fix1" })).await;
@@ -1524,6 +1622,9 @@ async fn a_git_tree_runs_one_precise_commit() {
     assert!(api.stub_log().contains("--syntax-check"));
     let (_, d) = api.agent("describe_playbook", json!({ "parc": "web3c", "playbook": "deploy-demo.yml", "commit": fix })).await;
     assert_eq!(d["tags"], json!(["three"]));
+    let subject = d["commit_subject"].as_str().unwrap();
+    assert_eq!(subject.chars().count(), 200, "bounded: {subject}");
+    assert!(long_subject.starts_with(subject), "{subject}");
     let (status, checked) = api.agent("run_ansible_playbook", launch(json!({ "check": true, "commit": fix }))).await;
     assert_eq!(status, StatusCode::OK, "{checked}");
     assert_eq!(api.wait_run(checked["run_id"].as_str().unwrap()).await["commit"], json!(fix));

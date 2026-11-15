@@ -576,7 +576,9 @@ fn redacted(value: serde_json::Value) -> serde_json::Value {
 }
 
 /// `{ parc, playbook, commit? }` → plays, étiquettes, variables attendues,
-/// `needs_no_limit` (voir `fleetforge_core::ansible_describe`).
+/// `needs_no_limit` (voir `fleetforge_core::ansible_describe`), plus the
+/// RESOLVED names (`playbook`, `imports_resolved`) and `commit_subject` —
+/// all redacted like the rest, `commit` excepted.
 async fn describe_playbook(state: &AppState, scope: &Scope, p: &Params) -> ApiResult {
     let parc: String = p.get("parc")?;
     within(scope, &parc)?;

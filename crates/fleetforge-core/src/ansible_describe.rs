@@ -66,6 +66,11 @@ pub struct Description {
     pub imports: Vec<String>,
     /// Ce que l'analyse n'a pas pu résoudre.
     pub notes: Vec<String>,
+    /// For each entry of `imports`, same index: the RESOLVED name of the file
+    /// Ansible would read (symlinks followed, relative to `playbooks/`), or
+    /// `null` when it does not resolve to a readable file inside the tree
+    /// (absent, link leaving `playbooks/`, refused).
+    pub imports_resolved: Vec<Option<String>>,
 }
 
 #[derive(Default, Clone)]
@@ -721,6 +726,7 @@ pub fn describe(reader: &TreeReader, playbook: &str) -> Result<Description> {
         .cloned()
         .collect();
     let needs = needs_no_limit(&plays);
+    let imports_resolved = walker.imports.iter().map(|i| reader.real_name(Path::new(i))).collect();
     Ok(Description {
         plays: plays.into_iter().map(|(p, _, _)| p).collect(),
         tags: all.tags.into_iter().collect(),
@@ -728,6 +734,7 @@ pub fn describe(reader: &TreeReader, playbook: &str) -> Result<Description> {
         needs_no_limit: needs,
         imports: walker.imports,
         notes: walker.notes.into_iter().collect(),
+        imports_resolved,
     })
 }
 
@@ -904,6 +911,35 @@ mod tests {
             assert!(!d.vars.contains(&unexpected.to_string()), "{unexpected} en trop : {:?}", d.vars);
         }
         assert!(d.notes.iter().any(|n| n.contains("include_role non résolu")), "{:?}", d.notes);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn imports_are_also_named_by_their_resolved_target() {
+        use std::os::unix::fs::symlink;
+        let (root, reader) = fixture("resolved-imports");
+        symlink("deploy-sub.yml", root.join("playbooks/sub-alias.yml")).unwrap();
+        write(&root, "outside/away.yml", "---\n- hosts: away\n  tasks: []\n");
+        symlink("../outside/away.yml", root.join("playbooks/away-alias.yml")).unwrap();
+        write(&root, "playbooks/chained.yml", "\
+---
+- import_playbook: sub-alias.yml
+- import_playbook: deploy-sub.yml
+- import_playbook: away-alias.yml
+- import_playbook: missing.yml
+");
+        let d = describe(&reader, "chained.yml").unwrap();
+        assert_eq!(d.imports, ["sub-alias.yml", "deploy-sub.yml", "away-alias.yml", "missing.yml"]);
+        assert_eq!(
+            d.imports_resolved,
+            [Some("deploy-sub.yml".to_string()), Some("deploy-sub.yml".to_string()), None, None],
+            "same index as imports; null when it does not resolve inside the tree"
+        );
+        assert!(d.plays.iter().all(|p| p.hosts != "away"), "nothing read outside the tree: {:?}", d.plays);
+
+        // A playbook without links: imports_resolved repeats imports.
+        let plain = describe(&reader, "deploy-demo.yml").unwrap();
+        assert_eq!(plain.imports_resolved, [Some("deploy-sub.yml".to_string())]);
     }
 
     #[test]

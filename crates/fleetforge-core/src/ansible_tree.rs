@@ -311,6 +311,35 @@ impl TreeReader {
         String::from_utf8(std::fs::read(real).ok()?).ok().filter(|t| !t.contains('\0'))
     }
 
+    /// Name RESOLVED of a file of the tree: its real path (symlinks and `..`
+    /// followed), relative to `playbooks/` (`deploy-x.yml`, `sub/x.yml`).
+    /// `None` when it does not exist, is not a file, leaves `playbooks/` or is
+    /// refused like `read` refuses it — the caller never gets a name it could
+    /// not have read.
+    pub fn real_name(&self, relative_to_playbooks: &Path) -> Option<String> {
+        let candidate = relative_to_playbooks
+            .components()
+            .try_fold(self.playbooks.clone(), |p, c| match c {
+                Component::Normal(n) => Some(p.join(n)),
+                Component::CurDir => Some(p),
+                _ => None,
+            })?;
+        let real = candidate.canonicalize().ok()?;
+        self.check_real(&real, "").ok()?;
+        if !real.is_file() {
+            return None;
+        }
+        let relative = real.strip_prefix(&self.playbooks).ok()?;
+        let parts: Option<Vec<&str>> = relative
+            .components()
+            .map(|c| match c {
+                Component::Normal(n) => n.to_str(),
+                _ => None,
+            })
+            .collect();
+        parts.filter(|p| !p.is_empty()).map(|p| p.join("/"))
+    }
+
     /// NOMS des variables que les group_vars / host_vars de l'arbre déclarent
     /// (clés de premier niveau) — jamais leurs valeurs, qui ne sortent pas de
     /// ce module. Un fichier chiffré en entier n'en donne aucun.
@@ -556,6 +585,26 @@ mod tests {
         assert_eq!(names, ["tasks", "vars"], "`vars/` est listé, son fichier vault non");
         let TreeRead::Dir { entries, .. } = reader.read("roles/vaulted/vars").unwrap() else { panic!() };
         assert!(entries.is_empty(), "le fichier vault est omis");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_resolved_name_is_the_real_target_inside_the_tree() {
+        let (root, reader) = fixture("real-name");
+        let name = |p: &str| reader.real_name(Path::new(p));
+        assert_eq!(name("deploy-x.yml").as_deref(), Some("deploy-x.yml"));
+        assert_eq!(name("alias.yml").as_deref(), Some("deploy-x.yml"), "a link is named after its target");
+        assert_eq!(name("./alias.yml").as_deref(), Some("deploy-x.yml"));
+        assert_eq!(name("roles/x-install/tasks/main.yml").as_deref(), Some("roles/x-install/tasks/main.yml"));
+        std::os::unix::fs::symlink("roles/x-install/tasks/main.yml", root.join("playbooks/deep-alias.yml")).unwrap();
+        assert_eq!(name("deep-alias.yml").as_deref(), Some("roles/x-install/tasks/main.yml"));
+        for bad in [
+            "abs-link", "rel-link", "roles/x-install/files/to-gv", "inv-dir/web3c_inventory.yml", "nothing.yml",
+            "roles", "group_vars/web3c.yml", ".hidden.yml", "roles/vaulted/vars/main.yml", "roles/x-install/files/app.json",
+            "../inventories/web3c_inventory.yml", "/etc/hosts", "",
+        ] {
+            assert_eq!(name(bad), None, "{bad}");
+        }
     }
 
     #[test]
