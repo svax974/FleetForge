@@ -65,6 +65,14 @@ fn the_gateway_stays_isolated_from_the_control_node() {
     let scripts = ansible_dir().join("scripts");
     let (ok, out) = run(&python, &scripts.join("test_webapp_hardening_check.py"), &[]);
     assert!(ok, "tests du contrôle d'isolation :\n{out}");
+    // Un test Python SAUTÉ (docker, ansible-playbook, awk absents) n'a rien prouvé : échec, sauf choix explicite.
+    let skipped = out.lines().any(|l| l.contains("skipped=") || l.trim_end().ends_with("skipped"));
+    if skipped && std::env::var("FLEETFORGE_ANSIBLE_TESTS").as_deref() != Ok("skip") {
+        panic!(
+            "tests du contrôle d'isolation SAUTÉS (docker, ansible-playbook ou awk absents) :\n{out}\n\
+             installer les outils, ou, en connaissance de cause, FLEETFORGE_ANSIBLE_TESTS=skip"
+        );
+    }
     let (ok, out) = run(
         &python,
         &scripts.join("webapp_hardening_check.py"),
