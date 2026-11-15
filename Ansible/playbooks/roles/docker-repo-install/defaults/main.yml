@@ -21,4 +21,4 @@ docker_repo_keep_tags: 15
 docker_repo_prune_hour: 4
 
 # Répertoire des métriques du collecteur textfile de node_exporter (voir exporter-sys-install).
-docker_repo_textfile_dir: "{{ node_exporter_textfile_dir | default('/var/lib/node_exporter/textfile') }}"
+docker_repo_textfile_dir: "{{ node_exporter_textfile_dir | default('/var/lib/node_exporter/textfile_collector') }}"

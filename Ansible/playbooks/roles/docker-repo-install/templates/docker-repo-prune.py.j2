@@ -13,8 +13,11 @@ URL = "http://127.0.0.1:{{ docker_repo_port }}"
 KEEP = {{ docker_repo_keep_tags }}
 CRED = open("{{ docker_repo_dir }}/auth/prune.cred").read().strip()
 AUTH = "Basic " + base64.b64encode(CRED.encode()).decode()
+# Une image construite par buildx est un INDEX (manifeste + attestations) : sans ces types le registre répond 404.
 ACCEPT = ("application/vnd.docker.distribution.manifest.v2+json,"
-          "application/vnd.oci.image.manifest.v1+json")
+          "application/vnd.oci.image.manifest.v1+json,"
+          "application/vnd.oci.image.index.v1+json,"
+          "application/vnd.docker.distribution.manifest.list.v2+json")
 DRY = "--dry-run" in sys.argv
 
 
@@ -41,6 +44,10 @@ def repos():
 def created_of(repo, tag):
     _, headers, body = call("/v2/%s/manifests/%s" % (repo, tag), accept=ACCEPT)
     manifest = json.loads(body)
+    if "manifests" in manifest:  # index : l'image est le premier manifeste qui n'est pas une attestation (unknown/unknown)
+        entry = next(m for m in manifest["manifests"] if (m.get("platform") or {}).get("architecture") not in (None, "unknown"))
+        _, _, body = call("/v2/%s/manifests/%s" % (repo, entry["digest"]), accept=ACCEPT)
+        manifest = json.loads(body)
     _, _, cfg = call("/v2/%s/blobs/%s" % (repo, manifest["config"]["digest"]))
     return json.loads(cfg).get("created", ""), headers.get("Docker-Content-Digest")
 
@@ -69,8 +76,12 @@ for repo in repos():
         pruned += 1
 
 if not DRY:
-    subprocess.run(["docker", "exec", "docker-repo-registry", "registry", "garbage-collect", "--delete-untagged",
-                    "/etc/docker/registry/config.yml"], check=True)
+    # Registre jamais alimenté : pas de dossier `repositories`, et `garbage-collect` échoue (« Path not found ») sans rien à collecter.
+    has_repos = subprocess.run(["docker", "exec", "docker-repo-registry", "test", "-d",
+                                "/var/lib/registry/docker/registry/v2/repositories"]).returncode == 0
+    if has_repos:
+        subprocess.run(["docker", "exec", "docker-repo-registry", "registry", "garbage-collect", "--delete-untagged",
+                        "/etc/docker/registry/config.yml"], check=True)
     with open("{{ docker_repo_textfile_dir }}/docker_repo_prune.prom.tmp", "w") as f:
         f.write("# TYPE docker_repo_prune_last_success_timestamp_seconds gauge\n"
                 "docker_repo_prune_last_success_timestamp_seconds %d\n"
