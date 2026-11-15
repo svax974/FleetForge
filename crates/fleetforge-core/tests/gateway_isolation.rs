@@ -7,11 +7,15 @@
 
 //! Isolation de la passerelle MCP de FleetForge (`Ansible/scripts/ffg_isolation_check.py`) :
 //! ses plays ne visent que `fleetforge_gateways` (jamais `infras`), ses rôles ne créent aucun
-//! conteneur, le vhost rendu limite `/mcp` aux serveurs nommés (+ whitelist de test, retirée
-//! exactement par `ffg_mcp_allow_whitelist: false`) puis `deny all`, et un compose non durci
-//! (socket Docker, chemins de l'hôte, compte, read_only, cap_drop, limites, réseau) est refusé.
-//! Le contrôle est en Python (PyYAML, Jinja2 : ceux d'Ansible) ; sans interpréteur qui les ait,
-//! ce test s'efface en le disant.
+//! conteneur, les proxies admis écartent les adresses VPN, le vhost rendu limite `/mcp` aux
+//! serveurs nommés (+ whitelist de test filtrée, retirée exactement par
+//! `ffg_mcp_allow_whitelist: false`) puis `deny all`, et un compose non durci (montages de
+//! l'hôte, driver_opts, volumes_from, cap_add, unconfined, ports publics, compte, read_only,
+//! cap_drop, limites, réseau, relais à adresse fixe) est refusé — compose piégé de la revue compris.
+//! Le contrôle est en Python (PyYAML, Jinja2 : ceux d'Ansible). PRÉREQUIS : un tel interpréteur
+//! (`FLEETFORGE_ANSIBLE_PYTHON`, celui d'`ansible`, ou `python3`). Sans lui le test ÉCHOUE — un
+//! contrôle de sécurité qui passerait sans rien vérifier serait pire que pas de contrôle ;
+//! `FLEETFORGE_ANSIBLE_TESTS=skip` l'écarte explicitement (machine sans Ansible).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -46,8 +50,15 @@ fn run(python: &str, script: &Path, args: &[&Path]) -> (bool, String) {
 #[test]
 fn the_gateway_stays_isolated_from_the_control_node() {
     let Some(python) = python() else {
-        eprintln!("PyYAML et Jinja2 introuvables (FLEETFORGE_ANSIBLE_PYTHON) : test ignoré");
-        return;
+        if std::env::var("FLEETFORGE_ANSIBLE_TESTS").as_deref() == Ok("skip") {
+            eprintln!("FLEETFORGE_ANSIBLE_TESTS=skip : contrôle d'isolation de la passerelle NON exécuté");
+            return;
+        }
+        panic!(
+            "PyYAML et Jinja2 introuvables : le contrôle d'isolation de la passerelle ne peut pas tourner. \
+             Désigner un Python qui les a (FLEETFORGE_ANSIBLE_PYTHON) ou, en connaissance de cause, \
+             FLEETFORGE_ANSIBLE_TESTS=skip"
+        );
     };
     let scripts = ansible_dir().join("scripts");
     let (ok, out) = run(&python, &scripts.join("test_ffg_isolation_check.py"), &[]);
