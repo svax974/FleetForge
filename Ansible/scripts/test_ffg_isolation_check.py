@@ -14,6 +14,8 @@ import copy
 import importlib.util
 import os
 import re
+import shutil
+import subprocess
 import tempfile
 import textwrap
 import unittest
@@ -29,34 +31,86 @@ SPEC = importlib.util.spec_from_file_location("ffg_isolation_check", os.path.joi
 check = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(check)
 
-HARDENED_SERVICE = {
-    "image": "x_back:latest",
-    "user": "${FFG_RUNTIME_UID}:${FFG_RUNTIME_GID}",
-    "read_only": True,
-    "cap_drop": ["ALL"],
-    "security_opt": ["no-new-privileges:true"],
-    "mem_limit": "512m",
-    "cpus": "1.0",
-    "networks": ["gateway"],
-    "volumes": ["shared_directory:/app/shared"],
-}
 NNP = ["no-new-privileges:true"]
-GOOD_COMPOSE = {
-    "services": {
-        "back": HARDENED_SERVICE,
-        "back-worker": HARDENED_SERVICE,
-        "db": {"image": "postgres:17-alpine", "security_opt": NNP,
-               "volumes": ["postgres_data:/var/lib/postgresql/data"], "ports": ["127.0.0.1:${DB_PORT}:5432"]},
-        "front": {"image": "x_front", "security_opt": NNP, "ports": ["${VITE_PORT}:80"],
-                  "networks": {"gateway": {"ipv4_address": "${FFG_FRONT_IP}"}}},
-        "back-lb": {"image": "nginx:1.30-alpine", "security_opt": NNP, "ports": ["${NODE_PORT}:${NODE_PORT}"],
-                    "environment": {"FFG_TRUSTED_PROXIES": "${FFG_TRUSTED_PROXIES}"},
-                    "entrypoint": ["/bin/sh", "-c", "set_real_ip_from $${FFG_TRUSTED_PROXIES}; proxy_set_header X-Forwarded-For $remote_addr;"],
-                    "networks": {"gateway": {"ipv4_address": "${FFG_BACK_LB_IP}"}}},
-    },
-    "networks": {"gateway": {"ipam": {"config": [{"subnet": "${FFG_DOCKER_SUBNET}"}]}}},
-    "volumes": {"postgres_data": {}},
-}
+# Compose DURCI de référence, réellement fonctionnel : `docker compose config` l'accepte, le
+# back-lb écrit sa configuration nginx par un heredoc QUOTÉ (le shell n'y touche pas), `$$` devient
+# `$` à l'interpolation de Compose, et `${FFG_BACK_LB_REALIP}` y insère les `set_real_ip_from`.
+GOOD_COMPOSE_YAML = """\
+x-hardened: &hardened
+  image: ffg_back:latest
+  build: {context: ../back}
+  env_file: [../back/.env]
+  restart: unless-stopped
+  user: "${FFG_RUNTIME_UID}:${FFG_RUNTIME_GID}"
+  read_only: true
+  tmpfs: [/tmp]
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  mem_limit: 512m
+  cpus: "1.0"
+  networks: [gateway]
+  volumes: ["shared_directory:/app/shared"]
+networks:
+  gateway:
+    ipam: {config: [{subnet: "${FFG_DOCKER_SUBNET}"}]}
+volumes:
+  postgres_data: {}
+  redis_data: {}
+  shared_directory: {}
+services:
+  back: *hardened
+  back-worker: *hardened
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]
+    env_file: [../back/.env]
+    volumes: ["postgres_data:/var/lib/postgresql/data"]
+    ports: ["127.0.0.1:${DB_PORT}:5432"]
+    networks: [gateway]
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]
+    command: ["redis-server", "/data/redis.conf"]
+    volumes: ["redis_data:/data"]
+    ports: ["127.0.0.1:${REDIS_PORT}:6379"]
+    networks: [gateway]
+  front:
+    image: ffg_front:latest
+    build: {context: ../front}
+    env_file: [../front/.env]
+    restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]
+    ports: ["0.0.0.0:${VITE_PORT}:80"]
+    networks: {gateway: {ipv4_address: "${FFG_FRONT_IP}"}}
+  back-lb:
+    image: nginx:1.30-alpine
+    restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]
+    ports: ["0.0.0.0:${NODE_PORT}:${NODE_PORT}"]
+    networks: {gateway: {ipv4_address: "${FFG_BACK_LB_IP}"}}
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        cat > /etc/nginx/conf.d/default.conf <<'NGINX'
+        ${FFG_BACK_LB_REALIP}
+        real_ip_header X-Forwarded-For;
+        real_ip_recursive on;
+        server {
+          listen ${NODE_PORT};
+          location / {
+            proxy_pass http://back:${NODE_PORT};
+            proxy_set_header Host $$host;
+            proxy_set_header X-Forwarded-For $$remote_addr;
+          }
+        }
+        NGINX
+        exec nginx -g 'daemon off;'
+"""
+GOOD_COMPOSE = yaml.safe_load(GOOD_COMPOSE_YAML)
+HARDENED_SERVICE = GOOD_COMPOSE["services"]["back"]
 
 # Compose piégé de la revue indépendante du 15/11/2026 (tel quel) : chacun de ses pièges doit être relevé.
 REVIEW_BAD_COMPOSE = """\
@@ -143,7 +197,7 @@ class ComposeTests(unittest.TestCase):
         finally:
             os.unlink(path)
         for expected in ["volume sneaky", "/var/run", "/var/lib/docker", "/proc", "volumes_from interdit",
-                         "cap_add interdit", "unconfined", "port publié hors 127.0.0.1", "service front absent",
+                         "cap_add interdit", "unconfined", "lié en clair à 127.0.0.1", "service front absent",
                          "service back-lb absent"]:
             self.assertIn(expected, errors)
 
@@ -165,7 +219,7 @@ class ComposeTests(unittest.TestCase):
         self.assertTrue(any("FFG_FRONT_IP" in e for e in self.errors(data)))
         data = copy.deepcopy(GOOD_COMPOSE)
         data["services"]["back-lb"]["entrypoint"] = ["/bin/sh", "-c", "proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;"]
-        self.assertTrue(any("X-Forwarded-For" in e for e in self.errors(data)))
+        self.assertTrue(any("configuration nginx" in e for e in self.errors(data)))
 
     def test_each_hardening_of_the_code_services_is_required(self):
         for key, bad in [("user", "1000:1000"), ("user", None), ("read_only", None), ("cap_drop", ["NET_RAW"]),
@@ -197,6 +251,175 @@ class ComposeTests(unittest.TestCase):
         data = copy.deepcopy(GOOD_COMPOSE)
         del data["services"]["back-worker"]
         self.assertTrue(any("back-worker absent" in e for e in self.errors(data)))
+
+
+# Compose de contournement de la SECONDE revue indépendante (15/11/2026), repris tel quel (chemins
+# personnels remplacés) : le contrôle l'acceptait (rc=0). Chaque contournement doit être relevé.
+REVIEW2_BYPASS = """\
+x-h: &h
+  user: "${FFG_RUNTIME_UID}:${FFG_RUNTIME_GID}"
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  mem_limit: 1g
+  cpus: 1
+  networks: [n, other]
+networks:
+  n: {ipam: {config: [{subnet: "${FFG_DOCKER_SUBNET}"}]}}
+  other: {external: true, name: fleetforge_default}
+volumes:
+  stolen: {external: true, name: someapp_postgres_data}
+  renamed: {name: prometheus_data}
+secrets:
+  key: {file: /home/srvc/.ssh/id_ed25519}
+configs:
+  cfg: {file: /home/srvc/.vault_pass}
+services:
+  back:
+    <<: *h
+    env_file: [/home/someone/.ssh/id_ed25519]
+    build: {context: /home/someone}
+    volumes: ["stolen:/x", "renamed:/y"]
+    secrets: [key]
+    configs: [cfg]
+    group_add: ["999"]
+    restart: always
+    security_opt: ["no-new-privileges:true", "seccomp=/tmp/allow-all.json", "label=disable"]
+  back-worker: *h
+  front:
+    security_opt: ["no-new-privileges:true"]
+    ports: ["${VITE_PORT}:80", "9999:80"]
+    networks: {n: {ipv4_address: "${FFG_FRONT_IP}"}}
+  back-lb:
+    image: nginx
+    security_opt: ["no-new-privileges:true"]
+    ports: ["${NODE_PORT}:${NODE_PORT}", "${NODE_PORT}"]
+    labels: {note: "X-Forwarded-For $remote_addr FFG_TRUSTED_PROXIES"}
+    entrypoint: ["/bin/sh","-c","echo 'proxy_set_header X-Forwarded-For \\\\$$proxy_add_x_forwarded_for;'"]
+    networks: {n: {ipv4_address: "${FFG_BACK_LB_IP}"}}
+  helper:
+    image: x_back:latest
+    security_opt: ["no-new-privileges:true"]
+    env_file: [../back/.env]
+"""
+
+
+def compose_errors(text_or_data, **kwargs):
+    fd, path = tempfile.mkstemp(suffix=".yml")
+    with os.fdopen(fd, "w") as f:
+        f.write(text_or_data if isinstance(text_or_data, str) else yaml.safe_dump(text_or_data))
+    try:
+        return "\n".join(check.check_compose(path, ["back", "back-worker"], **kwargs))
+    finally:
+        os.unlink(path)
+
+
+class ComposeReviewTwoTests(unittest.TestCase):
+    """Seconde revue : contournements du contrôle statique et forme RÉELLE de la configuration du back-lb."""
+
+    def test_the_good_compose_is_really_interpolated_and_passes(self):
+        self.assertEqual(compose_errors(GOOD_COMPOSE_YAML), "")
+        config, problems = check.back_lb_nginx_config(
+            check.interpolate(GOOD_COMPOSE, check.FAKE_ENV, [])["services"]["back-lb"])
+        self.assertEqual(problems, [])
+        self.assertIn("proxy_set_header X-Forwarded-For $remote_addr;", config)
+        self.assertIn("set_real_ip_from 198.51.100.7;", config)
+
+    def test_the_bypass_compose_fails_on_every_bypass(self):
+        errors = compose_errors(REVIEW2_BYPASS)
+        for expected in [
+            "network other : `external`", "network other : `name`", "volume stolen : `external`",
+            "volume renamed : `name`", "`secrets` interdit à la racine", "`configs` interdit à la racine",
+            "env_file /home/someone/.ssh/id_ed25519", "build.context /home/someone", "service back : secrets interdit",
+            "service back : configs interdit", "group_add interdit", "restart doit valoir unless-stopped",
+            "security_opt doit être exactement", "service helper : service hors de la liste blanche",
+            "le front publie EXACTEMENT", "le back-lb publie EXACTEMENT", "lié en clair à 0.0.0.0",
+            "aucune configuration nginx lisible",
+        ]:
+            self.assertIn(expected, errors)
+
+    def test_a_label_cannot_fake_the_forwarded_header_rewrite(self):
+        data = copy.deepcopy(GOOD_COMPOSE)
+        data["services"]["back-lb"]["labels"] = {"note": "proxy_set_header X-Forwarded-For $remote_addr; FFG_TRUSTED_PROXIES"}
+        data["services"]["back-lb"]["entrypoint"] = ["/bin/sh", "-c", "exec nginx -g 'daemon off;'"]
+        self.assertIn("aucune configuration nginx lisible", compose_errors(data))
+
+    def test_a_single_dollar_is_interpolated_away_and_refused(self):
+        broken = GOOD_COMPOSE_YAML.replace("X-Forwarded-For $$remote_addr", "X-Forwarded-For $remote_addr")
+        self.assertIn("ne RÉÉCRIT pas X-Forwarded-For", compose_errors(broken))
+
+    def test_appending_or_an_unquoted_heredoc_or_a_wide_trust_is_refused(self):
+        appending = GOOD_COMPOSE_YAML.replace("X-Forwarded-For $$remote_addr", "X-Forwarded-For $$proxy_add_x_forwarded_for")
+        self.assertIn("AJOUTE à X-Forwarded-For", compose_errors(appending))
+        unquoted = GOOD_COMPOSE_YAML.replace("<<'NGINX'", "<<NGINX")
+        self.assertIn("heredoc non quoté", compose_errors(unquoted))
+        wide = GOOD_COMPOSE_YAML.replace("${FFG_BACK_LB_REALIP}", "set_real_ip_from 0.0.0.0/0;")
+        self.assertIn("set_real_ip_from 0.0.0.0/0 : hors des relais de confiance", compose_errors(wide))
+        no_realip = GOOD_COMPOSE_YAML.replace("real_ip_header X-Forwarded-For;", "")
+        self.assertIn("real_ip_header", compose_errors(no_realip))
+
+    def test_front_and_back_lb_publish_exactly_one_port_on_ipv4(self):
+        for name, ports in [("front", ["0.0.0.0:${VITE_PORT}:80", "127.0.0.1:9999:80"]),
+                            ("front", ["${VITE_PORT}:80"]), ("front", ["[::]:${VITE_PORT}:80"]),
+                            ("back-lb", ["0.0.0.0:${NODE_PORT}:${NODE_PORT}", "0.0.0.0:8080:${NODE_PORT}"]),
+                            ("back-lb", ["0.0.0.0:${VITE_PORT}:${NODE_PORT}"])]:
+            data = copy.deepcopy(GOOD_COMPOSE)
+            data["services"][name]["ports"] = ports
+            self.assertTrue(compose_errors(data), f"{name} {ports}")
+
+    def test_redis_password_on_a_command_line_is_refused(self):
+        for key, value in [("command", ["redis-server", "--requirepass", "${REDIS_PASSWORD}"]),
+                           ("healthcheck", {"test": ["CMD-SHELL", "redis-cli -a $$REDIS_PASSWORD ping"]})]:
+            data = copy.deepcopy(GOOD_COMPOSE)
+            data["services"]["redis"][key] = value
+            self.assertIn("mot de passe Redis en ligne de commande", compose_errors(data), key)
+
+    def test_restart_tmpfs_and_userns_are_constrained(self):
+        for svc, key, value in [("db", "restart", "always"), ("back", "tmpfs", ["/home"]),
+                                ("db", "userns_mode", "host"), ("db", "sysctls", {"net.ipv4.ip_forward": 1})]:
+            data = copy.deepcopy(GOOD_COMPOSE)
+            data["services"][svc] = dict(data["services"][svc])
+            data["services"][svc][key] = value
+            self.assertTrue(compose_errors(data), f"{svc} {key}")
+
+    @unittest.skipUnless(shutil.which("docker"), "docker absent : contrôle `docker compose config` non exécuté")
+    def test_docker_compose_config_agrees_with_the_interpolation(self):
+        self.assertEqual(compose_errors(GOOD_COMPOSE_YAML, use_docker=True), "")
+        broken = GOOD_COMPOSE_YAML.replace("X-Forwarded-For $$remote_addr", "X-Forwarded-For $remote_addr")
+        self.assertIn("RÉÉCRIT", compose_errors(broken, use_docker=True))
+
+
+class CoverageTests(unittest.TestCase):
+    """Comptes aval : tout playbook sensible est refusé ou dans la liste blanche explicite."""
+
+    def test_the_real_playbooks_are_covered(self):
+        errors, sensitive, _ = check.check_coverage(PLAYBOOKS)
+        self.assertEqual(errors, [])
+        self.assertIn("setup-server.yml", sensitive)
+
+    def test_dropping_a_deny_pattern_uncovers_a_sensitive_playbook(self):
+        defaults = check._load(os.path.join(PLAYBOOKS, "roles", "fleetforge-gateway-install", "defaults", "main.yml"))
+        denies = [p for p in defaults["ffg_required_denies"] if p != "deploy-xmrig*"]
+        errors, _, _ = check.check_coverage(PLAYBOOKS, denies=denies)
+        self.assertTrue(any("deploy-xmrig.yml" in e for e in errors), errors)
+
+    def test_the_allow_list_is_usable_and_the_other_monitoring_playbooks_stay_refused(self):
+        defaults = check._load(os.path.join(PLAYBOOKS, "roles", "fleetforge-gateway-install", "defaults", "main.yml"))
+        denies, allowed = defaults["ffg_required_denies"], defaults["ffg_allowed_playbooks"]
+        self.assertEqual(sorted(allowed), ["check-monitoring.yml", "update-prometheus-alerts.yml"])
+        for name in allowed:
+            self.assertFalse(check.matches_playbook(denies, name), f"{name} refusé : la liste blanche serait vide")
+        for name in ["deploy-monitoring.yml", "remove-monitoring.yml", "purge-monitoring.yml",
+                     "deploy-monitoring.yaml", "deploy-exporter-sys.yml"]:
+            self.assertTrue(check.matches_playbook(denies, name), name)
+        self.assertNotIn("deploy-exporter-sys.yml", allowed)
+        errors, _, _ = check.check_coverage(PLAYBOOKS, allowed=allowed + ["setup-server.yml"])
+        self.assertTrue(any("setup-server.yml est refusé" in e for e in errors))
+
+    def test_the_glob_follows_fleetforge(self):
+        self.assertTrue(check.matches_playbook(["*-fleetforge.yml"], "deploy-fleetforge.yaml"))
+        self.assertTrue(check.matches_playbook(["deploy-?pn*"], "deploy-vpn.yml"))
+        self.assertFalse(check.matches_playbook(["deploy-*monitoring*"], "check-monitoring.yml"))
 
 
 class PlaybookTests(unittest.TestCase):
@@ -259,6 +482,7 @@ def _env():
     env.tests["match"] = lambda value, pattern: re.match(pattern, str(value)) is not None
     env.tests["version"] = lambda value, other, op: tuple(map(int, value.split("."))) >= tuple(map(int, other.split(".")))
     env.filters["bool"] = lambda value: value if isinstance(value, bool) else str(value).lower() in ("true", "yes", "1")
+    env.filters["regex_replace"] = lambda value, pattern, repl="": re.sub(pattern, repl, str(value))
 
     def extract(item, container, morekeys=None):  # filtre `extract` d'Ansible (sous-ensemble)
         value = container[item]
@@ -402,6 +626,52 @@ class VhostTests(unittest.TestCase):
             finally:
                 INVENTORY["fleetforge-gateway"]["access_local_cidrs"] = ["172.30.73.0/24"]
 
+    def test_a_multiline_value_never_becomes_a_directive(self):
+        global WHITELIST
+        saved = WHITELIST
+        WHITELIST = ["198.51.100.0/24\n        allow all;", "203.0.113.9\n"]
+        try:
+            directives = [line.split("#", 1)[0].strip() for line in check.mcp_block(render_gateway()).splitlines()]
+        finally:
+            WHITELIST = saved
+        self.assertNotIn("allow all;", directives)
+        self.assertNotIn("allow 203.0.113.9", " ".join(directives))
+        INVENTORY["fleetforge-gateway"]["access_local_cidrs"] = ["172.30.73.0/24\n        allow all;"]
+        try:
+            rendered = render_infra("proxy1")
+        finally:
+            INVENTORY["fleetforge-gateway"]["access_local_cidrs"] = ["172.30.73.0/24"]
+        self.assertNotIn("allow all;", [line.split("#", 1)[0].strip() for line in rendered.splitlines()])
+
+    def test_vpn_addresses_are_kept_off_mcp_unless_explicitly_allowed(self):
+        global WHITELIST
+        saved = WHITELIST
+        WHITELIST = saved + ["198.51.100.1"]
+        INVENTORY["agenthub"]["ansible_host"] = "198.51.100.1"
+        try:
+            closed = check.mcp_block(render_gateway())
+            opened = check.mcp_block(render_gateway(ffg_mcp_allow_vpn_addresses=True))
+        finally:
+            WHITELIST = saved
+            INVENTORY["agenthub"]["ansible_host"] = "203.0.113.7"
+        self.assertNotIn("198.51.100.1", allows(closed))
+        self.assertIn("198.51.100.1", allows(opened))
+        fd, path = tempfile.mkstemp(suffix=".conf")
+        with os.fdopen(fd, "w") as f:
+            f.write(render_gateway())
+        try:
+            self.assertEqual(check.check_vhost(path, forbidden=["198.51.100.1"]), [])
+        finally:
+            os.unlink(path)
+
+    def test_leading_zeros_in_a_local_cidr_are_refused(self):
+        for cidr in ["010.0.0.0/16", "172.030.73.0/24", "172.30.73.0/024"]:
+            INVENTORY["fleetforge-gateway"]["access_local_cidrs"] = [cidr]
+            try:
+                self.assertNotIn(f"allow {cidr};", render_infra("proxy1"), cidr)
+            finally:
+                INVENTORY["fleetforge-gateway"]["access_local_cidrs"] = ["172.30.73.0/24"]
+
     def test_a_local_cidr_containing_a_vpn_address_is_ignored(self):
         INVENTORY["vpn1"]["ansible_host"] = "10.9.0.1"
         INVENTORY["fleetforge-gateway"]["access_local_cidrs"] = ["10.9.0.0/24"]
@@ -452,9 +722,86 @@ class MonitoringProbeTests(unittest.TestCase):
             ffg_project_name="fleetforge-gateway", ffg_upstream_probe_timeout=20, app_port=4730, back_port=4731))
         names = [c["name"] for c in probe["extra_checks"]]
         self.assertEqual(names, ["front", "back_lb_health", "postgres", "firewall_4730", "firewall_4731", "upstream_main"])
-        self.assertIn("fleetforge-gateway:4731:deny", probe["extra_checks"][4]["argv"][2])
+        firewall = probe["extra_checks"][4]["argv"][2]
+        self.assertIn("awk -v p=4731", firewall)
+        self.assertIn('"fleetforge-gateway:" p ":deny"', firewall)
+        self.assertIn("RETURN|ACCEPT", firewall, "l'ordre des règles est vérifié aussi")
         self.assertIn("https://infra.example.test/healthz", probe["extra_checks"][5]["argv"][2])
         self.assertIn('{{.Label "com.docker.compose.project"}}', probe["extra_checks"][5]["argv"][2])
+
+
+RUNTIME_PLAYBOOK = """\
+- hosts: localhost
+  gather_facts: false
+  vars:
+    remote_username: srvc
+    app_port: 4730
+    back_port: 4731
+    ffg_docker_subnet: 10.73.231.0/24
+    ffg_front_ip: 10.73.231.10
+    ffg_back_lb_ip: 10.73.231.11
+    hc: {SecurityOpt: ["no-new-privileges:true"], ReadonlyRootfs: true, CapDrop: [ALL], Memory: 1, NanoCpus: 1}
+    net: {"fleetforge-gateway-back-x_gw": {IPAddress: "10.73.231.20"}}
+  tasks:
+    - ansible.builtin.include_role:
+        name: fleetforge-gateway-security
+        tasks_from: violations
+      vars:
+        ffg_passwd: {stdout: "ffgateway:x:999:999::/nonexistent:/usr/sbin/nologin"}
+        ffg_groups: {stdout: "ffgateway"}
+        ffg_path_probe: {results: []}
+        ffg_firewall_problems: "__FIREWALL__"
+        ffg_containers:
+          - {Name: /fleetforge-gateway-back-x-back-1, HostConfig: "{{ hc }}", Mounts: [{Type: volume, Name: __VOLUME__}], User: "999:999", Labels: {com.docker.compose.service: back}, Networks: "{{ net }}"}
+          - {Name: /fleetforge-gateway-back-x-back-worker-1, HostConfig: "{{ hc }}", Mounts: [], User: "999:999", Labels: {com.docker.compose.service: back-worker}, Networks: "{{ net }}"}
+          - {Name: /fleetforge-gateway_front, HostConfig: {SecurityOpt: ["no-new-privileges:true"], PortBindings: __FRONT_PORTS__}, Mounts: [], User: "", Labels: {com.docker.compose.service: front}, Networks: {"fleetforge-gateway-back-x_gw": {IPAddress: "10.73.231.10"}}}
+          - {Name: /fleetforge-gateway_back_lb, HostConfig: {SecurityOpt: ["no-new-privileges:true"], PortBindings: {"4731/tcp": [{HostIp: "0.0.0.0", HostPort: "4731"}]}}, Mounts: [], User: "", Labels: {com.docker.compose.service: back-lb}, Networks: {"fleetforge-gateway-back-x_gw": {IPAddress: "10.73.231.11"}}}
+          - {Name: /fleetforge-gateway-back-x-db-1, HostConfig: {SecurityOpt: ["no-new-privileges:true"], PortBindings: __DB_PORTS__}, Mounts: [], User: "", Labels: {com.docker.compose.service: db}, Networks: "{{ net }}"}
+        ffg_net_inspect: {stdout_lines: ['{"Name":"fleetforge-gateway-back-x_gw","IPAM":{"Config":[{"Subnet":"10.73.231.0/24"}]},"Containers":{},"Labels":{"com.docker.compose.project":"fleetforge-gateway-back-x"}}']}
+        ffg_vol_inspect: {stdout_lines: ['{"Name":"__VOLUME__","Driver":"local","Options":null,"Labels":{"com.docker.compose.project":"__VOLPROJECT__"}}']}
+    - ansible.builtin.debug: {msg: "VIOLATIONS=[{{ ffg_violations }}]"}
+"""
+GOOD_RUNTIME = {
+    "__FIREWALL__": "", "__VOLUME__": "fleetforge-gateway-back-x_shared", "__VOLPROJECT__": "fleetforge-gateway-back-x",
+    "__FRONT_PORTS__": '{"80/tcp": [{HostIp: "0.0.0.0", HostPort: "4730"}]}',
+    "__DB_PORTS__": '{"5432/tcp": [{HostIp: "127.0.0.1", HostPort: "4732"}]}',
+}
+
+
+@unittest.skipUnless(shutil.which("ansible-playbook"), "ansible-playbook absent")
+class RuntimeViolationsTests(unittest.TestCase):
+    """`violations.yml` (durcissement à l'exécution), joué en LOCAL sur des descriptions factices : aucun hôte."""
+
+    def violations(self, **overrides):
+        values = dict(GOOD_RUNTIME, **overrides)
+        text = RUNTIME_PLAYBOOK
+        for key, value in values.items():
+            text = text.replace(key, value)
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "play.yml"), "w", encoding="utf-8") as f:
+                f.write(text)
+            with open(os.path.join(tmp, "ansible.cfg"), "w", encoding="utf-8") as f:
+                f.write(f"[defaults]\nroles_path={os.path.join(PLAYBOOKS, 'roles')}\n")
+            env = dict(os.environ, ANSIBLE_CONFIG=os.path.join(tmp, "ansible.cfg"))
+            out = subprocess.run(["ansible-playbook", "-i", "localhost,", "-c", "local", os.path.join(tmp, "play.yml")],
+                                 capture_output=True, text=True, env=env, timeout=180)
+        match = re.search(r'"VIOLATIONS=\[(.*?)\]"', out.stdout)
+        self.assertIsNotNone(match, out.stdout[-2000:] + out.stderr[-2000:])
+        return match.group(1)
+
+    def test_a_conforming_gateway_has_no_violation(self):
+        self.assertEqual(self.violations(), "")
+
+    def test_an_extra_published_port_is_a_violation(self):
+        extra = '{"80/tcp": [{HostIp: "0.0.0.0", HostPort: "4730"}, {HostIp: "0.0.0.0", HostPort: "9999"}]}'
+        self.assertIn("ports publiés", self.violations(__FRONT_PORTS__=extra))
+        self.assertIn("hors boucle locale", self.violations(__DB_PORTS__='{"5432/tcp": [{HostIp: "0.0.0.0", HostPort: "4732"}]}'))
+
+    def test_a_volume_of_another_project_is_a_violation(self):
+        self.assertIn("hors du projet", self.violations(__VOLUME__="someapp_postgres_data", __VOLPROJECT__="someapp"))
+
+    def test_a_firewall_problem_is_a_violation(self):
+        self.assertIn("pare-feu", self.violations(__FIREWALL__="iptables : aucun DROP sur le port 4731"))
 
 
 class EligibleProxiesTests(unittest.TestCase):
