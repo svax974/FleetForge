@@ -9,6 +9,13 @@
   gather_facts: false
   tags: [always]
   tasks:
+    # Un fait interne donné par `-e` (wa_ufw_foreign, webapp_target…) fausserait la purge (no-overrides.yml).
+    - name: Refuse internal facts given on the command line
+      ansible.builtin.include_role:
+        name: webapp-setup
+        tasks_from: no-overrides
+        apply:
+          tags: [always]
     - name: Check the parameter and find the entry
       ansible.builtin.assert:
         that: webapp is defined and webapp in groups['all']

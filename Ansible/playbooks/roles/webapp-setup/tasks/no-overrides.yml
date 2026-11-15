@@ -1,0 +1,54 @@
+---
+# Faits INTERNES de la famille `webapp` : calculés par les rôles (contrôles, pare-feu, écarts, cible), jamais donnés par
+# l'opérateur. Une extra-var (`-e`) l'emporte sur tout `set_fact` et tout `register` : `-e wa_violations=` effacerait
+# les écarts constatés, `-e wa_firewall_problems=` un pare-feu absent, `-e wa_h_compose_check=…` le contrôle du compose,
+# `-e webapp_target=<autre>` déplacerait le contrôle à l'exécution sur une autre entrée.
+#
+# Détection RÉELLE, sans deviner la source : un `set_fact` pose une sonde, puis on relit la variable. Seule une extra-var
+# masque un fait d'hôte ; la relecture rend alors SA valeur. Joué sur `localhost`, au premier play des playbooks de la
+# famille, avant que les rôles posent ces faits sur les hôtes : la sonde ne reste que sur `localhost`.
+#
+# Liste LITTÉRALE (une variable de liste se surchargerait elle-même par `-e`) : tous les `set_fact`/`register` des rôles
+# webapp-* et de gateway-guard.yml, plus `webapp_target`. scripts/test_webapp_hardening_check.py (OverrideTests)
+# vérifie qu'elle les couvre tous, et qu'un `-e` de l'un d'eux fait échouer deploy-webapp, remove-webapp et purge-webapp.
+- name: Probe the internal facts of the webapp roles
+  ansible.builtin.set_fact:
+    "{{ item }}": __wa_internal_probe__
+  loop: &webapp_internal_facts [
+    wa_account_existing, wa_account_groups, wa_app, wa_app_id, wa_apps_text, wa_back_env_file, wa_back_injected,
+    wa_back_port, wa_back_ready, wa_back_removed, wa_back_todo, wa_back_written, wa_builder_host,
+    wa_builder_ssh_port, wa_chain, wa_chain4, wa_chain6, wa_chain_input, wa_checks, wa_container_ids,
+    wa_containers, wa_db_exposed, wa_db_port, wa_db_selfhosted, wa_derived_rules, wa_dns_resolvers,
+    wa_docker_config, wa_env, wa_env_back_absent, wa_env_back_owned, wa_env_back_removed, wa_env_back_text,
+    wa_env_front_absent, wa_env_front_owned, wa_env_front_text, wa_env_injected, wa_env_restore, wa_env_saved,
+    wa_env_status, wa_env_vault_bad, wa_env_vault_dir, wa_env_vault_values, wa_external, wa_firewall_problems,
+    wa_fleet, wa_front_env_file, wa_front_mode, wa_front_port, wa_front_ready, wa_front_todo, wa_front_written,
+    wa_fw_script, wa_fw_unit, wa_groups, wa_h_account, wa_h_account_marker, wa_h_allowed_binds, wa_h_back_host,
+    wa_h_back_lb_ip, wa_h_compose_check, wa_h_compose_file, wa_h_db_expected_volume, wa_h_db_reasons,
+    wa_h_db_state, wa_h_egress, wa_h_egress_host, wa_h_egress_remote, wa_h_eligible_proxies, wa_h_env,
+    wa_h_env_grammar, wa_h_firewall_script, wa_h_firewall_unit, wa_h_forbidden_groups, wa_h_front_ip,
+    wa_h_infra_listeners, wa_h_passwd, wa_h_predeploy_checked, wa_h_protected_paths, wa_h_realip,
+    wa_h_remote_proxies, wa_h_rules_removed, wa_h_run, wa_h_services, wa_h_subnet, wa_h_switches, wa_h_tag,
+    wa_h_trust_proxy, wa_h_trusted_relays, wa_h_user, wa_h_vpn_addresses, wa_health_url, wa_images,
+    wa_infra_listen, wa_inspect, wa_lib_branch, wa_machine, wa_machine_key, wa_machine_rules, wa_migrate,
+    wa_missing_manual, wa_missing_required, wa_net_inspect, wa_passwd, wa_path_probe, wa_probe, wa_project,
+    wa_ps, wa_ps_after_stop, wa_ps_stop, wa_redis_port, wa_registry, wa_registry_entry, wa_registry_hosts,
+    wa_registry_login, wa_registry_on, wa_registry_push, wa_registry_reach, wa_replicas, wa_resolv, wa_run,
+    wa_secret_env, wa_secret_items, wa_secrets_adopted, wa_secrets_drawn, wa_secrets_env_text, wa_src,
+    wa_ufw_foreign, wa_ufw_numbered, wa_ufw_status, wa_update_common, wa_violations, wa_vite_api_url,
+    wa_vol_inspect, wa_volumes, wa_worker, webapp_env_api_pinned, webapp_env_api_url, webapp_env_cf,
+    webapp_env_pinned, webapp_env_removed, webapp_env_saved, webapp_env_values, webapp_env_vite_api_url,
+    webapp_target]
+  loop_control:
+    label: "{{ item }}"
+
+- name: Refuse internal facts given on the command line
+  ansible.builtin.assert:
+    that: lookup('ansible.builtin.vars', item) | string == '__wa_internal_probe__'
+    fail_msg: >-
+      `{{ item }}` donné en extra-vars (-e) : refusé. Ce fait est calculé par les rôles de la famille `webapp`
+      (contrôles du profil durci, pare-feu, compose, base, cible) ; le fixer de l'extérieur effacerait un contrôle.
+    quiet: true
+  loop: *webapp_internal_facts
+  loop_control:
+    label: "{{ item }}"

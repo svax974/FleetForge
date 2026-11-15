@@ -44,6 +44,14 @@
   gather_facts: false
   tags: [always]
   tasks:
+    # Avant tout : un fait interne donné par `-e` effacerait un contrôle (webapp-setup/tasks/no-overrides.yml).
+    - name: Refuse internal facts given on the command line
+      ansible.builtin.include_role:
+        name: webapp-setup
+        tasks_from: no-overrides
+        apply:
+          tags: [always]
+
     - name: Select nothing when the application is optional and not named
       ansible.builtin.meta: end_play
       when:

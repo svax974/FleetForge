@@ -12,6 +12,7 @@ le calcul des écarts sont joués par un `ansible-playbook` LOCAL, sans aucun h�
 
 Aucun inventaire réel : adresses de documentation 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24."""
 import copy
+import glob
 import importlib.util
 import json
 import os
@@ -1591,6 +1592,38 @@ class GuardTests(unittest.TestCase):
         self.assertNotEqual(code, 0)
         self.assertIn("Check each upstream against its FleetForge entry", out)
         self.assertIn("accept_own_checks", out)
+
+    def test_internal_facts_given_on_the_command_line_are_refused(self):
+        # Quatrième revue : `-e wa_violations=` (ou wa_firewall_problems, wa_h_compose_check…) l'emportait sur le
+        # `set_fact` du contrôle et l'effaçait. La sonde de no-overrides.yml détecte l'extra-var elle-même.
+        inventory = guard_inventory()
+        inventory["all"]["vars"]["prom_alert_groups"] = ["services"]
+        for playbook in ("deploy-webapp.yml", "remove-webapp.yml", "purge-webapp.yml"):
+            for name in ("wa_violations", "wa_firewall_problems", "wa_h_compose_check", "wa_h_db_reasons",
+                         "wa_ufw_foreign", "wa_h_predeploy_checked", "webapp_target"):
+                with self.subTest(playbook=playbook, name=name):
+                    code, out = self.real_playbook(playbook, inventory, "-e", "webapp=fleetforge-gateway",
+                                                   "-e", json.dumps({name: ""}))
+                    self.assertNotEqual(code, 0)
+                    self.assertIn(f"`{name}` donné en extra-vars", out)
+        # Sans extra-var interne, la sonde passe (le play continue jusqu'à la sélection de l'entrée).
+        code, out = self.real_playbook("deploy-webapp.yml", inventory, "-e", "webapp=fleetforge-gateway")
+        self.assertNotIn("donné en extra-vars", out)
+        self.assertIn("Put the application in the target group", out)
+
+    def test_the_probe_covers_every_fact_of_the_webapp_roles(self):
+        probed = set(check._load(os.path.join(ROLES, "webapp-setup", "tasks", "no-overrides.yml"))[0]["loop"])
+        names = set()
+        files = glob.glob(os.path.join(ROLES, "webapp-*", "tasks", "*.yml"))
+        files.append(os.path.join(ROLES, "fleetforge-install", "tasks", "gateway-guard.yml"))
+        for path in files:
+            for task in check._tasks_in(check._load(path) or []):
+                if isinstance(task.get("register"), str):
+                    names.add(task["register"])
+                for key in ("ansible.builtin.set_fact", "set_fact"):
+                    if isinstance(task.get(key), dict):
+                        names.update(n for n in task[key] if "{{" not in n and n != "cacheable")
+        self.assertEqual(sorted(names - probed), [], "faits internes absents de la sonde (no-overrides.yml)")
 
     def test_deploy_webapp_refuses_the_gateway_with_the_fleetforge_scope(self):
         inventory = guard_inventory()
