@@ -930,7 +930,23 @@ class FirewallScriptTests(unittest.TestCase):
         host = [{"name": "upstream", "dest": "192.0.2.10", "port": 443, "proto": "tcp"},
                 {"name": "smtp", "dest": "192.0.2.10", "port": 587, "proto": "tcp"}]
         wa_app.update(wa_h_egress=remote + host, wa_h_egress_remote=remote, wa_h_egress_host=host)
-        return jinja2.Template(source, undefined=jinja2.StrictUndefined).render(wa_app=wa_app, wa_dns_resolvers=["198.51.100.53"])
+        return jinja2.Template(source, undefined=jinja2.StrictUndefined).render(
+            wa_app=wa_app, wa_dns_resolvers=["198.51.100.53"], webapp_front_container_port=80,
+            wa_h_nginx_cgroup="system.slice/nginx.service")
+
+    def test_local_traffic_to_the_app_is_limited_to_nginx_and_root(self):
+        # Quatrième revue : un compte local (WordPress en www-data, comme nginx) joignait les ports publiés par la
+        # boucle locale ou l'adresse de l'hôte (OUTPUT), hors DOCKER-USER et hors liste d'accès du vhost.
+        script = self.render(["192.0.2.30"])
+        self.assertIn('NGINX_CGROUP="system.slice/nginx.service"', script)
+        self.assertIn("FRONT_CPORT=80", script)
+        self.assertIn('-m cgroup --path ${NGINX_CGROUP} $(comment local:nginx) -j ACCEPT', script)
+        self.assertIn('-m owner --uid-owner 0 $(comment local:root) -j ACCEPT', script)
+        self.assertIn('$(comment local:deny) -j REJECT', script)
+        self.assertIn('local_rules 4 "-p tcp -m addrtype --dst-type LOCAL -m multiport --dports ${FRONT_PORT},${BACK_PORT}"', script)
+        self.assertIn('local_rules 4 "-p tcp -d ${INTERNAL} -m multiport --dports ${FRONT_CPORT},${BACK_PORT}"', script)
+        self.assertIn("insert_all iptables OUTPUT", script)
+        self.assertNotIn("--uid-owner www-data", script, "www-data est aussi WordPress : jamais admis")
 
     def test_the_outbound_rules_are_rendered_and_never_broad(self):
         script = self.render(["192.0.2.30"])
@@ -1010,17 +1026,27 @@ class FirewallScriptTests(unittest.TestCase):
             old_input = [{"target": "DROP", "comment": "webapp-fleetforge-gateway:host:deny:gOLD"},
                          {"target": "ufw-before-input", "comment": "ufw"}]
             with open(os.path.join(tmp, "state.json"), "w") as f:
-                json.dump({"DOCKER-USER": old, "INPUT": old_input}, f)
+                json.dump({"DOCKER-USER": old, "INPUT": old_input,
+                           "OUTPUT": [{"target": "ufw-before-output", "comment": "ufw"}]}, f)
             with open(os.path.join(tmp, "fw.sh"), "w") as f:
                 f.write(self.render(["192.0.2.30"]))
             env = dict(os.environ, PATH=f"{tmp}:{os.environ['PATH']}", FW_STATE=os.path.join(tmp, "state.json"),
                        FW_LOG=os.path.join(tmp, "log"))
-            run = subprocess.run(["bash", os.path.join(tmp, "fw.sh")], capture_output=True, text=True, env=env)
-            self.assertEqual(run.returncode, 0, run.stderr)
+            states = []
+            for _ in range(2):  # deux applications successives : même résultat (à la génération près)
+                run = subprocess.run(["bash", os.path.join(tmp, "fw.sh")], capture_output=True, text=True, env=env)
+                self.assertEqual(run.returncode, 0, run.stderr)
+                with open(os.path.join(tmp, "state.json")) as f:
+                    states.append(json.load(f))
             with open(os.path.join(tmp, "log")) as f:
                 log = f.read().split()
-            with open(os.path.join(tmp, "state.json")) as f:
-                chains = json.load(f)
+            chains = states[-1]
+        strip = lambda st: {c: [(r["target"], re.sub(r":g\d+$", "", r["comment"])) for r in rs] for c, rs in st.items()}
+        self.assertEqual(strip(states[0]), strip(states[1]), "deux applications successives diffèrent")
+        # OUTPUT : root puis REJECT, pour la destination locale puis interne ; nginx absent ici (pas de groupe de
+        # contrôle /sys/fs/cgroup/system.slice/nginx.service sur ce poste : fermé) ; ufw intact, après.
+        self.assertEqual([(r["target"], r["comment"].split(":")[1:3]) for r in chains["OUTPUT"]],
+                         [("ACCEPT", ["local", "root"]), ("REJECT", ["local", "deny"])] * 2 + [("ufw-before-output", [])])
         final, final_input = chains["DOCKER-USER"], chains["INPUT"]
         self.assertNotIn("NODROP", log, "fenêtre sans DROP pendant le rejeu")
         self.assertFalse([r for r in final + final_input if r["comment"].endswith(":gOLD")], "ancienne génération restée")
@@ -1060,6 +1086,11 @@ OUR_INPUT = [
     "-A INPUT -s 10.73.231.0/24 -m conntrack --ctstate RELATED,ESTABLISHED -m comment --comment webapp-fleetforge-gateway:host:reply:g1 -j ACCEPT",
     "-A INPUT -s 10.73.231.0/24 -m comment --comment webapp-fleetforge-gateway:host:deny:g1 -j DROP",
     "-A INPUT -j ufw-before-logging-input",
+    "-A OUTPUT -p tcp -m addrtype --dst-type LOCAL -m multiport --dports 4730,4731 -m owner --uid-owner 0 -m comment --comment webapp-fleetforge-gateway:local:root:g1 -j ACCEPT",
+    "-A OUTPUT -p tcp -m addrtype --dst-type LOCAL -m multiport --dports 4730,4731 -m comment --comment webapp-fleetforge-gateway:local:deny:g1 -j REJECT --reject-with icmp-port-unreachable",
+    "-A OUTPUT -d 10.73.231.0/24 -p tcp -m multiport --dports 80,4731 -m owner --uid-owner 0 -m comment --comment webapp-fleetforge-gateway:local:root:g1 -j ACCEPT",
+    "-A OUTPUT -d 10.73.231.0/24 -p tcp -m multiport --dports 80,4731 -m comment --comment webapp-fleetforge-gateway:local:deny:g1 -j REJECT --reject-with icmp-port-unreachable",
+    "-A OUTPUT -j ufw-before-logging-output",
 ]
 
 
@@ -1118,6 +1149,17 @@ class FirewallProblemsTests(unittest.TestCase):
                 self.assertIn("précède les règles", self.problems(before))
         ufw = ["-N ufw-before-input", "-A ufw-before-input -i lo -j ACCEPT", "-A INPUT -j ufw-before-input"]
         self.assertIn("iptables INPUT", self.problems([], input_rules=ufw + OUR_INPUT))
+
+    def test_the_local_output_rules_are_required_and_on_top(self):
+        no_output = [r for r in OUR_INPUT if not r.startswith("-A OUTPUT")]
+        problems = self.problems([], input_rules=no_output)
+        self.assertIn("aucune règle OUTPUT", problems)
+        self.assertIn("aucun REJECT du trafic local vers les ports publiés", problems)
+        only_local = [r for r in OUR_INPUT if "-d 10.73.231.0/24 -p tcp -m multiport" not in r]
+        self.assertIn("aucun REJECT du trafic local vers 10.73.231.0/24", self.problems([], input_rules=only_local))
+        front = ["-A OUTPUT -m owner --uid-owner 33 -j ACCEPT"]
+        rules = [r for r in OUR_INPUT if not r.startswith("-A OUTPUT")] + front + [r for r in OUR_INPUT if r.startswith("-A OUTPUT")]
+        self.assertIn("iptables OUTPUT", self.problems([], input_rules=rules))
 
     def test_an_ip6tables_table_without_docker_user_is_not_a_problem(self):
         play_rules = json.dumps(["-P INPUT ACCEPT", "-N f2b-sshd"])

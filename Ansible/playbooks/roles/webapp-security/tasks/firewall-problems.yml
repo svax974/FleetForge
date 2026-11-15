@@ -92,5 +92,22 @@
         {%- if (inrules | select('search', '-s ' ~ _subnet ~ ' .*' ~ _tag ~ ':host:deny.*-j DROP') | list | length) == 0 -%}
           {%- set ns.p = ns.p + ['iptables : aucun DROP du sous-réseau ' ~ _subnet ~ ' vers l hôte (INPUT)'] -%}
         {%- endif -%}
+        {#- Trafic LOCAL vers l'app (OUTPUT) : règles en tête, un REJECT pour la destination locale (ports publiés) et un
+            pour la destination interne (après DNAT). -#}
+        {%- set outrules = in_lines | select('match', '^-A OUTPUT ') | list -%}
+        {%- set outours = outrules | select('search', _tag ~ ':local:') | list -%}
+        {%- if outours | length == 0 -%}
+          {%- set ns.p = ns.p + ['iptables : aucune règle OUTPUT de ' ~ _tag ~ ' (trafic local vers l app)'] -%}
+        {%- else -%}
+          {%- for r in outrules[:outrules.index(outours | first)] if admitted(r, in_safe) | trim != 'yes' -%}
+            {%- set ns.p = ns.p + ['iptables OUTPUT : « ' ~ r ~ ' » précède les règles de ' ~ _tag] -%}
+          {%- endfor -%}
+        {%- endif -%}
+        {%- if (outrules | select('search', '--dst-type LOCAL .*' ~ _tag ~ ':local:deny.*-j REJECT') | list | length) == 0 -%}
+          {%- set ns.p = ns.p + ['iptables : aucun REJECT du trafic local vers les ports publiés (OUTPUT)'] -%}
+        {%- endif -%}
+        {%- if (outrules | select('search', '-d ' ~ _subnet ~ ' .*' ~ _tag ~ ':local:deny.*-j REJECT') | list | length) == 0 -%}
+          {%- set ns.p = ns.p + ['iptables : aucun REJECT du trafic local vers ' ~ _subnet ~ ' (OUTPUT)'] -%}
+        {%- endif -%}
       {%- endif -%}
       {{ ns.p | join(' ; ') }}

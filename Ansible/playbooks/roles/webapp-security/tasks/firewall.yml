@@ -52,6 +52,28 @@
   ansible.builtin.set_fact:
     wa_dns_resolvers: "{{ wa_resolv.stdout_lines | default([]) }}"
 
+# Trafic LOCAL vers les ports de l'app (chaîne OUTPUT, ni DOCKER-USER ni INPUT) : seuls nginx (proxy de la machine) et
+# root (docker-proxy, svcprobe) l'ont. nginx tourne en www-data, comme WordPress (apache/php) : `--uid-owner` ne les
+# distingue pas, le groupe de contrôle de l'UNITÉ nginx si (`-m cgroup --path`, cgroup v2). Lu sur la machine depuis le
+# processus maître ; nginx absent ou illisible : aucune règle nginx (fermé : seul root passe).
+- name: Read the control group of nginx
+  ansible.builtin.shell: >-
+    set -o pipefail;
+    [ -r /run/nginx.pid ] || exit 0;
+    sed -n 's|^0::/||p' "/proc/$(cat /run/nginx.pid)/cgroup"
+  args:
+    executable: /bin/bash
+  register: wa_nginx_cgroup
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Keep the control group of nginx
+  ansible.builtin.set_fact:
+    wa_h_nginx_cgroup: >-
+      {{ (wa_nginx_cgroup.stdout_lines | default([]) | first | default(''))
+         if (wa_nginx_cgroup.rc | default(1)) == 0 else '' }}
+
 # Les valeurs entrent dans un script root : grammaire tenue avant le rendu.
 - name: Check the values written into the firewall script
   ansible.builtin.assert:
@@ -70,6 +92,9 @@
       - wa_app.wa_h_egress | map(attribute='proto') | reject('in', ['tcp', 'udp']) | list | length == 0
       - wa_app.wa_h_egress | map(attribute='name') | map('string') | reject('match', '^[a-z][a-z0-9_-]{0,31}$') | list | length == 0
       - wa_dns_resolvers | reject('match', '^[0-9]{1,3}([.][0-9]{1,3}){3}$') | list | length == 0
+      - wa_h_nginx_cgroup == '' or wa_h_nginx_cgroup is match('^[A-Za-z0-9@._-]+(/[A-Za-z0-9@._-]+)*$')
+      - "'..' not in wa_h_nginx_cgroup"
+      - webapp_front_container_port | string is match('^[1-9][0-9]{0,4}$')
       - wa_fw_script is match('^/[A-Za-z0-9._/-]+$')
     fail_msg: >-
       Ports, sous-réseau DÉDIÉ (jamais 172.16.0.0/12) et adresses des proxies : formes numériques IPv4 attendues ;
@@ -95,6 +120,15 @@
     mode: '0644'
   become: true
   register: wa_fw_unit
+
+# `enabled: true` ne refait rien sur une unité déjà activée : ses NOUVEAUX `WantedBy` (nginx, fail2ban, ufw) n'auraient
+# pas leurs liens. `reenable` les recrée d'après le fichier, quand il a changé.
+- name: Re-create the install links of a changed firewall unit
+  ansible.builtin.command:
+    argv: [systemctl, reenable, "{{ wa_app.wa_h_firewall_unit }}.service"]
+  become: true
+  changed_when: true
+  when: wa_fw_unit is changed and not ansible_check_mode
 
 - name: Enable and start the firewall unit of the application
   ansible.builtin.systemd:

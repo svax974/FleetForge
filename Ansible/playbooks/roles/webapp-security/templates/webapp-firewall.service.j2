@@ -9,9 +9,11 @@ Description=Restrict the published ports of {{ wa_app.wa_project }} to the remot
 # Non couvert : `ufw reload` / `fail2ban-client reload` (pas de restart d'unité)
 # — la sonde `firewall_*` et le contrôle à l'exécution le signalent ; seul un
 # saut vers une chaîne qui ne fait que refuser est admis devant nos règles.
-After=docker.service fail2ban.service ufw.service
+# nginx : la règle OUTPUT qui l'admet vise le groupe de contrôle de son unité,
+# qui n'existe que lorsqu'elle tourne (absent : nginx est refusé, pas admis).
+After=docker.service fail2ban.service ufw.service nginx.service
 Requires=docker.service
-PartOf=docker.service fail2ban.service ufw.service
+PartOf=docker.service fail2ban.service ufw.service nginx.service
 
 [Service]
 Type=oneshot
@@ -19,4 +21,7 @@ RemainAfterExit=yes
 ExecStart={{ wa_app.wa_h_firewall_script }}
 
 [Install]
-WantedBy=multi-user.target
+# `PartOf` propage stop et restart, pas start : un stop puis start de nginx
+# (groupe de contrôle recréé, l'ancienne règle ne le vise plus) ou de fail2ban
+# (sauts réinsérés en tête) relance l'unité par ces `WantedBy`.
+WantedBy=multi-user.target docker.service nginx.service fail2ban.service ufw.service

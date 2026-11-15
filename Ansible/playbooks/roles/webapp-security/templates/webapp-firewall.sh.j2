@@ -44,6 +44,10 @@ EGRESS_REMOTE=({% for e in wa_app.wa_h_egress_remote %}{{ e.dest }}:{{ e.port | 
 EGRESS_HOST=({% for e in wa_app.wa_h_egress_host %}{{ e.port | int }}:{{ e.proto }}{{ '' if loop.last else ' ' }}{% endfor %})
 # Résolveurs DNS de la machine (lus sur place), joints depuis l'espace réseau du conteneur : 53 udp et tcp.
 DNS_SERVERS=({{ wa_dns_resolvers | join(' ') }})
+# LOCAL (chaîne OUTPUT) : port du front DANS son conteneur, groupe de contrôle de l'unité nginx (lu sur la machine,
+# vide = pas de nginx ici).
+FRONT_CPORT={{ webapp_front_container_port | int }}
+NGINX_CGROUP="{{ wa_h_nginx_cgroup | default('') }}"
 
 # Purge des générations PRÉCÉDENTES seulement (commentaire de l'app sans `:${GEN}`), par NUMÉRO (réinjecter une spec à
 # commentaire la ferait découper par le shell). L'awk lit TOUTE la sortie, sans `exit` : fermer le tube tôt tue
@@ -113,6 +117,33 @@ for dns in ${DNS_SERVERS[@]+"${DNS_SERVERS[@]}"}; do
 done
 RULES_INPUT+=("-s ${INTERNAL} $(comment host:deny) -j DROP")
 
+# ── Trafic LOCAL vers l'app (OUTPUT) ──
+# Un processus de la machine joint les ports publiés sans passer par DOCKER-USER : par 127.0.0.1/[::1] (docker-proxy,
+# destination locale) ou par une adresse de l'hôte, DNATée en OUTPUT vers le conteneur (destination INTERNE, port du
+# conteneur — la table filter voit l'adresse APRÈS le DNAT). Seuls nginx (le proxy de la machine, par son groupe de
+# contrôle : WordPress tourne aussi en www-data) et root (docker-proxy, svcprobe) passent ; tout autre compte est
+# rejeté — il contournerait la liste d'accès du vhost.
+# Groupe de contrôle absent (nginx arrêté au moment du passage) : pas de règle nginx (fermé), l'unité est rejouée au
+# redémarrage de nginx (PartOf).
+RULES_OUTPUT=()
+RULES_OUTPUT6=()
+local_rules() {
+  local family="$1" match="$2" who rule
+  for who in nginx root deny; do
+    case "${who}" in
+      nginx)
+        [ -n "${NGINX_CGROUP}" ] && [ -d "/sys/fs/cgroup/${NGINX_CGROUP}" ] || continue
+        rule="${match} -m cgroup --path ${NGINX_CGROUP} $(comment local:nginx) -j ACCEPT" ;;
+      root) rule="${match} -m owner --uid-owner 0 $(comment local:root) -j ACCEPT" ;;
+      deny) rule="${match} $(comment local:deny) -j REJECT" ;;
+    esac
+    if [ "${family}" = 4 ]; then RULES_OUTPUT+=("${rule}"); else RULES_OUTPUT6+=("${rule}"); fi
+  done
+}
+local_rules 4 "-p tcp -m addrtype --dst-type LOCAL -m multiport --dports ${FRONT_PORT},${BACK_PORT}"
+local_rules 4 "-p tcp -d ${INTERNAL} -m multiport --dports ${FRONT_CPORT},${BACK_PORT}"
+local_rules 6 "-p tcp -m addrtype --dst-type LOCAL -m multiport --dports ${FRONT_PORT},${BACK_PORT}"
+
 # Insertion en tête, de la dernière règle à la première (ordre final = ordre voulu). Liste retournée par
 # construction : le gabarit Jinja interdit la syntaxe de longueur de tableau de bash (elle ouvrirait un commentaire).
 insert_all() {
@@ -129,9 +160,15 @@ insert_all iptables DOCKER-USER "${RULES4[@]}"
 purge_old iptables DOCKER-USER
 insert_all iptables INPUT "${RULES_INPUT[@]}"
 purge_old iptables INPUT
+insert_all iptables OUTPUT "${RULES_OUTPUT[@]}"
+purge_old iptables OUTPUT
 
 # IPv6 : Docker publie aussi sur [::]. Aucune source IPv6 admise (le sous-réseau dédié est IPv4 seul).
 if ip6tables -w -L DOCKER-USER -n >/dev/null 2>&1; then
   insert_all ip6tables DOCKER-USER "${RULES6[@]}"
   purge_old ip6tables DOCKER-USER
+fi
+if ip6tables -w -L OUTPUT -n >/dev/null 2>&1; then
+  insert_all ip6tables OUTPUT "${RULES_OUTPUT6[@]}"
+  purge_old ip6tables OUTPUT
 fi
