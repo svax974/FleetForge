@@ -9,9 +9,7 @@
 # IPv6 : la chaîne ip6tables absente n'est PAS une preuve d'absence d'IPv6 (docker-proxy publie `[::]:port` quand le
 # conteneur n'a pas d'IPv6) — c'est la liaison explicite `0.0.0.0:` du compose (contrôlée) qui l'empêche.
 
-- name: Read the facts of the hardened application
-  ansible.builtin.set_fact:
-    wa_app: "{{ hostvars[webapp_target | default(inventory_hostname)] }}"
+# `wa_app` : roles/webapp-security/vars/main.yml (lu à la demande, jamais copié dans un fait).
 
 # Table filter ENTIÈRE (et non la seule chaîne) : une règle de fail2ban insérée devant les nôtres saute vers sa chaîne
 # `f2b-*`, admise seulement si celle-ci ne fait que refuser ou rendre la main (firewall-problems.yml) — il faut la lire.

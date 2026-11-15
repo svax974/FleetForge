@@ -1,131 +1,61 @@
 ---
 # AgentHub — hub d'orchestration d'agents CLI (Claude Code, Codex, ...).
-# Front React/nginx + back NestJS + Postgres (Docker Compose, AppTemplate) sur
-# l'entrée d'inventaire `agenthub`, machine DÉDIÉE depuis le 27/10/2026 (elle
-# était partagée avec ctdapi, rotki, xbot… ; l'ancienne se retire par
-# remove-/purge-agenthub.yml --limit agenthub-old). Machine neuve :
-# `setup-server.yml --limit agenthub` d'abord. Voir
-# docs/plans/2026-09-24-agenthub/09-implementation-plan.md Phase 7 pour les
-# règles déjà appliquées côté runner (T7.1), reprises ici côté hub.
+# Front React (Cloudflare Pages) + back NestJS + SQLite (AppTemplate, Docker Compose) sur l'entrée d'inventaire
+# `agenthub`, machine DÉDIÉE depuis le 27/10/2026 (elle était partagée avec ctdapi, rotki, xbot… ; l'ancienne se
+# retire par remove-/purge-agenthub.yml --limit agenthub-old). Machine neuve : `setup-server.yml --limit agenthub`
+# d'abord. Voir docs/plans/2026-09-24-agenthub/09-implementation-plan.md Phase 7 pour les règles déjà appliquées côté
+# runner (T7.1), reprises ici côté hub.
 #
 #   ./play.sh web3c deploy-agenthub.yml
 #
-# Ordre exact des effets de ce playbook :
-#   1. host-preflight (Docker requis)
-#   2. agenthub-install  : NE touche PAS au DNS d'agenthub (<domaine>) (géré chez
-#      Cloudflare, `cloudflare_front: true` sur l'entrée) ; cert déjà
-#      couvert par le wildcard *.<domaine>, rien à émettre
-#   3. (`cloudflare_front: true`) Authenticated Origin Pulls côté Cloudflare
-#      (cloudflare-origin-pull : autorité du parc, certificat client envoyé et
-#      activé sur agenthub-back.<domaine>) — AVANT le vhost, qui l'exige
-#   3b. vhost sur les proxies : sites-enabled/agenthub.conf (WebSocket,
-#      timeout 1h, buffering off sur /api/v1/agenthub/ws/). Avec
-#      `cloudflare_front: true` il ne sert que l'API (agenthub-back.<domaine>,
-#      vers back_port), publique derrière le certificat client de Cloudflare
-#      (hooks/ seul reste privé) : le front est sur Cloudflare Pages, sans location ici.
-#      L'autorité est déposée sur chaque proxy par deploy-one-site avant le gabarit
-#   4. agenthub-security : filtre les ports 4700/4701 dans DOCKER-USER
-#      (proxies + whitelist + VPN), règles de host_vars/agenthub.yml
-#   4b. relais SMTP : le hub y est autorisé en 465/587 (mailrelay-security rejoué sur
-#      l'hôte `mailrelay`, qui n'admet que les IP de l'inventaire) — SANS ce pas, un hub
-#      déménagé n'envoie plus aucun mail (le 01/11/2026 : timeout SMTP à l'inscription,
-#      504, parce que 194.163.180.236 n'était pas autorisé sur 62.171.135.125)
-#   5. silence Alertmanager sur service="agenthub" (alertmanager-update)
-#   6. agenthub-deploy   : fixe les cibles dans les .env (webapp-env-update : BACK_HOSTS,
-#      FRONT_HOSTS absent si `cloudflare_front: true`…) et, dans ce cas, prépare le
-#      front Cloudflare Pages (cloudflare-pages-setup : projet, branche, domaine) ;
-#      puis build+push+démarrage de l'app (scripts du dépôt
-#      app, PAS un docker_container/docker_compose Ansible — voir
-#      agenthub-deploy/defaults) ; le même script apparie le runner du hub et
-#      installe les runners des utilisateurs (un compte Linux par
-#      utilisateur, sshd ouvert au seul réseau Docker du hub pour un compte
-#      restreint) — voir agenthub-deploy/defaults
-#   7. agenthub-monitoring : sonde svcprobe (service_up{service="agenthub"})
-#   8. silence raccourci à 20 min (retombée des alertes de la coupure)
+# ENVELOPPE de `deploy-webapp.yml -e webapp=agenthub` (15/11/2026, docs/deploiement-webapp.md) : l'entrée porte
+# `ansible_roles: [webapp]`, et le déploiement générique fait DNS (Cloudflare Pages), Authenticated Origin Pulls, vhost,
+# filtrage DOCKER-USER, silence Alertmanager, `.env`, `run.sh prod`, sonde. Ne reste ici que ce qui est PROPRE à AgentHub :
+#   1. agenthub-install  : pile d'affichage (Xvfb, x11vnc, wine) et prérequis Flutter du runner
+#   2. (import)          : tout le déploiement générique — `webapp_run_env` y passe USER_RUNNERS_PROVISION /
+#                          USER_RUNNERS_AUTO_ENABLE à `run.sh`, `webapp_env_required` refuse un back/.env sans
+#                          RUNNER_PROVISION ni BOOTSTRAP_API_KEY (l'auto-provisionnement apparie le runner du hub et
+#                          installe les runners des utilisateurs pendant le déploiement lui-même)
+#   3. relais SMTP       : le hub y est autorisé en 465/587 (mailrelay-security rejoué sur l'hôte `mailrelay`, qui
+#                          n'admet que les IP de l'inventaire) — SANS ce pas, un hub déménagé n'envoie plus aucun mail
+#                          (le 01/11/2026 : timeout SMTP à l'inscription, 504, parce que l'adresse du hub n'était pas
+#                          autorisée sur le relais)
+#   4. runner manuel     : seulement `--tags runner` (agenthub_runner_autoprovision: false), avec un jeton émis par le hub
+#
+# Le vhost est écrit à la main (parcs/<parc>/nginx/sites-enabled/agenthub.conf : WebSocket, timeout 1h, buffering off sur
+# /api/v1/agenthub/ws/) et l'emporte sur le gabarit générique ; avec `cloudflare_front: true` il ne sert que l'API
+# (agenthub-back.<domaine>, derrière le certificat client de Cloudflare) : le front est sur Cloudflare Pages.
+# `docker_ports_rules` : host_vars/agenthub.yml (entrée canonique de la machine).
 #
 # Tags :
-#   --tags proxy-conf   rejoue seulement le vhost (reload, pas les autres sites), avec
-#                       l'activation Cloudflare des Authenticated Origin Pulls qui le précède
-#   --tags runner        rejoue seulement l'activation du runner
-#   --tags flutter       rejoue seulement les prérequis Flutter du runner (SDK + chaîne Linux desktop, rôle agenthub-install)
-#   --tags monitoring    réarme seulement la sonde
-#   --tags mail-relay    rejoue seulement l'autorisation du hub sur le relais SMTP (sans --limit :
-#                        le play vise l'hôte du relais, qu'un --limit agenthub exclurait)
+#   --tags proxy-conf   rejoue seulement le vhost (reload, pas les autres sites), avec l'activation Cloudflare des
+#                       Authenticated Origin Pulls qui le précède
+#   --tags config|image|install|security|monitoring   voir deploy-webapp.yml
+#   --tags runner       rejoue seulement l'activation MANUELLE du runner (jeton `agenthub_runner_token`)
+#   --tags flutter      rejoue seulement les prérequis Flutter du runner (SDK + chaîne Linux desktop, agenthub-install)
+#   --tags mail-relay   rejoue seulement l'autorisation du hub sur le relais SMTP (sans --limit : le play vise l'hôte du
+#                       relais, qu'un --limit agenthub exclurait)
 #
-# Prérequis côté poste de contrôle AVANT de lancer ce playbook (voir
-# agenthub-deploy/defaults/main.yml pour le détail) : back/.env et front/.env
-# de prod présents dans le dépôt app (jamais générés/vaultés par ce
-# playbook — secrets applicatifs + REMOTE_HOST/REMOTE_USER/REMOTE_SSH_PORT/
-# SSH_KEY_FILE/REMOTE_CONTEXT_NAME/PROJECT_NAME attendus par
-# scripts/deploy-full.sh). Le jeton du runner (`agenthub_runner_token`) ne
-# peut être obtenu qu'APRÈS un premier déploiement réussi (page « Nouveau
-# runner » du hub) : le rejouer ensuite avec --tags runner. Depuis
-# l'auto-provisionnement (BOOTSTRAP_API_KEY + hook provision-hub-runner.sh),
-# le runner colocqué est apparié pendant le déploiement lui-même — le chemin
-# manuel ci-dessus ne sert plus que pour les runners distants
-# (agenthub_runner_autoprovision: false).
+# Prérequis côté poste de contrôle : back/.env et front/.env de prod présents dans le dépôt app (secrets applicatifs, jamais
+# générés ici sauf ceux de `webapp-secrets-setup`, adoptés avant tout tirage). Le jeton du runner (`agenthub_runner_token`)
+# ne peut être obtenu qu'APRÈS un premier déploiement réussi (page « Nouveau runner » du hub) : seulement pour les runners
+# distants (agenthub_runner_autoprovision: false).
 
-# ── Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ───────────────────────
-- name: Contrôle préalable
-  hosts: agenthub
-  remote_user: "{{ remote_username }}"
-  roles:
-    - role: host-preflight
-      preflight_require_docker: true
-
-# ── DNS (nom public géré hors Ansible : agenthub-install ne publie rien) ──
-- name: Check the AgentHub DNS record is left alone
+# ── Prérequis propres à AgentHub (pile d'affichage, Flutter) ───────────────
+- name: AgentHub prerequisites (display stack, Flutter)
   hosts: agenthub
   remote_user: "{{ remote_username }}"
   roles:
     - agenthub-install
 
-# Le vhost exige, en mode public, le certificat client de NOTRE zone Cloudflare :
-# il doit être activé sur le nom d'API AVANT le vhost, sinon toute l'API publique
-# répond 403. Jeton `cloudflare_token` avec « SSL and Certificates : Edit ».
-- name: Authenticated Origin Pulls côté Cloudflare
-  hosts: agenthub
-  gather_facts: false
-  become: false
-  tags: [proxy-conf]
-  tasks:
-    - name: Create the parc certificate and enable it on the API name
-      ansible.builtin.include_role:
-        name: cloudflare-origin-pull
-      vars:
-        cfopull_part: cloudflare
-      when: cloudflare_front | default(false) | bool
+# ── Déploiement générique ──────────────────────────────────────────────────
+- name: Déploiement générique (famille webapp)
+  ansible.builtin.import_playbook: deploy-webapp.yml
+  vars:
+    webapp: agenthub
 
-# Pousse SEULEMENT sites-enabled/agenthub.conf sur chaque proxy. Ni restart,
-# ni resynchronisation des autres vhosts — reload, uniquement si ce fichier a
-# changé (voir deploy-freellm.yml pour ce même motif).
-- name: Vhost AgentHub sur les proxies
-  hosts: proxies
-  remote_user: "{{ remote_username }}"
-  become: true
-  tags: [proxy-conf]
-  tasks:
-    - name: Deploy just the AgentHub vhost
-      ansible.builtin.include_role:
-        name: proxy-update
-        tasks_from: deploy-one-site
-      vars:
-        site: agenthub.conf
-
-# Le filtrage vit dans DOCKER-USER et non dans ufw : le port est publié par
-# Docker, qui insère ses DNAT en amont de tout ce que gère ufw.
-# `docker_ports_rules` est dans host_vars/agenthub.yml (entrée canonique de la
-# machine).
-- name: Filter the AgentHub ports in DOCKER-USER
-  hosts: agenthub
-  remote_user: "{{ remote_username }}"
-  become: true
-  roles:
-    - agenthub-security
-
-# Le relais SMTP n'admet en 465/587 que les IP des hôtes de l'inventaire (plus la
-# whitelist) : mailrelay-security les relit à chaque passage, donc le rejouer ici
-# autorise le hub à la première mise en ligne ou après un changement d'adresse.
+# Le relais SMTP n'admet en 465/587 que les IP des hôtes de l'inventaire (plus la whitelist) : mailrelay-security les relit
+# à chaque passage, donc le rejouer ici autorise le hub à la première mise en ligne ou après un changement d'adresse.
 # Aucun `--limit` : il exclurait l'hôte du relais (le play est alors sans effet).
 - name: Authorize the AgentHub on the SMTP relay
   hosts: all
@@ -140,47 +70,13 @@
   roles:
     - mailrelay-security
 
-# ── Silence pendant le déploiement ─────────────────────────────────────────
-# `deploy-full.sh` coupe le service le temps du build : ~30 min le 21/10/2026,
-# assez pour que ServiceDown parte (10 min) et que la veille OpenClaw analyse
-# une panne qui n'en était pas une. Limité à agenthub : les autres services de
-# la machine restent surveillés. Hors tags (`--tags runner`, `proxy-conf`,
-# `monitoring` ne coupent pas le service).
-- name: Silence the AgentHub alerts during the deploy
+# Chemin MANUEL du runner (jeton émis par le hub) : `never` l'écarte d'un passage normal, où l'auto-provisionnement s'en charge.
+- name: Activate the AgentHub runner (manual path)
   hosts: agenthub
   remote_user: "{{ remote_username }}"
-  gather_facts: false
+  tags: [never, runner]
   tasks:
-    - name: Silence service="agenthub"
+    - name: Activate the AgentHub runner
       ansible.builtin.include_role:
-        name: alertmanager-update
-        tasks_from: silence
-      vars:
-        alertmanager_silence_matchers: [{ name: service, value: agenthub }]
-        alertmanager_silence_comment: "deploy-agenthub.yml"
-
-# ── Déploiement de l'app + activation du runner ────────────────────────────
-- name: Deploy the AgentHub app and activate its runner
-  hosts: agenthub
-  remote_user: "{{ remote_username }}"
-  roles:
-    - agenthub-deploy
-
-# ── Supervision (OBLIGATOIRE, voir CLAUDE.md) ──────────────────────────────
-- name: Supervision du service
-  hosts: agenthub
-  remote_user: "{{ remote_username }}"
-  roles:
-    - agenthub-monitoring
-
-# Après la sonde : le service répond de nouveau, le silence ne couvre plus que
-# la retombée des alertes de la coupure (`keep_firing_for`).
-- name: End the AgentHub silence
-  hosts: agenthub
-  remote_user: "{{ remote_username }}"
-  gather_facts: false
-  tasks:
-    - name: Shorten the silence
-      ansible.builtin.include_role:
-        name: alertmanager-update
-        tasks_from: unsilence
+        name: agenthub-deploy
+        tasks_from: runner

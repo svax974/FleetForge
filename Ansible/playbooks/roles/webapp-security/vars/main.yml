@@ -1,0 +1,5 @@
+---
+# L'entrée de l'application, lue À LA DEMANDE (une variable de rôle n'est évaluée qu'à l'usage). Un `set_fact` copierait tout
+# `hostvars[<entrée>]` : toutes les variables de l'entrée seraient alors évaluées d'un coup, y compris celles d'un
+# `host_vars/<entrée>.yml` qui lisent elles-mêmes `hostvars` (AgentHub : `src_proxies`), d'où « 'hostvars' is undefined ».
+wa_app: "{{ hostvars[webapp_target | default(inventory_hostname)] }}"

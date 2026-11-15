@@ -29,7 +29,7 @@
            if wa_front_mode == 'container' else [])
          + [{'name': 'back_lb_health', 'kind': 'http', 'url': 'http://127.0.0.1:' ~ wa_back_port ~ '/api/v1/health', 'status': [200], 'timeout': 10}]
          + ([{'name': 'postgres', 'kind': 'docker', 'container': wa_project ~ '_postgres'}] if wa_db_selfhosted | bool else [])
-         + [{'name': 'redis', 'kind': 'docker', 'container': wa_project ~ '_redis'}] }}
+         + ([{'name': 'redis', 'kind': 'docker', 'container': wa_project ~ '_redis'}] if (webapp_monitor_redis | default(webapp_db_engine != 'sqlite')) | bool else []) }}
   tags: [monitoring]
 
 # Profil durci (`firewall_<port>`) et amonts (`webapp_upstream_checks`, `upstream_<id>`) : sondes supplémentaires.
@@ -86,5 +86,8 @@
     wa_down_checks: "{{ wa_probe.content.split('\n') | select('search', 'service_check_up[{]service=\"' ~ wa_project ~ '\"') | select('search', ' 0$') | list }}"
   ansible.builtin.debug:
     msg: "Sonde(s) secondaire(s) à 0 : {{ wa_down_checks }} — vérifier les noms de conteneurs (`docker ps` sur {{ ansible_host }})."
-  when: wa_down_checks | length > 0
+  # Pas de relecture de la sonde en `--check` (elle n'est pas lue : `wa_probe` n'a pas de contenu).
+  when:
+    - not ansible_check_mode
+    - wa_down_checks | length > 0
   tags: [monitoring]

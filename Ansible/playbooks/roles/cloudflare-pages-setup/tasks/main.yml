@@ -56,6 +56,8 @@
   delegate_to: localhost
   become: false
   changed_when: false
+  # Lecture seule : exécutée aussi en `--check` (les tâches suivantes en lisent le résultat).
+  check_mode: false
 
 - name: Create the Pages project
   ansible.builtin.uri:
@@ -113,6 +115,8 @@
   delegate_to: localhost
   become: false
   changed_when: false
+  # Lecture seule : exécutée aussi en `--check` (les tâches suivantes en lisent le résultat).
+  check_mode: false
 
 - name: Attach the custom domain to the Pages project
   ansible.builtin.uri:
@@ -142,6 +146,8 @@
   delegate_to: localhost
   become: false
   changed_when: false
+  # Lecture seule : exécutée aussi en `--check` (les tâches suivantes en lisent le résultat).
+  check_mode: false
   when:
     - cfpages_publish_dns | bool
     - cfpages_dns_token | length > 0
@@ -156,6 +162,8 @@
   delegate_to: localhost
   become: false
   changed_when: false
+  # Lecture seule : exécutée aussi en `--check` (les tâches suivantes en lisent le résultat).
+  check_mode: false
   when: cfpages_zone_lookup is not skipped
 
 - name: Create the DNS record of the custom domain

@@ -6,9 +6,7 @@
 # un ALLOW y rouvrirait le port. Les appelants décident : firewall.yml REFUSE de continuer, webapp-remove le signale.
 # Pose `wa_ufw_foreign` (lignes de `ufw status numbered` qui visent ces ports).
 
-- name: Read the facts of the hardened application
-  ansible.builtin.set_fact:
-    wa_app: "{{ hostvars[webapp_target | default(inventory_hostname)] }}"
+# `wa_app` : roles/webapp-security/vars/main.yml (lu à la demande, jamais copié dans un fait).
 
 - name: Read the numbered ufw rules
   ansible.builtin.command:

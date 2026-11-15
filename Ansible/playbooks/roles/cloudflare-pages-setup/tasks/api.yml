@@ -36,6 +36,8 @@
   delegate_to: localhost
   become: false
   changed_when: false
+  # Lecture seule : exécutée aussi en `--check` (les tâches suivantes en lisent le résultat).
+  check_mode: false
 
 - name: Create the missing A records of the API domain
   ansible.builtin.uri:

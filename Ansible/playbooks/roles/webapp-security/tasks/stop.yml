@@ -3,9 +3,7 @@
 # `<projet>-front-<hôte>` de deploy-full.sh) — échec fermé : appelé quand le déploiement ou le contrôle du
 # durcissement échoue. Ne retire rien (volumes, images) : webapp-remove le fait.
 
-- name: Read the facts of the hardened application
-  ansible.builtin.set_fact:
-    wa_app: "{{ hostvars[webapp_target | default(inventory_hostname)] }}"
+# `wa_app` : roles/webapp-security/vars/main.yml (lu à la demande, jamais copié dans un fait).
 
 - name: Check the project name used to select the containers to stop
   ansible.builtin.assert:

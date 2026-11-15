@@ -65,6 +65,9 @@
       {{ '' if wa_update_common | bool else '--no-update-common' }}
   args:
     chdir: "{{ wa_src }}"
+  # Variables d'environnement propres à l'app lues par ses hooks (ex. AgentHub : USER_RUNNERS_PROVISION). Jamais de secret ici :
+  # un secret vit dans le `.env`, pas dans l'inventaire.
+  environment: "{{ webapp_run_env | default({}) }}"
   delegate_to: localhost
   become: false
   register: wa_run

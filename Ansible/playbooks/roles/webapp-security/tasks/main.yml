@@ -15,9 +15,7 @@
 #
 # `webapp_target` : l'entrée de l'application (variable passée par le playbook), dont on lit les faits `wa_*`.
 
-- name: Read the facts of the application
-  ansible.builtin.set_fact:
-    wa_app: "{{ hostvars[webapp_target] }}"
+# `wa_app` : roles/webapp-security/vars/main.yml (lu à la demande, pas copié dans un fait).
 
 - name: Apply the firewall of the hardened application
   ansible.builtin.include_tasks:

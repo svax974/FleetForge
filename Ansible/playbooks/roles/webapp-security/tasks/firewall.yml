@@ -22,9 +22,7 @@
 # Joué AVANT le déploiement de l'app (aucune fenêtre où un port publié serait ouvert) puis rejoué par
 # update-ufw-all.yml quand la liste des proxies change.
 
-- name: Read the facts of the hardened application
-  ansible.builtin.set_fact:
-    wa_app: "{{ hostvars[webapp_target | default(inventory_hostname)] }}"
+# `wa_app` : roles/webapp-security/vars/main.yml (lu à la demande, jamais copié dans un fait).
 
 - name: Name the firewall script of the application
   ansible.builtin.set_fact:

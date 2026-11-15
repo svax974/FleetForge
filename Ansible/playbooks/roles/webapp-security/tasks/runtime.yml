@@ -21,9 +21,7 @@
 #   • le pare-feu DOCKER-USER est en place et atteint ;
 #   • le compte dédié n'est dans aucun groupe privilégié et ne peut ni lire ni traverser les chemins protégés.
 
-- name: Read the facts of the hardened application
-  ansible.builtin.set_fact:
-    wa_app: "{{ hostvars[webapp_target | default(inventory_hostname)] }}"
+# `wa_app` : roles/webapp-security/vars/main.yml (lu à la demande, jamais copié dans un fait).
 
 - name: Check the names used to select the containers
   ansible.builtin.assert:

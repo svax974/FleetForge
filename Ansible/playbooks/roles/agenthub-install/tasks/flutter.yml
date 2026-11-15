@@ -138,6 +138,8 @@
   ansible.builtin.command: runuser -l {{ agenthub_flutter_user | quote }} -c {{ ((agenthub_flutter_dir | quote) ~ '/bin/flutter --version --machine') | quote }}
   register: agenthub_flutter_version
   changed_when: false
+  # Lecture seule : exécutée aussi en `--check`, sinon la sortie vide fait échouer l'assertion qui suit.
+  check_mode: false
   become: true
 
 - name: Fail when Flutter does not answer

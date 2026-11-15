@@ -46,6 +46,8 @@
 #   webapp_env_from_vault { CLÉ_DU_ENV: <variable du coffre> } : secrets non tirés par l'app (mots de passe d'un amont),
 #                         écrits dans back/.env (no_log) ; absent ou malformé = échec, par NOM
 #   webapp_env_required   clés que back/.env doit porter NON VIDES après le rendu (noms seulement)
+#   webapp_monitor_redis  false : pas de sonde du conteneur `<projet>_redis` (défaut : vrai sauf `webapp_db_engine: sqlite`, dont le compose n'en lance pas)
+#   webapp_run_env        { VARIABLE: valeur } ajoutées à l'environnement de `run.sh` (hooks propres à l'app ; jamais un secret)
 #   webapp_upstream_checks  sondes svcprobe `upstream_<id>` : [{ id, url }], URL https lue DEPUIS le conteneur back
 
 # Ports consécutifs réservés à une app : front, back-lb, Postgres, Redis.
