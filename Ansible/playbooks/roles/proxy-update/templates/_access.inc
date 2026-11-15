@@ -14,7 +14,9 @@
    ouvrir :
      • private → vpns + Prometheus + whitelist + serveurs liés (`access_linked`
                  de l'entrée : NOMS d'entrées d'inventaire, clients applicatifs
-                 réels), puis `deny all` ;
+                 réels ; plus, sur un proxy de la MÊME machine qu'un serveur
+                 lié, les sous-réseaux Docker privés déclarés par son
+                 `access_local_cidrs`), puis `deny all` ;
      • public  → aucun filtre d'adresse : l'authentification est celle du
                  service (signatures d'appareil, jeton…), et elle doit exister.
                  Entrée `cloudflare_front: true` : public MAIS seulement par
@@ -47,6 +49,23 @@
         {% endfor %}
         {% for host in hostvars[access_entry].access_linked | default([]) %}
         allow {{ hostvars[host]['ansible_host'] }};  # serveur lié {{ host }}
+        {#- Serveur lié sur la MÊME machine que ce proxy : il joint le nom public
+            par l'adresse publique de la machine, mais depuis un conteneur le
+            paquet arrive en local, avec l'adresse du conteneur (pas de NAT
+            pour une destination locale). Ses sous-réseaux Docker DÉDIÉS sont
+            alors déclarés sur son entrée (`access_local_cidrs`) — et admis ici
+            SEULEMENT sur un proxy co-localisé, SEULEMENT s'ils sont privés :
+            une valeur publique ou mal formée est ignorée (fermé), jamais
+            élargie. #}
+        {% if hostvars[host]['ansible_host'] == ansible_host %}
+        {% for cidr in hostvars[host].access_local_cidrs | default([]) %}
+        {% if cidr is match('^(10[.][0-9]{1,3}[.][0-9]{1,3}|172[.](1[6-9]|2[0-9]|3[01])[.][0-9]{1,3}|192[.]168[.][0-9]{1,3})[.][0-9]{1,3}/(1[6-9]|2[0-9]|3[0-2])$') %}
+        allow {{ cidr }};  # serveur lié {{ host }}, réseau Docker local
+        {% else %}
+        # access_local_cidrs « {{ cidr }} » de {{ host }} ignoré : pas un sous-réseau privé /16 à /32.
+        {% endif %}
+        {% endfor %}
+        {% endif %}
         {% endfor %}
         deny all;
 {% elif _access_mode == 'public' and hostvars[access_entry].cloudflare_front | default(false) | bool %}
