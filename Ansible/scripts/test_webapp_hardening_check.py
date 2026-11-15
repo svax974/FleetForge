@@ -1494,14 +1494,17 @@ class MonitoringProbeTests(unittest.TestCase):
     def test_the_probe_lists_firewall_and_upstream_checks(self):
         checks = self.checks()
         self.assertEqual([c["name"] for c in checks],
-                         ["front", "firewall_4730", "firewall_4731", "firewall_egress", "upstream_main"])
+                         ["front", "firewall_4730", "firewall_4731", "firewall_egress", "firewall_order4", "firewall_order6",
+                          "upstream_main"])
         self.assertIn("webapp-fleetforge-gateway:egress:deny", checks[3]["argv"][2])
         self.assertIn("webapp-fleetforge-gateway:host:deny", checks[3]["argv"][2])
         firewall = checks[2]["argv"][2]
         self.assertIn("awk -v t=webapp-fleetforge-gateway -v p=4731", firewall)
         self.assertIn('t ":" p ":deny"', firewall)
         self.assertIn("DROP|REJECT", firewall, "l'ordre des règles est vérifié aussi")
-        upstream = checks[4]["argv"][2]
+        self.assertIn("iptables -w -S | awk -v tag=webapp-fleetforge-gateway -v chains=DOCKER-USER,INPUT,OUTPUT", checks[4]["argv"][2])
+        self.assertIn("ip6tables -w -S | awk -v tag=webapp-fleetforge-gateway -v chains=DOCKER-USER,OUTPUT -v opt=1", checks[5]["argv"][2])
+        upstream = checks[6]["argv"][2]
         self.assertIn("https://infra.example.test/healthz", upstream)
         self.assertIn('{{.Label "com.docker.compose.project"}}', upstream)
         self.assertIn("/^fleetforge-gateway-back-/", upstream)
@@ -1518,6 +1521,37 @@ class MonitoringProbeTests(unittest.TestCase):
         self.assertEqual(probe(["-A DOCKER-USER -i eth0 -j ACCEPT"] + OUR_RULES), 1)
         self.assertEqual(probe(["-A DOCKER-USER -s 203.0.113.9/32 -j RETURN"] + OUR_RULES), 1)
         self.assertEqual(probe(OUR_RULES[:2]), 1, "pas de DROP sur 4731")
+
+    @unittest.skipUnless(shutil.which("awk"), "awk absent")
+    def test_the_order_probe_covers_input_output_and_ipv6(self):
+        # Relecture finale : la sonde ne lisait que DOCKER-USER ; `ufw reload` peut replacer `ufw-before-output`
+        # (`-o lo -j ACCEPT`) devant les règles OUTPUT de l'app sans alerte, et OUTPUT IPv6 n'était jamais vu.
+        command = self.checks()[4]["argv"][2]
+        program = command[command.index("'") + 1:command.rindex("'")]
+
+        def probe(table, chains="DOCKER-USER,INPUT,OUTPUT", opt="0"):
+            return subprocess.run(["awk", "-v", "tag=webapp-fleetforge-gateway", "-v", f"chains={chains}", "-v", f"opt={opt}",
+                                   program], input="\n".join(table) + "\n", capture_output=True, text=True).returncode
+        good = ["-P INPUT ACCEPT", "-P OUTPUT ACCEPT", "-N DOCKER-USER"] + OUR_RULES + OUR_INPUT
+        self.assertEqual(probe(good), 0)
+        ufw = ["-N ufw-before-output", "-A ufw-before-output -o lo -j ACCEPT"]
+        self.assertEqual(probe(ufw + ["-A OUTPUT -j ufw-before-output"] + good), 1, "ufw-before-output devant OUTPUT")
+        self.assertEqual(probe(["-A INPUT -i lo -j ACCEPT"] + good), 1, "ACCEPT devant INPUT")
+        f2b = ["-N f2b-sshd", "-A f2b-sshd -s 198.51.100.66/32 -j REJECT", "-A f2b-sshd -j RETURN",
+               "-A INPUT -p tcp --dport 22 -j f2b-sshd"]
+        self.assertEqual(probe(f2b + good), 0, "saut fail2ban (refus seulement) admis")
+        self.assertEqual(probe([r for r in good if not r.startswith("-A OUTPUT")]), 1, "règles OUTPUT absentes")
+        v6 = ["-P OUTPUT ACCEPT", "-A OUTPUT -p tcp -m addrtype --dst-type LOCAL -m comment --comment webapp-fleetforge-gateway:local:deny:g1 -j REJECT"]
+        self.assertEqual(probe(v6, "DOCKER-USER,OUTPUT", "1"), 0, "DOCKER-USER IPv6 absente : admise")
+        self.assertEqual(probe(["-A OUTPUT -o lo -j ACCEPT"] + v6, "DOCKER-USER,OUTPUT", "1"), 1)
+
+    def test_a_local_proxy_adds_the_live_nginx_cgroup_probe(self):
+        play = MONITORING_PLAY.replace("wa_h_tag: webapp-fleetforge-gateway", "wa_h_tag: webapp-fleetforge-gateway\n    wa_h_local_proxy: true")
+        checks = {c["name"]: c for c in self.checks(play)}
+        command = checks["firewall_local_nginx"]["argv"][2]
+        self.assertIn("/sys/fs/cgroup/$1/cgroup.procs", command)
+        self.assertIn("setpriv --reuid=65534", command, "jamais root : la règle local:root le laisserait passer")
+        self.assertIn("/dev/tcp/127.0.0.1/$2' probe \"$cg\" 4731", command.replace('"\'', "'"))
 
     def test_a_hostile_upstream_url_is_refused(self):
         code, out = run_local_play(MONITORING_PLAY.replace("https://infra.example.test/healthz", "https://x/; rm -rf /"))

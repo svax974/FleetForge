@@ -24,6 +24,22 @@
     _awk: >-
       /^-A DOCKER-USER/ { if (index($0, t ":")) seen = 1; if (!seen && $0 !~ / -j (DROP|REJECT)( |$)/) bad = 1;
       if (index($0, t ":" p ":deny") && $0 ~ /-j DROP/) ok = 1 } END { exit !(ok && !bad) }
+    # Chaînes « refus seulement » par niveaux (DROP/REJECT/RETURN, ou saut vers une telle chaîne ; 5 niveaux, un cycle
+    # n'y entre jamais), puis, pour chaque chaîne de `chains`, aucune règle hors refus avant celle de l'app. `opt` :
+    # chaîne absente et vide admise (DOCKER-USER IPv6 sans Docker IPv6).
+    _order_awk: >-
+      $1 == "-N" { decl[$2] = 1 }
+      $1 == "-A" { c = $2; n[c]++; r[c, n[c]] = $0; t = ""; for (i = 3; i < NF; i++) if ($i == "-j" || $i == "-g") t = $(i + 1); tg[c, n[c]] = t }
+      END { for (d = 0; d < 5; d++) { for (c in decl) { ok = 1; for (i = 1; i <= n[c]; i++) { x = tg[c, i];
+      if (!(x == "DROP" || x == "REJECT" || x == "RETURN" || ((x in safe) && safe[x]))) ok = 0 } nx[c] = ok }
+      for (c in nx) safe[c] = nx[c] }
+      k = split(chains, cs, ","); bad = 0; for (j = 1; j <= k; j++) { c = cs[j]; if (n[c] == 0 && !(c in decl) && opt) continue;
+      seen = 0; for (i = 1; i <= n[c]; i++) { if (index(r[c, i], tag ":")) { seen = 1; break } x = tg[c, i];
+      if (!(x == "DROP" || x == "REJECT" || ((x in safe) && safe[x]))) bad = 1 } if (!seen) bad = 1 } exit bad }
+    _nginx_probe: >-
+      pid=$(cat /run/nginx.pid) && cg=$(sed -n 's|^0::/||p' /proc/$pid/cgroup) && [ -n "$cg" ] &&
+      exec sh -c 'echo $$ > "/sys/fs/cgroup/$1/cgroup.procs" && exec setpriv --reuid=65534 --regid=65534 --clear-groups
+      timeout 5 bash -c "exec 3<>/dev/tcp/127.0.0.1/$2"' probe "$cg" {{ wa_back_port | int }}
     _fmt: "{{ webapp_probe_ps_format }}"
     _firewall: >-
       {%- set out = [] -%}
@@ -35,6 +51,19 @@
       {#- Sortie du sous-réseau dédié : DROP final présent vers les autres machines ET vers l'hôte. -#}
       {%- set _ = out.append({'name': 'firewall_egress', 'kind': 'command', 'timeout': 10,
             'argv': ['/bin/sh', '-c', "iptables -w -S DOCKER-USER | grep -q -- '" ~ wa_h_tag ~ ":egress:deny' && iptables -w -S INPUT | grep -q -- '" ~ wa_h_tag ~ ":host:deny'"]}) -%}
+      {#- ORDRE dans DOCKER-USER, INPUT et OUTPUT (IPv4), DOCKER-USER et OUTPUT (IPv6) : rien qui puisse accepter avant
+          la première règle de l'app (`ufw reload` replace `ufw-before-output`, `-o lo -j ACCEPT`, en tête) ; un saut
+          vers une chaîne qui ne fait que refuser est admis (fail2ban). Table ENTIÈRE lue pour juger ces chaînes. -#}
+      {%- set _ = out.append({'name': 'firewall_order4', 'kind': 'command', 'timeout': 10,
+            'argv': ['/bin/sh', '-c', "iptables -w -S | awk -v tag=" ~ wa_h_tag ~ " -v chains=DOCKER-USER,INPUT,OUTPUT -v opt=0 '" ~ _order_awk ~ "'"]}) -%}
+      {%- set _ = out.append({'name': 'firewall_order6', 'kind': 'command', 'timeout': 10,
+            'argv': ['/bin/sh', '-c', "ip6tables -w -S | awk -v tag=" ~ wa_h_tag ~ " -v chains=DOCKER-USER,OUTPUT -v opt=1 '" ~ _order_awk ~ "'"]}) -%}
+      {#- Proxy sur cette machine : un processus NON root placé dans le groupe de contrôle VIVANT de nginx joint le
+          back-lb — la règle `local:nginx` le vise encore (sinon périmée : nginx recréé, 502 sans alerte). -#}
+      {%- if wa_h_local_proxy | default(false) | bool -%}
+      {%- set _ = out.append({'name': 'firewall_local_nginx', 'kind': 'command', 'timeout': 10,
+            'argv': ['/bin/sh', '-c', _nginx_probe]}) -%}
+      {%- endif -%}
       {%- endif -%}
       {{ out }}
     _upstreams: >-
