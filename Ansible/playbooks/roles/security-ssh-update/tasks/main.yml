@@ -49,7 +49,12 @@
     from_ip: "{{ hostvars[item].ansible_host }}"
   loop: "{{ groups['vpns'] | default([]) }}"
 
-# Allow app_port from proxies + whitelist + VPNs (if defined for this host)
+# Allow app_port from proxies + whitelist + VPNs (if defined for this host).
+# `ufw_app_ports: false` sur l'entrée : ses ports sont PUBLIÉS PAR DOCKER et
+# filtrés dans DOCKER-USER par le rôle `-security` du service — une règle ufw y
+# serait décorative, et resterait après un resserrement (passerelle MCP de
+# FleetForge : `fleetforge-gateway-security` purge alors toute règle ufw de ses
+# ports).
 - name: Allow app_port from proxies
   community.general.ufw:
     rule: allow
@@ -57,7 +62,7 @@
     from_ip: "{{ hostvars[item].ansible_host }}"
     port: "{{ app_port }}"
   loop: "{{ groups['proxies'] | default([]) }}"
-  when: app_port is defined
+  when: app_port is defined and (ufw_app_ports | default(true) | bool)
 
 - name: Allow app_port from whitelist
   community.general.ufw:
@@ -66,7 +71,7 @@
     from_ip: "{{ item }}"
     port: "{{ app_port }}"
   with_items: "{{ whitelist }}"
-  when: app_port is defined
+  when: app_port is defined and (ufw_app_ports | default(true) | bool)
 
 - name: Allow app_port from VPNs
   community.general.ufw:
@@ -75,7 +80,7 @@
     from_ip: "{{ hostvars[item].ansible_host }}"
     port: "{{ app_port }}"
   loop: "{{ groups['vpns'] | default([]) }}"
-  when: app_port is defined
+  when: app_port is defined and (ufw_app_ports | default(true) | bool)
 
 # Allow back_port from whitelist + VPNs only (if defined for this host)
 - name: Allow back_port from whitelist
@@ -85,7 +90,7 @@
     from_ip: "{{ item }}"
     port: "{{ back_port }}"
   with_items: "{{ whitelist }}"
-  when: back_port is defined
+  when: back_port is defined and (ufw_app_ports | default(true) | bool)
 
 - name: Allow back_port from VPNs
   community.general.ufw:
@@ -94,7 +99,7 @@
     from_ip: "{{ hostvars[item].ansible_host }}"
     port: "{{ back_port }}"
   loop: "{{ groups['vpns'] | default([]) }}"
-  when: back_port is defined
+  when: back_port is defined and (ufw_app_ports | default(true) | bool)
 
 # Deny connections on port 22
 - name: Remove SSH connections on port 22 rules if any
