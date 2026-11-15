@@ -59,6 +59,7 @@
     state: absent
   loop:
     - "/etc/systemd/system/{{ wa_h_firewall_unit }}.service"
+    - "/etc/systemd/system/nginx.service.d/{{ wa_h_firewall_unit }}.conf"
     - "{{ wa_h_firewall_script }}"
   become: true
 

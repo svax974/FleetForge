@@ -131,6 +131,34 @@
   changed_when: true
   when: wa_fw_unit is changed and not ansible_check_mode
 
+# Proxy sur cette machine : `xt_cgroup --path` résout le groupe de contrôle À L'INSERTION. nginx recréé (crash puis
+# `Restart=on-failure`, démarrage échoué puis relancé) = nouvel objet, règle périmée = proxy → app REJETÉ (502). Le
+# drop-in, PROPRE à l'app (un fichier par app, retiré par webapp-remove), relance le pare-feu à chaque démarrage de
+# nginx : les règles sont reposées sur le groupe vivant.
+- name: Create the drop-in directory of nginx
+  ansible.builtin.file:
+    path: "{{ webapp_systemd_unit_dir }}/nginx.service.d"
+    state: directory
+    owner: "{{ webapp_root_owner }}"
+    group: "{{ webapp_root_group }}"
+    mode: '0755'
+  become: true
+  when: wa_app.wa_h_local_proxy | default(false) | bool
+
+- name: Deploy the nginx drop-in that replays the firewall of the application
+  ansible.builtin.copy:
+    dest: "{{ webapp_systemd_unit_dir }}/nginx.service.d/{{ wa_app.wa_h_firewall_unit }}.conf"
+    content: |
+      # Posé par webapp-security ({{ wa_app.wa_project }}) : reposer les règles OUTPUT `local:nginx` sur le groupe de
+      # contrôle de CE démarrage de nginx (xt_cgroup le résout à l'insertion).
+      [Service]
+      ExecStartPost=/bin/systemctl --no-block try-restart {{ wa_app.wa_h_firewall_unit }}.service
+    owner: "{{ webapp_root_owner }}"
+    group: "{{ webapp_root_group }}"
+    mode: '0644'
+  become: true
+  when: wa_app.wa_h_local_proxy | default(false) | bool
+
 - name: Enable and start the firewall unit of the application
   ansible.builtin.systemd:
     name: "{{ wa_app.wa_h_firewall_unit }}"
