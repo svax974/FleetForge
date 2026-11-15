@@ -6,7 +6,9 @@ storage:
   cache:
     blobdescriptor: inmemory
   filesystem:
-    rootdirectory: /data
+    # Le point de montage du compose (`<répertoire du registre>/data:/var/lib/registry`). Écrit en `/data`, le registre rangeait
+    # tout dans la couche inscriptible du conteneur : images perdues à sa recréation (constaté le 15/11/2026).
+    rootdirectory: /var/lib/registry
   delete:
     enabled: true
 http:

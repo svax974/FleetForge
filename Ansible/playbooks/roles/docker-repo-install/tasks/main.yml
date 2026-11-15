@@ -108,6 +108,7 @@
     owner: "{{ remote_username }}"
     group: "{{ remote_username }}"
     mode: '0640'
+  register: docker_repo_config
 
 - name: Copy the docker-compose file
   ansible.builtin.template:
@@ -123,6 +124,8 @@
     state: present
     project_src: "{{ docker_repo_dir }}"
     pull: always
+    # Un fichier monté qui change (config.yml) n'est pas vu par Compose : sans cela le conteneur garde l'ancienne configuration.
+    recreate: "{{ 'always' if (docker_repo_config is changed) else 'auto' }}"
   # Premier passage en `--check` : le répertoire n'existe pas encore (créé plus haut, mais pas en simulation).
   ignore_errors: "{{ ansible_check_mode }}"
 
