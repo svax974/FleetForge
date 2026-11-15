@@ -538,20 +538,28 @@ Trois bornes facultatives (`max_hosts` obligatoire en mode `check`), tenues par
 avec les deux premières) :
 - `deny_playbooks` : motifs (`*` = toute suite, `?` = un caractère ; lettres, chiffres,
   `_ . -`) sur le **nom de fichier** du playbook. Le playbook demandé et ceux qu'il
-  importe (`import_playbook` de nom statique, transitivement) sont tous jugés, sur
-  leur nom **résolu** (lien symbolique suivi : un alias `x.yml` → `deploy-fleetforge.yml`
-  est jugé `deploy-fleetforge.yml`) et, pour un import, aussi sur le nom écrit. Un
-  import qui ne se résout pas en un fichier lisible sous `playbooks/` (absent, lien
-  sortant, fichier refusé) refuse le lancement : son nom réel ne peut être jugé.
-  `x.yml` et `x.yaml` sont un même playbook. Refus : `403 forbidden_playbook`. La
-  lecture (`describe_playbook`, `read_tree`) reste ouverte ;
+  importe (`import_playbook` de nom statique, transitivement) sont tous jugés, chacun
+  sous son nom **écrit** (celui de la requête, celui de l'`import_playbook`) ET sous son
+  nom **résolu** (lien symbolique suivi) : un alias `x.yml` interdit par son nom reste
+  interdit même si sa cible est permise, et un alias `x.yml` → `deploy-fleetforge.yml`
+  est interdit si `deploy-fleetforge.yml` l'est. `x.yml` et `x.yaml` sont un même
+  playbook. Refus : `403 forbidden_playbook`. La lecture (`describe_playbook`,
+  `read_tree`) reste ouverte.
+  **Durcissement du 15/11/2026, à valider par le propriétaire** : un import qui ne se
+  résout pas en un fichier lisible sous `playbooks/` (absent, lien qui en sort, fichier
+  refusé par le lecteur de l'arbre) refuse le lancement en `403 forbidden_playbook` —
+  son nom réel ne peut être jugé. Avant, il passait (absent : échec d'Ansible ; lien
+  sortant : exécuté sans jugement). Ne vaut que pour les comptes bornés et le compte
+  d'automatisation, pas pour l'opérateur ;
 - `max_hosts` (1 à 1000) : `limit` devient **obligatoire** (sans lui un run vise tout ce
   que cible le playbook, donc un nombre inconnu), `no_limit` est refusé, et les groupes
   de `limit` sont développés par l'inventaire (`all`, l'organisation, un groupe, un
   hôte ; sans doublon) : au-delà, `403 too_many_hosts` ;
 - `allow_playbooks` : liste blanche, mêmes motifs, non vide — seul un playbook qu'elle
   couvre se lance (`403 forbidden_playbook` sinon ; ceux qu'il importe restent jugés par
-  `deny_playbooks`).
+  `deny_playbooks`). Jugée sur le seul nom **résolu**, celui qui s'exécute et qu'hache
+  l'empreinte du check : un alias non listé vers un playbook listé se lance, un alias
+  listé vers un playbook non listé est refusé.
 
 Par le déploiement : `ff_api_accounts: [{ user, parcs?, mode, deny_playbooks?, max_hosts?,
 allow_playbooks?, accept_checks_from?, accept_own_checks?, allow_extra_vars?, allow_diff? }]` dans
