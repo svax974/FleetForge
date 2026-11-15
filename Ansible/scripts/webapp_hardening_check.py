@@ -122,6 +122,30 @@ ALLOWED_NETWORK_KEYS = {"ipam", "driver"}
 ALLOWED_IPAM_KEYS = {"config"}
 ALLOWED_IPAM_CONFIG_KEYS = {"subnet"}
 ALLOWED_TOP_VOLUME_KEYS = {"driver"}
+CODE_SERVICES = {"back", "back-worker"}
+# Variables qui portent un secret de l'app ou d'un amont ; services tiers : seules celles dont ils ont besoin.
+SECRET_VAR = re.compile(r"^(FFG_.*|.*_PASSWORD|.*PASSWORD.*|JWT_.*|CRYPT_.*|ADMIN_.*|.*SECRET.*|.*_API_KEY)$", re.I)
+THIRD_PARTY_SECRETS = {"db": {"DB_PASSWORD", "POSTGRES_PASSWORD"}, "redis": {"REDIS_PASSWORD"}}
+_INTERP = re.compile(r"(?<!\$)\$\{([A-Za-z_][A-Za-z0-9_]*)|(?<!\$)\$([A-Za-z_][A-Za-z0-9_]*)")
+
+
+def _strings(value):
+    if isinstance(value, dict):
+        for k, v in value.items():
+            yield from _strings(k)
+            yield from _strings(v)
+    elif isinstance(value, list):
+        for v in value:
+            yield from _strings(v)
+    elif isinstance(value, str):
+        yield value
+
+
+def _interpolated(text):
+    """Variables que Compose interpole dans une chaîne BRUTE (`$$X` est échappé : laissé au conteneur)."""
+    return [a or b for a, b in _INTERP.findall(text.replace("$$", "\0\0"))]
+
+
 DOCKERFILE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]*(/[A-Za-z0-9_][A-Za-z0-9._-]*)*$")
 # Valeurs FACTICES : elles servent à vérifier la FORME (où chaque variable arrive), jamais déployées.
 FAKE_ENV = {
@@ -746,6 +770,20 @@ def _structure(raw, path, allowed_binds, front, back_lb):
             if source not in allowed_binds:
                 errors.append(f"{where} : montage de l'hôte interdit {source}")
         expected_ip = "0.0.0.0" if name in (front, back_lb) else "127.0.0.1"
+        if name in CODE_SERVICES and svc.get("ports"):
+            errors.append(f"{where} : aucun port publié pour un service de code (revue du 15/11/2026)")
+        # Valeurs INTERPOLÉES depuis back/.env : un secret de l'app (mots de passe aval, JWT, clés) n'entre ni dans
+        # un argument de build (gravé dans l'image), ni dans un service tiers hors liste explicite.
+        for value in _strings(svc.get("build", {}).get("args") if isinstance(svc.get("build"), dict) else None):
+            for var in _interpolated(value):
+                if SECRET_VAR.match(var):
+                    errors.append(f"{where} : build.args interpole le secret ${{{var}}}")
+        if name not in CODE_SERVICES:
+            allowed = THIRD_PARTY_SECRETS.get(name, set())
+            for value in _strings({k: v for k, v in svc.items() if k != "build"}):
+                for var in _interpolated(value):
+                    if SECRET_VAR.match(var) and var not in allowed:
+                        errors.append(f"{where} : interpole le secret ${{{var}}} (service tiers)")
         for port in _as_list(svc.get("ports")):
             if _raw_host_ip(port) != expected_ip:
                 errors.append(f"{where} : port {port} doit être lié en clair à {expected_ip}:")
@@ -767,9 +805,19 @@ def _values(data, path, hardened, front, back_lb):
         if any(str(c.get("subnet", "")) == FAKE_ENV["HARDEN_SUBNET"]
                for c in (((net or {}).get("ipam") or {}).get("config") or []))
     }
+    # UN SEUL réseau, celui du sous-réseau dédié : un second réseau (bridge du pool Docker, `default`) échapperait
+    # au pare-feu de sortie, indexé sur ce sous-réseau (revue du 15/11/2026).
+    networks = list((data.get("networks") or {}).keys())
+    if len(networks) != 1 or not subnet_nets:
+        errors.append(f"{path}: exactement UN réseau de premier niveau, de sous-réseau ${{HARDEN_SUBNET}} ({networks})")
     for name, svc in services.items():
         svc = svc or {}
         where = f"{path}: service {name}"
+        attached = svc.get("networks")
+        if attached is None:
+            errors.append(f"{where} : `networks` explicite exigé (sinon `default`, hors du sous-réseau dédié)")
+        elif sorted(_service_networks(svc)) != sorted(subnet_nets) or len(_service_networks(svc)) != 1:
+            errors.append(f"{where} : réseaux {sorted(_service_networks(svc))} au lieu du seul réseau dédié {sorted(subnet_nets)}")
         ports = [_port_tuple(p) for p in _as_list(svc.get("ports"))]
         if name == front and ports != [("0.0.0.0", FAKE_ENV["VITE_PORT"], "80")]:
             errors.append(f"{where} : le front publie EXACTEMENT 0.0.0.0:${{VITE_PORT}}:80 ({ports})")

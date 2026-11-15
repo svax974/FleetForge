@@ -459,6 +459,34 @@ WHITELIST_CASES = {
 }
 
 
+class ComposeNetworkAndSecretTests(unittest.TestCase):
+    """Quatrième revue : un second réseau échapperait au pare-feu de sortie ; un secret interpolé ailleurs que là où
+    il sert, ou un port publié par un service de code, est refusé (mutations M1 à M5 du relecteur)."""
+
+    def test_reviewer_mutations_are_refused(self):
+        m1 = GOOD_COMPOSE_YAML.replace("  networks: [app]\n  volumes:", "  networks: [app, default]\n  volumes:", 1)
+        self.assertIn("au lieu du seul réseau dédié", compose_errors(m1))
+        m2 = _with(lambda d: (d["networks"].update({"aaa": {}}), d["services"]["back"].__setitem__("networks", ["aaa", "app"])))
+        self.assertIn("exactement UN réseau", compose_errors(m2))
+        m3 = _with(lambda d: d["services"]["redis"].pop("networks"))
+        self.assertIn("`networks` explicite exigé", compose_errors(m3))
+        m4 = _with(lambda d: d["services"]["back"].__setitem__("ports", ["127.0.0.1:9999:${NODE_PORT}"]))
+        self.assertIn("aucun port publié pour un service de code", compose_errors(m4))
+        m5 = _with(lambda d: (d["networks"].update({"other": {}}), d["services"]["redis"].__setitem__("networks", ["app", "other"])))
+        errors = compose_errors(m5)
+        self.assertIn("exactement UN réseau", errors)
+        self.assertIn("service redis : réseaux", errors)
+
+    def test_secrets_are_interpolated_only_where_they_serve(self):
+        bad_arg = _with(lambda d: d["services"]["front"]["build"].__setitem__("args", {"X": "${FFG_UPSTREAM_MAIN_RUN_PASSWORD}"}))
+        self.assertIn("build.args interpole le secret ${FFG_UPSTREAM_MAIN_RUN_PASSWORD}", compose_errors(bad_arg))
+        bad_env = _with(lambda d: d["services"]["back-lb"].__setitem__("environment", {"J": "${JWT_SECRET}"}))
+        self.assertIn("interpole le secret ${JWT_SECRET} (service tiers)", compose_errors(bad_env))
+        wrong_service = _with(lambda d: d["services"]["db"].__setitem__("environment", {"R": "${REDIS_PASSWORD}"}))
+        self.assertIn("${REDIS_PASSWORD} (service tiers)", compose_errors(wrong_service))
+        self.assertEqual(compose_errors(GOOD_COMPOSE_YAML), "", "Redis lit ${REDIS_PASSWORD:?} : admis pour redis")
+
+
 class ComposeWhitelistTests(unittest.TestCase):
     """Liste BLANCHE de clés (racine, services, build et voisins, sortie de `docker compose config`)."""
 
