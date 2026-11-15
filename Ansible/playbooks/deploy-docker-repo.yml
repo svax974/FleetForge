@@ -20,6 +20,35 @@
   roles:
     - docker-repo-install
 
+# ── Vhost du registre sur les proxies ──────────────────────────────────────
+# Les hôtes d'application TIRENT par `docker-repo.<domaine>` (TLS, nginx des proxies) : sans ce vhost un `docker pull`
+# échoue en 403/404. Reload seul, uniquement si le fichier a changé ; jamais les autres vhosts. Pas de `--limit` à ce
+# play (il exclurait les proxies). Le gabarit est `parcs/<parc>/nginx/sites-enabled/docker-repo-ssl.conf`.
+- name: Vhost du registre sur les proxies
+  hosts: proxies
+  remote_user: "{{ remote_username }}"
+  become: true
+  tags: [proxy-conf]
+  tasks:
+    - name: Deploy just the registry vhost
+      ansible.builtin.include_role:
+        name: proxy-update
+        tasks_from: deploy-one-site
+      vars:
+        site: docker-repo-ssl.conf
+
+# Le port du registre est publié par Docker : ufw ne le voit pas, il se filtre dans DOCKER-USER (CLAUDE.md, « Ports
+# publiés par Docker »). `docker_ports_rules` décrit la MACHINE : il vit dans host_vars/<entrée canonique de la machine>
+# (`ctdapi` sur web3c, `back1-preprod` sur papanglabs) et ce play est joué sur CETTE entrée — joué sur `docker-repo`, qui
+# n'a pas de host_vars, il serait un no-op silencieux. Un nom absent d'un inventaire est ignoré.
+- name: Filter the registry port in DOCKER-USER
+  hosts: ctdapi:back1-preprod
+  remote_user: "{{ remote_username }}"
+  become: true
+  tags: [docker-user]
+  roles:
+    - docker-ports-security
+
 - name: Docker repository security settings
   hosts: docker-repo
   remote_user: "{{ remote_username }}"
@@ -32,6 +61,7 @@
 # Sonde `service_up` + métriques du service, et enregistrement de la cible
 # auprès de Prometheus. Rejouable seule :
 #   ./play.sh papanglabs deploy-docker-repo.yml --tags monitoring
+#   ./play.sh papanglabs deploy-docker-repo.yml --tags proxy-conf    # vhost seul
 - name: Supervision du service
   hosts: docker-repo
   remote_user: "{{ remote_username }}"

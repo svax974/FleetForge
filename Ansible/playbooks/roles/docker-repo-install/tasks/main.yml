@@ -48,12 +48,31 @@
   no_log: true
   when: docker_repo_pull_pass is not defined and vsecret_values is defined and vsecret_values['docker_repo_pull_pass'] is defined
 
+- name: Put the push account password in the vault (drawn once, never replaced)
+  ansible.builtin.include_role:
+    name: vault-secret-setup
+  vars:
+    vsecret_file: "{{ playbook_dir }}/group_vars/{{ docker_repo_fleet }}.yml"
+    vsecret_owner: docker-repo-install
+    vsecret_items:
+      - name: docker_repo_pass
+        kind: password
+        length: 40
+        comment: "Mot de passe du compte de POUSSÉE du registre Docker ({{ docker_repo_push_user }}) : `docker login localhost:{{ docker_repo_port }}` du constructeur d'images (cette machine) et script de rétention. Jamais copié sur un hôte d'application."
+  when: docker_repo_pass is not defined and docker_repo_fleet | length > 0
+
+- name: Take the push password for this run
+  ansible.builtin.set_fact:
+    docker_repo_pass: "{{ vsecret_values['docker_repo_pass'] }}"
+  no_log: true
+  when: docker_repo_pass is not defined and vsecret_values is defined and vsecret_values['docker_repo_pass'] is defined
+
 - name: Check the push account is declared
   ansible.builtin.assert:
     that:
       - docker_repo_pass is defined
       - docker_repo_pull_pass is defined
-    fail_msg: "`docker_repo_user`/`docker_repo_pass` (compte de poussée) sont attendus dans le vault du parc."
+    fail_msg: "`docker_repo_pass` (compte de poussée) et `docker_repo_pull_pass` (lecture) sont attendus dans le vault du parc : aucun fichier group_vars/<parc>.yml n'a pu les recevoir."
     quiet: true
   when: not ansible_check_mode
 
@@ -104,6 +123,8 @@
     state: present
     project_src: "{{ docker_repo_dir }}"
     pull: always
+  # Premier passage en `--check` : le répertoire n'existe pas encore (créé plus haut, mais pas en simulation).
+  ignore_errors: "{{ ansible_check_mode }}"
 
 # ── Rétention ──────────────────────────────────────────────────────────────
 # Le script s'authentifie avec le compte de poussée (il supprime) : identifiants dans un fichier 0600 de root, jamais
@@ -145,3 +166,47 @@
     enabled: true
     daemon_reload: true
   become: true
+  # Premier passage en `--check` : l'unité n'est pas encore sur le disque.
+  ignore_errors: "{{ ansible_check_mode }}"
+
+# ── Nom public ─────────────────────────────────────────────────────────────
+# Les hôtes tirent par `docker-repo.<domaine>` (CNAME vers le front des proxies, TLS, vhost docker-repo-ssl.conf) : le
+# CNAME est garanti dès le premier déploiement, sans attendre `update-cloudflare-dns.yml` (CLAUDE.md, « Obligation DNS +
+# vhost »). Sans `proxy_hostname` sur l'entrée, rien à publier.
+- name: Ensure the registry CNAME to the canonical proxy front
+  ansible.builtin.include_role:
+    name: cloudflare-dns-update
+    tasks_from: cnames
+  vars:
+    cfdns_cname_scope:
+      - "{{ inventory_hostname }}"
+  when: proxy_hostname is defined
+
+# ── Constructeur d'images ──────────────────────────────────────────────────
+# `scripts/deploy-full.sh` (DEPLOY_BUILDER=remote) assemble l'image sur CETTE machine et la pousse en
+# `localhost:<port>` par `ssh … docker push` : l'identité du push est le `docker login` de l'utilisateur de déploiement
+# ICI. Fait par le playbook (une étape manuelle de moins) ; le jeton reste dans ~/.docker/config.json de ce compte.
+- name: Wait for the registry to answer (401 = up, authentication required)
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ docker_repo_port }}/v2/"
+    status_code: [200, 401]
+  register: docker_repo_up
+  retries: 12
+  delay: 5
+  until: docker_repo_up.status is defined and docker_repo_up.status in [200, 401]
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Log the builder in to the registry with the push account
+  ansible.builtin.command:
+    argv:
+      - docker
+      - login
+      - "localhost:{{ docker_repo_port }}"
+      - --username
+      - "{{ docker_repo_push_user }}"
+      - --password-stdin
+    stdin: "{{ docker_repo_pass }}"
+  no_log: true
+  changed_when: false
+  when: not ansible_check_mode

@@ -54,8 +54,11 @@ du parc**, et les clés de chiffrement à sauvegarder hors du serveur. Restent m
 - Publication Postgres/Redis sur 127.0.0.1 conservée (ports dérivés) ; `webapp_db_exposed: true` les ouvre au profil
   « non exposé » (ctdapi).
 - Registre PAR PARC. web3c : `docker-repo` (machine `docker-priv`, machine partagée avec ctdapi), pull par `docker-repo.web3c.cc` (TLS, proxies),
-  push du constructeur en `localhost:<docker_repo_port>`. papanglabs : entrée `docker-repo` non déployée (adresse factice) → les apps
-  papanglabs restent en mode historique tant qu'elle ne l'est pas.
+  push du constructeur en `localhost:<docker_repo_port>`. papanglabs : entrée `docker-repo` sur la machine de `back1-preprod` (décision du 15/11/2026 ; 5000,
+  `docker_repo_keep_tags: 8`), nom `docker-repo.papanglabs.com` ; ses apps restent en mode historique tant qu'elle n'est pas
+  déployée. `deploy-docker-repo.yml` fait TOUT : comptes tirés au coffre (poussée et lecture), CNAME, vhost TLS sur les proxies
+  (`--tags proxy-conf`), DOCKER-USER de la machine (`--tags docker-user`, règle dans `host_vars/<entrée canonique>.yml`), `docker
+  login` du constructeur, rétention, sonde. Rien à poser à la main.
 - Famille unique `webapp` ; les besoins propres (WebSocket, git smart-HTTP, runner AgentHub) = vhost écrit à la main
   `parcs/<parc>/nginx/sites-enabled/<projet>.conf` (prioritaire sur le gabarit générique) ou `webapp_vhost_locations`.
 
@@ -63,11 +66,12 @@ du parc**, et les clés de chiffrement à sauvegarder hors du serveur. Restent m
 
 Fait : scripts du template (`deploy-images.sh`, 15 tests + les 52 historiques), rôles et playbooks `webapp-*`, `vault-secret-setup`,
 gabarit de vhost générique, registre durci (version épinglée, deux comptes, rétention), métadonnées, garde de quoting.
-Branche locale `feat/registry-deploy` du dépôt `vx-public` (**non poussée** : à relire, puis `update_common.sh`).
+Branche `feat/registry-deploy` du dépôt `vx-public` (poussée le 15/11/2026, pas encore fusionnée : relecture, puis `update_common.sh`).
+Registre papanglabs : entrée, vhost, règle DOCKER-USER et playbook prêts, vérifiés en `--check` ; **pas encore déployé**.
 
 À faire : back-lb sans la `location` AgentHub du template ; entrées CompanyManager, Maestro, air-farmer, ai-medialab,
 social-manager ; groupes multi-hôtes (PapangWorkspace : `BACK_HOSTS` de plusieurs entrées, `app-env.sh` par environnement,
-registre papanglabs, `webapp_upstreams` actif, `webapp_metrics_push`) ; enveloppe `deploy-agenthub.yml` (runner, SMTP) ;
+`webapp_upstreams` actif, `webapp_metrics_push`) ; enveloppe `deploy-agenthub.yml` (runner, SMTP) ;
 suppression des rôles par app une fois migrés ; métrique `webapp_deployed_info`.
 
 ## Validations par l'usage (suivi)
@@ -76,6 +80,7 @@ suppression des rôles par app une fois migrés ; métrique `webapp_deployed_inf
 |---|---|---|
 | Premier `push` vers le registre | pas de 413 ; ligne `[IMAGE:<projet>] … builder=` | `deploy-docker-repo.yml` rejoué (vhost `client_max_body_size 0`), builder connecté (`docker login localhost:<port>` par `srvc`) |
 | Premier `pull` d'une cible | `[IMAGE:<projet>] … host=` ; sinon 403 du vhost | `webapp-install` rejoué (docker login, compte `docker_repo_pull_*` au coffre) ; vhost du registre re-déployé (liste `allow` dérivée des entrées webapp) |
+| Premier déploiement du registre papanglabs | `docker-repo.papanglabs.com/v2/` répond 401 depuis un hôte admis (back1-prod) et expire ailleurs ; `docker_repo_pass` et `docker_repo_pull_pass` apparus dans `group_vars/papanglabs.yml` (à COMMITTER dans le dépôt privé) | `./play.sh papanglabs deploy-docker-repo.yml` (d'abord `--check --diff`, qui n'écrit rien) ; CNAME publié par le rôle, vhost par le play `proxy-conf` |
 | Rétention | `count(docker_repo_prune_last_success_timestamp_seconds)` = 1 ; `docker-repo-prune --dry-run` d'abord | `registry` à ajouter à `prom_alert_groups` APRÈS ce premier passage |
 | Adoption des secrets | message « ADOPTÉ(S) … NOUVEAU(X) » : aucun secret de chiffrement ne doit être « NOUVEAU » pour une app déjà en production | premier `deploy-webapp.yml` d'une app existante, d'abord en `--check --diff --tags config` |
 | Rollback par tag | `current.json` : `imageTag` change, `/api/v1/health` rend le tag en `revision` | `-e webapp_phase=deploy -e webapp_tag=<ancien>` |

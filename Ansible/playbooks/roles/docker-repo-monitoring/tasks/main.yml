@@ -34,6 +34,7 @@
   delay: 5
   until: docker_repo_probe.status is defined and docker_repo_probe.status == 200
   changed_when: false
+  when: not ansible_check_mode
   tags: [monitoring]
 
 - name: Report the probe result
@@ -42,4 +43,5 @@
       {{ docker_repo_probe.content.split('\n')
          | select('search', 'service="docker-registry"')
          | list }}
+  when: not ansible_check_mode
   tags: [monitoring]

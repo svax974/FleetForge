@@ -251,7 +251,7 @@ fn get_playbook_metadata(name: &str) -> (String, String) {
         "remove-dmarc-exporter" => ("Suppression exporteur DMARC".into(), "Arrête et retire l'exporteur DMARC (état agrégé et cible Prometheus conservés).".into()),
         "purge-dmarc-exporter" => ("Purge exporteur DMARC".into(), "Supprime l'exporteur DMARC, son état agrégé, ses identifiants IMAP et sa cible Prometheus. Destructif.".into()),
         "deploy-rpcbtc" => ("Déploiement noeud Bitcoin".into(), "Installe et configure un noeud Bitcoin Core avec accès RPC.".into()),
-        "deploy-docker-repo" => ("Déploiement registre Docker".into(), "Installe un registre Docker privé avec authentification.".into()),
+        "deploy-docker-repo" => ("Déploiement registre Docker".into(), "Déploie le registre Docker privé du parc (entrée `docker-repo`, une par parc) : comptes de poussée et de lecture tirés au coffre s'ils manquent, connexion du constructeur, rétention planifiée, CNAME `docker-repo.<domaine>` vers les proxies, vhost TLS posé sur les proxies (tag proxy-conf), port filtré dans DOCKER-USER (tag docker-user), supervision. Les hôtes d'application y tirent leurs images (famille webapp).".into()),
         "deploy-install-cert" => ("Installation certificats SSL".into(), "Génère et installe les certificats Let's Encrypt via certbot.".into()),
         "deploy-vxiptv-pages" => ("Pages VxIPTV".into(), "Publie les pages légales de VxIPTV sous https://www.web3c.cc/vxiptv/ (fichiers dans le docroot WordPress de www, .htaccess local). À rejouer après un restore/purge WordPress.".into()),
         "remove-vxiptv-pages" => ("Suppression pages VxIPTV".into(), "Supprime le dossier https://www.web3c.cc/vxiptv/ du docroot de www.".into()),
