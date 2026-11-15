@@ -114,12 +114,21 @@
       {%- endfor -%}
       {{ ns.p | join(',') }}
     _clash: "{{ _ours | intersect((_taken | string).split(',') | reject('equalto', '') | map('int') | list) }}"
+    # Ports filtrés par docker-ports-security sur la machine (`docker_ports_rules` de TOUTE entrée de la même adresse,
+    # celle-ci comprise) : deux scripts poseraient leurs règles sur le même port.
+    _rule_ports: >-
+      {{ (groups['all'] | map('extract', hostvars) | selectattr('ansible_host', 'defined')
+          | selectattr('ansible_host', 'equalto', ansible_host) | map(attribute='docker_ports_rules', default=[])
+          | flatten | map(attribute='port', default=0) | map('int') | list) }}
+    _rule_clash: "{{ _ours | intersect(_rule_ports) }}"
   ansible.builtin.assert:
     that:
       - (_ours | unique | length) == 4
       - _clash | length == 0
+      - _rule_clash | length == 0
     fail_msg: >-
       {{ inventory_hostname }} : front/back-lb/Postgres/Redis ({{ _ours | join(', ') }}) doivent être distincts et libres
-      sur {{ ansible_host }} — déjà pris par une autre entrée de la machine : {{ _clash | join(', ') or 'aucun' }}.
+      sur {{ ansible_host }} — déjà pris par une autre entrée de la machine : {{ _clash | join(', ') or 'aucun' }} ;
+      déjà filtrés par `docker_ports_rules` (docker-ports-security) : {{ _rule_clash | join(', ') or 'aucun' }}.
     quiet: true
   tags: [always]

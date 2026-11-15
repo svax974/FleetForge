@@ -895,6 +895,27 @@ class FirewallScriptTests(unittest.TestCase):
         self.assertIn("PROXIES=()", self.render([]))
 
 
+@unittest.skipUnless(shutil.which("awk"), "awk absent")
+class DockerPortsPurgeTests(unittest.TestCase):
+    """docker-ports-security ne purge QUE ses propres règles d'un port, jamais celles d'une app durcie."""
+
+    def test_the_purge_skips_the_rules_of_a_hardened_application(self):
+        path = os.path.join(ROLES, "docker-ports-security", "templates", "docker-ports-firewall.sh.j2")
+        with open(path, encoding="utf-8") as f:
+            program = re.search(r"awk -v p=\"\(dpt:[^\"]*\" '([^']*)'", f.read()).group(1)
+        listing = textwrap.dedent("""\
+            Chain DOCKER-USER (1 references)
+            num  target  prot opt source        destination
+            1    RETURN  6    --  192.0.2.30    0.0.0.0/0  ctstate DNAT ctorigdstport 4731 ctdir ORIGINAL /* webapp-fleetforge-gateway:4731:proxy */
+            2    DROP    6    --  0.0.0.0/0     0.0.0.0/0  ctstate DNAT ctorigdstport 4731 ctdir ORIGINAL /* webapp-fleetforge-gateway:4731:deny */
+            3    RETURN  6    --  198.51.100.9  0.0.0.0/0  tcp dpt:4731 /* llm-proxy — back-lb allow */
+            4    DROP    6    --  0.0.0.0/0     0.0.0.0/0  tcp dpt:4731 /* llm-proxy — back-lb deny */
+            """)
+        out = subprocess.run(["awk", "-v", "p=(dpt:|ctorigdstport )4731( |$)", program], input=listing,
+                             capture_output=True, text=True).stdout.strip()
+        self.assertEqual(out, "3", "première règle PROPRE au script, jamais celles de webapp-<projet>")
+
+
 # ── Fichiers de tâches joués en LOCAL (aucun hôte) ───────────────────────
 
 def run_local_play(play_text, inventory=None, extra_files=None, outputs=(), playbook=None, args=()):
@@ -1212,6 +1233,13 @@ class GuardTests(unittest.TestCase):
             code, out = self.real_playbook("deploy-fleetforge.yml", inventory, *args)
             self.assertNotEqual(code, 0, args)
             self.assertIn("Check the deployment scope and the application named on the command line", out)
+
+    def test_a_port_already_filtered_by_docker_ports_security_is_refused(self):
+        inventory = guard_inventory()
+        inventory["all"]["children"]["infras"]["hosts"]["infra1"]["docker_ports_rules"] = [{"port": 4731, "comment": "x"}]
+        code, out = self.guard(inventory)
+        self.assertNotEqual(code, 0)
+        self.assertIn("docker_ports_rules", out)
 
     def test_the_gateway_never_carries_the_fleetforge_family_nor_goes_public(self):
         self.assertNotEqual(self.guard(guard_inventory(ansible_roles=["webapp", "fleetforge"]))[0], 0)

@@ -68,10 +68,13 @@ apply_family() {
   # Purge par NUMÉRO de règle, et non par spécification : réinjecter une spec
   # contenant `--comment "... - ..."` la fait découper par le shell, et iptables
   # rejette le tiret isolé (« Bad argument `-' »).
+  # SEULEMENT ses propres règles (commentaire « <commentaire> allow|deny ») : une
+  # règle étiquetée par un autre script sur le même port (pare-feu d'une app
+  # `webapp` durcie, `webapp-<projet>:<port>:…`) n'est jamais retirée ici.
   while true; do
     local n
     n=$("${tool}" -L DOCKER-USER --line-numbers -n 2>/dev/null \
-        | awk -v p="(dpt:|ctorigdstport )${port}( |$)" '$0 ~ p && !done {print $1; done=1}')
+        | awk -v p="(dpt:|ctorigdstport )${port}( |$)" '$0 ~ p && $0 ~ / (allow|deny) \*\// && !done {print $1; done=1}')
     [ -z "${n}" ] && break
     "${tool}" -D DOCKER-USER "${n}"
   done
