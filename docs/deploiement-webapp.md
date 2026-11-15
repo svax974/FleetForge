@@ -92,24 +92,33 @@ du parc**, et les clés de chiffrement à sauvegarder hors du serveur. Restent m
 
 ## État au 15/11/2026
 
-Fait : scripts du template (`deploy-images.sh`, 15 tests + les 52 historiques), rôles et playbooks `webapp-*`, `vault-secret-setup`,
-gabarit de vhost générique, registre durci (version épinglée, deux comptes, rétention), métadonnées, garde de quoting.
-Branche `feat/registry-deploy` du dépôt `vx-public` (poussée le 15/11/2026, pas encore fusionnée : relecture, puis `update_common.sh`).
-Registre papanglabs : entrée, vhost, règle DOCKER-USER et playbook prêts, vérifiés en `--check` ; **pas encore déployé**.
+Fait : scripts du template (`deploy-images.sh`, 67 tests avec les historiques), fusionnés dans `main` de `vx-public` le 15/11/2026 ;
+rôles et playbooks `webapp-*`, `vault-secret-setup`, gabarit de vhost générique, registre durci (version épinglée, deux comptes,
+rétention, données sur le volume monté), métadonnées, garde de quoting.
+Registres : papanglabs (`docker-repo` sur la machine de `back1-preprod`) et web3c déployés le 15/11/2026 ; rétention courte sur web3c
+(`docker_repo_keep_tags: 3`, disque de la machine presque plein).
+Applications déployées par `deploy-webapp.yml` : `llm-proxy` (mode registre, secrets adoptés) et `social-manager` (mode historique,
+`webapp_migrate: true`, accès privé, première mise en service).
 
-À faire : back-lb sans la `location` AgentHub du template ; entrées Maestro, air-farmer, ai-medialab (CompanyManager existe, famille `tradekong`, à
-convertir) ; social-manager : entrée créée (machine de `companymanager`, `socialmanager.web3c.cc`, accès privé,
-mode registre désactivé), jamais déployée ; groupes multi-hôtes (PapangWorkspace : `BACK_HOSTS` de plusieurs entrées, `app-env.sh` par environnement,
-`webapp_upstreams` actif, `webapp_metrics_push`) ; enveloppe `deploy-agenthub.yml` (runner, SMTP) ;
-suppression des rôles par app une fois migrés ; métrique `webapp_deployed_info`.
+À faire : back-lb sans la `location` AgentHub du template (inoffensive pour les autres apps : à traiter avec la migration d'AgentHub, qui
+a besoin d'un mécanisme d'inclusion par projet) ; entrées Maestro, air-farmer, ai-medialab (CompanyManager existe, famille `tradekong`, à
+convertir) ; mode registre de social-manager (worker bâti `FROM` l'image du back) ; groupes multi-hôtes (PapangWorkspace : `BACK_HOSTS`
+de plusieurs entrées, `app-env.sh` par environnement, `webapp_upstreams` actif, `webapp_metrics_push`) ; enveloppe `deploy-agenthub.yml`
+(runner, SMTP) ; TradeKong et ctdapi (`webapp_db_exposed`) ; suppression des rôles par app une fois migrés ; métrique
+`webapp_deployed_info` ; `registry` dans `prom_alert_groups` après le premier passage de la rétention (timer à 04:17, d'abord `--dry-run`).
+
+Leçons du premier déploiement d'une app à stack propre (social-manager) : `REMOTE_USER` et `*_REMOTE_APP_DIR` doivent désigner le même
+compte (`"~/<projet>/back"`, entre guillemets : un `~` nu est développé par le shell LOCAL) ; `SSH_KEY_FILE` n'est pas facultatif
+(`migrate-db.sh` l'exige : `webapp_ssh_key_file` au parc) ; un `configs: file:` de compose devient un `bind` d'un chemin LOCAL, inutilisable
+avec un daemon distant (écrire le contenu au démarrage du conteneur) ; une app au schéma géré par migrations veut `webapp_migrate: true`.
 
 ## Validations par l'usage (suivi)
 
 | Situation | Signal | Conditions de départ |
 |---|---|---|
-| Premier `push` vers le registre | pas de 413 ; ligne `[IMAGE:<projet>] … builder=` | `deploy-docker-repo.yml` rejoué (vhost `client_max_body_size 0`), builder connecté (`docker login localhost:<port>` par `srvc`) |
-| Premier `pull` d'une cible | `[IMAGE:<projet>] … host=` ; sinon 403 du vhost | `webapp-install` rejoué (docker login, compte `docker_repo_pull_*` au coffre) ; vhost du registre re-déployé (liste `allow` dérivée des entrées webapp) |
-| Premier déploiement du registre papanglabs | `docker-repo.papanglabs.com/v2/` répond 401 depuis un hôte admis (back1-prod) et expire ailleurs ; `docker_repo_pass` et `docker_repo_pull_pass` apparus dans `group_vars/papanglabs.yml` (à COMMITTER dans le dépôt privé) | `./play.sh papanglabs deploy-docker-repo.yml` (d'abord `--check --diff`, qui n'écrit rien) ; CNAME publié par le rôle, vhost par le play `proxy-conf` |
+| **VALIDÉ 15/11/2026** — Premier `push` vers le registre | pas de 413 ; ligne `[IMAGE:<projet>] … builder=` | `deploy-docker-repo.yml` rejoué (vhost `client_max_body_size 0`), builder connecté (`docker login localhost:<port>` par `srvc`) |
+| **VALIDÉ 15/11/2026** — Premier `pull` d'une cible | `[IMAGE:<projet>] … host=` ; sinon 403 du vhost | `webapp-install` rejoué (docker login, compte `docker_repo_pull_*` au coffre) ; vhost du registre re-déployé (liste `allow` dérivée des entrées webapp) |
+| **VALIDÉ 15/11/2026** — Premier déploiement du registre papanglabs | `docker-repo.papanglabs.com/v2/` répond 401 depuis un hôte admis (back1-prod) et expire ailleurs ; `docker_repo_pass` et `docker_repo_pull_pass` apparus dans `group_vars/papanglabs.yml` (à COMMITTER dans le dépôt privé) | `./play.sh papanglabs deploy-docker-repo.yml` (d'abord `--check --diff`, qui n'écrit rien) ; CNAME publié par le rôle, vhost par le play `proxy-conf` |
 | Rétention | `count(docker_repo_prune_last_success_timestamp_seconds)` = 1 ; `docker-repo-prune --dry-run` d'abord | `registry` à ajouter à `prom_alert_groups` APRÈS ce premier passage |
-| Adoption des secrets | message « ADOPTÉ(S) … NOUVEAU(X) » : aucun secret de chiffrement ne doit être « NOUVEAU » pour une app déjà en production | premier `deploy-webapp.yml` d'une app existante, d'abord en `--check --diff --tags config` |
+| **VALIDÉ 15/11/2026** — Adoption des secrets | message « ADOPTÉ(S) … NOUVEAU(X) » : aucun secret de chiffrement ne doit être « NOUVEAU » pour une app déjà en production | premier `deploy-webapp.yml` d'une app existante, d'abord en `--check --diff --tags config` |
 | Rollback par tag | `current.json` : `imageTag` change, `/api/v1/health` rend le tag en `revision` | `-e webapp_phase=deploy -e webapp_tag=<ancien>` |
