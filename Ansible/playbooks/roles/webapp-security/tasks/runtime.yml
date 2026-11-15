@@ -16,6 +16,7 @@
 #     toutes capacités retirées, limites mémoire et CPU, sur le réseau du sous-réseau dédié ;
 #   • le front et le back-lb (relais de confiance de TRUST_PROXY) ont leurs adresses fixes et publient EXACTEMENT leur
 #     port sur 0.0.0.0, tout autre conteneur sur la boucle locale seulement ;
+#   • TOUT conteneur du projet (services tiers compris) est sur UN SEUL réseau, celui du sous-réseau dédié ;
 #   • volumes et réseaux appartiennent au seul projet, sans conteneur étranger ;
 #   • le pare-feu DOCKER-USER est en place et atteint ;
 #   • le compte dédié n'est dans aucun groupe privilégié et ne peut ni lire ni traverser les chemins protégés.

@@ -89,10 +89,14 @@
           {%- if (hc.Memory | default(0) | int) <= 0 -%}{%- set ns.v = ns.v + [name ~ ' : sans limite mémoire'] -%}{%- endif -%}
           {%- if (hc.NanoCpus | default(0) | int) <= 0 and (hc.CpuQuota | default(0) | int) <= 0 -%}{%- set ns.v = ns.v + [name ~ ' : sans limite CPU'] -%}{%- endif -%}
         {%- endif -%}
-        {%- if svc in wa_app.wa_h_services + [webapp_front_service, webapp_back_lb_service] -%}
-          {%- set subnets = _networks | selectattr('Name', 'in', nets | list) | map(attribute='IPAM.Config') | flatten | map(attribute='Subnet') | list -%}
-          {%- if wa_app.wa_h_subnet not in subnets -%}{%- set ns.v = ns.v + [name ~ ' : réseau hors du sous-réseau dédié ' ~ wa_app.wa_h_subnet] -%}{%- endif -%}
+        {#- TOUT conteneur du projet (db, redis compris) : UN SEUL réseau, celui du sous-réseau dédié. Un second réseau
+            (bridge du pool Docker) sortirait par une source que le pare-feu de sortie, indexé sur ce sous-réseau, ne
+            voit pas. -#}
+        {%- if nets | length != 1 -%}
+          {%- set ns.v = ns.v + [name ~ ' : ' ~ (nets | length) ~ ' réseaux (' ~ (nets | list | join(',')) ~ ') au lieu du seul réseau dédié'] -%}
         {%- endif -%}
+        {%- set subnets = _networks | selectattr('Name', 'in', nets | list) | map(attribute='IPAM.Config') | flatten | map(attribute='Subnet') | list -%}
+        {%- if wa_app.wa_h_subnet not in subnets -%}{%- set ns.v = ns.v + [name ~ ' : réseau hors du sous-réseau dédié ' ~ wa_app.wa_h_subnet] -%}{%- endif -%}
         {%- set ips = nets.values() | map(attribute='IPAddress') | list -%}
         {%- if svc == webapp_front_service and wa_app.wa_h_front_ip not in ips -%}{%- set ns.v = ns.v + [name ~ ' : adresse du front différente de ' ~ wa_app.wa_h_front_ip] -%}{%- endif -%}
         {%- if svc == webapp_back_lb_service and wa_app.wa_h_back_lb_ip not in ips -%}{%- set ns.v = ns.v + [name ~ ' : adresse du back-lb différente de ' ~ wa_app.wa_h_back_lb_ip] -%}{%- endif -%}

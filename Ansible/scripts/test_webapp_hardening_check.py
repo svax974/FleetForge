@@ -1238,8 +1238,8 @@ RUNTIME_PLAYBOOK = """\
           - {Name: /fleetforge-gateway-back-x-back-worker-1, HostConfig: "{{ hc }}", Mounts: [], User: "__WORKER_USER__", Labels: {com.docker.compose.service: back-worker}, Networks: "{{ net }}"}
           - {Name: /fleetforge-gateway_front, HostConfig: {SecurityOpt: ["no-new-privileges:true"], PortBindings: __FRONT_PORTS__}, Mounts: [], User: "", Labels: {com.docker.compose.service: front}, Networks: {"fleetforge-gateway-back-x_app": {IPAddress: "10.73.231.10"}}}
           - {Name: /fleetforge-gateway_back_lb, HostConfig: {SecurityOpt: ["no-new-privileges:true"], PortBindings: {"4731/tcp": [{HostIp: "0.0.0.0", HostPort: "4731"}]}}, Mounts: [], User: "", Labels: {com.docker.compose.service: back-lb}, Networks: {"fleetforge-gateway-back-x_app": {IPAddress: "10.73.231.11"}}}
-          - {Name: /fleetforge-gateway-back-x-db-1, HostConfig: {SecurityOpt: ["no-new-privileges:true"], PortBindings: __DB_PORTS__}, Mounts: [], User: "", Labels: {com.docker.compose.service: db}, Networks: "{{ net }}"}
-        wa_net_inspect: {stdout_lines: ['{"Name":"fleetforge-gateway-back-x_app","IPAM":{"Config":[{"Subnet":"10.73.231.0/24"}]},"Containers":{},"Labels":{"com.docker.compose.project":"fleetforge-gateway-back-x"}}']}
+          - {Name: /fleetforge-gateway-back-x-db-1, HostConfig: {SecurityOpt: ["no-new-privileges:true"], PortBindings: __DB_PORTS__}, Mounts: [], User: "", Labels: {com.docker.compose.service: db}, Networks: __DB_NETS__}
+        wa_net_inspect: {stdout_lines: ['{"Name":"fleetforge-gateway-back-x_app","IPAM":{"Config":[{"Subnet":"10.73.231.0/24"}]},"Containers":{},"Labels":{"com.docker.compose.project":"fleetforge-gateway-back-x"}}', '{"Name":"fleetforge-gateway-back-x_other","IPAM":{"Config":[{"Subnet":"172.30.0.0/16"}]},"Containers":{},"Labels":{"com.docker.compose.project":"fleetforge-gateway-back-x"}}']}
         wa_vol_inspect: {stdout_lines: ['{"Name":"__VOLUME__","Driver":"local","Options":null,"Labels":{"com.docker.compose.project":"__VOLPROJECT__"}}']}
     - ansible.builtin.debug: {msg: "VIOLATIONS=[{{ wa_violations }}]"}
 """
@@ -1248,6 +1248,7 @@ GOOD_RUNTIME = {
     "__FRONT_PORTS__": '{"80/tcp": [{HostIp: "0.0.0.0", HostPort: "4730"}]}',
     "__DB_PORTS__": '{"5432/tcp": [{HostIp: "127.0.0.1", HostPort: "4732"}]}',
     "__WORKER_USER__": "999:999",
+    "__DB_NETS__": '"{{ net }}"',
 }
 
 
@@ -1280,6 +1281,14 @@ class RuntimeViolationsTests(unittest.TestCase):
 
     def test_a_code_service_under_another_account_is_a_violation(self):
         self.assertIn("utilisateur 1000:1000", self.violations(__WORKER_USER__="1000:1000"))
+
+    def test_a_third_party_container_on_a_second_or_foreign_subnet_is_a_violation(self):
+        # Quatrième revue : db (service tiers, hors `services`) n'était pas contrôlé ; un second réseau du projet (même
+        # étiquette compose) sortait par une source hors du sous-réseau dédié.
+        two = '{"fleetforge-gateway-back-x_app": {IPAddress: "10.73.231.30"}, "fleetforge-gateway-back-x_other": {IPAddress: "172.30.0.2"}}'
+        self.assertIn("db-1 : 2 réseaux", self.violations(__DB_NETS__=two))
+        other = '{"fleetforge-gateway-back-x_other": {IPAddress: "172.30.0.2"}}'
+        self.assertIn("db-1 : réseau hors du sous-réseau dédié", self.violations(__DB_NETS__=other))
 
 
 # Inventaire FACTICE d'un parc : proxies (dont un à l'adresse du VPN), FleetForge, AgentHub, la passerelle durcie.
