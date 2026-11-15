@@ -527,6 +527,11 @@ compte `run` peut accepter NOMMÉMENT ceux d'autres comptes `check` ou `run`
 (`accept_checks_from`) : une passerelle qui fait ses checks sous `gw_check` et ses
 runs réels sous `gw_run`. Un nom qui n'est pas un autre compte d'automatisation
 `check`/`run` (inconnu, lui-même, `read`, l'opérateur) refuse le démarrage.
+Par défaut un compte `run` garde aussi l'usage de SES propres checks. Avec
+`"accept_own_checks": false` (compte `run` qui nomme au moins un compte dans
+`accept_checks_from`, sinon le démarrage est refusé), seuls les checks de ces comptes
+ouvrent ses runs réels : `gw_run` compromis seul ne peut plus se fournir lui-même le
+check préalable (séparation réelle check / run de la passerelle `ffg_check` / `ffg_run`).
 
 Trois bornes facultatives (`max_hosts` obligatoire en mode `check`), tenues par
 `run_ansible_playbook` avant tout (le compte « autonome » du hub est un compte `run`
@@ -545,7 +550,7 @@ avec les deux premières) :
   `deny_playbooks`).
 
 Par le déploiement : `ff_api_accounts: [{ user, parcs?, mode, deny_playbooks?, max_hosts?,
-allow_playbooks?, accept_checks_from?, allow_extra_vars?, allow_diff? }]` dans
+allow_playbooks?, accept_checks_from?, accept_own_checks?, allow_extra_vars?, allow_diff? }]` dans
 `playbooks/group_vars/<parc>.yml` (`mode` : `read` par défaut,
 `check` ou `run` ; `parcs` : `[<parc_name>]` par défaut ; `user` en minuscules, chiffres
 et `_` — `gw_check`, pas `gw-check` —, il nomme une variable du vault) ; le

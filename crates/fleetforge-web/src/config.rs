@@ -111,6 +111,12 @@ pub struct Scope {
     /// des runs réels d'une passerelle dont les checks passent par un compte
     /// `check`. Vide : ses propres checks seulement.
     pub accept_checks_from: Vec<String>,
+    /// Ses PROPRES `--check` autorisent-ils ses runs réels ? Vrai par défaut
+    /// (comportement historique). Faux (compte `run` qui nomme au moins un
+    /// compte dans `accept_checks_from`) : seuls les checks de ces comptes
+    /// comptent — séparation réelle entre le compte qui vérifie et celui qui
+    /// lance, que la compromission du second seul ne contourne pas.
+    pub accept_own_checks: bool,
     /// Liste blanche (motifs `*`, `?`) des playbooks que `run_ansible_playbook`
     /// accepte de ce compte (`forbidden_playbook` sinon). `None` : pas de liste.
     pub allow_playbooks: Option<Vec<String>>,
@@ -133,6 +139,7 @@ impl Scope {
             max_hosts: None,
             owner: String::new(),
             accept_checks_from: Vec::new(),
+            accept_own_checks: true,
             allow_playbooks: None,
             allow_extra_vars: false,
             allow_diff: false,
@@ -154,10 +161,12 @@ impl Scope {
         self.mode == Mode::Check
     }
 
-    /// Comptes dont un `--check` récent autorise le run réel de celui-ci : lui-même,
-    /// puis ceux qu'il accepte (`accept_checks_from`).
+    /// Comptes dont un `--check` récent autorise le run réel de celui-ci : lui-même
+    /// (sauf `accept_own_checks: false`), puis ceux qu'il accepte (`accept_checks_from`).
     pub fn check_owners(&self) -> impl Iterator<Item = &str> {
-        std::iter::once(self.owner.as_str()).chain(self.accept_checks_from.iter().map(String::as_str))
+        std::iter::once(self.owner.as_str())
+            .filter(|_| self.accept_own_checks)
+            .chain(self.accept_checks_from.iter().map(String::as_str))
     }
 
     /// Ce playbook (nom de fichier) est-il interdit à ce compte ?
@@ -317,6 +326,10 @@ struct AccountEntry {
     /// de celui-ci — compte `run` seulement.
     #[serde(default)]
     accept_checks_from: Vec<String>,
+    /// Compte `run` seulement : `false` = ses propres checks n'ouvrent PAS ses
+    /// runs réels, seuls ceux de `accept_checks_from` (alors non vide).
+    #[serde(default = "own_checks_by_default")]
+    accept_own_checks: bool,
     /// Liste blanche des playbooks lançables (motifs), non vide.
     #[serde(default)]
     allow_playbooks: Option<Vec<String>>,
@@ -386,6 +399,15 @@ fn accounts_from_file(path: &Path) -> Result<Vec<Account>> {
             if !e.accept_checks_from.is_empty() && e.mode != Mode::Run {
                 bail!("{shown} : accept_checks_from de {} réservé à un compte run", e.user);
             }
+            // Sans ses propres checks ni ceux d'un autre, aucun run réel ne passerait
+            // jamais : une erreur de configuration, pas un réglage.
+            if !e.accept_own_checks && (e.mode != Mode::Run || e.accept_checks_from.is_empty()) {
+                bail!(
+                    "{shown} : accept_own_checks: false de {} réservé à un compte run qui nomme \
+                     au moins un compte dans accept_checks_from",
+                    e.user
+                );
+            }
             // Un compte `check` lance des `--check` sans humain dans la boucle :
             // son rayon d'action doit être borné et connu.
             if e.mode == Mode::Check && e.max_hosts.is_none() {
@@ -414,6 +436,7 @@ fn accounts_from_file(path: &Path) -> Result<Vec<Account>> {
                     max_hosts: e.max_hosts,
                     owner: e.user.clone(),
                     accept_checks_from,
+                    accept_own_checks: e.accept_own_checks,
                     allow_playbooks: e.allow_playbooks,
                     allow_extra_vars: e.allow_extra_vars,
                     allow_diff: e.allow_diff,
@@ -424,6 +447,11 @@ fn accounts_from_file(path: &Path) -> Result<Vec<Account>> {
             })
         })
         .collect()
+}
+
+/// Défaut serde de `accept_own_checks` : le comportement historique.
+fn own_checks_by_default() -> bool {
+    true
 }
 
 /// `accept_checks_from` : chaque nom désigne un AUTRE compte d'automatisation
@@ -586,6 +614,8 @@ mod tests {
         assert_eq!(own.check_owners().collect::<Vec<_>>(), ["agenthub"]);
         let gateway = Scope { accept_checks_from: vec!["gw_check".into()], ..Scope::everything_for("gw_run") };
         assert_eq!(gateway.check_owners().collect::<Vec<_>>(), ["gw_run", "gw_check"]);
+        let separated = Scope { accept_own_checks: false, ..gateway.clone() };
+        assert_eq!(separated.check_owners().collect::<Vec<_>>(), ["gw_check"], "ses propres checks ne comptent plus");
         // Sans authentification : un seul appelant, sans nom.
         assert_eq!(Scope::everything().check_owners().collect::<Vec<_>>(), [""]);
     }

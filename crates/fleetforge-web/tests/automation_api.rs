@@ -1603,6 +1603,13 @@ fn a_flawed_bound_refuses_to_start() {
     refuses_accounts(json!([checker, other("b", "run")]), 0o600, "réservé à un compte run");
     refuses_accounts(json!([other("a", "dry-run")]), 0o600, "comptes illisibles");
 
+    // `accept_own_checks: false` : un compte run qui n'accepte QUE les checks d'autres comptes.
+    refuses_accounts(entry(json!({ "accept_own_checks": false })), 0o600, "accept_own_checks");
+    let mut lone_checker = other("a", "check");
+    lone_checker["accept_own_checks"] = json!(false);
+    refuses_accounts(json!([lone_checker]), 0o600, "accept_own_checks");
+    refuses_accounts(entry(json!({ "accept_own_checks": "no" })), 0o600, "comptes illisibles");
+
     // Compte `check` : borné en hôtes ; ses options n'appartiennent qu'à lui.
     let check_entry = |extra: Value| {
         let mut e = json!({ "user": "a", "password_hash": hash, "parcs": ["web3c"], "mode": "check", "max_hosts": 2 });
@@ -1775,6 +1782,51 @@ async fn a_check_account_only_dry_runs_and_its_checks_unlock_only_who_accepts_th
     assert_eq!(api.wait_run_mcp(CHECKER, started["run_id"].as_str().unwrap()).await["check"], json!(true));
     let new_lines: Vec<String> = api.stub_log().lines().skip(runs_before).map(String::from).collect();
     assert!(new_lines.len() == 1 && new_lines[0].contains("--check"), "{new_lines:?}");
+}
+
+const SEPARATED: (&str, &str) = ("pilote_sep", "mot-de-passe-pilote-sep");
+
+/// `accept_own_checks: false` : le compte run d'une passerelle ne peut pas se
+/// fournir lui-même le check préalable — seul celui du compte `check` compte.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_account_that_refuses_its_own_checks_needs_the_check_account() {
+    let (am_port, _) = fake_alertmanager().await;
+    let accounts = json!([
+        {
+            "user": CHECKER.0, "password_hash": hash_with_binary(CHECKER.1), "parcs": ["web3c"], "mode": "check",
+            "max_hosts": 2
+        },
+        {
+            "user": SEPARATED.0, "password_hash": hash_with_binary(SEPARATED.1), "parcs": ["web3c"], "mode": "run",
+            "accept_checks_from": [CHECKER.0], "accept_own_checks": false
+        }
+    ]);
+    let server = start_with(am_port, |root| {
+        let file = accounts_file(root, accounts);
+        vec![("FLEETFORGE_API_ACCOUNTS_FILE".into(), file.display().to_string())]
+    })
+    .await;
+    let api = Api { http: Client::new(), server: &server };
+    let launch = |extra: Value| {
+        let mut body = json!({ "parc": "web3c", "playbook": "deploy-demo.yml", "limit": ["proxy1"], "detach": true });
+        body.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        body
+    };
+
+    // Son propre check passe (c'est un compte run) mais n'ouvre pas son run réel.
+    let (status, own) = api.call(SEPARATED, "run_ansible_playbook", launch(json!({ "check": true }))).await;
+    assert_eq!(status, StatusCode::OK, "{own}");
+    api.wait_run_as(SEPARATED, own["run_id"].as_str().unwrap()).await;
+    let (status, body) = api.call(SEPARATED, "run_ansible_playbook", launch(json!({}))).await;
+    assert_eq!((status, code(&body)), (StatusCode::CONFLICT, "check_required"), "{body}");
+
+    // Le check du compte `check` qu'il accepte : le run réel passe.
+    let (status, check) = api.call(CHECKER, "run_ansible_playbook", launch(json!({}))).await;
+    assert_eq!(status, StatusCode::OK, "{check}");
+    api.wait_run_as(CHECKER, check["run_id"].as_str().unwrap()).await;
+    let (status, real) = api.call(SEPARATED, "run_ansible_playbook", launch(json!({}))).await;
+    assert_eq!(status, StatusCode::OK, "{real}");
+    assert_eq!(real["check"], json!(false), "{real}");
 }
 
 // ═══ Mode `check` : ni injection par extra_vars, ni --diff, ni run_id d'autrui ═
