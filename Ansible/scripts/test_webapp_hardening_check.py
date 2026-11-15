@@ -1647,14 +1647,18 @@ class GuardTests(unittest.TestCase):
                     code, out = self.real_playbook(playbook, inventory, "-e", "webapp=fleetforge-gateway",
                                                    "-e", json.dumps({name: ""}))
                     self.assertNotEqual(code, 0)
-                    self.assertIn(f"`{name}` donné en extra-vars", out)
+                    self.assertIn("donné en extra-vars", out)
+                    self.assertIn(f"lookup('ansible.builtin.vars', '{name}')", out, "l'assertion en échec nomme le fait")
         # Sans extra-var interne, la sonde passe (le play continue jusqu'à la sélection de l'entrée).
         code, out = self.real_playbook("deploy-webapp.yml", inventory, "-e", "webapp=fleetforge-gateway")
         self.assertNotIn("donné en extra-vars", out)
         self.assertIn("Put the application in the target group", out)
 
     def test_the_probe_covers_every_fact_of_the_webapp_roles(self):
-        probed = set(check._load(os.path.join(ROLES, "webapp-setup", "tasks", "no-overrides.yml"))[0]["loop"])
+        probe, refuse = check._load(os.path.join(ROLES, "webapp-setup", "tasks", "no-overrides.yml"))
+        probed = set(probe["ansible.builtin.set_fact"])
+        asserted = {re.search(r"vars', '([^']+)'\)", t).group(1) for t in refuse["ansible.builtin.assert"]["that"]}
+        self.assertEqual(sorted(probed ^ asserted), [], "sonde et assertions nomment les mêmes faits")
         names = set()
         files = glob.glob(os.path.join(ROLES, "webapp-*", "tasks", "*.yml"))
         files.append(os.path.join(ROLES, "fleetforge-install", "tasks", "gateway-guard.yml"))
