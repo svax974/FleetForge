@@ -538,7 +538,11 @@ Trois bornes facultatives (`max_hosts` obligatoire en mode `check`), tenues par
 avec les deux premières) :
 - `deny_playbooks` : motifs (`*` = toute suite, `?` = un caractère ; lettres, chiffres,
   `_ . -`) sur le **nom de fichier** du playbook. Le playbook demandé et ceux qu'il
-  importe (`import_playbook` de nom statique, transitivement) sont tous jugés ;
+  importe (`import_playbook` de nom statique, transitivement) sont tous jugés, sur
+  leur nom **résolu** (lien symbolique suivi : un alias `x.yml` → `deploy-fleetforge.yml`
+  est jugé `deploy-fleetforge.yml`) et, pour un import, aussi sur le nom écrit. Un
+  import qui ne se résout pas en un fichier lisible sous `playbooks/` (absent, lien
+  sortant, fichier refusé) refuse le lancement : son nom réel ne peut être jugé.
   `x.yml` et `x.yaml` sont un même playbook. Refus : `403 forbidden_playbook`. La
   lecture (`describe_playbook`, `read_tree`) reste ouverte ;
 - `max_hosts` (1 à 1000) : `limit` devient **obligatoire** (sans lui un run vise tout ce
@@ -624,7 +628,7 @@ l'authentification basique y circulerait en clair.
 | `alertmanager_alerts` | `{ "parc" }` | JSON de `GET /api/v2/alerts?active=true&silenced=false&inhibited=false`, tel quel |
 | `query_prometheus` | `{ "parc", "query", "time"? }` | `{ "parc", "result": [{ "metric": {…}, "timestamp", "value" }], "truncated" }` |
 | `ssh_diagnose` | `{ "host", "verb", "args"?: [..], "parc"? }` | `{ "parc", "host", "verb", "args", "exit_code", "output", "truncated" }` |
-| `describe_playbook` | `{ "parc", "playbook", "commit"? }` | `{ "commit", "plays": [{ "name", "hosts", "roles", "tags" }], "tags", "vars", "needs_no_limit", "imports", "notes" }` |
+| `describe_playbook` | `{ "parc", "playbook", "commit"? }` | `{ "commit", "playbook", "commit_subject", "plays": [{ "name", "hosts", "roles", "tags" }], "tags", "vars", "needs_no_limit", "imports", "imports_resolved", "notes" }` |
 | `read_tree` | `{ "parc", "path"?, "commit"? }` | fichier : `{ "commit", "kind": "file", "path", "size", "content", "redacted" }` ; dossier : `{ "commit", "kind": "dir", "path", "entries": [{ "name", "kind": "file"\|"dir", "size"? }], "truncated" }` |
 | `search_tree` | `{ "parc", "pattern", "commit"? }` | `{ "commit", "hits": [{ "path", "line", "text" }], "truncated" }` |
 | `tree_status` | `{ "parc" }` | `{ "source": "git"\|"rsync", "branch", "head", "synced_at", "commits_cached" }` |
@@ -686,7 +690,25 @@ Détails :
   dont un motif positif (hors `localhost`, `all`, `*`, `{{ }}`) n'y figure pas est ignoré par
   un tel `--limit` → vrai (`deploy-fleetforge.yml` : `infras`, puis `proxies` et
   `prometheus1:monitor`) ; cibles habituelles `all` → faux. `notes` dit ce qui n'a pas pu
-  être résolu.
+  être résolu. Champs ajoutés le 15/11/2026 (les autres sont inchangés) :
+  - `playbook` : nom du fichier **résolu** et décrit (lien symbolique suivi, relatif à
+    `playbooks/`, même grammaire que les noms acceptés en entrée). Un alias
+    `update-x.yml` → `other.yml` est décrit comme `other.yml` et nommé `other.yml` :
+    c'est ce nom qu'exécute FleetForge, qu'entre dans l'empreinte du check et que juge
+    `deny_playbooks` — une passerelle juge ce nom, pas celui qu'elle a demandé. Un lien
+    qui sort de `playbooks/` ou ne mène à rien reste refusé (`404 unknown_playbook`) ;
+  - `imports_resolved` : même longueur et même ordre que `imports` (noms tels
+    qu'écrits) ; le nom résolu de chaque import (`sub/x.yml` s'il est dans un
+    sous-dossier), ou `null` quand il ne se résout pas en un fichier lisible sous
+    `playbooks/` (absent, lien sortant, fichier refusé — `notes` le signale aussi, et
+    un lancement d'un compte borné est alors refusé) ;
+  - `commit_subject` : première ligne non vide du message du commit décrit (`commit`),
+    lue par `git cat-file commit` (aucun hook, aucun contenu de l'arbre exécuté),
+    caractères de contrôle et de mise en forme invisible (bidi, largeur nulle) remplacés
+    par une espace, 200 caractères au plus, UTF-8 valide ; vide en mode rsync ou si git
+    ne le lit pas (jamais une erreur). Caviardé comme le reste de la réponse.
+  Par MCP : mêmes champs ; seul le texte de description de l'outil change (schéma
+  d'entrée inchangé, pas de `outputSchema`).
 - `read_tree` / `search_tree` : le CODE sous `playbooks/` seulement. `path` est relatif à
   `playbooks/` (un préfixe `playbooks/` est accepté), vide = le dossier lui-même. Refusé
   (`403 path_refused`) : chemin absolu ou `~`, `..`, composante cachée (`.x`), toute
