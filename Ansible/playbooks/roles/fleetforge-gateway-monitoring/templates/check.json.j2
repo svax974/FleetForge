@@ -1,18 +1,25 @@
 {#- Sonde svcprobe de la passerelle (voir defaults). Les valeurs interpolées
     dans la commande sont tenues par des asserts (tasks/main.yml) : nom de
-    projet `[a-z0-9-]`, nom d'hôte de l'amont `[a-z0-9.-]`. -#}
+    projet `[a-z0-9-]`, nom d'hôte de l'amont `[a-z0-9.-]`, ports numériques.
+    `namespace` : un `set` dans une boucle Jinja ne survit pas à la boucle. -#}
 {%- set fmt = '{{.ID}} {{.Label "com.docker.compose.project"}}' -%}
-{%- set extra = [
+{%- set ns = namespace(extra=[
   {"name": "front", "kind": "http", "url": ffg_svcprobe_front_url, "status": [200, 301, 302], "timeout": 10},
   {"name": "back_lb_health", "kind": "http", "url": ffg_svcprobe_back_lb_health_url, "status": [200], "timeout": 10},
   {"name": "postgres", "kind": "docker", "container": ffg_postgres_container}
-] -%}
+]) -%}
+{#- Pare-feu : la règle DROP de chaque port publié doit être en place (Docker
+    recrée DOCKER-USER vide à chaque démarrage ; l'unité la repose). 0 = ports
+    ouverts à tous → ServiceCheckFailing. -#}
+{%- for port in [app_port | int, back_port | int] -%}
+{%- set ns.extra = ns.extra + [{"name": "firewall_" ~ port, "kind": "command", "argv": ["/bin/sh", "-c", "iptables -w -S DOCKER-USER | grep -q -- 'fleetforge-gateway:" ~ port ~ ":deny'"], "timeout": 10}] -%}
+{%- endfor -%}
 {%- for u in ffg_upstreams | default([]) -%}
 {%- set cmd = "c=$(docker ps --filter label=com.docker.compose.service=back --format '" ~ fmt ~ "' | awk '$2 ~ /^" ~ ffg_project_name ~ "-back-/ {print $1}' | head -n 1); [ -n \"$c\" ] && exec docker exec \"$c\" wget -q -O /dev/null -T 10 https://" ~ hostvars[u.entry].proxy_hostname ~ "/healthz" -%}
-{%- set extra = extra + [{"name": "upstream_" ~ u.id, "kind": "command", "argv": ["/bin/sh", "-c", cmd], "timeout": ffg_upstream_probe_timeout | int}] -%}
+{%- set ns.extra = ns.extra + [{"name": "upstream_" ~ u.id, "kind": "command", "argv": ["/bin/sh", "-c", cmd], "timeout": ffg_upstream_probe_timeout | int}] -%}
 {%- endfor -%}
 {{ {
   "service": "fleetforge-gateway",
   "up": {"kind": "http", "url": ffg_svcprobe_health_url, "status": [200], "timeout": 10},
-  "extra_checks": extra
+  "extra_checks": ns.extra
 } | to_nice_json }}

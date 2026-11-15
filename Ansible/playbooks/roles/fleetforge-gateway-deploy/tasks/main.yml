@@ -94,9 +94,17 @@
       NODE_PORT: "{{ back_port }}"
       FRONT_PORT: "{{ app_port }}"
       DB_PORT: "{{ pg_port }}"
+      REDIS_PORT: "{{ redis_port }}"
       FFG_RUNTIME_UID: "{{ _f[2] }}"
       FFG_RUNTIME_GID: "{{ _f[3] }}"
       FFG_DOCKER_SUBNET: "{{ ffg_docker_subnet }}"
+      FFG_FRONT_IP: "{{ ffg_front_ip }}"
+      FFG_BACK_LB_IP: "{{ ffg_back_lb_ip }}"
+      FFG_TRUSTED_PROXIES: "{{ ffg_trusted_proxies | join(',') }}"
+      # deploy-full.sh lit COMPOSE_FILE_NAME dans back/.env (sourcé après
+      # l'environnement) : le fixer ici garantit que le fichier contrôlé plus bas
+      # est EXACTEMENT celui qui est déployé.
+      COMPOSE_FILE_NAME: "{{ ffg_compose_file }}"
     ffg_upstreams_json: "{{ _upstreams | trim }}"
 
 - name: Check the non-secret settings
@@ -105,9 +113,15 @@
       - ffg_back_settings.FFG_RUNTIME_UID is match('^[0-9]+$')
       - ffg_back_settings.FFG_RUNTIME_GID is match('^[0-9]+$')
       - ffg_back_settings.FFG_RUNTIME_UID | int > 0
+      - ffg_compose_file is match('^[A-Za-z0-9._/-]+$')
+      - "'..' not in ffg_compose_file"
+      - (ffg_trusted_proxies + [ffg_front_ip, ffg_back_lb_ip]) | reject('match', '^[0-9]{1,3}([.][0-9]{1,3}){3}$') | list | length == 0
+      - ffg_trusted_proxies | intersect(ffg_vpn_addresses) | length == 0
       - ffg_upstreams_json is match('^[][{}A-Za-z0-9 ",:._/-]+$')
       - ffg_upstreams_json | from_json | length == ffg_upstreams | length
-    fail_msg: "uid/gid du compte dédié ou FFG_UPSTREAMS hors grammaire (aucune apostrophe, aucun espace de nom inconnu)."
+    fail_msg: >-
+      uid/gid du compte dédié, FFG_UPSTREAMS, chemin du compose (relatif, sans `..`)
+      ou relais de confiance (IPv4, jamais l'adresse d'un VPN) hors grammaire.
     quiet: true
 
 - name: Pin the non-secret settings in the back env file
@@ -231,6 +245,32 @@
       ni vmagent (socket Docker monté), ni Postgres/Redis hors boucle locale pour la passerelle.
     quiet: true
 
+# DEPLOY_FROM_MAIN : deploy-full.sh déploierait origin/main, pas l'arbre dont le
+# compose vient d'être contrôlé. REDIS_PASSWORD : Redis du compose
+# (`--requirepass`) jamais sans mot de passe. `grep -q` : aucune valeur affichée.
+- name: Check the deployment switches of the back env file (names only)
+  ansible.builtin.shell: >-
+    set -o pipefail;
+    f={{ (ffg_src ~ ffg_back_env_file) | quote }};
+    if grep -Eqi -- '^[[:space:]]*DEPLOY_FROM_MAIN=["'"'"']?(1|true|yes|on)' "$f"; then echo DEPLOY_FROM_MAIN; fi;
+    if ! grep -Eq -- '^[[:space:]]*REDIS_PASSWORD=["'"'"']?[^"'"'"'[:space:]]' "$f"; then echo REDIS_PASSWORD; fi
+  args:
+    executable: /bin/bash
+  delegate_to: localhost
+  become: false
+  register: ffg_switches
+  changed_when: false
+  check_mode: false
+
+- name: Fail on a deployment switch
+  ansible.builtin.assert:
+    that: ffg_switches.stdout | trim | length == 0
+    fail_msg: >-
+      {{ ffg_src }}{{ ffg_back_env_file }} : {{ ffg_switches.stdout_lines | join(', ') }} —
+      DEPLOY_FROM_MAIN doit être absent ou faux (le compose contrôlé doit être celui
+      déployé) et REDIS_PASSWORD non vide.
+    quiet: true
+
 # ── Coffre, cibles du déploiement ──────────────────────────────────────────
 # Après les variables ci-dessus : webapp-env-update les resauvegarde avec les
 # siennes dans le coffre.
@@ -242,6 +282,10 @@
     webapp_env_back_file: "{{ ffg_back_env_file }}"
     webapp_env_front_file: "{{ ffg_front_env_file }}"
     webapp_env_app_id: "{{ ffg_app_env_id }}"
+    # Liste EXPLICITE : proxies admis (+ passerelle du réseau Docker si un proxy
+    # est sur cette machine), front et back-lb à adresse fixe. Jamais
+    # `loopback`, `linklocal`, `uniquelocal` génériques.
+    webapp_env_trust_proxy: "{{ (ffg_trusted_proxies + [ffg_front_ip, ffg_back_lb_ip]) | unique | join(',') }}"
 
 # Premier déploiement : le dossier du coffre n'existe pas encore,
 # webapp-env-update ne sauvegarde pas — `save` le crée.
@@ -255,22 +299,8 @@
   changed_when: "'saved to' in ffg_env_saved.stdout"
 
 # ── Compose durci, contrôlé AVANT tout déploiement ─────────────────────────
-- name: Work out the compose file the deployment will use
-  ansible.builtin.set_fact:
-    ffg_compose_file: >-
-      {{ (lookup('ansible.builtin.file', ffg_src ~ ffg_back_env_file, errors='ignore')
-          | default('', true) | regex_findall('^[ ]*COMPOSE_FILE_NAME=["\']?([^"\'\n]*)', multiline=True)
-          | last | default('', true)) or ffg_default_compose_file }}
-  no_log: true
-
-- name: Check the compose path
-  ansible.builtin.assert:
-    that:
-      - ffg_compose_file is match('^[A-Za-z0-9._/-]+$')
-      - "'..' not in ffg_compose_file"
-    fail_msg: "COMPOSE_FILE_NAME hors grammaire (chemin relatif au dépôt, sans `..`)."
-    quiet: true
-
+# `ffg_compose_file` est écrit dans back/.env (COMPOSE_FILE_NAME) ET passé dans
+# l'environnement de run.sh : le fichier contrôlé ici est celui déployé.
 - name: Check the compose file is hardened (static, before deploying)
   ansible.builtin.command:
     argv:
@@ -297,69 +327,99 @@
     success_msg: "{{ ffg_compose_file }} : compose durci ({{ ffg_hardened_services | join(', ') }})."
 
 # ── Déploiement par les scripts de l'app ───────────────────────────────────
-- name: Deploy the gateway (build + push + start, via the app's own tooling)
-  ansible.builtin.command:
-    argv: "{{ ['./scripts/run.sh', 'prod'] + (['--migrate'] if ffg_migrate | bool else []) + ([] if ffg_update_common | bool else ['--no-update-common']) }}"
-    chdir: "{{ ffg_src }}"
-  delegate_to: localhost
-  become: false
-  environment:
-    BACK_ENV_FILE: "{{ ffg_back_env_file }}"
-    FRONT_ENV_FILE: "{{ ffg_front_env_file }}"
-  register: ffg_deploy_run
-  changed_when: true
-  failed_when: false
-  no_log: true
+# Déploiement, attentes de santé, écoutes et durcissement RÉEL dans un seul
+# bloc : au moindre échec, les conteneurs de la passerelle sont ARRÊTÉS
+# (fermé) — jamais une passerelle non vérifiée laissée en marche.
+- name: Deploy, verify, or stop the gateway
+  block:
+    - name: Deploy the gateway (build + push + start, via the app's own tooling)
+      ansible.builtin.command:
+        argv: "{{ ['./scripts/run.sh', 'prod'] + (['--migrate'] if ffg_migrate | bool else []) + ([] if ffg_update_common | bool else ['--no-update-common']) }}"
+        chdir: "{{ ffg_src }}"
+      delegate_to: localhost
+      become: false
+      environment:
+        BACK_ENV_FILE: "{{ ffg_back_env_file }}"
+        FRONT_ENV_FILE: "{{ ffg_front_env_file }}"
+        COMPOSE_FILE_NAME: "{{ ffg_compose_file }}"
+      register: ffg_deploy_run
+      changed_when: true
+      failed_when: false
+      no_log: true
 
-# Sortie du script masquée : elle peut citer l'environnement (back/.env porte
-# les mots de passe aval). Seul le code de retour est rapporté.
-- name: Fail when the deployment script failed (exit code only)
-  ansible.builtin.assert:
-    that: (ffg_deploy_run.rc | default(1)) == 0
-    fail_msg: >-
-      scripts/run.sh prod a échoué (code {{ ffg_deploy_run.rc | default('?') }}). Sortie
-      masquée ici ; la relire en relançant à la main depuis {{ ffg_src }} :
-      `BACK_ENV_FILE={{ ffg_back_env_file }} ./scripts/run.sh prod --no-update-common`.
-    success_msg: "scripts/run.sh prod : code 0."
-  when: not ansible_check_mode
+    # Sortie du script masquée : elle peut citer l'environnement (back/.env porte
+    # les mots de passe aval). Seul le code de retour est rapporté.
+    - name: Fail when the deployment script failed (exit code only)
+      ansible.builtin.assert:
+        that: (ffg_deploy_run.rc | default(1)) == 0
+        fail_msg: >-
+          scripts/run.sh prod a échoué (code {{ ffg_deploy_run.rc | default('?') }}). Sortie
+          masquée ici ; la relire en relançant à la main depuis {{ ffg_src }} :
+          `BACK_ENV_FILE={{ ffg_back_env_file }} ./scripts/run.sh prod --no-update-common`.
+        success_msg: "scripts/run.sh prod : code 0."
+      when: not ansible_check_mode
 
-# Contrôles SUR l'hôte, en boucle locale (hors DOCKER-USER).
-- name: Wait for the front to answer
-  ansible.builtin.uri:
-    url: "http://127.0.0.1:{{ app_port }}/"
-    status_code: [200, 301, 302]
-  register: ffg_front_ready
-  until: ffg_front_ready.status is defined and ffg_front_ready.status in [200, 301, 302]
-  retries: "{{ ffg_health_retries }}"
-  delay: "{{ ffg_health_delay }}"
-  changed_when: false
+    # Contrôles SUR l'hôte, en boucle locale (hors DOCKER-USER).
+    - name: Wait for the front to answer
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ app_port }}/"
+        status_code: [200, 301, 302]
+      register: ffg_front_ready
+      until: ffg_front_ready.status is defined and ffg_front_ready.status in [200, 301, 302]
+      retries: "{{ ffg_health_retries }}"
+      delay: "{{ ffg_health_delay }}"
+      changed_when: false
 
-- name: Wait for the API health endpoint
-  ansible.builtin.uri:
-    url: "http://127.0.0.1:{{ back_port }}/api/v1/health"
-    status_code: [200]
-  register: ffg_back_ready
-  until: ffg_back_ready.status is defined and ffg_back_ready.status == 200
-  retries: "{{ ffg_health_retries }}"
-  delay: "{{ ffg_health_delay }}"
-  changed_when: false
+    - name: Wait for the API health endpoint
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ back_port }}/api/v1/health"
+        status_code: [200]
+      register: ffg_back_ready
+      until: ffg_back_ready.status is defined and ffg_back_ready.status == 200
+      retries: "{{ ffg_health_retries }}"
+      delay: "{{ ffg_health_delay }}"
+      changed_when: false
 
-- name: Collect the listeners of the Postgres host port
-  ansible.builtin.shell: >-
-    set -o pipefail;
-    ss -ltnH | awk '{print $4}' | grep -E ':'{{ pg_port | int | string | quote }}'$' || true
-  args:
-    executable: /bin/bash
-  register: ffg_pg_listeners
-  changed_when: false
-  check_mode: false
+    - name: Collect the listeners of the Postgres and Redis host ports
+      ansible.builtin.shell: >-
+        set -o pipefail;
+        ss -ltnH | awk '{print $4}'
+        | grep -E ':('{{ pg_port | int | string | quote }}'|'{{ redis_port | int | string | quote }}')$' || true
+      args:
+        executable: /bin/bash
+      register: ffg_infra_listeners
+      changed_when: false
+      check_mode: false
 
-- name: Fail when Postgres listens outside loopback
-  ansible.builtin.assert:
-    that:
-      - ffg_pg_listeners.stdout_lines | reject('match', '^(127[.]0[.]0[.]1|[[]::1[]]):') | list | length == 0
-    fail_msg: "Postgres de la passerelle écoute hors boucle locale ({{ ffg_pg_listeners.stdout_lines | join(', ') }})."
-    success_msg: "Postgres de la passerelle sur la boucle locale uniquement."
+    - name: Fail when Postgres or Redis listens outside loopback
+      ansible.builtin.assert:
+        that:
+          - ffg_infra_listeners.stdout_lines | reject('match', '^(127[.]0[.]0[.]1|[[]::1[]]):') | list | length == 0
+        fail_msg: "Postgres/Redis de la passerelle écoutent hors boucle locale ({{ ffg_infra_listeners.stdout_lines | join(', ') }})."
+        success_msg: "Postgres et Redis de la passerelle sur la boucle locale uniquement."
+
+    - name: Verify the hardening of the running gateway
+      ansible.builtin.include_role:
+        name: fleetforge-gateway-security
+        tasks_from: runtime
+        apply:
+          tags: [always]
+      when: not ansible_check_mode
+
+  rescue:
+    - name: Stop the gateway containers (deployment or verification failed)
+      ansible.builtin.include_role:
+        name: fleetforge-gateway-security
+        tasks_from: stop
+        apply:
+          tags: [always]
+
+    - name: Fail after stopping the gateway
+      ansible.builtin.fail:
+        msg: >-
+          Déploiement ou vérification de la passerelle en échec ({{ ansible_failed_task.name | default('?') }}) :
+          conteneurs de la passerelle ARRÊTÉS. Corriger puis rejouer
+          `deploy-fleetforge.yml -e ff_deploy_scope=gateway`.
 
 - name: Report how the gateway is exposed
   ansible.builtin.debug:

@@ -41,8 +41,25 @@ ffg_migrate: false
 ffg_health_retries: 24
 ffg_health_delay: 10
 
-# Compose déployé quand back/.env ne nomme pas COMPOSE_FILE_NAME (défaut du
-# gabarit pour Postgres). Le contrôle statique le refusera tant qu'il n'est
-# pas durci : le dépôt de l'app doit fournir son compose durci et le nommer.
-ffg_default_compose_file: scripts/docker-compose.yml
+# Compose DURCI de l'app, relatif à son dépôt : écrit dans back/.env
+# (COMPOSE_FILE_NAME) et passé à run.sh, contrôlé statiquement avant. Le dépôt
+# de l'app doit le fournir (absent : déploiement refusé).
+ffg_compose_file: scripts/docker-compose.ffg-hardened.yml
 ffg_hardened_services: [back, back-worker]
+
+# Relais de confiance (TRUST_PROXY, FFG_TRUSTED_PROXIES pour le back-lb) :
+# proxies ADMIS (hors adresses VPN — formule identique dans -install et
+# -security), plus la passerelle du réseau Docker dédié quand un proxy admis
+# est sur cette machine (il atteint les ports publiés par la boucle locale,
+# donc par le pont). Jamais `loopback`/`linklocal`/`uniquelocal` génériques.
+ffg_vpn_addresses: "{{ groups['vpns'] | default([]) | map('extract', hostvars, 'ansible_host') | list }}"
+ffg_eligible_proxies: >-
+  {{ groups['proxies'] | default([]) | map('extract', hostvars)
+     | rejectattr('ansible_host', 'in', ffg_vpn_addresses)
+     | map(attribute='inventory_hostname') | list }}
+ffg_docker_gateway_ip: "{{ ffg_docker_subnet.split('/')[0].rsplit('.', 1)[0] ~ '.1' }}"
+ffg_trusted_proxies: >-
+  {{ (ffg_eligible_proxies | map('extract', hostvars, 'ansible_host') | unique | list)
+     + ([ffg_docker_gateway_ip]
+        if ansible_host in (ffg_eligible_proxies | map('extract', hostvars, 'ansible_host') | list)
+        else []) }}

@@ -82,21 +82,37 @@
 #      de l'entrée FleetForge (mots de passe tirés et chiffrés au group_vars du
 #      parc par fleetforge-install, à COMMITTER) et la passerelle dans son
 #      `access_linked` — le play de garde le vérifie ;
-#   3. un compose DURCI dans le dépôt de l'app (COMPOSE_FILE_NAME) : compte
-#      dédié (FFG_RUNTIME_UID/GID), read_only, cap_drop ALL, no-new-privileges,
-#      limites mémoire/CPU, réseau ${FFG_DOCKER_SUBNET}, aucun montage de
-#      l'hôte ni du socket Docker — refusé AVANT déploiement sinon
-#      (scripts/ffg_isolation_check.py), puis vérifié sur la machine (tag
-#      `hardening`, conteneurs ARRÊTÉS en cas d'écart) ;
+#   3. un compose DURCI dans le dépôt de l'app (`ffg_compose_file`, écrit en
+#      COMPOSE_FILE_NAME) : compte dédié (FFG_RUNTIME_UID/GID), read_only,
+#      cap_drop ALL, no-new-privileges partout, aucun cap_add, limites
+#      mémoire/CPU, réseau ${FFG_DOCKER_SUBNET} avec le front et le back-lb à
+#      ${FFG_FRONT_IP} / ${FFG_BACK_LB_IP}, back-lb qui RÉÉCRIT X-Forwarded-For
+#      (real_ip depuis ${FFG_TRUSTED_PROXIES}), Postgres/Redis en 127.0.0.1,
+#      aucun montage de l'hôte, volume à driver_opts, volumes_from ni socket
+#      Docker — refusé AVANT déploiement sinon (scripts/ffg_isolation_check.py),
+#      puis vérifié sur la machine (dans le bloc du déploiement et par le tag
+#      `hardening` : conteneurs ARRÊTÉS au moindre écart ou échec) ;
 #   4. une revue Opus indépendante (docs/avant-ouverture-public.md).
 #
 # EXPOSITION (E1, plan 06 §7) : vhost PRIVÉ ; `/mcp` limité aux serveurs
 # NOMMÉS par `ffg_mcp_allowed_hosts` (infra1, AgentHub) et, en TEST seulement,
 # à la whitelist (`ffg_mcp_allow_whitelist: true` — à repasser à `false` dès
-# la fin des tests et avant toute exposition E2/E3) ; ni vpns ni plage large.
-# Second niveau, côté app : chaque credential `exec` porte sa propre
-# allow-list d'adresses (≤ /16, `mcp-access`), qui ne s'élargit pas avec la
-# whitelist. Ports publiés : proxies seulement (DOCKER-USER).
+# la fin des tests et avant toute exposition E2/E3), filtrée : IPv4 seule ou
+# /32, IPv6 de préfixe ≥ `ffg_mcp_whitelist_max_v6_prefix` (128 par défaut) ;
+# ni vpns ni plage large. Second niveau, côté app : chaque credential `exec`
+# porte sa propre allow-list d'adresses (≤ /16, `mcp-access`), qui ne
+# s'élargit pas avec la whitelist. Ports publiés (DOCKER-USER, règles en tête
+# de chaîne) : proxies ADMIS seulement — jamais un proxy à l'adresse d'un VPN —,
+# plus le seul sous-réseau Docker dédié pour le back-lb. TRUST_PROXY de l'app :
+# liste EXPLICITE (proxies admis, passerelle du réseau dédié si un proxy est
+# sur la machine, front et back-lb à adresse fixe), et le back-lb réécrit
+# X-Forwarded-For.
+# RISQUE RÉSIDUEL tant que la machine est partagée : tout processus local peut
+# joindre les ports publiés par la boucle locale (vu comme le proxy local, donc
+# de confiance) et choisir l'adresse qu'il annonce — la clé `ffg_` reste exigée,
+# mais l'allow-list d'adresses d'un credential ne protège plus contre lui.
+# Comptes aval : `ffg_run` porte `accept_own_checks: false` — seuls les checks
+# de `ffg_check` ouvrent ses runs réels.
 # E2/E3 (OAuth public) INTERDITS tant que la passerelle partage la machine du
 # nœud de contrôle : la déplacer d'abord (docs/etude-isolation-passerelle-vm.md).
 

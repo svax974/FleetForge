@@ -29,11 +29,24 @@ ffg_unix_user: ffgateway
 ffg_forbidden_groups: [docker, sudo, adm, lxd, root, "{{ remote_username }}"]
 
 # Chemins que le compte dédié ne doit NI lire NI traverser (vérifié par
-# fleetforge-gateway-security, jamais modifié). Complétés par l'inventaire
-# (`ffg_protected_paths` de l'entrée : répertoire de FleetForge, arbre Ansible…)
-# — aucun chemin d'une machine précise n'est écrit ici.
+# fleetforge-gateway-security, jamais modifié) et qu'aucun conteneur ne monte :
+# le home ENTIER du compte de service (clés SSH, répertoire de FleetForge,
+# arbre Ansible, mot de passe du vault). Complétés par l'inventaire
+# (`ffg_protected_paths` de l'entrée : socket de l'agent SSH de FleetForge…) —
+# aucun chemin propre à une machine n'est écrit ici.
 ffg_protected_paths_base:
-  - "/home/{{ remote_username }}/.ssh"
+  - "/home/{{ remote_username }}"
+
+# Proxies ADMIS à joindre la passerelle : ceux dont l'adresse n'est celle
+# d'aucun serveur VPN (même calcul que le front `proxy-private`). Un proxy qui
+# partage l'adresse d'un VPN (ou d'un NAT domestique) admettrait tout ce qui
+# sort par cette adresse. Formule IDENTIQUE dans fleetforge-gateway-security
+# (vérifié par scripts/ffg_isolation_check.py).
+ffg_vpn_addresses: "{{ groups['vpns'] | default([]) | map('extract', hostvars, 'ansible_host') | list }}"
+ffg_eligible_proxies: >-
+  {{ groups['proxies'] | default([]) | map('extract', hostvars)
+     | rejectattr('ansible_host', 'in', ffg_vpn_addresses)
+     | map(attribute='inventory_hostname') | list }}
 
 # Sous-réseau privé /16 à /32 (même grammaire que `_access.inc`).
 ffg_private_cidr_regex: '^(10[.][0-9]{1,3}[.][0-9]{1,3}|172[.](1[6-9]|2[0-9]|3[01])[.][0-9]{1,3}|192[.]168[.][0-9]{1,3})[.][0-9]{1,3}/(1[6-9]|2[0-9]|3[0-2])$'
@@ -43,5 +56,31 @@ ffg_ipv4_regex: '^[0-9]{1,3}([.][0-9]{1,3}){3}$'
 ffg_default_users: { read: ffg_read, check: ffg_check, run: ffg_run }
 
 # Motifs que les comptes `check` et `run` doivent refuser : la passerelle ne
-# redéploie ni FleetForge ni elle-même (deploy-fleetforge.yml les porte tous deux).
-ffg_required_denies: ["*-fleetforge.yml", "*-fleetforge-gateway.yml"]
+# redéploie ni FleetForge ni elle-même, ne touche ni aux accès (SSH, pare-feu,
+# VPN, proxies, DNS, certificats, clés), ni aux sauvegardes, ni aux
+# suppressions. Liste MINIMALE vérifiée par la garde ; l'inventaire peut en
+# ajouter, jamais en retirer.
+ffg_required_denies:
+  - "*-fleetforge.yml"
+  - "*-fleetforge-gateway.yml"
+  - "*-readonly-user.yml"
+  - "setup-server.yml"
+  - "purge-*.yml"
+  - "remove-*.yml"
+  - "update-security-*.yml"
+  - "update-sshd-security.yml"
+  - "update-ufw-all.yml"
+  - "deploy-vpn*"
+  - "install-vpn-routes*"
+  - "deploy-cloudflare-origin-pull*"
+  - "update-cloudflare-dns*"
+  - "deploy-proxy*"
+  - "update-proxy*"
+  - "deploy-install-cert*"
+  - "deploy-webapp*"
+  - "retarget-backups*"
+  - "restore-*"
+  - "export-*-keys*"
+  - "deploy-copyfail-patch*"
+  - "deploy-docker-repo*"
+  - "temp.yml"
