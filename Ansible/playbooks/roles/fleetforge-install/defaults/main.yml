@@ -102,7 +102,9 @@ ff_api_user: ""
 #     - { user: gw_check, mode: check, deny_playbooks: [...], max_hosts: 3,
 #         allow_playbooks: [...] }
 #     - { user: gw_run, mode: run, deny_playbooks: [...], max_hosts: 3,
-#         accept_checks_from: [gw_check] }
+#         accept_checks_from: [gw_check], accept_own_checks: false }
+# `accept_own_checks: false` : ses PROPRES checks n'ouvrent plus ses runs réels,
+# seuls ceux de `accept_checks_from` (séparation réelle check / run).
 # `user` : minuscules, chiffres et `_` (il nomme une variable). Le mot de passe
 # de chacun, `ff_api_password_<user>`, est tiré au PREMIER déploiement et
 # chiffré dans playbooks/group_vars/<parc>.yml (à committer), comme

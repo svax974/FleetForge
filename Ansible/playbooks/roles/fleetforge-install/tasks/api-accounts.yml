@@ -34,6 +34,8 @@
                      | map(attribute='user') | list)
         | length == 0
       - item.mode | default('read') != 'check' or item.max_hosts is defined
+      - item.accept_own_checks | default(true) is boolean
+      - item.accept_own_checks | default(true) or (item.mode | default('read') == 'run' and item.accept_checks_from | default([]) | length > 0)
       - item.allow_playbooks is not defined or item.allow_playbooks is not string
       - item.allow_playbooks | default(['x']) | length > 0
       - item.allow_playbooks | default([]) | reject('match', '^[A-Za-z0-9_.*?-]{1,128}$') | list | length == 0
@@ -48,7 +50,8 @@
       (défaut : [{{ parc_name }}]) ; `deny_playbooks` une liste de motifs
       (lettres, chiffres, _ . - * ?) ; `max_hosts` un entier de 1 à 1000 ;
       `accept_checks_from` (compte run seulement) une liste d'AUTRES comptes
-      de `ff_api_accounts` en mode check ou run ; un compte check porte
+      de `ff_api_accounts` en mode check ou run ; `accept_own_checks: false`
+      (booléen) seulement sur un compte run qui en nomme ; un compte check porte
       `max_hosts` ; `allow_playbooks` une liste NON VIDE de motifs ;
       `allow_extra_vars` et `allow_diff` des booléens, compte check seulement.
   loop: "{{ ff_api_accounts }}"
