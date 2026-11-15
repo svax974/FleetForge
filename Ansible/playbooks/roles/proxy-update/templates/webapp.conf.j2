@@ -16,24 +16,51 @@
    client, `_cloudflare_front.inc`).
    Plusieurs entrées pour un même nom (ex. deux back de prod) : un `upstream`.
    Blocs supplémentaires : `webapp_vhost_locations` sur la première entrée, une
-   liste de { path, regex?, mode?, ws?, body?, timeout?, buffering? }. #}
+   liste de { path, regex?, mode?, ws?, body?, timeout?, buffering?, upstream?,
+   priority?, access? } : `upstream: back` relaie au back-lb (`back_port`),
+   `priority: true` pose `^~`, `access` remplace le mode par une liste NOMMÉE
+   (`_named_access.inc` : serveurs nommés, whitelist filtrée, adresses VPN
+   écartées, puis `deny all`).
+   Profil durci (`webapp_hardening` sur l'entrée) : X-Forwarded-For RÉÉCRIT
+   (`$remote_addr`, jamais complété) dans toutes les locations, amont en
+   127.0.0.1 sur le proxy co-localisé (le pare-feu de l'app n'admet que les
+   proxies DISTANTS), et AUCUN vhost sur un proxy à l'adresse d'un serveur VPN.
+   Sans profil : rendu inchangé. #}
 {% set _first = webapp_vhost_entries | first %}
 {% set _h = hostvars[_first] %}
+{% set _hardened = _h.webapp_hardening is defined %}
+{% set _vpn_addresses = groups['vpns'] | default([]) | map('extract', hostvars, 'ansible_host') | list %}
+{% set _xff = '$remote_addr' if _hardened else '$proxy_add_x_forwarded_for' %}
 {% set _pages = _h.cloudflare_front | default(false) | bool %}
 {% set _project = (_h.webapp_project | default(_first)) | lower | replace('_', '-') %}
 {% set _server_name = (_project ~ '-back.' ~ domain_name) if _pages else _h.proxy_hostname %}
 {% set _slug = _server_name | regex_replace('[^a-z0-9]', '_') %}
 {% set access_entry = _first %}
+{% if _hardened and ansible_host in _vpn_addresses %}
+# {{ _server_name }} : aucun vhost sur ce proxy (son adresse est celle d'un serveur VPN ; profil durci).
+{% else %}
 {% set _backends = [] %}
+{% set _backends_back = [] %}
 {% for _e in webapp_vhost_entries %}
+{% set _addr = '127.0.0.1' if (_hardened and hostvars[_e].ansible_host == ansible_host) else hostvars[_e].ansible_host %}
 {% set _port = (hostvars[_e].back_port | default(hostvars[_e].app_port | int + 1)) if _pages else hostvars[_e].app_port %}
-{% set _ = _backends.append(hostvars[_e].ansible_host ~ ':' ~ _port) %}
+{% set _ = _backends.append(_addr ~ ':' ~ _port) %}
+{% set _ = _backends_back.append(_addr ~ ':' ~ (hostvars[_e].back_port | default(hostvars[_e].app_port | int + 1))) %}
 {% endfor %}
 {% set _upstream = ('webapp_' ~ _slug) if (_backends | length > 1) else ('http://' ~ _backends[0]) %}
+{% set _upstream_back = ('webapp_' ~ _slug ~ '_back') if (_backends_back | length > 1) else ('http://' ~ _backends_back[0]) %}
+{% set _wants_back = (_h.webapp_vhost_locations | default([]) | selectattr('upstream', 'defined') | selectattr('upstream', 'equalto', 'back') | list | length) > 0 %}
 # {{ _server_name }} → {{ _backends | join(', ') }} ({{ 'API seule, front sur Cloudflare Pages' if _pages else 'front en conteneur' }})
 {% if _backends | length > 1 %}
 upstream webapp_{{ _slug }} {
 {% for _b in _backends %}
+    server {{ _b }} max_fails=3 fail_timeout=10s;
+{% endfor %}
+}
+{% endif %}
+{% if _wants_back and _backends_back | length > 1 %}
+upstream webapp_{{ _slug }}_back {
+{% for _b in _backends_back %}
     server {{ _b }} max_fails=3 fail_timeout=10s;
 {% endfor %}
 }
@@ -64,14 +91,20 @@ server {
     ssl_certificate_key /etc/letsencrypt/live/{{ domain_name }}/privkey.pem;
 {% for _l in _h.webapp_vhost_locations | default([]) %}
 
-    location {{ '~* ' if _l.regex | default(false) else '' }}{{ _l.path }} {
+    location {{ '^~ ' if _l.priority | default(false) else '' }}{{ '~* ' if _l.regex | default(false) else '' }}{{ _l.path }} {
+{% if _l.access is defined %}
+{% set named_access = _l.access %}
+{# Le partiel perd sa fin de ligne finale au rendu : la remettre, sinon `deny all;` et `proxy_pass` partagent une ligne. #}
+{% include '_named_access.inc' %}{{ '\n' -}}
+{% else %}
         {% set access_mode_local = _l.mode | default(none) %}
         {% include '_access.inc' %}
-        proxy_pass         {{ _upstream }};
+{% endif %}
+        proxy_pass         {{ _upstream_back if (_l.upstream | default('front')) == 'back' else _upstream }};
         proxy_http_version 1.1;
         proxy_set_header   Host $host;
         proxy_set_header   X-Real-IP $remote_addr;
-        proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-For {{ _xff }};
         proxy_set_header   X-Forwarded-Proto $scheme;
 {% if _l.ws | default(false) %}
         proxy_set_header   Upgrade $http_upgrade;
@@ -98,9 +131,10 @@ server {
         proxy_http_version 1.1;
         proxy_set_header   Host $host;
         proxy_set_header   X-Real-IP $remote_addr;
-        proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-For {{ _xff }};
         proxy_set_header   X-Forwarded-Proto $scheme;
         proxy_set_header   Upgrade $http_upgrade;
         proxy_set_header   Connection "upgrade";
     }
 }
+{% endif %}
