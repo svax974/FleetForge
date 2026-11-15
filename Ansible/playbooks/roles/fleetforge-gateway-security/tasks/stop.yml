@@ -1,0 +1,30 @@
+---
+# Arrête TOUS les conteneurs de la passerelle (projets compose
+# `<nom>-back-<hôte>` et `<nom>-front-<hôte>` de deploy-full.sh) — échec fermé :
+# appelé quand le déploiement ou le contrôle de durcissement échoue. Ne retire
+# rien (volumes, images) : fleetforge-gateway-remove le fait.
+
+- name: Check the project name used to select the containers to stop
+  ansible.builtin.assert:
+    that: ffg_project_name is match('^[a-z][a-z0-9-]{0,40}$')
+    quiet: true
+
+- name: List the containers with their compose project (to stop)
+  ansible.builtin.command:
+    argv: [docker, ps, --format, '{% raw %}{{.ID}} {{.Label "com.docker.compose.project"}}{% endraw %}']
+  become: true
+  register: ffg_ps_stop
+  changed_when: false
+  check_mode: false
+
+- name: Stop the gateway containers
+  ansible.builtin.command:
+    argv: "{{ ['docker', 'stop'] + _ids }}"
+  vars:
+    _ids: >-
+      {{ ffg_ps_stop.stdout_lines | select('match', '^[0-9a-f]+ ' ~ (ffg_project_name | regex_escape) ~ '-(back|front)-')
+         | map('split') | map('first') | list }}
+  become: true
+  when:
+    - _ids | length > 0
+    - not ansible_check_mode

@@ -1,24 +1,29 @@
 ---
 # Contrôle du DURCISSEMENT RÉEL de la passerelle, après son déploiement
-# (deploy-fleetforge.yml, play « hardening ») — lit `docker inspect`, ne
-# modifie rien, sauf en cas d'échec : les conteneurs de la passerelle sont
-# ARRÊTÉS (fermé) puis le play échoue.
+# (deploy-fleetforge.yml : dans le bloc du déploiement, puis play « hardening »)
+# — lit la machine, ne modifie rien, sauf en cas d'échec : les conteneurs de la
+# passerelle sont ARRÊTÉS (fermé, tasks/stop.yml) puis le play échoue.
 #
-# Le compose de l'app n'est pas écrit par Ansible (scripts du dépôt de l'app) ;
-# la passerelle peut partager la machine du nœud de contrôle : ce contrôle est
-# le seul à prouver, sur la machine, que :
-#   • aucun conteneur du projet n'est privilégié, ne monte le socket Docker,
-#     ~/.ssh, le répertoire de FleetForge, l'arbre Ansible, /etc, /root ou /,
-#     ni ne partage un espace de noms de l'hôte, et que tous portent
-#     no-new-privileges ;
+# `docker inspect` est appelé avec un FORMAT limité (HostConfig, Mounts,
+# Config.User, Config.Labels, NetworkSettings.Networks) : jamais `Config.Env`,
+# qui porte les mots de passe aval, DB_PASSWORD, JWT_SECRET, CRYPT_*. Les
+# tâches qui lisent ces descriptions sont `no_log` quand même.
+#
+# Prouve, sur la machine, que :
+#   • aucun conteneur du projet n'est privilégié, n'ajoute de capacité, n'est
+#     `unconfined` (seccomp/AppArmor), ne partage un espace de noms de l'hôte,
+#     n'a de périphérique de l'hôte, ne monte AUCUN chemin de l'hôte (bind) hors
+#     `ffg_allowed_bind_sources` (vide), ni un volume local déguisé en montage
+#     (`driver_opts` bind/device), et que tous portent no-new-privileges ;
 #   • les services de CODE (`ffg_hardened_services`) tournent sous le compte
 #     dédié (uid:gid), racine en lecture seule, toutes capacités retirées,
-#     limites mémoire et CPU, sur un réseau du projet dont le sous-réseau est
-#     `ffg_docker_subnet` ;
+#     limites mémoire et CPU, sur le réseau de sous-réseau `ffg_docker_subnet` ;
+#   • le front et le back-lb (relais de confiance de TRUST_PROXY) ont leurs
+#     adresses fixes `ffg_front_ip` / `ffg_back_lb_ip` ;
 #   • les réseaux du projet ne portent aucun conteneur d'un autre projet ;
 #   • le compte dédié n'est dans aucun groupe privilégié et ne peut ni lire ni
-#     traverser les chemins protégés (`ffg_protected_paths_base` +
-#     `ffg_protected_paths` de l'entrée).
+#     traverser les chemins protégés (home du compte de service, et ceux de
+#     l'entrée : socket de l'agent SSH de FleetForge…).
 
 - name: Check the names used to select the gateway containers
   ansible.builtin.assert:
@@ -43,27 +48,45 @@
       {{ ffg_ps.stdout_lines | select('match', '^[0-9a-f]+ ' ~ (ffg_project_name | regex_escape) ~ '-(back|front)-')
          | map('split') | map('first') | list }}
 
-- name: Inspect the gateway containers
+- name: Inspect the gateway containers (selected fields, never the environment)
   ansible.builtin.command:
-    argv: "{{ [ 'docker', 'inspect' ] + ffg_container_ids }}"
+    argv: "{{ ['docker', 'inspect', '--format', ffg_inspect_format] + ffg_container_ids }}"
   become: true
   register: ffg_inspect
   changed_when: false
   check_mode: false
+  no_log: true
   when: ffg_container_ids | length > 0
 
 - name: Parse the container descriptions
   ansible.builtin.set_fact:
-    ffg_containers: "{{ (ffg_inspect.stdout | default('[]')) | from_json }}"
+    ffg_containers: "{{ (ffg_inspect.stdout_lines | default([])) | map('from_json') | list }}"
+  no_log: true
 
 - name: Inspect the networks of the gateway containers
   ansible.builtin.command:
-    argv: "{{ ['docker', 'network', 'inspect'] + (ffg_containers | map(attribute='NetworkSettings.Networks') | map('list') | flatten | unique | list) }}"
+    argv: >-
+      {{ ['docker', 'network', 'inspect', '--format', ffg_network_format]
+         + (ffg_containers | map(attribute='Networks') | map('list') | flatten | unique | list) }}
   become: true
   register: ffg_net_inspect
   changed_when: false
   check_mode: false
+  no_log: true
   when: ffg_containers | length > 0
+
+- name: Inspect the named volumes of the gateway containers
+  ansible.builtin.command:
+    argv: "{{ ['docker', 'volume', 'inspect', '--format', ffg_volume_format] + _volumes }}"
+  vars:
+    _volumes: >-
+      {{ ffg_containers | map(attribute='Mounts') | flatten
+         | selectattr('Type', 'equalto', 'volume') | map(attribute='Name') | unique | list }}
+  become: true
+  register: ffg_vol_inspect
+  changed_when: false
+  check_mode: false
+  when: _volumes | length > 0
 
 - name: Read the dedicated account
   ansible.builtin.command:
@@ -95,88 +118,34 @@
   failed_when: false
   when: ffg_passwd.rc == 0
 
+# `apply: always` : un include dynamique ne transmet pas les tags de son appelant
+# à ses tâches (CLAUDE.md, pièges) ; ce fichier n'est chargé que si son appelant
+# a été retenu.
 - name: Work out the hardening violations
-  vars:
-    _fields: "{{ (ffg_passwd.stdout | default('')).split(':') }}"
-    _runtime_user: "{{ (_fields[2] ~ ':' ~ _fields[3]) if _fields | length > 3 else '' }}"
-    _networks: "{{ (ffg_net_inspect.stdout | default('[]')) | from_json }}"
-    _protected: "{{ ffg_protected_paths_base + (ffg_protected_paths | default([])) }}"
-  ansible.builtin.set_fact:
-    ffg_violations: >-
-      {%- set ns = namespace(v=[], seen=[]) -%}
-      {%- if _runtime_user == '' -%}{%- set ns.v = ns.v + ['compte ' ~ ffg_unix_user ~ ' absent'] -%}{%- endif -%}
-      {%- for g in (ffg_groups.stdout | default('')).split() | intersect(ffg_forbidden_groups) -%}
-        {%- set ns.v = ns.v + ['compte ' ~ ffg_unix_user ~ ' dans le groupe ' ~ g] -%}
-      {%- endfor -%}
-      {%- for r in ffg_path_probe.results | default([]) if (r.rc | default(1)) == 0 -%}
-        {%- set ns.v = ns.v + ['compte ' ~ ffg_unix_user ~ ' : test ' ~ r.item.0 ~ ' ' ~ r.item.1 ~ ' réussit'] -%}
-      {%- endfor -%}
-      {%- for c in ffg_containers -%}
-        {%- set name = c.Name | regex_replace('^/', '') -%}
-        {%- set svc = (c.Config.Labels | default({}))['com.docker.compose.service'] | default('') -%}
-        {%- set hc = c.HostConfig | default({}) -%}
-        {%- set ns.seen = ns.seen + [svc] -%}
-        {%- if hc.Privileged | default(false) -%}{%- set ns.v = ns.v + [name ~ ' : privileged'] -%}{%- endif -%}
-        {%- for k in ['NetworkMode', 'PidMode', 'IpcMode', 'UTSMode', 'UsernsMode'] if (hc[k] | default('')) == 'host' -%}
-          {%- set ns.v = ns.v + [name ~ ' : ' ~ k ~ '=host'] -%}
-        {%- endfor -%}
-        {%- if hc.Devices | default([], true) | length > 0 -%}{%- set ns.v = ns.v + [name ~ ' : périphériques de l hôte'] -%}{%- endif -%}
-        {%- if (hc.SecurityOpt | default([], true) | select('match', '^no-new-privileges(:true)?$') | list | length) == 0 -%}
-          {%- set ns.v = ns.v + [name ~ ' : sans no-new-privileges'] -%}
-        {%- endif -%}
-        {%- for m in c.Mounts | default([], true) if m.Type | default('') == 'bind' -%}
-          {%- set src = (m.Source | default('')).rstrip('/') or '/' -%}
-          {%- for p in ffg_forbidden_mount_sources + _protected -%}
-            {%- set q = p.rstrip('/') or '/' -%}
-            {%- if src == q or src.startswith(q ~ '/') or q.startswith(src ~ '/') or src == '/' -%}
-              {%- set ns.v = ns.v + [name ~ ' : montage interdit ' ~ m.Source ~ ' (' ~ p ~ ')'] -%}
-            {%- endif -%}
-          {%- endfor -%}
-        {%- endfor -%}
-        {%- for n in (c.NetworkSettings.Networks | default({})) | list if not n.startswith(ffg_project_name ~ '-') -%}
-          {%- set ns.v = ns.v + [name ~ ' : réseau étranger au projet ' ~ n] -%}
-        {%- endfor -%}
-        {%- if svc in ffg_hardened_services -%}
-          {%- if (c.Config.User | default('')) != _runtime_user -%}{%- set ns.v = ns.v + [name ~ ' : utilisateur ' ~ (c.Config.User | default('') or 'root') ~ ' au lieu de ' ~ _runtime_user] -%}{%- endif -%}
-          {%- if not (hc.ReadonlyRootfs | default(false)) -%}{%- set ns.v = ns.v + [name ~ ' : racine en écriture'] -%}{%- endif -%}
-          {%- if 'ALL' not in (hc.CapDrop | default([], true)) -%}{%- set ns.v = ns.v + [name ~ ' : capacités non retirées (cap_drop ALL)'] -%}{%- endif -%}
-          {%- if hc.CapAdd | default([], true) | length > 0 -%}{%- set ns.v = ns.v + [name ~ ' : capacités ajoutées'] -%}{%- endif -%}
-          {%- if (hc.Memory | default(0) | int) <= 0 -%}{%- set ns.v = ns.v + [name ~ ' : sans limite mémoire'] -%}{%- endif -%}
-          {%- if (hc.NanoCpus | default(0) | int) <= 0 and (hc.CpuQuota | default(0) | int) <= 0 -%}{%- set ns.v = ns.v + [name ~ ' : sans limite CPU'] -%}{%- endif -%}
-          {%- set nets = (c.NetworkSettings.Networks | default({})) | list -%}
-          {%- set subnets = _networks | selectattr('Name', 'in', nets) | map(attribute='IPAM.Config') | flatten | map(attribute='Subnet') | list -%}
-          {%- if ffg_docker_subnet not in subnets -%}{%- set ns.v = ns.v + [name ~ ' : réseau hors de ffg_docker_subnet ' ~ ffg_docker_subnet ~ ' (' ~ (subnets | join(',')) ~ ')'] -%}{%- endif -%}
-        {%- endif -%}
-      {%- endfor -%}
-      {%- for s in ffg_hardened_services if s not in ns.seen -%}
-        {%- set ns.v = ns.v + ['service ' ~ s ~ ' introuvable'] -%}
-      {%- endfor -%}
-      {%- for net in _networks -%}
-        {%- for cid, att in (net.Containers | default({}, true)).items() if not (att.Name | default('')).startswith(ffg_project_name) -%}
-          {%- set ns.v = ns.v + ['réseau ' ~ net.Name ~ ' : conteneur étranger ' ~ (att.Name | default(cid))] -%}
-        {%- endfor -%}
-      {%- endfor -%}
-      {{ ns.v | join(' ; ') }}
+  ansible.builtin.include_tasks:
+    file: violations.yml
+    apply:
+      tags: [always]
+  tags: [always]
 
 - name: Stop the gateway containers when the hardening is not met
-  ansible.builtin.command:
-    argv: "{{ ['docker', 'stop'] + ffg_container_ids }}"
-  become: true
+  ansible.builtin.include_tasks:
+    file: stop.yml
+    apply:
+      tags: [always]
+  tags: [always]
   when:
     - ffg_violations | trim | length > 0
     - ffg_stop_on_hardening_failure | bool
-    - ffg_container_ids | length > 0
-    - not ansible_check_mode
 
 - name: Fail when the hardening is not met
   ansible.builtin.assert:
     that: ffg_violations | trim | length == 0
     fail_msg: >-
       Durcissement de la passerelle NON conforme ({{ 'conteneurs arrêtés' if ffg_stop_on_hardening_failure | bool else 'conteneurs laissés en marche' }}) :
-      {{ ffg_violations }}. Le compose de l'app (COMPOSE_FILE_NAME de back/.env)
-      doit porter, pour {{ ffg_hardened_services | join(', ') }} : user
-      "${FFG_RUNTIME_UID}:${FFG_RUNTIME_GID}", read_only (+ tmpfs), cap_drop [ALL],
-      security_opt [no-new-privileges:true], mem_limit et cpus, un réseau de
-      sous-réseau ${FFG_DOCKER_SUBNET} ; pour tous : no-new-privileges, aucun
-      montage du socket Docker ni de chemin de l'hôte, ni profil `metrics` (vmagent).
+      {{ ffg_violations }}. Le compose de l'app (COMPOSE_FILE_NAME) doit porter, pour
+      {{ ffg_hardened_services | join(', ') }} : user "${FFG_RUNTIME_UID}:${FFG_RUNTIME_GID}",
+      read_only (+ tmpfs), cap_drop [ALL], mem_limit et cpus ; pour tous : no-new-privileges, aucun
+      cap_add, aucun montage de l'hôte ni volume à driver_opts, ni socket Docker ni vmagent ; front et
+      back-lb sur le réseau ${FFG_DOCKER_SUBNET} aux adresses ${FFG_FRONT_IP} / ${FFG_BACK_LB_IP}.
     success_msg: "Durcissement conforme : {{ ffg_containers | length }} conteneur(s), compte {{ ffg_unix_user }} isolé."

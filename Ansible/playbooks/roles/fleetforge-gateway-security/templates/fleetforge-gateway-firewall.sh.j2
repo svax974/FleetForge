@@ -8,6 +8,10 @@
 # même réseau n'est pas concerné, et le front qui écoute sur 80 dans son
 # conteneur est bien filtré sur son port publié.
 #
+# Les règles sont INSÉRÉES EN TÊTE de DOCKER-USER : un RETURN inconditionnel
+# placé avant elles (ancien défaut de Docker, autre rôle) les rendrait
+# décoratives. Elles ne touchent que ces deux ports.
+#
 # Rejoué au démarrage APRÈS docker.service (Docker recrée DOCKER-USER vide).
 # Idempotent : purge d'abord les règles portant son commentaire, puis repose.
 set -euo pipefail
@@ -33,31 +37,47 @@ purge() {
   done
 }
 
-# `--ctdir ORIGINAL` est INDISPENSABLE : la réponse (conteneur → client) porte
-# elle aussi l'état DNAT et le port d'origine ; sans lui elle tomberait dans le
-# DROP final, y compris pour une source autorisée.
-rule() {
-  local cmd="$1" port="$2" target="$3" what="$4"; shift 4
-  "${cmd}" -w -A DOCKER-USER "$@" -p tcp \
-    -m conntrack --ctstate DNAT --ctorigdstport "${port}" --ctdir ORIGINAL \
-    -m comment --comment "${TAG}:${port}:${what}" -j "${target}"
+# Règles voulues, dans l'ORDRE d'évaluation ; insérées ensuite en tête, de la
+# dernière à la première. `--ctdir ORIGINAL` est INDISPENSABLE : la réponse
+# (conteneur → client) porte elle aussi l'état DNAT et le port d'origine ; sans
+# lui elle tomberait dans le DROP final, y compris pour une source autorisée.
+RULES4=()
+RULES6=()
+add() {
+  local family="$1" port="$2" target="$3" what="$4" src="${5:-}"
+  local spec="${src:+-s ${src} }-p tcp -m conntrack --ctstate DNAT --ctorigdstport ${port} --ctdir ORIGINAL -m comment --comment ${TAG}:${port}:${what} -j ${target}"
+  if [ "${family}" = 4 ]; then RULES4+=("${spec}"); else RULES6+=("${spec}"); fi
+}
+
+for port in "${FRONT_PORT}" "${BACK_PORT}"; do
+  for src in ${PROXIES[@]+"${PROXIES[@]}"}; do
+    add 4 "${port}" RETURN proxy "${src}"
+  done
+done
+add 4 "${BACK_PORT}" RETURN internal "${INTERNAL}"
+for port in "${FRONT_PORT}" "${BACK_PORT}"; do
+  add 4 "${port}" DROP deny
+  add 6 "${port}" DROP deny
+done
+
+# Insertion en tête, de la dernière règle à la première (ordre final = ordre
+# voulu). Liste retournée par construction : le gabarit Jinja interdit la
+# syntaxe de longueur de tableau de bash (elle ouvrirait un commentaire).
+insert_all() {
+  local cmd="$1"; shift
+  local reversed=() rule
+  for rule in "$@"; do reversed=("${rule}" ${reversed[@]+"${reversed[@]}"}); done
+  for rule in "${reversed[@]}"; do
+    # shellcheck disable=SC2086  # la spec est découpée volontairement (aucune valeur libre)
+    "${cmd}" -w -I DOCKER-USER 1 ${rule}
+  done
 }
 
 purge iptables
-for port in "${FRONT_PORT}" "${BACK_PORT}"; do
-  for src in "${PROXIES[@]}"; do
-    rule iptables "${port}" RETURN proxy -s "${src}"
-  done
-done
-rule iptables "${BACK_PORT}" RETURN internal -s "${INTERNAL}"
-for port in "${FRONT_PORT}" "${BACK_PORT}"; do
-  rule iptables "${port}" DROP deny
-done
+insert_all iptables "${RULES4[@]}"
 
 # IPv6 : Docker publie aussi sur [::]. Aucune source IPv6 admise.
 if ip6tables -w -L DOCKER-USER -n >/dev/null 2>&1; then
   purge ip6tables
-  for port in "${FRONT_PORT}" "${BACK_PORT}"; do
-    rule ip6tables "${port}" DROP deny
-  done
+  insert_all ip6tables "${RULES6[@]}"
 fi

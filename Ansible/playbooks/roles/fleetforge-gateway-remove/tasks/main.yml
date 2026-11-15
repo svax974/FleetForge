@@ -65,6 +65,16 @@
   register: ffg_rules_removed
   changed_when: "'removed' in ffg_rules_removed.stdout"
 
+# Toute règle ufw sur les ports de la passerelle (décorative, posée par
+# d'autres rôles), IPv4 et IPv6, quelle que soit sa source.
+- name: Remove every ufw rule on the gateway ports
+  ansible.builtin.include_role:
+    name: fleetforge-gateway-security
+    tasks_from: ufw-purge
+    apply:
+      tags: [always]
+  when: app_port is defined and back_port is defined
+
 - name: Remove the gateway firewall unit and script
   ansible.builtin.file:
     path: "{{ item }}"
