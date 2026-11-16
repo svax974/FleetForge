@@ -316,7 +316,9 @@ restauration) : `Ansible/README.md`, « Sauvegardes (famille `backup`) ».
   `pgbak_encrypt_recipient` (entrée). La clé privée n'est jamais dans le dépôt ni sur une machine du parc : elle reste hors
   ligne chez le propriétaire et n'arrive sur la machine de la passerelle que le temps d'une vérification ou d'une
   restauration, par l'entrée standard. Pas de repli : `age` absent ou en échec, le dump échoue (BackupFailed). Les clés de
-  chiffrement de l'APP (back/.env, coffre) ne sont pas dans le dump : une restauration les exige à part.
+  chiffrement de l'APP (back/.env, coffre) ne sont pas dans le dump : une restauration les exige à part. **Clé DISTINCTE**
+  pour la passerelle (`pgbak_encrypt_recipient` sur son entrée) : restaurer ctdapi, machine mutualisée, ne doit pas y
+  envoyer la clé qui déchiffre l'audit et les approbations de la passerelle.
 - **Destination** (plan du 16/11/2026, inventaire privé tenu par le propriétaire) : l'entrée `backup-fleetforge-gateway`,
   sur `station` — PAS proxy1, qui porte la passerelle elle-même (une sauvegarde sur la machine de la base ne survit pas à sa
   perte ; tradekong, ctdapi et les serveurs de synchro, eux, restent sur proxy1). `station` est une machine de BUREAU derrière
@@ -328,14 +330,21 @@ restauration) : `Ansible/README.md`, « Sauvegardes (famille `backup`) ».
   INDISPENSABLE (une machine de bureau éteinte ou une IP changée arrête la sauvegarde sans autre symptôme).
 - **Compte de destination dédié** (rôle `backup-setup`) : `fleetbackup` (variable `backup_account` ; jamais `backup`, compte
   système de toute Debian/Ubuntu, refusé), sans sudo ni groupe. La clé de la passerelle y est posée avec `restrict`,
-  `from="<adresse de la passerelle>"` et la commande forcée `backup-gate <racine> fleetforge-gateway <pgbak_keep>
-  <plancher>` : aucun shell, verbes fermés, répertoire de la seule passerelle, nombre de générations fixé côté destination,
-  écriture arrêtée sous le plancher d'espace libre de `station` (`backup_floor_gb`, 5 Go : le disque sert aussi Storj).
-- **Mêmes garanties que tradekong/ctdapi pour le reste** : cron quotidien (minute `pgbak_cron_minute`), 3 générations
+  `from="<adresse IP littérale de la passerelle>"` et la commande forcée `backup-gate <racine> fleetforge-gateway
+  <pgbak_keep> <plancher>` : aucun shell, verbes fermés, répertoire de la seule passerelle, une écriture à la fois,
+  écriture arrêtée sous le plancher d'espace libre de `station` (`backup_floor_gb`, 5 Go, contrôlé à chaque Mio : le disque
+  sert aussi Storj). La DESTINATION tient la rétention et la fraîcheur : horodatage d'un nom à moins de 26 h de son
+  horloge, élagage selon l'heure de réception, `last-success` écrit par elle au `commit` d'une génération contrôlée et
+  encore présente. Ancien schéma (clé de la source sur `srvc`, dumps en clair sous `backup_root`) : la clé y est retirée,
+  les dumps signalés et gardés jusqu'à `-e backup_legacy_purge=yes` (`Ansible/README.md`, « Migration »). known_hosts : clé
+  d'hôte de `station` lue par la connexion d'Ansible, pas par un `ssh-keyscan` du poste (NAT).
+- **Mêmes garanties que tradekong/ctdapi pour le reste** : cron quotidien (minute `pgbak_cron_minute` ; auto-limitation
+  calculée en heures avec 2 h de marge — en jours entiers, une sauvegarde sur deux était sautée), 3 générations
   (`pgbak_keep`), purge APRÈS le succès du nouveau dump, marge libre exigée sur la destination (`backup_min_free_gb` de
-  l'entrée de destination, 20 Go par défaut), métriques `backup_last_*{backup="<pgbak_name>"}` (collecteur textfile de
-  node_exporter). Pas de test de restauration automatique : `postgres-restore.sh --verify` relit et déchiffre tout sans rien
-  écrire, la vérification supervisée est la procédure ci-dessous.
+  l'entrée de destination, 20 Go par défaut : une destination qui en a moins fait échouer TOUTES ses sauvegardes, à régler
+  sur l'entrée — mesurer `df -h /home` sur `station`), métriques `backup_last_*{backup="<pgbak_name>"}` (collecteur textfile
+  de node_exporter). Pas de test de restauration automatique : `postgres-restore.sh --verify` relit et déchiffre tout sans
+  rien écrire, la vérification supervisée est la procédure ci-dessous.
 - **Ce que l'entrée déclare** (modèle : `Ansible/inventories/parc_inventory.yml.template`, un seul endroit) : `backup` dans
   `ansible_roles`, `pgbak_name`, `pgbak_container`, `pgbak_db`, `pgbak_user`, `pgbak_dest_host` (entrée de `backups` sur une
   AUTRE machine que celle de la passerelle), `pgbak_dest_port` (si la destination n'est pas sur le port du parc), `pgbak_dir`
@@ -345,7 +354,8 @@ restauration) : `Ansible/README.md`, « Sauvegardes (famille `backup`) ».
   `retarget-backups-web3c.yml`). Absent : rien n'est vérifié, rien n'est installé.
 - **Supervision** : `BackupStale` (série trop ancienne), `BackupMissing` (`absent()` : aucune série pour un nom ATTENDU
   depuis le seuil — sauvegarde jamais installée, jamais passée, ou métrique perdue) et `BackupFailed`. Les deux premières
-  sont générées par nom à partir de `prom_alert_backup_max_age_hours`.
+  sont générées par nom à partir de `prom_alert_backup_max_age_hours`. `alert_exclude: [BackupMissing]` est sans effet
+  (`absent()` n'a pas de label `instance`) : retirer le nom du seuil pour éteindre la règle.
 - **Activation** (inventaire et group_vars PRIVÉS, hors de ce dépôt ; décisions du propriétaire) : générer la clé de
   l'opérateur sur SON poste (`Ansible/README.md`) et poser son destinataire public ; entrée de destination sur `station`
   (`ansible_port: 22`, `backup_sources: [fleetforge-gateway]`, `ansible_roles: [backup]`) ; `backup` + `pgbak_*` +
@@ -356,7 +366,8 @@ restauration) : `Ansible/README.md`, « Sauvegardes (famille `backup`) ».
 #### Première vérification supervisée (lecture seule, sans secret)
 
 À faire après le PREMIER passage du cron (ou du play), jamais avant. Ne rien lancer qui écrive dans la base vivante ;
-surtout PAS `postgres-restore.sh --yes` (il SUPPRIME la base puis la recrée, après relecture complète).
+surtout PAS `postgres-restore.sh --yes` (il recharge la base à côté puis l'ÉCHANGE avec la base vivante, gardée sous
+`<base>_before_<horodatage>` : c'est une restauration, pas une vérification).
 
 1. Machine de la passerelle : `tail -n 20 <pgbak_dir>/backup.log` doit finir par « [fleetforge-gateway] Terminé en N s — X Mo
    (chiffré) » (« Place insuffisante », « Destination injoignable ou passerelle en refus », « age introuvable » = échec) ;
@@ -366,13 +377,14 @@ surtout PAS `postgres-restore.sh --yes` (il SUPPRIME la base puis la recrée, ap
    liste `<base>-<horodatage>.sql.gz.age … chiffrée (age)`, taille plausible, non nulle (ordre de grandeur face à
    `docker exec <conteneur> psql -U <pgbak_user> -d <pgbak_db> -tAc "select pg_size_pretty(pg_database_size(current_database()))"`
    — un dump compressé fait une fraction de la base ; la tendance sur plusieurs jours compte plus que la valeur). Sur `station`,
-   `journalctl -t backup-gate` (ou `/var/log/syslog`) montre `source=fleetforge-gateway verb=commit … bytes=…` puis `prune`
-   et `stamp` ; `sudo ls -l /home/fleetbackup/backups/fleetforge-gateway/` : aucun `.tmp` qui traîne, propriétaire
-   `fleetbackup`, mode 0600.
+   `journalctl -t backup-gate` (ou `/var/log/syslog`) montre `source=fleetforge-gateway verb=put …` puis `verb=commit …
+   bytes=… kept=3 removed=… last-success=…` ; `sudo ls -l /home/fleetbackup/backups/fleetforge-gateway/` : aucun `.tmp` qui
+   traîne, propriétaire `fleetbackup`, mode 0600. Si la passerelle avait déjà été sauvegardée par l'ancien schéma, le play
+   a affiché « AVERTISSEMENT … ancien schéma » : migration dans `Ansible/README.md`.
 3. Relecture complète avec la clé, sans rien écrire, depuis le poste du propriétaire :
-   `age -d ~/.config/fleetforge/backup-key.age | ssh -p <port> srvc@<machine de la passerelle> '<pgbak_dir>/postgres-restore.sh --verify'`
-   (clé déchiffrée en mémoire sur le poste, transmise par SSH, jamais écrite sur la machine) → « Sauvegarde lisible : N octets
-   de SQL ». Une mauvaise clé ou un fichier altéré s'arrête là.
+   `age -d ~/.config/fleetforge/backup-key-ffg.age | ssh -p <port> srvc@<machine de la passerelle> '<pgbak_dir>/postgres-restore.sh --verify'`
+   (clé déchiffrée en mémoire sur le poste, transmise par SSH, jamais écrite sur la machine) → « Sauvegarde lisible et
+   complète ». Une mauvaise clé, un fichier altéré ou un dump sans sa ligne finale s'arrête là.
 4. Prometheus (`monitor`) : `count(backup_last_success_timestamp_seconds{backup="<pgbak_name>"})` vaut 1 et
    `time() - backup_last_success_timestamp_seconds{backup="<pgbak_name>"}` reste sous le seuil ; les règles `BackupStale` ET
    `BackupMissing` portant le label `backup="<pgbak_name>"` figurent dans `/api/v1/rules` (`BackupMissing` inactive : la série
@@ -384,7 +396,7 @@ surtout PAS `postgres-restore.sh --yes` (il SUPPRIME la base puis la recrée, ap
    version majeure que la base (`docker exec <conteneur> postgres --version`) SANS publier de port : `docker run --rm -d --name
    ffg-restore-check -e POSTGRES_HOST_AUTH_METHOD=trust postgres:<majeure>` ; `docker exec ffg-restore-check createuser -U
    postgres <pgbak_user>` puis `createdb -U postgres -O <pgbak_user> restorecheck` ; `age -d -i <(age -d
-   ~/.config/fleetforge/backup-key.age) <dossier>/dump.sql.gz.age | gunzip -c | docker exec -i ffg-restore-check psql -U postgres
+   ~/.config/fleetforge/backup-key-ffg.age) <dossier>/dump.sql.gz.age | gunzip -c | docker exec -i ffg-restore-check psql -U postgres
    -d restorecheck -v ON_ERROR_STOP=1 -q` doit finir sans erreur. Comparer les comptes de `mcp_audit`, `mcp_approval` et
    `ffg_launch` entre la base jetable et la base vivante (`select count(*)`, lecture seule) : l'écart doit se limiter aux lignes
    écrites depuis le dump. Puis `docker stop ffg-restore-check` (le conteneur s'efface seul) et supprimer le dossier temporaire.
@@ -397,12 +409,21 @@ surtout PAS `postgres-restore.sh --yes` (il SUPPRIME la base puis la recrée, ap
   destination ; sa perte ET celle de proxy1 perdent tout. Une destination de plus = une autre entrée et un autre play.
 - **Clé de l'opérateur perdue = sauvegardes illisibles**, par construction (deux copies hors ligne). Rotation : nouveau
   destinataire → les dumps suivants l'utilisent ; garder l'ancienne clé jusqu'à la rotation des 3 générations.
-- **Une source compromise** ne lit ni n'efface les sauvegardes des autres, ne choisit pas la rétention et ne descend pas sous
-  le plancher d'espace libre, mais peut pousser des générations vides de sens qui, au bout de `pgbak_keep` passages, évincent
-  les bonnes (le contenu chiffré n'est pas vérifiable par la destination). **Une destination compromise** peut effacer, jamais
-  lire (sans la clé privée).
-- Ni exécuté ni observé sur une machine : passerelle `backup-gate`, compte `fleetbackup`, `age` des dépôts (Ubuntu 22.04+,
-  Debian 12+ — un OS plus ancien fait échouer le déploiement, sans repli), redirection du port 22 de `station`.
+- **Une source compromise** ne lit ni n'efface les sauvegardes des autres, ne choisit ni la rétention ni la fraîcheur
+  (horodatages bornés, élagage à l'heure de réception, `last-success` écrit par la destination) et ne fait descendre le disque
+  qu'au plus 1 Mio sous le plancher, mais peut pousser des générations VALIDES et vides de sens qui, au bout de `pgbak_keep`
+  passages, évincent les bonnes (le contenu chiffré n'est pas vérifiable par la destination). Même effet d'une base VIDÉE
+  par l'application : 3 passages suffisent. Seule la taille (`backup_last_size_bytes` dans la durée) le révèle.
+  **Une destination compromise** peut effacer, jamais lire (sans la clé privée).
+- authorized_keys du compte dédié dans sa maison (aucun verbe de la passerelle n'y écrit) : un fichier possédé par root
+  (`AuthorizedKeysFile` par `Match User`) imposerait de modifier sshd_config de `station`, machine derrière un NAT où une
+  erreur coupe l'accès — non fait. Règles ufw des destinations purement additives : hors périmètre.
+- Restauration `--yes` vérifiée de bout en bout sur un PostgreSQL 17 jetable (vrai `pg_dump`, double de `docker` et d'`age`) :
+  chargement à côté, échange en une transaction, ancienne base gardée. La machine de la base doit avoir la place de DEUX
+  copies le temps de valider.
+- Ni exécuté ni observé sur une machine : passerelle `backup-gate`, compte `fleetbackup`, retrait de l'ancien accès sur
+  `srvc`, `age` des dépôts (Ubuntu 22.04+, Debian 12+ — un OS plus ancien fait échouer le déploiement, sans repli),
+  redirection du port 22 de `station`, lecture de sa clé d'hôte par Ansible.
 
 ## 9. Choix à valider par le propriétaire
 
