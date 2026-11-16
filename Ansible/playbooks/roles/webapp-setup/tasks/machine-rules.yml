@@ -1,5 +1,6 @@
 ---
-# Garde d'une machine PARTAGÉE (inventaire seul, AUCUNE connexion, aucun fait calculé : rien à ajouter à no-overrides.yml).
+# Garde d'une machine PARTAGÉE (inventaire seul, AUCUNE connexion). Ses faits (`wa_mr_entries`, `wa_machine_ports`…) et ses
+# variables de travail sont dans la sonde de no-overrides.yml (un `-e` ne les masque pas).
 #
 # `docker-ports-firewall.sh` est UN fichier par machine (rôle docker-ports-security), réécrit à chaque déploiement d'une app
 # avec `docker_ports_rules` de l'entrée CANONIQUE (`webapp_machine`, host_vars) plus les règles DÉRIVÉES de l'app jouée
@@ -8,36 +9,93 @@
 # disque ne porte que ceux de la dernière app jouée : un redémarrage de Docker (l'unité systemd rejoue le script) coupe ou
 # ouvre à tort les ports des autres apps, en production. Constat du 16/11/2026 sur 185.237.252.206.
 #
+# Une machine = l'adresse ET le port SSH (derrière un NAT, l'adresse seule désigne plusieurs machines).
 # Concerne les entrées `webapp` NON durcies (le profil durci a son propre pare-feu) et NON `webapp_proxy: external` (aucun
-# filtrage posé) qui partagent l'adresse ET le port SSH de cette entrée. Il y en a ≥ 2 : alors
-#   - toutes désignent la MÊME entrée canonique (`webapp_machine`, défaut : elles-mêmes), qui existe et porte la même adresse ;
+# filtrage posé). La garde s'applique à l'app jouée dès que l'UN de ces trois cas se présente :
+#   (1) au moins deux de ces apps partagent la machine ;
+#   (2) une AUTRE entrée de la machine (toute famille : ctdapi, rotki…) porte `docker_ports_rules` — une app seule jouée
+#       avec ses règles dérivées RÉÉCRIRAIT le script et effacerait celles de cette entrée ;
+#   (3) l'app désigne une autre entrée canonique (`webapp_machine`) que la sienne.
+# Alors
+#   - toutes ces apps désignent la MÊME entrée canonique (`webapp_machine`, défaut : elles-mêmes), qui existe et porte la même
+#     adresse ET le même port SSH ;
 #   - son `docker_ports_rules` contient chacun des ports de chacune (mêmes défauts que facts.yml : back = app_port+1,
-#     Postgres = webapp_db_port ou app_port+2 si le moteur est postgres|selfhosted, Redis = webapp_redis_port ou app_port+3).
-# Une machine à une seule app n'est pas concernée (les règles dérivées suffisent).
+#     Postgres = webapp_db_port ou app_port+2 si le moteur est postgres|selfhosted, Redis = webapp_redis_port ou app_port+3) ;
+#     exigé dans les cas (1) et (2), et dans le cas (3) quand l'entrée canonique porte des règles.
+# Une machine à une seule app, sans autre entrée portant des règles et sans `webapp_machine`, n'est pas concernée (les règles
+# dérivées suffisent). Les ports sont lus par machine-ports.yml : chaque entrée dans SON contexte (une valeur qui référence
+# `hostvars` n'est pas lisible depuis une autre entrée avec ansible-core 2.21 : « 'hostvars' is undefined »).
+# Limite : seuls les ports de la canonique et des apps jouées sont comparés ; les règles d'une AUTRE entrée qui porterait aussi
+# `docker_ports_rules` ne sont pas reportées dans le script (leur place est le host_vars canonique, CLAUDE.md).
 
-- name: Check that the shared machine declares the Docker ports of every webapp in its canonical host_vars
+- name: List the entries that share this machine (same address and SSH port)
   vars:
-    _machine: >-
+    _addr: "{{ ansible_host | default('') }}"
+    _ssh: "{{ (ansible_port | default(22, true)) | string }}"
+  ansible.builtin.set_fact:
+    wa_mr_entries: >-
       {%- set ns = namespace(out=[]) -%}
       {%- for n in groups['all'] -%}
       {%- set h = hostvars[n] -%}
-      {%- if 'webapp' in (h.ansible_roles | default([])) and h.app_port is defined and h.webapp_hardening is not defined
-             and (h.webapp_proxy | default('internal')) != 'external'
-             and (h.ansible_host | default('')) == ansible_host
-             and ((h.ansible_port | default(22)) | string) == ((ansible_port | default(22)) | string) -%}
-      {%- set ap = h.app_port | int -%}
-      {%- set db = (h.webapp_db_engine | default('')) in webapp_db_selfhosted_engines -%}
-      {%- set ports = [ap, (h.back_port | default(ap + 1)) | int, (h.webapp_redis_port | default(ap + 3)) | int]
-                      + ([(h.webapp_db_port | default(ap + 2)) | int] if db else []) -%}
-      {%- set ns.out = ns.out + [{'entry': n, 'canonical': h.webapp_machine | default(n), 'ports': ports}] -%}
+      {%- if (h.ansible_host | default('')) == _addr and ((h.ansible_port | default(22, true)) | string) == _ssh -%}
+      {%- set ns.out = ns.out + [n] -%}
       {%- endif -%}
       {%- endfor -%}
       {{ ns.out }}
-    _canonicals: "{{ _machine | map(attribute='canonical') | unique | list }}"
-    _canonical: "{{ _canonicals | first | default('') }}"
-    _declared: >-
-      {{ (hostvars[_canonical].docker_ports_rules | default([]) | map(attribute='port', default=0) | map('int') | list)
-         if _canonical in hostvars else [] }}
+  when:
+    - webapp_hardening is not defined
+    - (webapp_proxy | default('internal')) != 'external'
+  tags: [always]
+
+# Cas (1) ou (2) possible, ou canonique explicite (3) : lire les ports de ces entrées (et de la canonique) dans leur contexte.
+- name: Read the rendered ports of the entries of the machine and of the canonical entry
+  vars:
+    _canonical: "{{ webapp_machine | default(inventory_hostname) }}"
+  ansible.builtin.include_tasks:
+    file: machine-ports.yml
+  args:
+    apply:
+      tags: [always]
+      vars:
+        wa_mp_entries: "{{ (wa_mr_entries + ([_canonical] if _canonical in hostvars and _canonical not in wa_mr_entries else [])) | list }}"
+  when:
+    - webapp_hardening is not defined
+    - (webapp_proxy | default('internal')) != 'external'
+    - (wa_mr_entries | length > 1) or (webapp_machine is defined and webapp_machine != inventory_hostname)
+  tags: [always]
+
+- name: Check that the shared machine declares the Docker ports of every webapp in its canonical host_vars
+  vars:
+    _canonical: "{{ webapp_machine | default(inventory_hostname) }}"
+    _data: "{{ wa_machine_ports | default({}) }}"
+    _machine: >-
+      {%- set ns = namespace(out=[]) -%}
+      {%- for n in wa_mr_entries -%}
+      {%- set d = _data[n] -%}
+      {%- if 'webapp' in d.roles and d.ports.app_port is defined and not d.hardened and d.proxy != 'external' -%}
+      {%- set ap = d.ports.app_port | int -%}
+      {%- set db = d.engine in webapp_db_selfhosted_engines -%}
+      {%- set ports = [ap, (d.ports.back_port | default(ap + 1)) | int, (d.ports.webapp_redis_port | default(ap + 3)) | int]
+                      + ([(d.ports.webapp_db_port | default(ap + 2)) | int] if db else []) -%}
+      {%- set ns.out = ns.out + [{'entry': n, 'canonical': d.machine, 'ports': ports}] -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {{ ns.out }}
+    _carriers: >-
+      {%- set ns = namespace(out=[]) -%}
+      {%- for n in wa_mr_entries if n != inventory_hostname -%}
+      {%- if not _data[n].hardened and (_data[n].rules | length) > 0 -%}{%- set ns.out = ns.out + [n] -%}{%- endif -%}
+      {%- endfor -%}
+      {{ ns.out }}
+    _canonicals: "{{ (_machine | map(attribute='canonical') | list + [_canonical]) | unique | list }}"
+    _on_machine: >-
+      {{ _canonical in _data
+         and _data[_canonical].host == (ansible_host | default(''))
+         and _data[_canonical].ssh == ((ansible_port | default(22, true)) | string) }}
+    _declared: "{{ _data[_canonical].rules if _canonical in _data else [] }}"
+    _strict: >-
+      {{ (_machine | length > 1) or (_carriers | length > 0)
+         or (_canonical != inventory_hostname and (_declared | length) > 0) }}
     _missing: >-
       {%- set ns = namespace(out=[]) -%}
       {%- for m in _machine -%}
@@ -49,19 +107,21 @@
   ansible.builtin.assert:
     that:
       - _canonicals | length == 1
-      - _canonical in hostvars
-      - (hostvars[_canonical].ansible_host | default('')) == ansible_host
-      - _missing | length == 0
+      - _on_machine | bool
+      - (not (_strict | bool)) or _missing | length == 0
     fail_msg: >-
-      {{ inventory_hostname }} partage {{ ansible_host }} avec {{ (_machine | map(attribute='entry') | list) | join(', ') }}
-      (entrées `webapp` non durcies) : un seul docker-ports-firewall.sh par machine, réécrit à chaque déploiement. Elles
-      doivent toutes porter `webapp_machine: <entrée canonique>` (aujourd'hui : {{ _canonicals | join(', ') or '—' }}),
-      présente à la même adresse, dont host_vars/<canonique>.yml déclare dans `docker_ports_rules` TOUS leurs ports (front,
-      back-lb, Postgres, Redis). Manquants (entrée:port) : {{ _missing | join(', ') or 'aucun' }}. Sans cela un redémarrage
-      de Docker ne rétablit que les règles de la dernière app jouée.
+      {{ inventory_hostname }} partage {{ ansible_host }}:{{ ansible_port | default(22, true) }} avec
+      {{ ((_machine | map(attribute='entry') | list) + _carriers) | unique | reject('equalto', inventory_hostname) | join(', ') or 'une autre entrée' }}
+      (entrées `webapp` non durcies, ou entrée portant `docker_ports_rules` : {{ _carriers | join(', ') or 'aucune' }}) : un seul
+      docker-ports-firewall.sh par machine, réécrit à chaque déploiement. Les apps doivent toutes porter
+      `webapp_machine: <entrée canonique>` (aujourd'hui : {{ _canonicals | join(', ') or '—' }}), présente à la même adresse et
+      au même port SSH, dont host_vars/<canonique>.yml déclare dans `docker_ports_rules` TOUS leurs ports (front, back-lb,
+      Postgres, Redis). Manquants (entrée:port) : {{ _missing | join(', ') or 'aucun' }}. Sans cela un redémarrage de Docker
+      ne rétablit que les règles de la dernière app jouée, et le déploiement efface celles des autres entrées de la machine.
     quiet: true
   when:
     - webapp_hardening is not defined
     - (webapp_proxy | default('internal')) != 'external'
-    - _machine | length > 1
+    - wa_machine_ports is defined
+    - (_machine | length > 1) or (_carriers | length > 0) or (webapp_machine is defined and webapp_machine != inventory_hostname)
   tags: [always]

@@ -3350,6 +3350,87 @@ class SharedMachineRulesTests(unittest.TestCase):
         self.assertNotEqual(code, 0)
         self.assertIn("docker-ports-firewall.sh", out, "refusée par la garde de la machine, pas pour une autre raison")
 
+    # ── une seule app, mais une AUTRE entrée de la machine porte des règles (ctdapi/rotki) ──
+
+    @staticmethod
+    def single_app_inventory(legacy_ports=(9100,), legacy_ssh=22, with_machine=None, drop=("app-b", "app-c")):
+        """Une seule app `webapp` (app-a) sur une machine dont l'entrée `legacy` (autre famille) porte `docker_ports_rules`."""
+        inventory = shared_inventory()
+        apps = inventory["all"]["children"]["apps"]["hosts"]
+        for name in drop:
+            apps.pop(name)
+        inventory["all"]["children"]["misc"]["hosts"].pop("machine")
+        legacy = {"ansible_host": "203.0.113.7", "ansible_port": legacy_ssh, "ansible_connection": "local", "ansible_roles": ["ctdapi"],
+                  "src_proxies": "{{ groups['proxies'] | map('extract', hostvars, 'ansible_host') | list }}",
+                  "src_prometheus": "{{ [hostvars[prometheus_host].ansible_host] }}",
+                  "docker_ports_rules": [{"port": p, "comment": f"legacy {p}", "allow_internal": True} for p in legacy_ports]}
+        inventory["all"]["children"]["misc"]["hosts"]["legacy"] = legacy
+        if with_machine is None:
+            apps["app-a"].pop("webapp_machine")
+        else:
+            apps["app-a"]["webapp_machine"] = with_machine
+        return inventory
+
+    def test_a_single_app_on_a_machine_whose_other_entry_carries_rules_is_refused(self):
+        # Sans `webapp_machine`, l'app jouée serait sa propre canonique : le script réécrit ne porterait que ses règles
+        # dérivées et effacerait celles de `legacy` au prochain déploiement.
+        code, out, _ = self.run_app("app-a", self.single_app_inventory(), guard_only=True)
+        self.assertNotEqual(code, 0, out[-2000:])
+        self.assertIn("docker-ports-firewall.sh", out)
+        self.assertIn("legacy", out)
+        # nommer la canonique ne suffit pas tant que ses règles ne portent pas les ports de l'app
+        code, out, _ = self.run_app("app-a", self.single_app_inventory(with_machine="legacy"), guard_only=True)
+        self.assertNotEqual(code, 0)
+        self.assertIn("app-a:4500", out.replace("\\n", " "))
+        # ports déclarés dans la canonique : acceptée, et le script porte les règles de l'entrée ET celles de l'app
+        ports = tuple(r["port"] for r in _shared_rules(4500, "app-a"))
+        code, out, text = self.run_app("app-a", self.single_app_inventory(legacy_ports=(9100,) + ports, with_machine="legacy"))
+        self.assertEqual(code, 0, out[-3000:])
+        self.assertEqual(sorted(parse_script(text)), sorted((9100,) + ports))
+
+    def test_a_single_app_naming_a_canonical_must_find_it_at_the_same_address_and_ssh_port(self):
+        ports = tuple(r["port"] for r in _shared_rules(4500, "app-a"))
+        good = self.single_app_inventory(legacy_ports=ports, with_machine="legacy")
+        self.assertEqual(self.run_app("app-a", good, guard_only=True)[0], 0)
+        other_ssh = self.single_app_inventory(legacy_ports=ports, legacy_ssh=2222, with_machine="legacy")
+        code, out, _ = self.run_app("app-a", other_ssh, guard_only=True)
+        self.assertNotEqual(code, 0, "même adresse mais autre port SSH : une autre machine (NAT)")
+        self.assertIn("docker-ports-firewall.sh", out)
+        missing = self.single_app_inventory(with_machine="nobody")
+        self.assertNotEqual(self.run_app("app-a", missing, guard_only=True)[0], 0)
+
+    def test_an_entry_on_another_ssh_port_behind_the_same_nat_is_not_the_same_machine(self):
+        # Même adresse, autre port SSH : une autre machine derrière le NAT, ses règles ne concernent pas cette app.
+        code, out, _ = self.run_app("app-a", self.single_app_inventory(legacy_ssh=2222), guard_only=True)
+        self.assertEqual(code, 0, out[-2000:])
+
+    def test_a_hardened_or_empty_carrier_does_not_trigger_the_guard(self):
+        inventory = self.single_app_inventory(legacy_ports=())
+        self.assertEqual(self.run_app("app-a", inventory, guard_only=True)[0], 0, "aucune règle portée : rien à effacer")
+        inventory = self.single_app_inventory()
+        inventory["all"]["children"]["misc"]["hosts"]["legacy"]["webapp_hardening"] = {"runtime_user": "x"}
+        self.assertEqual(self.run_app("app-a", inventory, guard_only=True)[0], 0, "profil durci : son propre pare-feu")
+
+    def test_templated_ports_are_read_through_the_rendered_hostvars_and_not_reported_missing(self):
+        # Les ports de la canonique et d'une app référencent `hostvars` : rendus dans le contexte de LEUR entrée.
+        inventory = shared_inventory()
+        hosts = inventory["all"]["children"]
+        rules = hosts["misc"]["hosts"]["machine"]["docker_ports_rules"]
+        for rule in rules:
+            if rule["port"] == 4501:
+                rule["port"] = "{{ hostvars['app-a'].app_port | int + 1 }}"
+            if rule["port"] == 4521:
+                rule["port"] = "{{ hostvars['app-c'].app_port | int + 1 }}"
+        hosts["apps"]["hosts"]["app-c"]["back_port"] = "{{ hostvars['app-c'].app_port | int + 1 }}"
+        code, out, _ = self.run_app("app-a", inventory, guard_only=True)
+        self.assertEqual(code, 0, out[-3000:])
+        # et un port VRAIMENT absent reste signalé
+        rules[:] = [r for r in rules if r["port"] != 4522]
+        code, out, _ = self.run_app("app-a", inventory, guard_only=True)
+        self.assertNotEqual(code, 0)
+        self.assertIn("app-c:4522", out.replace("\\n", " "))
+        self.assertNotIn("app-a:4501", out.replace("\\n", " "))
+
     def test_a_dedicated_machine_a_hardened_entry_and_an_external_one_are_not_concerned(self):
         # Une machine à UNE app : les règles dérivées suffisent, aucun host_vars exigé.
         inventory = shared_inventory()

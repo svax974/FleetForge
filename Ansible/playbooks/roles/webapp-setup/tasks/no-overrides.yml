@@ -124,8 +124,12 @@
     wa_lib_branch: __wa_internal_probe__
     wa_machine: __wa_internal_probe__
     wa_machine_key: __wa_internal_probe__
+    wa_machine_ports: __wa_internal_probe__
     wa_machine_rules: __wa_internal_probe__
     wa_migrate: __wa_internal_probe__
+    wa_mp_entries: __wa_internal_probe__
+    wa_mp_read: __wa_internal_probe__
+    wa_mr_entries: __wa_internal_probe__
     wa_missing_manual: __wa_internal_probe__
     wa_missing_required: __wa_internal_probe__
     wa_net_inspect: __wa_internal_probe__
@@ -174,6 +178,12 @@
     webapp_target: __wa_internal_probe__
     # `vars:` de niveau tâche, inclusion ou bloc (variables de travail des contrôles : `_families`, `_reasons`…).
     _accounts: __wa_internal_probe__
+    _addr: __wa_internal_probe__
+    _carriers: __wa_internal_probe__
+    _data: __wa_internal_probe__
+    _on_machine: __wa_internal_probe__
+    _ssh: __wa_internal_probe__
+    _strict: __wa_internal_probe__
     _admitted_by_address: __wa_internal_probe__
     _authority: __wa_internal_probe__
     _awk: __wa_internal_probe__
@@ -397,7 +407,11 @@
       - lookup('ansible.builtin.vars', 'wa_machine') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', 'wa_machine_key') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', 'wa_machine_rules') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'wa_machine_ports') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', 'wa_migrate') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'wa_mp_entries') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'wa_mp_read') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'wa_mr_entries') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', 'wa_missing_manual') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', 'wa_missing_required') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', 'wa_net_inspect') | string == '__wa_internal_probe__'
@@ -445,6 +459,12 @@
       - lookup('ansible.builtin.vars', 'webapp_env_vite_api_url') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', 'webapp_target') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_accounts') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_addr') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_carriers') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_data') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_on_machine') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_ssh') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_strict') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_admitted_by_address') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_authority') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_awk') | string == '__wa_internal_probe__'
