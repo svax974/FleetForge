@@ -1,0 +1,25 @@
+---
+# Révocation, côté DESTINATION, de la clé d'une source et (option) suppression de ses sauvegardes. Importé par
+# postgres-backup-purge et sync-backup-purge. Variables : bk_dest_host, bk_pubkey (vide : clé déjà absente de la
+# source, rien à révoquer), bk_name, bk_remove_data.
+
+- name: Revoke the key of this source on the destination
+  ansible.posix.authorized_key:
+    user: "{{ backup_account }}"
+    state: absent
+    key: "{{ bk_pubkey }}"
+  delegate_to: "{{ bk_dest_host if bk_dest_host in groups['all'] else undef(hint='bk_dest_host: not an inventory host') }}"
+  become: true
+  throttle: 1
+  when: bk_pubkey | length > 0
+
+- name: Remove the backups of this source on the destination
+  ansible.builtin.file:
+    path: "{{ backup_account_root }}/{{ bk_name }}"
+    state: absent
+  delegate_to: "{{ bk_dest_host if bk_dest_host in groups['all'] else undef(hint='bk_dest_host: not an inventory host') }}"
+  become: true
+  throttle: 1
+  when:
+    - bk_remove_data | bool
+    - bk_name is match('^[a-z0-9][a-z0-9-]{0,62}$')

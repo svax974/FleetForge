@@ -1,0 +1,58 @@
+---
+# Sauvegarde de la base de la passerelle MCP (famille `backup`, rôle générique postgres-backup-install, jouée par
+# deploy-backup.yml) : garde STATIQUE, sans connexion, incluse par gateway-guard.yml (deploy-fleetforge.yml) ET par
+# le play de garde de deploy-backup.yml — la passerelle ne sauvegarde jamais sans elle. Opt-in par `backup` dans
+# `ansible_roles` : absent, rien n'est vérifié (et deploy-backup.yml ne touche pas à l'entrée).
+#
+# Présent : les valeurs que le profil POSSÈDE sont exigées exactes — conteneur `<projet>_postgres` (PROJECT_NAME =
+# `webapp_project` ou le nom de l'entrée, jamais autre en profil durci) —, la destination est une entrée du groupe
+# `backups` sur une AUTRE machine (une sauvegarde sur la machine de la base ne survit pas à sa perte), le répertoire
+# des scripts est propre à l'entrée (le défaut du rôle est partagé par toutes les entrées d'une machine : le script de
+# l'une écraserait l'autre). `pgbak_db`/`pgbak_user` ne sont pas déduits : DB_NAME/DB_USER sont des clés « si
+# absentes », adoptées du back/.env.
+#
+# Et, la base portant audit, approbations et registre de lancements : le dump est CHIFFRÉ pour la clé de l'opérateur
+# (destinataire age exigé, `pgbak_encrypt_recipient` ou `backup_encrypt_recipient` du parc) — la destination peut être
+# une machine moins tenue que la source (machine de bureau derrière un NAT) —, et un port SSH de destination autre que
+# celui du parc est écrit EXPLICITEMENT sur l'entrée (`pgbak_dest_port`), égal à celui de la destination.
+
+- name: Check the database backup declaration of the gateway
+  ansible.builtin.assert:
+    that:
+      - pgbak_name is defined and pgbak_name is match('^[a-z0-9][a-z0-9-]{0,62}$')
+      - pgbak_db is defined and pgbak_db is match('^[A-Za-z0-9_]{1,63}$')
+      - pgbak_user is defined and pgbak_user is match('^[A-Za-z0-9_]{1,63}$')
+      - pgbak_container is defined
+      - pgbak_container == (webapp_project | default(inventory_hostname)) ~ '_postgres'
+      - pgbak_dest_host | default('') in (groups['backups'] | default([]))
+      - hostvars[pgbak_dest_host].ansible_host | default('') != ansible_host
+      - pgbak_dir is defined and pgbak_dir is match('^/[A-Za-z0-9._/-]*$')
+      - pgbak_name in pgbak_dir
+      - pgbak_name in (prom_alert_backup_max_age_hours | default({}))
+    fail_msg: >-
+      {{ inventory_hostname }} : `backup` dans `ansible_roles` exige `pgbak_name`, `pgbak_db`, `pgbak_user`,
+      `pgbak_container` = {{ webapp_project | default(inventory_hostname) }}_postgres, `pgbak_dest_host` = une entrée du
+      groupe `backups` portée par une AUTRE machine, `pgbak_dir` (chemin absolu contenant `pgbak_name`, propre à l'entrée)
+      et `prom_alert_backup_max_age_hours.<pgbak_name>` (seuil de BackupStale et BackupMissing : sans lui, une
+      sauvegarde qui cesse ou ne démarre jamais ne sonne pas).
+    quiet: true
+
+- name: Check the gateway dump is encrypted and the destination port is explicit
+  vars:
+    _recipient: "{{ pgbak_encrypt_recipient | default(backup_encrypt_recipient | default('')) }}"
+    _parc_port: "{{ ssh_custom_port | default(22) }}"
+    _dest_port: "{{ hostvars[pgbak_dest_host].ansible_port | default(_parc_port) }}"
+  ansible.builtin.assert:
+    that:
+      - _recipient is match('^age1[02-9ac-hj-np-z]{58}$')
+      - (_dest_port | string) == (_parc_port | string) or pgbak_dest_port is defined
+      - pgbak_dest_port is not defined or (pgbak_dest_port | string) == (_dest_port | string)
+      # La clé de la passerelle est liée à son adresse (`from=`) sur la destination, comme l'ouverture ufw.
+      - ansible_host is match('^[0-9A-Fa-f.:]+$')
+    fail_msg: >-
+      {{ inventory_hostname }} : la sauvegarde de la passerelle exige un destinataire de chiffrement age
+      (`pgbak_encrypt_recipient` ou `backup_encrypt_recipient`, « age1… », clé PUBLIQUE de l'opérateur — la privée
+      n'est jamais sur une machine du parc), et `pgbak_dest_port` explicite et égal au port SSH de
+      `{{ pgbak_dest_host }}` ({{ _dest_port }}) dès qu'il diffère de celui du parc ({{ _parc_port }}) ; `ansible_host`
+      en adresse IP littérale.
+    quiet: true

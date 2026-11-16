@@ -10,11 +10,10 @@
 # sans défaut plausible — fournis par l'inventaire).
 #
 # Contrairement à `timescaledb-backup-install`, PAS de mode local : la
-# destination (`monitor` sur ce parc) n'est jamais la même machine qu'une
-# source applicative, et ne le sera pas — c'est le hôte central de supervision
-# du parc, pas un hôte d'application. La branche locale de ce rôle historique
-# existe pour une raison ponctuelle qui ne s'applique pas ici ; la reproduire
-# ajouterait un chemin mort.
+# destination n'est jamais la même machine que la source (une sauvegarde sur la
+# machine de la base ne survit pas à sa perte). La branche locale de ce rôle
+# historique existe pour une raison ponctuelle qui ne s'applique pas ici ; la
+# reproduire ajouterait un chemin mort.
 
 pgbak_dir: "{{ ansible_env.HOME }}/postgres-backup"
 
@@ -25,12 +24,27 @@ pgbak_dir: "{{ ansible_env.HOME }}/postgres-backup"
 # pgbak_user        rôle PostgreSQL utilisé par pg_dump
 # pgbak_dest_host   entrée d'inventaire du groupe `backups`, ex. backup-tradekong
 
+# Destination : compte DÉDIÉ (backup-setup : sans sudo, clé liée à la passerelle `backup-gate`, un répertoire par
+# source), jamais `remote_username`. Mêmes valeurs que backup-setup/defaults (surchargeables au niveau du parc).
+backup_account: fleetbackup
+backup_account_root: "/home/{{ backup_account }}/backups"
+
 pgbak_dest_addr: "{{ hostvars[pgbak_dest_host]['ansible_host'] }}"
-pgbak_dest_user: "{{ remote_username }}"
-pgbak_dest_port: "{{ ssh_custom_port }}"
-pgbak_dest_dir: "{{ backup_root }}/{{ pgbak_name }}"
+pgbak_dest_user: "{{ backup_account }}"
+# Port SSH de la DESTINATION, pas celui du parc : une destination derrière un NAT (machine de bureau) écoute sur son
+# propre port (`ansible_port` de son entrée, que security-ssh donne aussi à sshd).
+pgbak_dest_port: "{{ hostvars[pgbak_dest_host]['ansible_port'] | default(ssh_custom_port) }}"
+pgbak_dest_dir: "{{ backup_account_root }}/{{ pgbak_name }}"
+# known_hosts : OpenSSH écrit et cherche `[adresse]:port`, sauf sur le port 22 où c'est l'adresse seule.
+pgbak_known_host: "{{ pgbak_dest_addr if (pgbak_dest_port | string) == '22' else '[' ~ pgbak_dest_addr ~ ']:' ~ pgbak_dest_port }}"
 
 pgbak_ssh_key_path: "{{ ansible_env.HOME }}/.ssh/id_ed25519_{{ pgbak_name }}backup"
+
+# Chiffrement des dumps (age, destinataire X25519 `age1…` de l'OPÉRATEUR). Vide : dumps `.sql.gz` en clair, comme
+# avant. Posé : `pg_dump | gzip | age -r <destinataire>`, fichier `.sql.gz.age`, et AUCUN repli — `age` absent ou
+# en échec, le dump échoue. La clé PRIVÉE n'est jamais sur une machine du parc (Ansible/README.md, « Sauvegardes »).
+# Exigé pour la passerelle MCP (gateway-backup-guard.yml).
+pgbak_encrypt_recipient: "{{ backup_encrypt_recipient | default('') }}"
 
 # Planification quotidienne, décalée selon `pgbak_name` pour éviter que deux
 # sources partageant la même destination ne cognent au même instant — voir
@@ -42,6 +56,10 @@ pgbak_keep: 3
 # Marge libre exigée sur la destination avant de lancer le dump — un
 # `pg_dump | gzip` qui remplit le disque produit une archive tronquée
 # indiscernable d'une archive complète tant qu'on n'essaie pas de la restaurer.
-pgbak_min_free_gb: 5
+# Propriété de la DESTINATION (`backup_min_free_gb` sur son entrée) : elle protège
+# aussi ce qui y tourne déjà. 20 Go par défaut (rapport de capacité du 16/11/2026,
+# proxy1 : partition unique partagée avec nginx, Prometheus et les journaux ; ~2 fois
+# le plus gros dump attendu, ctdapi 2,7 à 4,9 Go, plus la croissance de Prometheus).
+pgbak_min_free_gb: "{{ hostvars[pgbak_dest_host]['backup_min_free_gb'] | default(20) }}"
 
 node_exporter_textfile_dir: /var/lib/node_exporter/textfile_collector

@@ -129,12 +129,30 @@ prom_alert_groups: [availability, resources, services]
 
 
 # ── Sauvegardes ──────────────────────────────────────────────────────────────
-# Racine des sauvegardes sur l'hôte de DESTINATION (groupe `backups`).
-# [brk-backup-*, postgres-backup-*, brk-restore, retarget-backups*.yml]
+# Racine des sauvegardes BRK et TimescaleDB sur l'hôte de DESTINATION (groupe `backups`), sous `remote_username`.
+# [brk-backup-*, timescaledb-backup-*, brk-restore, retarget-backups.yml]
 backup_root: "/home/{{ remote_username }}/backups"
-# Péremption (h) avant alerte, par nom de sauvegarde (postgres-backup, sync-backup). [prometheus-alerts-update]
+# PostgreSQL et SQLite (postgres-backup-*, sync-backup-*) écrivent par un compte DÉDIÉ de la destination : sans sudo,
+# chaque clé de source liée à son adresse et à la passerelle `backup-gate` (commande forcée), un répertoire 0700 par
+# source sous `backup_account_root`. Jamais `backup` (compte système Debian/Ubuntu, uid 34 : refusé). [backup-setup]
+# backup_account: fleetbackup
+# backup_account_root: "/home/fleetbackup/backups"
+# Destinataire age des dumps et archives : la clé PUBLIQUE de l'opérateur (« age1… », 62 caractères, pas un secret).
+# Posé : chiffrement sans repli en clair ; absent : en clair (comportement d'avant). EXIGÉ pour la passerelle MCP.
+# La clé PRIVÉE ne va jamais dans ce dépôt ni sur une machine du parc (Ansible/README.md, « Sauvegardes »).
+# Surcharge par entrée : `pgbak_encrypt_recipient`, `sync_backup_encrypt_recipient`.
+# [postgres-backup-install, sync-backup-install]
+# backup_encrypt_recipient: <sortie de `age-keygen -y` sur le poste de l'opérateur>
+# Place libre minimale (Go) d'une destination avant d'y écrire : `backup_min_free_gb` sur l'ENTRÉE de destination,
+# 20 par défaut (partition partagée avec ce qui tourne déjà sur la machine).
+# Péremption (h) avant alerte, par nom de sauvegarde (postgres-backup, sync-backup) : BackupStale (série trop
+# ancienne) ET BackupMissing (aucune série depuis ce délai). Un nom par sauvegarde qui DOIT exister — une instance
+# non déployée ferait sonner BackupMissing. [prometheus-alerts-update]
 prom_alert_backup_max_age_hours:
   monapp: 48
+  sync-iptv: 48            # une ligne par instance de serveur de synchro DÉPLOYÉE
+  # sync-banking: 48
+  # sync-aiteam: 48
   fleetforge-gateway: 48   # exigé par la garde de la passerelle dès qu'elle porte `backup`
 # Péremption (h) des sauvegardes BRK et TimescaleDB (papanglabs). [prometheus-alerts-update]
 # backup_max_age_hours_brk: 240

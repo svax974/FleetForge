@@ -161,34 +161,12 @@
       `webapp_env_from_vault` ≠ {{ _expected | join(', ') }}, ou FFG_UPSTREAMS absent de `webapp_env_required`.
     quiet: true
 
-# Sauvegarde de la base (famille `backup`, rôle générique postgres-backup-install, jouée par deploy-backup.yml) : opt-in
-# par `backup` dans `ansible_roles`. Absent : rien n'est vérifié, comportement INCHANGÉ. Présent : les valeurs que le
-# profil POSSÈDE sont exigées exactes — conteneur `<projet>_postgres` (PROJECT_NAME = `webapp_project` ou le nom de
-# l'entrée, jamais autre en profil durci) —, la destination est une entrée du groupe `backups` sur une AUTRE machine
-# (une sauvegarde sur la machine de la base ne survit pas à sa perte), et le répertoire des scripts est propre à
-# l'entrée (le défaut du rôle est partagé par toutes les entrées d'une machine : le script de l'une écraserait l'autre).
-# `pgbak_db`/`pgbak_user` ne sont pas déduits : DB_NAME/DB_USER sont des clés « si absentes », adoptées du back/.env.
+# Sauvegarde de la base (famille `backup`, deploy-backup.yml) : opt-in par `backup` dans `ansible_roles`. Absent : rien
+# n'est vérifié, comportement INCHANGÉ. Présent : destination d'une autre machine, dump chiffré, port explicite — voir
+# gateway-backup-guard.yml, que deploy-backup.yml joue aussi.
 - name: Check the database backup declaration of the gateway
   when: "'backup' in (ansible_roles | default([]))"
-  ansible.builtin.assert:
-    that:
-      - pgbak_name is defined and pgbak_name is match('^[a-z0-9][a-z0-9-]{0,62}$')
-      - pgbak_db is defined and pgbak_db is match('^[A-Za-z0-9_]{1,63}$')
-      - pgbak_user is defined and pgbak_user is match('^[A-Za-z0-9_]{1,63}$')
-      - pgbak_container is defined
-      - pgbak_container == (webapp_project | default(inventory_hostname)) ~ '_postgres'
-      - pgbak_dest_host | default('') in (groups['backups'] | default([]))
-      - hostvars[pgbak_dest_host].ansible_host | default('') != ansible_host
-      - pgbak_dir is defined and pgbak_dir is match('^/[A-Za-z0-9._/-]*$')
-      - pgbak_name in pgbak_dir
-      - pgbak_name in (prom_alert_backup_max_age_hours | default({}))
-    fail_msg: >-
-      {{ inventory_hostname }} : `backup` dans `ansible_roles` exige `pgbak_name`, `pgbak_db`, `pgbak_user`,
-      `pgbak_container` = {{ webapp_project | default(inventory_hostname) }}_postgres, `pgbak_dest_host` = une entrée du
-      groupe `backups` portée par une AUTRE machine, `pgbak_dir` (chemin absolu contenant `pgbak_name`, propre à l'entrée)
-      et `prom_alert_backup_max_age_hours.<pgbak_name>` (seuil de BackupStale : sans lui, une sauvegarde qui cesse ne
-      sonne pas).
-    quiet: true
+  ansible.builtin.import_tasks: gateway-backup-guard.yml
 
 # FFG_UPSTREAMS : JSON sans secret (id, URL https de l'amont, parcs, noms de comptes), écrit par webapp-env-update.
 # URL : le nom PRIVÉ de la machine de l'amont (`hostname`), jamais `proxy_hostname` (CNAME vers le front de TOUS les

@@ -35,18 +35,14 @@
     - "{{ sync_backup_ssh_key }}.pub"
   become: true
 
-- name: Revoke the key on the destination host
-  ansible.posix.authorized_key:
-    user: "{{ sync_backup_dest_user }}"
-    state: absent
-    key: "{{ sync_backup_pubkey.content | b64decode | trim }}"
-  delegate_to: "{{ sync_backup_dest_host if sync_backup_dest_host in groups['all'] else undef(hint='sync_backup_dest_host: not an inventory host') }}"
-  become: true
-  when: sync_backup_pubkey.content is defined
-
-- name: Remove the archives on the destination host
-  ansible.builtin.file:
-    path: "{{ sync_backup_dest_dir }}"
-    state: absent
-  delegate_to: "{{ sync_backup_dest_host if sync_backup_dest_host in groups['all'] else undef(hint='sync_backup_dest_host: not an inventory host') }}"
-  become: true
+# Compte dédié de la destination (backup-setup) : clé révoquée, répertoire de
+# CETTE instance supprimé — ceux des autres sources restent.
+- name: Revoke the key and remove the archives on the destination host
+  ansible.builtin.import_role:
+    name: backup-setup
+    tasks_from: revoke
+  vars:
+    bk_dest_host: "{{ sync_backup_dest_host }}"
+    bk_pubkey: "{{ (sync_backup_pubkey.content | b64decode | trim) if sync_backup_pubkey.content is defined else '' }}"
+    bk_name: "{{ sync_backup_name }}"
+    bk_remove_data: true

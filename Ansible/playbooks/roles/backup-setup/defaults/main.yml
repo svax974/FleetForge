@@ -1,0 +1,30 @@
+---
+# Compte de DESTINATION des sauvegardes poussées en SSH (postgres-backup-install, sync-backup-install), sur les
+# entrées du groupe `backups`. Il remplace `srvc` (administrateur d'Ansible, sudo sans mot de passe) : une source
+# compromise n'obtient plus de shell administrateur sur la destination.
+#
+#   • compte NON système, sans sudo ni groupe supplémentaire, mot de passe verrouillé ;
+#   • chaque clé de source y est posée avec `restrict` (ni pty, ni redirection), `from="<adresse de la source>"` et
+#     une commande FORCÉE : la passerelle `backup-gate` (files/backup-gate.py), seule à s'exécuter quoi que demande
+#     le client. Elle confine la source à SON répertoire `<backup_account_root>/<nom>/` (mode 0700) et à une liste
+#     fermée de verbes (écrire une génération, la valider, purger au-delà du nombre de générations fixé par la
+#     commande forcée — pas par la source —, lister, relire pour restaurer). Aucun shell interactif utile ;
+#   • une source ne lit ni n'efface les sauvegardes d'une autre, même avec la même destination.
+#
+# PAS `backup` : ce nom est un compte SYSTÈME de toutes les Debian/Ubuntu (uid 34, maison /var/backups, shell
+# nologin, base-passwd). Le reprendre modifierait un compte de la distribution — que ses mises à jour peuvent
+# remettre à nologin, ce qui couperait la commande forcée (sshd la lance par le shell du compte). Le rôle refuse
+# tout compte existant d'uid < 1000.
+backup_account: fleetbackup
+backup_account_root: "/home/{{ backup_account }}/backups"
+backup_gate_path: /usr/local/sbin/backup-gate
+
+# Plancher d'espace libre (Go) que la passerelle tient PENDANT l'écriture : sous ce seuil, `put` s'arrête et efface son
+# `.tmp`. Une source — même compromise, même en boucle — ne remplit jamais le disque d'une destination qui fait tourner
+# autre chose (proxy1 : partition unique avec nginx, Prometheus, journaux). Surcharge par destination :
+# `backup_floor_gb` sur son entrée. Distinct de `backup_min_free_gb` (20), que la SOURCE exige avant de commencer.
+backup_floor_gb: 5
+
+# Forme admise de l'adresse d'une source pour `from=` (IPv4/IPv6 littérale) : un nom DNS serait comparé au DNS
+# inverse. C'est la même adresse que la règle ufw de la destination (`ansible_host` de la source).
+backup_origin_pattern: '^[0-9A-Fa-f.:]+$'

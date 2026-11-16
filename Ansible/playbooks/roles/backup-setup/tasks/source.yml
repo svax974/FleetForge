@@ -1,0 +1,81 @@
+---
+# Côté DESTINATION, pour la source jouée (inventory_hostname) : compte dédié et passerelle (account.yml), répertoire
+# PROPRE à la source, clé de la source liée à la passerelle, ouverture SSH depuis la source. Importé par
+# postgres-backup-install et sync-backup-install (`import_role`, tag `retarget`), toutes les tâches DÉLÉGUÉES à la
+# destination, une source à la fois (ufw et authorized_keys : lecture-modification-écriture).
+#
+# Variables : bk_dest_host (entrée d'inventaire de la destination), bk_dest_port (port SSH de la destination),
+# bk_name (répertoire et nom de la sauvegarde), bk_keep (générations gardées par la passerelle), bk_pubkey (clé
+# publique de la source), bk_comment.
+
+- name: Check what the destination will bind the key to
+  ansible.builtin.assert:
+    that:
+      - bk_dest_host in groups['all']
+      - bk_name is match('^[a-z0-9][a-z0-9-]{0,62}$')
+      - bk_keep | string is match('^[0-9]{1,4}$')
+      - bk_keep | int >= 1
+      - bk_dest_port | string is match('^[0-9]{1,5}$')
+      # `from=` et la règle ufw de la destination : l'adresse de la source, littérale.
+      - ansible_host is match(backup_origin_pattern)
+    fail_msg: >-
+      {{ inventory_hostname }} : destination `{{ bk_dest_host }}` hors inventaire, nom de sauvegarde
+      `{{ bk_name }}` invalide, générations ({{ bk_keep }}) < 1, port de destination ({{ bk_dest_port }}) invalide, ou
+      `ansible_host` ({{ ansible_host }}) qui n'est pas une adresse IP littérale — la clé est liée à cette adresse
+      (`from=`), comme l'ouverture du pare-feu de la destination.
+    quiet: true
+
+# Figées AVANT toute délégation : dans une tâche déléguée, `ansible_host` pourrait désigner la destination. Le
+# plancher d'espace libre est une propriété de la DESTINATION (son entrée), que la passerelle tient pendant l'écriture.
+- name: Record the address of this source and the floor of the destination
+  ansible.builtin.set_fact:
+    bk_source_addr: "{{ ansible_host }}"
+    bk_floor_gb: "{{ hostvars[bk_dest_host]['backup_floor_gb'] | default(backup_floor_gb) }}"
+
+- name: Check the free-space floor of the destination
+  ansible.builtin.assert:
+    that: bk_floor_gb | string is match('^[0-9]{1,6}$')
+    fail_msg: "backup_floor_gb de {{ bk_dest_host }} : entier de Go attendu ({{ bk_floor_gb }})."
+    quiet: true
+
+- name: Prepare the dedicated account on the destination
+  ansible.builtin.import_tasks: account.yml
+  vars:
+    bk_target: "{{ bk_dest_host }}"
+
+- name: Create the directory of this source on the destination
+  ansible.builtin.file:
+    path: "{{ backup_account_root }}/{{ bk_name }}"
+    state: directory
+    owner: "{{ backup_account }}"
+    group: "{{ backup_account }}"
+    mode: '0700'
+  delegate_to: "{{ bk_dest_host }}"
+  become: true
+  throttle: 1
+
+# `restrict` : ni pty (donc pas de session interactive), ni redirection de port, d'agent ou X11. La commande forcée
+# porte la racine, le nom de la source, le nombre de générations et le plancher d'espace libre : la source ne choisit
+# aucun des quatre.
+- name: Authorize the key of this source, bound to the gate and to its address
+  ansible.posix.authorized_key:
+    user: "{{ backup_account }}"
+    state: present
+    key: "{{ bk_pubkey }}"
+    comment: "{{ bk_comment }}"
+    key_options: >-
+      restrict,from="{{ bk_source_addr }}",command="{{ backup_gate_path }} {{ backup_account_root }} {{ bk_name }} {{ bk_keep | int }} {{ bk_floor_gb | int }}"
+  delegate_to: "{{ bk_dest_host }}"
+  become: true
+  throttle: 1
+
+- name: Open SSH on the destination for this source
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ bk_source_addr }}"
+    port: "{{ bk_dest_port | string }}"
+    comment: "backup source {{ inventory_hostname }} - ssh push"
+  delegate_to: "{{ bk_dest_host }}"
+  become: true
+  throttle: 1

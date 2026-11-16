@@ -1,19 +1,35 @@
 #!/usr/bin/env bash
-# Sauvegarde cohérente de l'instance web3c-sync « {{ sync_instance }} » vers
-# {{ sync_backup_dest_user }}@{{ sync_backup_dest_addr }}:{{ sync_backup_dest_dir }}.
+# Sauvegarde cohérente de l'instance web3c-sync « {{ sync_instance }} » vers {{ sync_backup_dest_host }}
+# ({{ sync_backup_dest_user }}@{{ sync_backup_dest_addr }}:{{ sync_backup_dest_port }}, répertoire {{ sync_backup_dest_dir }}).
 #
-# Contenu d'une archive sync-{{ sync_instance }}-<horodatage>.tar.gz :
+# Contenu d'une archive sync-{{ sync_instance }}-<horodatage>.tar.gz{{ '.age' if sync_backup_encrypt_recipient | length > 0 else '' }} :
 #   sync.db   instantané `VACUUM INTO` (cohérent, compacté, sans pages libres)
 #   blobs/    copie du répertoire des blobs, prise APRÈS l'instantané
 # Les blobs sont copiés après la base : un blob écrit entre-temps est un orphelin
 # inoffensif, alors qu'un blob supprimé entre-temps laisserait la base en
 # référencer un absent (rare : suppression de blob ou purge de groupe pendant la
 # fenêtre de copie — rejouer la sauvegarde).
+{% if sync_backup_encrypt_recipient | length > 0 %}
+# CHIFFRÉE pour la clé de l'opérateur (tar | gzip | age -r <destinataire>), sans
+# repli en clair : `age` absent ou en échec, la sauvegarde échoue.
+{% endif %}
 #
-# RESTAURATION (sur la machine du serveur, conteneur arrêté) :
+# La destination n'offre pas de shell : la clé est liée à la passerelle
+# `backup-gate` (rôle backup-setup), confinée au répertoire de cette instance
+# (verbes : free-kb, last-success, put, commit, abort, prune, stamp, list, get).
+#
+# RESTAURATION (en root sur cette machine, conteneur arrêté ; `list` donne les archives) :
 #   docker stop sync-{{ sync_instance }}
-#   mkdir /tmp/restore && ssh -p {{ sync_backup_dest_port }} {{ sync_backup_dest_user }}@{{ sync_backup_dest_addr }} \
-#     "cat {{ sync_backup_dest_dir }}/<archive>.tar.gz" | tar -xz -C /tmp/restore
+#   G=(ssh -n -p {{ sync_backup_dest_port }} -i {{ sync_backup_ssh_key }} -o IdentitiesOnly=yes {{ sync_backup_dest_user }}@{{ sync_backup_dest_addr }})
+#   "${G[@]}" list
+{% if sync_backup_encrypt_recipient | length > 0 %}
+#   # clé de l'opérateur collée sur l'entrée standard (jamais écrite sur le disque) :
+#   read -rs AGE_KEY   # AGE-SECRET-KEY-1…
+#   mkdir -m 700 /tmp/restore && "${G[@]}" get <archive>.tar.gz.age \
+#     | age -d -i <(printf '%s\n' "$AGE_KEY") | tar -xz -C /tmp/restore; unset AGE_KEY
+{% else %}
+#   mkdir -m 700 /tmp/restore && "${G[@]}" get <archive>.tar.gz | tar -xz -C /tmp/restore
+{% endif %}
 #   rm -f {{ sync_backup_data_dir }}/sync.db{,-wal,-shm}; rm -rf {{ sync_backup_data_dir }}/blobs
 #   cp /tmp/restore/sync.db {{ sync_backup_data_dir }}/ ; cp -a /tmp/restore/blobs {{ sync_backup_data_dir }}/
 #   chown -R {{ sync_backup_uid }}:{{ sync_backup_gid }} {{ sync_backup_data_dir }} && docker start sync-{{ sync_instance }}
@@ -27,9 +43,13 @@ DATA_DIR="{{ sync_backup_data_dir }}"
 DB="${DATA_DIR}/sync.db"
 UID_IMG="{{ sync_backup_uid }}"
 GID_IMG="{{ sync_backup_gid }}"
-DEST_DIR="{{ sync_backup_dest_dir }}"
-KEEP="{{ sync_backup_keep }}"
 MIN_FREE_GB="{{ sync_backup_min_free_gb }}"
+{% if sync_backup_encrypt_recipient | length > 0 %}
+RECIPIENT="{{ sync_backup_encrypt_recipient }}"
+SUFFIX=".tar.gz.age"
+{% else %}
+SUFFIX=".tar.gz"
+{% endif %}
 METRIC_FILE="{{ node_exporter_textfile_dir }}/backup_{{ sync_backup_name }}.prom"
 LOCK="/run/lock/sync-backup-{{ sync_instance }}.lock"
 
@@ -40,8 +60,10 @@ DEST_PORT="{{ sync_backup_dest_port }}"
 SSH_OPTS=(-p "${DEST_PORT}" -i "${SSH_KEY}" -o BatchMode=yes -o UserKnownHostsFile="${KNOWN_HOSTS}" \
           -o ServerAliveInterval=60 -o ServerAliveCountMax=10)
 
-log() { echo "$(date -Iseconds) $*"; }
-dest_sh() { ssh "${SSH_OPTS[@]}" "${DEST}" "$1"; }
+log() { echo "$(date -Iseconds) [${BACKUP_NAME}] $*"; }
+# Un appel = un verbe de la passerelle ; entrée standard fermée sauf pour `put`.
+gate() { ssh -n "${SSH_OPTS[@]}" "${DEST}" "$@"; }
+gate_put() { ssh "${SSH_OPTS[@]}" "${DEST}" put "$1"; }
 
 write_metrics() {
   local status="$1" duration="$2" size="$3" ts="$4"
@@ -64,7 +86,12 @@ EOT
   mv "${tmp}" "${METRIC_FILE}"
 }
 
-last_success_ts() { dest_sh "cat '${DEST_DIR}/last-success' 2>/dev/null" || echo 0; }
+last_success_ts() {
+  local ts
+  ts="$(gate last-success 2>/dev/null)" || ts=0
+  case "${ts}" in ''|*[!0-9]*) ts=0 ;; esac
+  echo "${ts}"
+}
 
 START=$(date +%s)
 STAGE=""
@@ -73,7 +100,7 @@ trap cleanup EXIT
 
 fail() {
   log "[ERROR] $*"
-  write_metrics 0 "$(( $(date +%s) - START ))" 0 "$(last_success_ts || echo 0)"
+  write_metrics 0 "$(( $(date +%s) - START ))" 0 "$(last_success_ts)"
   exit 1
 }
 
@@ -91,10 +118,12 @@ if [ ! -f "${DB}" ]; then
   exit 0
 fi
 
-dest_sh "mkdir -p '${DEST_DIR}'" || fail "Destination injoignable."
+{% if sync_backup_encrypt_recipient | length > 0 %}
+command -v age >/dev/null 2>&1 || fail "age introuvable : chiffrement exigé, aucune archive en clair."
 
-FREE_KB="$(dest_sh "df -Pk '${DEST_DIR}' | awk 'NR==2 {print \$4}'")" \
-  || fail "Impossible de mesurer l'espace libre sur la destination."
+{% endif %}
+FREE_KB="$(gate free-kb)" || fail "Destination injoignable ou passerelle en refus."
+case "${FREE_KB}" in ''|*[!0-9]*) fail "Espace libre illisible sur la destination (« ${FREE_KB} »)." ;; esac
 if [ "${FREE_KB}" -lt $(( MIN_FREE_GB * 1024 * 1024 )) ]; then
   fail "Place insuffisante : $(( FREE_KB / 1024 / 1024 )) Go libres, ${MIN_FREE_GB} Go requis."
 fi
@@ -116,30 +145,33 @@ CHECK="$(sqlite3 -readonly "${STAGE}/sync.db" "PRAGMA integrity_check" 2>&1 || t
 
 # ── Archive streamée vers la destination ────────────────────────────────────
 STAMP="$(date +%Y-%m-%dT%H%M%S)"
-OUT="${DEST_DIR}/sync-{{ sync_instance }}-${STAMP}.tar.gz"
-TMP="${OUT}.tmp"
+OUT="sync-{{ sync_instance }}-${STAMP}${SUFFIX}"
 
 TAR_ARGS=(-C "${STAGE}" sync.db)
 [ -d "${DATA_DIR}/blobs" ] && TAR_ARGS+=(-C "${DATA_DIR}" blobs)
 
 log "Archive → ${OUT}"
-if ! tar -czf - "${TAR_ARGS[@]}" | ssh "${SSH_OPTS[@]}" "${DEST}" "cat > '${TMP}'"; then
-  dest_sh "rm -f '${TMP}'" || true
+{% if sync_backup_encrypt_recipient | length > 0 %}
+if ! tar -czf - "${TAR_ARGS[@]}" | age -r "${RECIPIENT}" | gate_put "${OUT}"; then
+{% else %}
+if ! tar -czf - "${TAR_ARGS[@]}" | gate_put "${OUT}"; then
+{% endif %}
+  gate abort "${OUT}" || true
   fail "Échec du transfert."
 fi
 
-# Archive vérifiée AVANT de la rendre visible : un `.tmp` traînant est
-# visiblement un échec, un `.tar.gz` tronqué se ferait passer pour valide.
-dest_sh "gzip -t '${TMP}' && mv '${TMP}' '${OUT}'" \
-  || { dest_sh "rm -f '${TMP}'" || true; fail "Archive illisible côté destination."; }
+# Archive vérifiée par la passerelle AVANT de la rendre visible
+# ({{ 'en-tête age' if sync_backup_encrypt_recipient | length > 0 else 'gzip -t' }}) : un `.tmp` traînant est visiblement un échec, une
+# archive tronquée ne se fait pas passer pour valide.
+SIZE_BYTES="$(gate commit "${OUT}")" \
+  || { gate abort "${OUT}" || true; fail "Archive refusée par la destination."; }
+case "${SIZE_BYTES}" in ''|*[!0-9]*) SIZE_BYTES=0 ;; esac
 
-# Rétention APRÈS le succès : purger d'abord laisserait un instant sans copie
-# saine si le transfert échouait ensuite.
-dest_sh "ls -1 '${DEST_DIR}'/sync-{{ sync_instance }}-*.tar.gz 2>/dev/null | sort -r | tail -n +$(( KEEP + 1 )) | xargs -r rm -f" \
-  || log "[WARN] Purge des anciennes générations en échec."
+# Rétention APRÈS le succès (nombre de générations fixé côté destination) :
+# purger d'abord laisserait un instant sans copie saine si le transfert échouait.
+gate prune >/dev/null || log "[WARN] Purge des anciennes générations en échec."
 
 END=$(date +%s)
-dest_sh "echo ${END} > '${DEST_DIR}/last-success'"
-SIZE_BYTES="$(dest_sh "stat -c %s '${OUT}'" || echo 0)"
+gate stamp >/dev/null || fail "Impossible d'enregistrer le succès sur la destination."
 write_metrics 1 "$(( END - START ))" "${SIZE_BYTES}" "${END}"
-log "Terminé en $(( END - START )) s — $(( SIZE_BYTES / 1024 )) Kio."
+log "Terminé en $(( END - START )) s — $(( SIZE_BYTES / 1024 )) Kio{{ ' (chiffrée)' if sync_backup_encrypt_recipient | length > 0 else '' }}."

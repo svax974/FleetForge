@@ -1,8 +1,10 @@
 ---
-# Dupliqué depuis sync-backup-install/defaults (voir sync-backup-remove).
+# Dupliqué depuis sync-backup-install/defaults (voir sync-backup-remove ; compte dédié : backup-setup/defaults).
+backup_account: fleetbackup
+backup_account_root: "/home/{{ backup_account }}/backups"
 sync_backup_name: "sync-{{ sync_instance }}"
 sync_backup_dest_host: backup-sync
-sync_backup_dest_user: "{{ remote_username }}"
-sync_backup_dest_dir: "{{ backup_root }}/{{ sync_backup_name }}"
+sync_backup_dest_user: "{{ backup_account }}"
+sync_backup_dest_dir: "{{ backup_account_root }}/{{ sync_backup_name }}"
 sync_backup_ssh_key: "/root/.ssh/id_ed25519_{{ sync_backup_name }}"
 sync_backup_log: "/var/log/sync-backup-{{ sync_instance }}.log"

@@ -1733,9 +1733,12 @@ groups:
   # règles n'existent que pour elle.
   #
   # Les séries viennent du collecteur `textfile` de node_exporter, alimenté par
-  # brk-backup.sh (sur brk1) et timescaledb-backup.sh (sur timescale).
+  # brk-backup.sh (sur brk1) et timescaledb-backup.sh (sur timescale), et par
+  # postgres-backup.sh / sync-backup-<instance>.sh (web3c).
   # Contrôle après déploiement : `count(backup_last_success_timestamp_seconds)`
-  # doit valoir 2 — une règle sans série est décorative.
+  # doit valoir le nombre de sauvegardes du parc — une règle sans série est
+  # décorative (BackupMissing le signale pour les noms de
+  # `prom_alert_backup_max_age_hours`).
   - name: backups
     rules:
       # Deux règles plutôt qu'une règle générique : les deux sauvegardes n'ont
@@ -1788,6 +1791,13 @@ groups:
       # via `prom_alert_backup_max_age_hours` obtient sa propre règle SANS
       # toucher au template. Par défaut `{}` : aucun effet sur un parc qui ne
       # définit pas la variable (papanglabs, aujourd'hui).
+      #
+      # BackupStale ne voit qu'une série EXISTANTE : une sauvegarde déclarée ici
+      # mais jamais installée, ou dont le script n'a jamais écrit sa métrique
+      # (premier passage jamais arrivé, collecteur textfile absent), n'a pas de
+      # série — rien ne sonnait. BackupMissing (`absent()`, par nom ATTENDU) la
+      # couvre après le même délai. Ne déclarer un seuil que pour une
+      # sauvegarde qui doit exister : retirer le nom éteint les deux règles.
 {% for name, max_age in (prom_alert_backup_max_age_hours | default({})).items() %}
       - alert: BackupStale
         expr: >-
@@ -1802,6 +1812,19 @@ groups:
           description: >-
             Aucune sauvegarde réussie depuis {{ '{{' }} $value | printf "%.0f" {{ '}}' }} h
             (seuil {{ max_age }} h).
+
+      - alert: BackupMissing
+        expr: absent(backup_last_success_timestamp_seconds{backup="{{ name }}"})
+        for: {{ max_age }}h
+        labels:
+          severity: critical
+          backup: {{ name }}
+        annotations:
+          summary: "Sauvegarde {{ name }} attendue, aucune série"
+          description: >-
+            Aucune métrique backup_last_success_timestamp_seconds pour {{ name }}
+            depuis {{ max_age }} h : sauvegarde jamais installée, jamais passée,
+            ou collecteur textfile de node_exporter absent sur la source.
 {% endfor %}
 
       # Distincte de BackupStale, et pas redondante : un échec est visible

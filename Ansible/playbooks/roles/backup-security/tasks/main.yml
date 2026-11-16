@@ -6,6 +6,11 @@
 # port 16138 que depuis les IP opérateur, donc brk1 ne pouvait
 # pas y écrire, alors même que la destination retenue est cette machine.
 #
+# Port ouvert : celui sur lequel CETTE destination écoute (`ansible_port` de son
+# entrée, que security-ssh donne aussi à sshd), pas le port commun du parc — une
+# destination derrière un NAT (machine de bureau) a le sien. C'est aussi le port
+# que les sources visent (`pgbak_dest_port`, `sync_backup_dest_port`).
+#
 # Rejouable seul via `update-ufw-all.yml`, comme les autres rôles `-security` :
 # une source ajoutée ou une whitelist modifiée ne doit pas imposer de rejouer
 # l'installation des sauvegardes (rsync de 348 Go).
@@ -15,7 +20,7 @@
     rule: allow
     proto: tcp
     from_ip: "{{ hostvars[item]['ansible_host'] }}"
-    port: "{{ ssh_custom_port }}"
+    port: "{{ backup_listen_port | string }}"
     comment: "backup source {{ item }} - ssh push"
   loop: "{{ backup_sources }}"
   when: hostvars[item]['ansible_host'] is defined
@@ -26,7 +31,7 @@
     rule: allow
     proto: tcp
     from_ip: "{{ item }}"
-    port: "{{ ssh_custom_port }}"
+    port: "{{ backup_listen_port | string }}"
     comment: "backup source (extra) - ssh push"
   loop: "{{ backup_extra_allowed_cidrs }}"
   become: true

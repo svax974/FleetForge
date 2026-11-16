@@ -10,6 +10,7 @@
       Purge refusée. Cette opération SUPPRIME les dumps de {{ pgbak_db }} sur
       {{ pgbak_dest_host }} ({{ pgbak_dest_dir }}). Relance avec
       -e confirm=yes en connaissance de cause.
+    quiet: true
 
 - name: Read the backup public key (to revoke it on the destination)
   ansible.builtin.slurp:
@@ -48,18 +49,14 @@
     - "{{ pgbak_ssh_key_path }}"
     - "{{ pgbak_ssh_key_path }}.pub"
 
-- name: Revoke the key on the destination host
-  ansible.posix.authorized_key:
-    user: "{{ pgbak_dest_user }}"
-    state: absent
-    key: "{{ pgbak_pubkey.content | b64decode | trim }}"
-  delegate_to: "{{ pgbak_dest_host if pgbak_dest_host in groups['all'] else undef(hint='pgbak_dest_host: not an inventory host') }}"
-  become: true
-  when: pgbak_pubkey.content is defined
-
-- name: Remove the backup data on the destination host
-  ansible.builtin.file:
-    path: "{{ pgbak_dest_dir }}"
-    state: absent
-  delegate_to: "{{ pgbak_dest_host if pgbak_dest_host in groups['all'] else undef(hint='pgbak_dest_host: not an inventory host') }}"
-  become: true
+# Compte dédié de la destination (backup-setup) : clé révoquée, répertoire de
+# CETTE source supprimé — ceux des autres sources restent.
+- name: Revoke the key and remove the backup data on the destination host
+  ansible.builtin.import_role:
+    name: backup-setup
+    tasks_from: revoke
+  vars:
+    bk_dest_host: "{{ pgbak_dest_host }}"
+    bk_pubkey: "{{ (pgbak_pubkey.content | b64decode | trim) if pgbak_pubkey.content is defined else '' }}"
+    bk_name: "{{ pgbak_name }}"
+    bk_remove_data: true

@@ -6,3 +6,6 @@ backup_sources: []
 
 # IP/CIDR bruts à autoriser en plus (dépannage). À garder vide.
 backup_extra_allowed_cidrs: []
+
+# Port SSH de cette destination (voir tasks/main.yml).
+backup_listen_port: "{{ ansible_port | default(ssh_custom_port) }}"

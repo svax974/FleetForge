@@ -1707,6 +1707,11 @@ class UfwForeignTests(unittest.TestCase):
         ]
         self.assertEqual(self.foreign(caught + ignored), caught)
 
+# Destinataire age FACTICE (clé publique, alphabet bech32, longueur réelle) : jamais une vraie clé.
+BACKUP_RECIPIENT = "age1" + "q" * 58
+DEPLOY_BACKUP = os.path.join(PLAYBOOKS, "deploy-backup.yml")
+
+
 def guard_inventory(**gateway):
     gw = {
         "ansible_host": "192.0.2.10", "ansible_connection": "local", "ansible_roles": ["webapp"],
@@ -2065,7 +2070,8 @@ class GuardTests(unittest.TestCase):
         self.assertIn("docker_ports_rules", out)
 
     def backup_inventory(self, **gateway):
-        """Passerelle qui opte pour la famille `backup` : destination sur une AUTRE machine, seuil d'alerte déclaré."""
+        """Passerelle qui opte pour la famille `backup` : destination sur une AUTRE machine, seuil d'alerte déclaré,
+        destinataire de chiffrement du parc (clé PUBLIQUE factice, alphabet bech32)."""
         entry = dict(ansible_roles=["webapp", "backup"], pgbak_name="fleetforge-gateway", pgbak_db="fleetforgegateway",
                      pgbak_user="fleetforgegateway", pgbak_container="fleetforge-gateway_postgres",
                      pgbak_dest_host="backup-fleetforge-gateway",
@@ -2073,8 +2079,64 @@ class GuardTests(unittest.TestCase):
         entry.update(gateway)
         inventory = guard_inventory(**entry)
         inventory["all"]["vars"]["prom_alert_backup_max_age_hours"] = {"fleetforge-gateway": 48}
+        inventory["all"]["vars"]["backup_encrypt_recipient"] = BACKUP_RECIPIENT
         inventory["all"]["children"]["backups"] = {"hosts": {"backup-fleetforge-gateway": {"ansible_host": "203.0.113.90"}}}
         return inventory
+
+    def test_the_gateway_dump_is_encrypted_for_the_operator(self):
+        # Sans destinataire age (ni du parc, ni de l'entrée), ou avec autre chose qu'un destinataire age : refusé.
+        for label, recipient in (("none", None), ("ssh_key", "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFAKE"),
+                                 ("short", "age1qqqq"), ("upper", BACKUP_RECIPIENT.upper())):
+            with self.subTest(label):
+                inventory = self.backup_inventory()
+                if recipient is None:
+                    del inventory["all"]["vars"]["backup_encrypt_recipient"]
+                else:
+                    inventory["all"]["vars"]["backup_encrypt_recipient"] = recipient
+                code, out = self.guard(inventory)
+                self.assertNotEqual(code, 0, label)
+                self.assertIn("destinataire de chiffrement", out)
+        # Destinataire propre à l'entrée : accepté sans celui du parc.
+        inventory = self.backup_inventory(pgbak_encrypt_recipient=BACKUP_RECIPIENT)
+        del inventory["all"]["vars"]["backup_encrypt_recipient"]
+        code, out = self.guard(inventory)
+        self.assertEqual(code, 0, out[-3000:])
+
+    def test_a_destination_on_its_own_ssh_port_is_declared_explicitly(self):
+        # Destination derrière un NAT (port 22) dans un parc sur 7776 : `pgbak_dest_port` exigé, et exact.
+        def on_port_22(**gateway):
+            inventory = self.backup_inventory(**gateway)
+            inventory["all"]["vars"]["ssh_custom_port"] = 7776
+            inventory["all"]["children"]["backups"]["hosts"]["backup-fleetforge-gateway"]["ansible_port"] = 22
+            return inventory
+        for label, inventory in (("implicit", on_port_22()), ("wrong", on_port_22(pgbak_dest_port=7776))):
+            with self.subTest(label):
+                code, out = self.guard(inventory)
+                self.assertNotEqual(code, 0, label)
+                self.assertIn("pgbak_dest_port", out)
+        code, out = self.guard(on_port_22(pgbak_dest_port=22))
+        self.assertEqual(code, 0, out[-3000:])
+        # Destination sur le port du parc : rien à déclarer.
+        inventory = self.backup_inventory()
+        inventory["all"]["vars"]["ssh_custom_port"] = 7776
+        code, out = self.guard(inventory)
+        self.assertEqual(code, 0, out[-3000:])
+
+    def test_deploy_backup_plays_the_same_guard_before_any_connection(self):
+        # deploy-backup.yml lui-même (aucune tâche hors `always`, limité à l'entrée) : sans `backup`, l'entrée n'est
+        # pas touchée ; avec `backup` mais sans chiffrement, la garde arrête le playbook avant tout contact.
+        args = ["--tags", "no-such-tag", "--limit", "fleetforge-gateway"]
+        code, out = run_local_play(None, guard_inventory(), playbook=DEPLOY_BACKUP, args=args)
+        self.assertEqual(code, 0, out[-3000:])
+        inventory = self.backup_inventory()
+        del inventory["all"]["vars"]["backup_encrypt_recipient"]
+        code, out = run_local_play(None, inventory, playbook=DEPLOY_BACKUP, args=args)
+        self.assertNotEqual(code, 0, out[-3000:])
+        self.assertIn("destinataire de chiffrement", out)
+        code, out = run_local_play(None, self.backup_inventory(pgbak_container="other_postgres"), playbook=DEPLOY_BACKUP,
+                                   args=args)
+        self.assertNotEqual(code, 0, out[-3000:])
+        self.assertIn("pgbak_container", out)
 
     def test_the_database_backup_is_checked_only_when_the_gateway_opts_in(self):
         # Sans `backup` dans ansible_roles : aucune exigence `pgbak_*` (comportement inchangé).

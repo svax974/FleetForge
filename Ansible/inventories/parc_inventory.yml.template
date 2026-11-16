@@ -180,13 +180,16 @@ all:
               # « Sauvegarde de la base de la passerelle »). Conteneur = `<projet>_postgres` (projet = nom de l'entrée) ;
               # base et rôle = ceux du back/.env (défaut `webapp` : le nom du projet sans tiret) ; destination = une
               # entrée de `backups` sur une AUTRE machine ; `pgbak_dir` propre à l'entrée (le défaut est partagé par
-              # toutes les entrées d'une machine) ; seuil BackupStale : `prom_alert_backup_max_age_hours`.
-              # Contrôlé sans connexion par la garde de deploy-fleetforge.yml (tag gateway).
+              # toutes les entrées d'une machine) ; seuils BackupStale/BackupMissing : `prom_alert_backup_max_age_hours`.
+              # Dump CHIFFRÉ exigé : `backup_encrypt_recipient` du parc (group_vars) ou `pgbak_encrypt_recipient` ici.
+              # Port SSH de la destination explicite s'il diffère de `ssh_custom_port` (ici : machine derrière un NAT).
+              # Contrôlé sans connexion par la garde de deploy-fleetforge.yml (tag gateway) et de deploy-backup.yml.
               pgbak_name: fleetforge-gateway
               pgbak_container: fleetforge-gateway_postgres
               pgbak_db: fleetforgegateway
               pgbak_user: fleetforgegateway
               pgbak_dest_host: backup-fleetforge-gateway
+              pgbak_dest_port: 22
               pgbak_dir: "/home/{{ remote_username }}/postgres-backup-fleetforge-gateway"
               pgbak_cron_minute: "20"
               # Sous-réseau Docker dédié (HARDEN_SUBNET du compose durci), hors
@@ -223,6 +226,10 @@ all:
                 - { id: main, url: "https://infra.{{ domain_name }}/healthz" }
 
         # ── Destinations de sauvegarde (une entrée par sauvegarde) ────────────
+        # Les sources y écrivent par le compte dédié `backup_account` (rôle backup-setup, créé au premier
+        # deploy-backup.yml), jamais par `remote_username`. `backup_min_free_gb` : place libre exigée avant
+        # d'écrire (défaut 20) ; `backup_floor_gb` : plancher que la passerelle tient pendant l'écriture (défaut 5).
+        # `ansible_port` : port SSH de la machine s'il diffère de `ssh_custom_port`.
         backups:
           hosts:
             backup-monapp:
@@ -232,12 +239,15 @@ all:
               server_type: backup
               backup_sources: [monapp]
               ansible_roles: [backup]
+              backup_min_free_gb: 20
 
-            # Destination de la base de la passerelle : JAMAIS la machine de la passerelle.
+            # Destination de la base de la passerelle : JAMAIS la machine de la passerelle. Ici une machine de
+            # bureau derrière un NAT (port 22 redirigé) : dump chiffré exigé, fraîcheur supervisée.
             backup-fleetforge-gateway:
               hostname: backup-ffg.{{ domain_name }}
-              ansible_host: 203.0.113.60
-              provider: contabo
+              ansible_host: 198.51.100.60
+              ansible_port: 22
+              provider: custom
               server_type: backup
               backup_sources: [fleetforge-gateway]
               ansible_roles: [backup]

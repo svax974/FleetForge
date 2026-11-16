@@ -3,6 +3,8 @@
 # `{{ sync_backup_dest_host }}`. Modèle : postgres-backup-install. Joué par
 # deploy-backup.yml (sur le groupe `sync_servers`).
 
+# Destination : compte dédié et passerelle `backup-gate` (rôle backup-setup), jamais `srvc`.
+
 # `-e` l'emporte sur l'inventaire : le script est lancé (cron, root), le journal reçoit sa sortie.
 - name: Check the script and log paths are plain absolute paths
   ansible.builtin.assert:
@@ -19,12 +21,27 @@
       L'hôte de destination `{{ sync_backup_dest_host }}` est absent de
       l'inventaire. Ajoute-le au groupe `backups` avant de jouer ce rôle.
   when: sync_backup_dest_host not in hostvars
+  tags: [always]
+
+- name: Check the backup name, the retention and the encryption recipient
+  ansible.builtin.assert:
+    that:
+      - sync_backup_name is match('^[a-z0-9][a-z0-9-]{0,62}$')
+      - sync_backup_keep | string is match('^[0-9]{1,4}$') and sync_backup_keep | int >= 1
+      - sync_backup_encrypt_recipient | length == 0 or sync_backup_encrypt_recipient is match('^age1[02-9ac-hj-np-z]{58}$')
+    fail_msg: >-
+      sync_backup_name (minuscules, chiffres, tirets), sync_backup_keep (>= 1) ou sync_backup_encrypt_recipient
+      (vide, ou destinataire age « age1… » de 62 caractères) invalide.
+    quiet: true
+  tags: [always]
 
 - name: Report the resolved backup destination
   ansible.builtin.debug:
     msg: >-
-      Sauvegarde de {{ sync_instance }} → {{ sync_backup_dest_user }}@{{ sync_backup_dest_addr }}:{{ sync_backup_dest_dir }}
-      (rétention {{ sync_backup_keep }} générations).
+      Sauvegarde de {{ sync_instance }} → {{ sync_backup_dest_user }}@{{ sync_backup_dest_addr }}:{{ sync_backup_dest_port }}
+      ({{ sync_backup_dest_dir }}, rétention {{ sync_backup_keep }} générations,
+      {{ 'chiffrée (age)' if sync_backup_encrypt_recipient | length > 0 else 'NON chiffrée' }}).
+  tags: [retarget]
 
 # Outil générique, jamais retiré par remove/purge. `VACUUM INTO` exige SQLite
 # >= 3.27 (Ubuntu 20.04+ : 3.31).
@@ -36,7 +53,27 @@
     cache_valid_time: 3600
   become: true
 
-# ── Clé, autorisation, pare-feu, known_hosts ───────────────────────────────
+# ── Chiffrement (même mécanisme que postgres-backup-install) ────────────────
+- name: Install age (encrypted archives)
+  when: sync_backup_encrypt_recipient | length > 0
+  tags: [retarget]
+  block:
+    - name: Install the age package
+      ansible.builtin.apt:
+        name: age
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+      become: true
+  rescue:
+    - name: Refuse to back up without encryption
+      ansible.builtin.fail:
+        msg: >-
+          Le paquet `age` est introuvable sur {{ ansible_distribution | default('?') }}
+          {{ ansible_distribution_version | default('?') }} (paquet officiel : Ubuntu 22.04+, Debian 12+).
+          Le chiffrement est demandé (`sync_backup_encrypt_recipient`) : aucune archive ne partira en clair.
+
+# ── Clé, destination (compte dédié, répertoire, clé liée, pare-feu), known_hosts ──
 - name: Ensure root's .ssh directory exists
   ansible.builtin.file:
     path: /root/.ssh
@@ -45,7 +82,9 @@
     group: root
     mode: '0700'
   become: true
+  tags: [retarget]
 
+# Tag `retarget` : la clé publique est lue par les tâches de destination, qui le portent.
 - name: Generate the dedicated backup SSH key
   community.crypto.openssh_keypair:
     path: "{{ sync_backup_ssh_key }}"
@@ -53,46 +92,42 @@
     comment: "{{ inventory_hostname }}-{{ sync_backup_name }}-backup"
   become: true
   register: sync_backup_key
-
-- name: Authorize the key on the destination host
-  ansible.posix.authorized_key:
-    user: "{{ sync_backup_dest_user }}"
-    state: present
-    key: "{{ sync_backup_key.public_key }}"
-    comment: "{{ inventory_hostname }}-{{ sync_backup_name }}-backup"
-  delegate_to: "{{ sync_backup_dest_host if sync_backup_dest_host in groups['all'] else undef(hint='sync_backup_dest_host: not an inventory host') }}"
-  become: true
   tags: [retarget]
 
-- name: Open SSH on the destination for this host
-  community.general.ufw:
-    rule: allow
-    proto: tcp
-    from_ip: "{{ ansible_host }}"
-    port: "{{ sync_backup_dest_port }}"
-    comment: "backup source {{ inventory_hostname }} - ssh push"
-  delegate_to: "{{ sync_backup_dest_host if sync_backup_dest_host in groups['all'] else undef(hint='sync_backup_dest_host: not an inventory host') }}"
-  become: true
+- name: Prepare the destination for this source
+  ansible.builtin.import_role:
+    name: backup-setup
+    tasks_from: source
+  vars:
+    bk_dest_host: "{{ sync_backup_dest_host }}"
+    bk_dest_port: "{{ sync_backup_dest_port }}"
+    bk_name: "{{ sync_backup_name }}"
+    bk_keep: "{{ sync_backup_keep }}"
+    bk_pubkey: "{{ sync_backup_key.public_key }}"
+    bk_comment: "{{ inventory_hostname }}-{{ sync_backup_name }}-backup"
+  tags: [retarget]
+
+- name: Scan the destination host key
+  ansible.builtin.set_fact:
+    sync_backup_dest_hostkey: "{{ lookup('pipe', 'ssh-keyscan -p ' ~ (sync_backup_dest_port | string | quote) ~ ' -t ed25519 ' ~ (sync_backup_dest_addr | quote) ~ ' 2>/dev/null | grep -v \"^#\" || true') }}"
+  tags: [retarget]
+
+- name: Check the destination answered on its SSH port
+  ansible.builtin.assert:
+    that: sync_backup_dest_hostkey | length > 0
+    fail_msg: >-
+      Aucune clé d'hôte relevée sur {{ sync_backup_dest_addr }}:{{ sync_backup_dest_port }} depuis ce poste
+      (`ssh-keyscan`) : destination éteinte, port non redirigé (NAT) ou filtré.
+    quiet: true
   tags: [retarget]
 
 # Les scripts tournent en root : le known_hosts est celui de root.
 - name: Refresh the destination host key in root's known_hosts
   ansible.builtin.known_hosts:
     path: "{{ sync_backup_known_hosts }}"
-    name: "[{{ sync_backup_dest_addr }}]:{{ sync_backup_dest_port }}"
-    key: "{{ lookup('pipe', 'ssh-keyscan -p ' ~ (sync_backup_dest_port | quote) ~ ' -t ed25519 ' ~ (sync_backup_dest_addr | quote) ~ ' 2>/dev/null | grep -v \"^#\"') }}"
+    name: "{{ sync_backup_known_host }}"
+    key: "{{ sync_backup_dest_hostkey }}"
     state: present
-  become: true
-  tags: [retarget]
-
-- name: Create the destination backup directory
-  ansible.builtin.file:
-    path: "{{ sync_backup_dest_dir }}"
-    state: directory
-    owner: "{{ sync_backup_dest_user }}"
-    group: "{{ sync_backup_dest_user }}"
-    mode: '0750'
-  delegate_to: "{{ sync_backup_dest_host if sync_backup_dest_host in groups['all'] else undef(hint='sync_backup_dest_host: not an inventory host') }}"
   become: true
   tags: [retarget]
 

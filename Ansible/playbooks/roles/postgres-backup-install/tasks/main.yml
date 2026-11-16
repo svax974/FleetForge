@@ -1,7 +1,9 @@
 ---
 # Installe la sauvegarde de `{{ pgbak_db }}` vers `{{ pgbak_dest_host }}`.
 # Calqué sur `timescaledb-backup-install`, sans branche locale (voir
-# defaults/main.yml) : la destination est toujours une machine distincte.
+# defaults/main.yml) : la destination est toujours une machine distincte, où
+# la source écrit par le compte dédié et la passerelle `backup-gate`
+# (rôle backup-setup), jamais par `srvc`.
 
 # `-e` l'emporte sur l'inventaire : `pgbak_dir` désigne le script lancé par cron.
 - name: Check the backup directory is a plain absolute path
@@ -17,61 +19,99 @@
       L'hôte de destination `{{ pgbak_dest_host }}` est absent de
       l'inventaire. Ajoute-le au groupe `backups` avant de jouer ce rôle.
   when: pgbak_dest_host not in hostvars
+  tags: [always]
+
+# Le nom de la sauvegarde est aussi le répertoire de la destination et l'argument
+# de la commande forcée ; le destinataire, s'il est posé, est une clé publique age.
+- name: Check the backup name, the retention and the encryption recipient
+  ansible.builtin.assert:
+    that:
+      - pgbak_name is match('^[a-z0-9][a-z0-9-]{0,62}$')
+      - pgbak_db is match('^[A-Za-z0-9_][A-Za-z0-9_-]{0,62}$')
+      - pgbak_keep | string is match('^[0-9]{1,4}$') and pgbak_keep | int >= 1
+      - pgbak_encrypt_recipient | length == 0 or pgbak_encrypt_recipient is match('^age1[02-9ac-hj-np-z]{58}$')
+    fail_msg: >-
+      pgbak_name (minuscules, chiffres, tirets), pgbak_db (lettres, chiffres, _ et -), pgbak_keep (>= 1) ou
+      pgbak_encrypt_recipient (vide, ou destinataire age « age1… » de 62 caractères) invalide.
+    quiet: true
+  tags: [always]
 
 - name: Report the resolved backup destination
   ansible.builtin.debug:
     msg: >-
-      Sauvegarde de {{ pgbak_db }} → {{ pgbak_dest_user }}@{{ pgbak_dest_addr }}:{{ pgbak_dest_dir }}
+      Sauvegarde de {{ pgbak_db }} → {{ pgbak_dest_user }}@{{ pgbak_dest_addr }}:{{ pgbak_dest_port }}
+      ({{ pgbak_dest_dir }}), {{ 'chiffrée (age)' if pgbak_encrypt_recipient | length > 0 else 'NON chiffrée' }}.
+  tags: [retarget]
 
-# ── Clé, autorisation, pare-feu, known_hosts ───────────────────────────────
+# ── Chiffrement ──────────────────────────────────────────────────────────────
+# Paquet officiel de la distribution (Ubuntu 22.04+, Debian 12+), jamais un binaire
+# téléchargé. Introuvable : échec explicite, aucun dump ne part en clair.
+- name: Install age (encrypted dumps)
+  when: pgbak_encrypt_recipient | length > 0
+  tags: [retarget]
+  block:
+    - name: Install the age package
+      ansible.builtin.apt:
+        name: age
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+      become: true
+  rescue:
+    - name: Refuse to back up without encryption
+      ansible.builtin.fail:
+        msg: >-
+          Le paquet `age` est introuvable sur {{ ansible_distribution | default('?') }}
+          {{ ansible_distribution_version | default('?') }} (paquet officiel : Ubuntu 22.04+, Debian 12+).
+          Le chiffrement est demandé (`pgbak_encrypt_recipient`) : aucun dump ne partira en clair. Mettre la
+          machine à jour, ou retirer le destinataire en connaissance de cause (jamais pour la passerelle MCP).
 
+# ── Clé, destination (compte dédié, répertoire, clé liée, pare-feu), known_hosts ──
+
+# Tag `retarget` : la clé publique est lue par les tâches de destination, qui le portent.
 - name: Generate the dedicated backup SSH key
   community.crypto.openssh_keypair:
     path: "{{ pgbak_ssh_key_path }}"
     type: ed25519
     comment: "{{ inventory_hostname }}-{{ pgbak_name }}-backup"
   register: pgbak_key
-
-- name: Authorize the key on the destination host
-  ansible.posix.authorized_key:
-    user: "{{ pgbak_dest_user }}"
-    state: present
-    key: "{{ pgbak_key.public_key }}"
-    comment: "{{ inventory_hostname }}-{{ pgbak_name }}-backup"
-  delegate_to: "{{ pgbak_dest_host if pgbak_dest_host in groups['all'] else undef(hint='pgbak_dest_host: not an inventory host') }}"
-  become: true
   tags: [retarget]
 
-- name: Open SSH on the destination for this host
-  community.general.ufw:
-    rule: allow
-    proto: tcp
-    from_ip: "{{ ansible_host }}"
-    port: "{{ pgbak_dest_port }}"
-    comment: "backup source {{ inventory_hostname }} - ssh push"
-  delegate_to: "{{ pgbak_dest_host if pgbak_dest_host in groups['all'] else undef(hint='pgbak_dest_host: not an inventory host') }}"
-  become: true
+- name: Prepare the destination for this source
+  ansible.builtin.import_role:
+    name: backup-setup
+    tasks_from: source
+  vars:
+    bk_dest_host: "{{ pgbak_dest_host }}"
+    bk_dest_port: "{{ pgbak_dest_port }}"
+    bk_name: "{{ pgbak_name }}"
+    bk_keep: "{{ pgbak_keep }}"
+    bk_pubkey: "{{ pgbak_key.public_key }}"
+    bk_comment: "{{ inventory_hostname }}-{{ pgbak_name }}-backup"
+  tags: [retarget]
+
+# Clé d'hôte relevée depuis le poste qui joue Ansible (premier contact) : vide =
+# destination injoignable sur ce port, refusée plutôt qu'une entrée vide.
+- name: Scan the destination host key
+  ansible.builtin.set_fact:
+    pgbak_dest_hostkey: "{{ lookup('pipe', 'ssh-keyscan -p ' ~ (pgbak_dest_port | string | quote) ~ ' -t ed25519 ' ~ (pgbak_dest_addr | quote) ~ ' 2>/dev/null | grep -v \"^#\" || true') }}"
+  tags: [retarget]
+
+- name: Check the destination answered on its SSH port
+  ansible.builtin.assert:
+    that: pgbak_dest_hostkey | length > 0
+    fail_msg: >-
+      Aucune clé d'hôte relevée sur {{ pgbak_dest_addr }}:{{ pgbak_dest_port }} depuis ce poste
+      (`ssh-keyscan`) : destination éteinte, port non redirigé (NAT) ou filtré.
+    quiet: true
   tags: [retarget]
 
 - name: Refresh the destination host key in known_hosts
   ansible.builtin.known_hosts:
     path: "{{ ansible_env.HOME }}/.ssh/known_hosts"
-    name: "[{{ pgbak_dest_addr }}]:{{ pgbak_dest_port }}"
-    key: "{{ lookup('pipe', 'ssh-keyscan -p ' ~ (pgbak_dest_port | quote) ~ ' -t ed25519 ' ~ (pgbak_dest_addr | quote) ~ ' 2>/dev/null | grep -v \"^#\"') }}"
+    name: "{{ pgbak_known_host }}"
+    key: "{{ pgbak_dest_hostkey }}"
     state: present
-  tags: [retarget]
-
-# ── Répertoire de destination ──────────────────────────────────────────────
-
-- name: Create the destination backup directory
-  ansible.builtin.file:
-    path: "{{ pgbak_dest_dir }}"
-    state: directory
-    owner: "{{ pgbak_dest_user }}"
-    group: "{{ pgbak_dest_user }}"
-    mode: '0750'
-  delegate_to: "{{ pgbak_dest_host if pgbak_dest_host in groups['all'] else undef(hint='pgbak_dest_host: not an inventory host') }}"
-  become: true
   tags: [retarget]
 
 # ── Métriques ───────────────────────────────────────────────────────────────

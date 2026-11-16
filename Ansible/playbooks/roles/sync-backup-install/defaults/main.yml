@@ -1,7 +1,6 @@
 ---
 # Sauvegarde périodique et COHÉRENTE de la base SQLite (+ blobs) d'une instance
-# web3c-sync vers un hôte du groupe `backups` (backup-sync, sur `monitor`),
-# poussée en SSH. Calquée sur postgres-backup-install (cron, métrique textfile,
+# web3c-sync vers un hôte du groupe `backups` (`backup-sync`), poussée en SSH. Calquée sur postgres-backup-install (cron, métrique textfile,
 # rotation, destination dérivée de l'inventaire — jamais d'IP écrite en dur).
 #
 # Pourquoi pas un `cp` : la base est ouverte en WAL par le serveur ; copier
@@ -20,10 +19,19 @@
 sync_backup_name: "sync-{{ sync_instance }}"
 sync_backup_dest_host: backup-sync
 
+# Destination : compte DÉDIÉ et passerelle `backup-gate` (rôle backup-setup, mêmes
+# valeurs que ses defaults), jamais `remote_username` ; port SSH de la destination.
+backup_account: fleetbackup
+backup_account_root: "/home/{{ backup_account }}/backups"
 sync_backup_dest_addr: "{{ hostvars[sync_backup_dest_host]['ansible_host'] }}"
-sync_backup_dest_user: "{{ remote_username }}"
-sync_backup_dest_port: "{{ ssh_custom_port }}"
-sync_backup_dest_dir: "{{ backup_root }}/{{ sync_backup_name }}"
+sync_backup_dest_user: "{{ backup_account }}"
+sync_backup_dest_port: "{{ hostvars[sync_backup_dest_host]['ansible_port'] | default(ssh_custom_port) }}"
+sync_backup_dest_dir: "{{ backup_account_root }}/{{ sync_backup_name }}"
+sync_backup_known_host: "{{ sync_backup_dest_addr if (sync_backup_dest_port | string) == '22' else '[' ~ sync_backup_dest_addr ~ ']:' ~ sync_backup_dest_port }}"
+
+# Chiffrement des archives (age, destinataire `age1…` de l'opérateur) : même
+# mécanisme que postgres-backup-install. Vide : archives `.tar.gz` en clair.
+sync_backup_encrypt_recipient: "{{ backup_encrypt_recipient | default('') }}"
 
 # Sauvegarde exécutée par ROOT (le volume appartient à l'uid 65532, 0700) :
 # script, clé et journal sont donc sous root, pas sous le home de srvc.
@@ -47,7 +55,9 @@ sync_backup_cron_minute: "5"
 # (chiffré) dans les archives jusqu'à leur rotation, soit 14 jours ici.
 sync_backup_keep: 14
 
-# Marge libre exigée sur la destination avant de pousser.
-sync_backup_min_free_gb: 2
+# Marge libre exigée sur la destination avant de pousser : propriété de la
+# destination (`backup_min_free_gb` sur son entrée, 20 Go par défaut, comme
+# postgres-backup-install) — elle protège ce qui tourne déjà sur cette machine.
+sync_backup_min_free_gb: "{{ hostvars[sync_backup_dest_host]['backup_min_free_gb'] | default(20) }}"
 
 node_exporter_textfile_dir: /var/lib/node_exporter/textfile_collector

@@ -1,61 +1,104 @@
 ---
-# Repointe les sauvegardes tradekong/ctdapi sur un nouveau serveur de
+# Repointe les sauvegardes PostgreSQL de tradekong, ctdapi et de la passerelle MCP
+# (entrée de `fleetforge_gateways` qui porte `backup`) sur un nouveau serveur de
 # destination.
 #
 # ── Procédure ──────────────────────────────────────────────────────────────
-#   1. Modifier `ansible_host` de `backup-tradekong` et/ou `backup-ctdapi`
-#      dans inventories/web3c_inventory.yml.
+#   1. Modifier `ansible_host` — et `ansible_port` si la machine a son propre port
+#      SSH (NAT) — de l'entrée de destination (`backup-tradekong`, `backup-ctdapi`,
+#      ou le `pgbak_dest_host` de la passerelle) dans l'inventaire web3c.
+#      Passerelle : `pgbak_dest_port` explicite dès que ce port diffère de celui du
+#      parc (garde de la passerelle).
 #   2. Si la nouvelle machine est neuve, la préparer d'abord :
-#        ./play.sh web3c setup-server.yml --limit backup-tradekong
+#        ./play.sh web3c setup-server.yml --limit <entrée de destination>
 #   3. ./play.sh web3c retarget-backups-web3c.yml
 #
-# Ce playbook refait TOUT ce qui dépend de l'adresse : clé SSH autorisée sur la
-# nouvelle destination, ouverture du pare-feu, entrée known_hosts, répertoire
-# de destination, et réécriture des scripts de sauvegarde et de restauration.
-# Il vérifie ensuite que la destination répond réellement.
+# Ce playbook refait TOUT ce qui dépend de l'adresse : compte dédié et passerelle
+# `backup-gate` sur la nouvelle destination (rôle backup-setup), répertoire de la
+# source, clé liée à la source (`from=`, commande forcée), ouverture du pare-feu,
+# entrée known_hosts, réécriture des scripts de sauvegarde et de restauration.
+# Il vérifie ensuite que la destination répond réellement (par la passerelle).
+# Serveurs de synchro : `deploy-backup.yml --tags retarget --limit sync_servers`.
 #
 # ── Les anciennes sauvegardes ne sont PAS recopiées ────────────────────────
 # Volontairement : la prochaine exécution reconstitue la destination depuis la
 # base vivante. L'ANCIEN SERVEUR CONSERVE LES SAUVEGARDES tant qu'on ne le
-# purge pas — un filet pendant la bascule, une fuite de données si on l'oublie.
+# purge pas — un filet pendant la bascule, une fuite de données si on l'oublie
+# (chiffrées si le destinataire age était posé, en clair sinon).
 #
 # ── Options ────────────────────────────────────────────────────────────────
-#   -e run_now=true          lance immédiatement les sauvegardes en tâche de
-#                            fond au lieu d'attendre le cron
-#   -e purge_old=<adresse>   révoque les clés et supprime {{ backup_root }} sur
-#                            l'ANCIENNE destination, une fois la nouvelle
-#                            vérifiée
+#   -e run_now=true            lance immédiatement les sauvegardes en tâche de
+#                              fond au lieu d'attendre le cron
+#   -e purge_old=<adresse>     sur l'ANCIENNE destination, révoque les clés des
+#                              sources repointées ici et supprime LEURS
+#                              répertoires (ceux des autres sources restent),
+#                              une fois la nouvelle vérifiée
+#   -e purge_old_port=<port>   port SSH de l'ancienne destination (défaut : celui
+#                              du parc)
+
+# ── Passerelle MCP : opt-in et garde, SANS connexion (comme deploy-backup.yml) ──
+- name: Passerelle MCP — opt-in et garde de la sauvegarde
+  hosts: fleetforge_gateways
+  gather_facts: false
+  tasks:
+    - name: Check the database backup declaration of the gateway
+      ansible.builtin.include_role:
+        name: fleetforge-install
+        tasks_from: gateway-backup-guard
+        apply:
+          tags: [always]
+      when: "'backup' in (ansible_roles | default([]))"
+      tags: [always]
+
+    - name: Keep the gateways that opt in
+      ansible.builtin.group_by:
+        key: "{{ 'fleetforge_gateways_backup' if 'backup' in (ansible_roles | default([])) else 'fleetforge_gateways_nobackup' }}"
+      changed_when: false
+      tags: [always]
 
 - name: Préflight — destinations résolues
   hosts: localhost
   gather_facts: false
   connection: local
+  vars:
+    retarget_sources: >-
+      {{ (['tradekong', 'ctdapi'] + (groups['fleetforge_gateways_backup'] | default([])))
+         | select('in', hostvars) | list }}
   tasks:
     - name: Afficher les destinations telles que l'inventaire les définit
       ansible.builtin.debug:
-        msg:
-          - "backup-tradekong → {{ hostvars['backup-tradekong']['ansible_host'] }}"
-          - "backup-ctdapi    → {{ hostvars['backup-ctdapi']['ansible_host'] }}"
-          - "racine           → {{ hostvars['backup-tradekong']['backup_root'] }}"
+        msg: >-
+          {{ item }} ({{ hostvars[item].pgbak_name | default('?') }}) →
+          {{ hostvars[item].pgbak_dest_host | default('?') }} =
+          {{ hostvars[hostvars[item].pgbak_dest_host | default('')].ansible_host | default('ABSENTE') }}:{{
+          hostvars[hostvars[item].pgbak_dest_host | default('')].ansible_port | default(hostvars[item].ssh_custom_port | default('?')) }}
+      loop: "{{ retarget_sources }}"
 
-    - name: Refuser une destination confondue avec sa propre source
+    - name: Refuser une destination absente ou confondue avec sa propre source
       ansible.builtin.fail:
         msg: >-
-          `{{ item.dest }}` pointe sur {{ hostvars[item.dest]['ansible_host'] }},
-          soit la machine qui produit la base. Corrige l'inventaire.
-      loop:
-        - { dest: backup-tradekong, src: tradekong }
-        - { dest: backup-ctdapi, src: ctdapi }
-      when: hostvars[item.dest]['ansible_host'] == hostvars[item.src]['ansible_host']
+          `{{ hostvars[item].pgbak_dest_host | default('?') }}` (destination de {{ item }}) est absente de l'inventaire
+          ou pointe sur {{ hostvars[item].ansible_host }}, la machine qui produit la base. Corrige l'inventaire.
+      loop: "{{ retarget_sources }}"
+      when: >-
+        hostvars[item].pgbak_dest_host | default('') not in hostvars
+        or hostvars[hostvars[item].pgbak_dest_host].ansible_host | default('') == hostvars[item].ansible_host
 
-- name: Repointage de la sauvegarde PostgreSQL — tradekong
-  hosts: tradekong
-  remote_user: "{{ remote_username }}"
-  roles:
-    - postgres-backup-install
+    # Variables du parc lues sur une source (localhost n'est pas dans le groupe du parc).
+    - name: Retenir les sources repointées (purge de l'ancienne destination)
+      vars:
+        _parc: "{{ hostvars[retarget_sources[0]] if retarget_sources | length > 0 else {} }}"
+        _account: "{{ _parc.backup_account | default('fleetbackup') }}"
+      ansible.builtin.set_fact:
+        retarget_old_entries: "{{ retarget_sources | zip(retarget_sources | map('extract', hostvars, 'pgbak_name')) | map('join', '-') | list }}"
+        retarget_old_dirs: "{{ retarget_sources | map('extract', hostvars, 'pgbak_name') | list }}"
+        retarget_remote_username: "{{ _parc.remote_username | default('') }}"
+        retarget_parc_port: "{{ _parc.ssh_custom_port | default(22) }}"
+        retarget_backup_account: "{{ _account }}"
+        retarget_backup_account_root: "{{ _parc.backup_account_root | default('/home/' ~ _account ~ '/backups') }}"
 
-- name: Repointage de la sauvegarde PostgreSQL — ctdapi
-  hosts: ctdapi
+- name: Repointage de la sauvegarde PostgreSQL — tradekong, ctdapi et passerelle MCP
+  hosts: tradekong:ctdapi:fleetforge_gateways_backup
   remote_user: "{{ remote_username }}"
   roles:
     - postgres-backup-install
@@ -68,62 +111,44 @@
     - backup-security
 
 # ── Vérification ───────────────────────────────────────────────────────────
-- name: Vérification — la destination tradekong répond
-  hosts: tradekong
+- name: Vérification — chaque destination répond par la passerelle
+  hosts: tradekong:ctdapi:fleetforge_gateways_backup
   remote_user: "{{ remote_username }}"
+  vars:
+    # `-e` l'emporte : `pgbak_dir` désigne le script lancé ; défaut du rôle sinon.
+    retarget_pgbak_dir: "{{ pgbak_dir | default(ansible_env.HOME ~ '/postgres-backup') }}"
   tasks:
-    # `pgbak_dir` désigne le script lancé (`-e` l'emporte).
     - name: Répertoire de sauvegarde simple
       ansible.builtin.assert:
-        that: pgbak_dir is match('^/[A-Za-z0-9._/-]*$')
+        that: retarget_pgbak_dir is match('^/[A-Za-z0-9._/-]*$')
         fail_msg: "pgbak_dir : chemin absolu sans espace ni métacaractère."
         quiet: true
 
     - name: Interroger la destination via postgres-restore.sh --check
-      ansible.builtin.command: "{{ pgbak_dir | quote }}/postgres-restore.sh --check"
+      ansible.builtin.command: "{{ retarget_pgbak_dir | quote }}/postgres-restore.sh --check"
       changed_when: false
-      register: tradekong_check
+      register: retarget_check
 
     - name: Afficher l'état
       ansible.builtin.debug:
-        var: tradekong_check.stdout_lines
-
-- name: Vérification — la destination ctdapi répond
-  hosts: ctdapi
-  remote_user: "{{ remote_username }}"
-  tasks:
-    # `pgbak_dir` désigne le script lancé (`-e` l'emporte).
-    - name: Répertoire de sauvegarde simple
-      ansible.builtin.assert:
-        that: pgbak_dir is match('^/[A-Za-z0-9._/-]*$')
-        fail_msg: "pgbak_dir : chemin absolu sans espace ni métacaractère."
-        quiet: true
-
-    - name: Interroger la destination via postgres-restore.sh --check
-      ansible.builtin.command: "{{ pgbak_dir | quote }}/postgres-restore.sh --check"
-      changed_when: false
-      register: ctdapi_check
-
-    - name: Afficher l'état
-      ansible.builtin.debug:
-        var: ctdapi_check.stdout_lines
+        var: retarget_check.stdout_lines
 
 # ── Première sauvegarde immédiate (optionnelle) ────────────────────────────
 - name: Lancement immédiat des sauvegardes
-  hosts: tradekong:ctdapi
+  hosts: tradekong:ctdapi:fleetforge_gateways_backup
   remote_user: "{{ remote_username }}"
-  gather_facts: false
+  vars:
+    retarget_pgbak_dir: "{{ pgbak_dir | default(ansible_env.HOME ~ '/postgres-backup') }}"
   tasks:
-    # `pgbak_dir` désigne le script lancé (`-e` l'emporte).
     - name: Répertoire de sauvegarde simple
       ansible.builtin.assert:
-        that: pgbak_dir is match('^/[A-Za-z0-9._/-]*$')
+        that: retarget_pgbak_dir is match('^/[A-Za-z0-9._/-]*$')
         fail_msg: "pgbak_dir : chemin absolu sans espace ni métacaractère."
         quiet: true
       when: run_now | default(false) | bool
 
     - name: Lancer la sauvegarde en tâche de fond
-      ansible.builtin.shell: "{{ pgbak_dir | quote }}/postgres-backup.sh >> {{ pgbak_dir | quote }}/backup.log 2>&1"
+      ansible.builtin.shell: "{{ retarget_pgbak_dir | quote }}/postgres-backup.sh >> {{ retarget_pgbak_dir | quote }}/backup.log 2>&1"
       async: 3600
       poll: 0
       changed_when: true
@@ -131,7 +156,7 @@
 
     - name: Rappel de suivi
       ansible.builtin.debug:
-        msg: "Sauvegarde lancée en tâche de fond. Suivi : tail -f {{ pgbak_dir }}/backup.log"
+        msg: "Sauvegarde lancée en tâche de fond. Suivi : tail -f {{ retarget_pgbak_dir }}/backup.log"
       when: run_now | default(false) | bool
 
 # ── Nettoyage de l'ancienne destination (optionnel) ────────────────────────
@@ -144,10 +169,13 @@
       ansible.builtin.add_host:
         name: old-backup-host
         ansible_host: "{{ purge_old }}"
-        ansible_port: "{{ hostvars['backup-tradekong']['ansible_port'] }}"
-        ansible_user: "{{ hostvars['backup-tradekong']['remote_username'] }}"
-        remote_username: "{{ hostvars['backup-tradekong']['remote_username'] }}"
-        backup_root: "{{ hostvars['backup-tradekong']['backup_root'] }}"
+        ansible_port: "{{ purge_old_port | default(retarget_parc_port) }}"
+        ansible_user: "{{ retarget_remote_username }}"
+        remote_username: "{{ retarget_remote_username }}"
+        backup_account: "{{ retarget_backup_account }}"
+        old_root: "{{ retarget_backup_account_root }}"
+        retarget_old_entries: "{{ retarget_old_entries }}"
+        retarget_old_dirs: "{{ retarget_old_dirs }}"
         groups: [old_backups_web3c]
       when: purge_old is defined
       changed_when: false
@@ -157,18 +185,18 @@
   gather_facts: false
   remote_user: "{{ remote_username }}"
   tasks:
-    - name: Révoquer les clés de sauvegarde
+    - name: Révoquer les clés des sources repointées
       ansible.builtin.lineinfile:
-        path: "/home/{{ remote_username }}/.ssh/authorized_keys"
-        regexp: "{{ item }}"
+        path: "/home/{{ backup_account }}/.ssh/authorized_keys"
+        regexp: " {{ item | regex_escape }}-backup$"
         state: absent
-      loop:
-        - '.*-tradekong-backup$'
-        - '.*-ctdapi-backup$'
+      loop: "{{ retarget_old_entries }}"
       become: true
 
-    - name: Supprimer les sauvegardes
+    - name: Supprimer leurs sauvegardes
       ansible.builtin.file:
-        path: "{{ backup_root }}"
+        path: "{{ old_root }}/{{ item }}"
         state: absent
+      loop: "{{ retarget_old_dirs }}"
+      when: item is match('^[a-z0-9][a-z0-9-]{0,62}$')
       become: true

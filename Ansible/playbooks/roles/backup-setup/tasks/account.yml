@@ -1,0 +1,84 @@
+---
+# Compte dédié et passerelle sur la destination `bk_target` (voir defaults/main.yml). Joué DÉLÉGUÉ depuis chaque
+# source (source.yml) — une source à la fois (`throttle: 1` : deux `useradd` simultanés sur la même machine se
+# disputent /etc/passwd) — ou directement sur l'hôte (main.yml). Idempotent.
+
+- name: Check the backup account settings
+  ansible.builtin.assert:
+    that:
+      - backup_account is match('^[a-z][a-z0-9-]{1,30}$')
+      - backup_account_root is match('^/[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)+$')
+      - backup_gate_path is match('^/[A-Za-z0-9._/-]+$')
+    fail_msg: >-
+      backup_account (minuscules, 2 à 31 caractères), backup_account_root (chemin absolu d'au moins deux niveaux) et
+      backup_gate_path (chemin absolu) : valeurs invalides.
+    quiet: true
+
+- name: Look for an existing account named {{ backup_account }} on {{ bk_target }}
+  ansible.builtin.command:
+    argv: [getent, passwd, "{{ backup_account }}"]
+  register: bk_existing_account
+  changed_when: false
+  failed_when: bk_existing_account.rc not in [0, 2]
+  check_mode: false
+  delegate_to: "{{ bk_target }}"
+  throttle: 1
+
+- name: Refuse to take over a system account
+  ansible.builtin.assert:
+    that: bk_existing_account.rc == 2 or (bk_existing_account.stdout.split(':')[2] | int) >= 1000
+    fail_msg: >-
+      {{ bk_target }} : `{{ backup_account }}` existe déjà comme compte SYSTÈME (uid
+      {{ bk_existing_account.stdout.split(':')[2] | default('?') }}) — `backup` (uid 34) l'est sur toute Debian/Ubuntu.
+      Choisir un autre `backup_account` (défaut : fleetbackup).
+    quiet: true
+
+- name: Create the dedicated backup account on {{ bk_target }}
+  ansible.builtin.user:
+    name: "{{ backup_account }}"
+    comment: "FleetForge backup destination (forced command {{ backup_gate_path }})"
+    # sshd lance la commande forcée par le shell du compte : nologin la refuserait. Aucun shell interactif n'est
+    # pour autant possible : `restrict` (pas de pty) et la commande forcée remplacent toute demande du client.
+    shell: /bin/sh
+    home: "/home/{{ backup_account }}"
+    create_home: true
+    password_lock: true
+    groups: []
+    append: false
+    system: false
+  delegate_to: "{{ bk_target }}"
+  become: true
+  throttle: 1
+
+- name: Keep the home directory private
+  ansible.builtin.file:
+    path: "/home/{{ backup_account }}"
+    state: directory
+    owner: "{{ backup_account }}"
+    group: "{{ backup_account }}"
+    mode: '0750'
+  delegate_to: "{{ bk_target }}"
+  become: true
+  throttle: 1
+
+- name: Create the backup root
+  ansible.builtin.file:
+    path: "{{ backup_account_root }}"
+    state: directory
+    owner: "{{ backup_account }}"
+    group: "{{ backup_account }}"
+    mode: '0750'
+  delegate_to: "{{ bk_target }}"
+  become: true
+  throttle: 1
+
+- name: Install the backup gate
+  ansible.builtin.copy:
+    src: backup-gate.py
+    dest: "{{ backup_gate_path }}"
+    owner: root
+    group: root
+    mode: '0755'
+  delegate_to: "{{ bk_target }}"
+  become: true
+  throttle: 1

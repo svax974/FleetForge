@@ -1,0 +1,9 @@
+---
+# Prépare le compte dédié et la passerelle sur l'hôte joué (une destination du groupe `backups`), sans aucune source.
+# Les rôles d'installation des sauvegardes le font eux-mêmes pour leur destination (tasks/source.yml) : ce point
+# d'entrée sert à préparer une destination à l'avance. Voir defaults/main.yml.
+
+- name: Prepare the dedicated backup account
+  ansible.builtin.import_tasks: account.yml
+  vars:
+    bk_target: "{{ inventory_hostname }}"

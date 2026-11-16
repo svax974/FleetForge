@@ -108,7 +108,8 @@ archives ; retirer EN MÊME TEMPS l'entrée d'inventaire ou son `proxy_hostname`
 ## Vérifications après déploiement
 
 - Prometheus (sur `monitor`) : `count(sync_up{job="sync-server"})` doit valoir 3 (une règle sans série est décorative) ;
-  `count(backup_last_success_timestamp_seconds)` doit valoir 5 une fois les sauvegardes jouées ; `service_up{service=~"sync-.*"}` à 1.
+  `count(backup_last_success_timestamp_seconds)` doit valoir 5 une fois les sauvegardes jouées (6 avec la passerelle MCP) ;
+  `service_up{service=~"sync-.*"}` à 1.
 - Depuis une machine NON whitelistée (ni proxy, ni `monitor`) les ports 4710-4712 et 9710-9712 doivent être BLOQUÉS :
   `for p in 4710 4711 4712 9710 9711 9712; do nc -zv -w5 `ctdapi` $p; done` — tous en échec. Sur la machine,
   `iptables -S DOCKER-USER | grep -E '47(10|11|12)|97(10|11|12)'` doit montrer un DROP par port (`ufw status` ne prouve rien).
@@ -127,7 +128,85 @@ archives ; retirer EN MÊME TEMPS l'entrée d'inventaire ou son `proxy_hostname`
   archives : un groupe supprimé reste (chiffré) dans les sauvegardes jusqu'à 14 jours.
 - Restauration : procédure en tête du script `/usr/local/sbin/sync-backup-<instance>.sh` sur l'hôte. Repointer la
   destination : `deploy-backup.yml --tags retarget --limit sync_servers` (`retarget-backups-web3c.yml` ne couvre
-  que tradekong/ctdapi).
+  que les bases PostgreSQL : tradekong, ctdapi, passerelle MCP).
+
+# Sauvegardes (famille `backup`)
+
+`deploy-backup.yml` (retrait `remove-backup.yml`, purge `purge-backup.yml -e confirm=yes`, repointage
+`retarget-backups(-web3c).yml`). Destinations = entrées du groupe `backups` ; les sources poussent en SSH, rien ne
+transite par leur disque. Ce qui suit vaut pour PostgreSQL (`postgres-backup-install` : tradekong, ctdapi, passerelle MCP)
+et SQLite (`sync-backup-install`) ; BRK et TimescaleDB (papanglabs) écrivent encore par `remote_username`.
+
+## Compte dédié et passerelle sur la destination
+
+- Compte `backup_account` (défaut `fleetbackup`, rôle `backup-setup`, créé par la première source qui vise la
+  destination) : sans sudo ni groupe, mot de passe verrouillé. Jamais `backup` : compte SYSTÈME de toute Debian/Ubuntu
+  (uid 34), qu'une mise à jour de la distribution peut remettre à `nologin` — le rôle refuse tout compte existant
+  d'uid < 1000.
+- Chaque clé de source : `restrict,from="<adresse de la source>",command="/usr/local/sbin/backup-gate <racine> <nom>
+  <générations> <plancher Go>"`. Quoi que demande le client, seule la passerelle s'exécute (aucun shell, aucun pty) : verbes fermés
+  (`free-kb`, `last-success`, `put`, `commit`, `abort`, `prune`, `stamp`, `list`, `get`), noms de fichiers à la grammaire
+  des sauvegardes, répertoire `/home/<compte>/backups/<nom>` (0700) de LA source. Une source ne lit ni n'efface celles
+  d'une autre ; la rétention est fixée par la commande forcée, pas par la source. Chaque appel est journalisé
+  (`journalctl -t backup-gate` : source, verbe, fichier, octets — jamais de contenu).
+- Pare-feu (`backup-security`) et known_hosts : même logique qu'avant, sur le port SSH de LA destination
+  (`ansible_port` de son entrée — une machine derrière un NAT a le sien ; sur 22, known_hosts porte l'adresse seule).
+- Place libre exigée par la source avant d'écrire : `backup_min_free_gb` sur l'entrée de destination (20 Go par
+  défaut). Plancher tenu par la passerelle PENDANT l'écriture : `backup_floor_gb` (5 Go) — sous ce seuil, `put` s'arrête
+  et efface son `.tmp` ; une source, même compromise, ne remplit pas le disque d'une destination qui sert autre chose.
+
+## Chiffrement (age)
+
+- Posé par `backup_encrypt_recipient` (group_vars du parc) ou par entrée (`pgbak_encrypt_recipient`,
+  `sync_backup_encrypt_recipient`) : `pg_dump | gzip | age -r <destinataire>` (`tar -cz | age` pour les serveurs de
+  synchro), fichiers `.sql.gz.age` / `.tar.gz.age`. Compression AVANT chiffrement (un flux chiffré ne se compresse
+  plus), en flux, mémoire constante. Pas de repli : `age` absent ou en échec, la sauvegarde échoue (BackupFailed) ; la
+  passerelle `backup-gate` n'accepte un `.age` qu'avec l'en-tête age. Sans destinataire : en clair, comme avant —
+  sauf la passerelle MCP, dont la garde l'EXIGE.
+- Pourquoi age : paquet officiel (Ubuntu 22.04+, Debian 12+ ; installé par le rôle, jamais un binaire téléchargé),
+  destinataire d'une ligne dans l'inventaire, pas de trousseau sur les sources (gpg en tiendrait un, et y écrirait la
+  clé privée le temps d'une restauration), format authentifié par blocs de 64 Kio (un fichier tronqué ou modifié est
+  refusé au déchiffrement). `openssl` ne chiffre pas en flux authentifié vers une clé publique (`cms -decrypt` charge
+  tout en mémoire).
+- Coût mesuré le 16/11/2026 sur le poste (300 Mio de dump synthétique, implémentation du format age v1 avec
+  `cryptography`/OpenSSL, `age` n'étant pas installé sur le poste) : `gzip -6` 4,3 s CPU ; chiffrement du flux compressé
+  (83 Mo) 0,16 s CPU (≈ 4 %, interpréteur compris) ; +20 Ko (0,025 %) ; mémoire constante (≈ 30 Mo pour 8 Mo comme pour
+  83 Mo) ; aller-retour identique octet pour octet, mauvaise clé et fichier tronqué refusés. ChaCha20-Poly1305 seul
+  (`openssl speed`) : ≈ 2 Go/s sur un cœur. Le coût est celui de gzip et de pg_dump, pas du chiffrement.
+
+## Clé de l'opérateur (sur SON poste, jamais dans ce dépôt ni sur une machine du parc)
+
+    brew install age            # ou : sudo apt install age
+    mkdir -p ~/.config/fleetforge && cd ~/.config/fleetforge && umask 077
+    age-keygen | age -p -a > backup-key.age   # clé privée chiffrée par une phrase de passe ; affiche « Public key: age1… »
+    age -d backup-key.age | age-keygen -y     # redonne le destinataire public, à tout moment
+
+Le destinataire public (`age1…`) va dans `backup_encrypt_recipient` (group_vars privé du parc, ce n'est pas un secret).
+Deux copies hors ligne de `backup-key.age` (et de sa phrase de passe, séparément) : sans elles, les sauvegardes sont
+illisibles. Rotation : nouveau destinataire → les sauvegardes suivantes l'utilisent ; garder l'ancienne clé tant que des
+générations chiffrées pour elle existent (3 jours pour PostgreSQL, 14 pour les serveurs de synchro).
+
+## Restauration
+
+- PostgreSQL, sur la machine de la base : `<pgbak_dir>/postgres-restore.sh --check` (liste, sans clé),
+  `--verify [--file <nom>]` (relit, déchiffre, décompresse, n'écrit rien), `--yes [--file <nom>]` (relecture COMPLÈTE
+  d'abord, puis suppression et rechargement de la base — application arrêtée). Clé sur l'entrée standard, depuis le poste :
+  `age -d ~/.config/fleetforge/backup-key.age | ssh -p <port> srvc@<machine> '<pgbak_dir>/postgres-restore.sh --verify'`.
+  La clé reste en mémoire du script et passe à age par un tube : jamais un fichier, jamais un argument de processus.
+- Serveurs de synchro : en-tête de `/usr/local/sbin/sync-backup-<instance>.sh`.
+
+## Supervision
+
+`backup_last_*{backup="<nom>"}` (collecteur textfile). Par nom de `prom_alert_backup_max_age_hours` : `BackupStale`
+(dernière réussite plus vieille que le seuil) et `BackupMissing` (`absent()` : aucune série depuis le seuil — jamais
+installée, jamais passée, métrique perdue) ; `BackupFailed` pour tout échec. Ne déclarer un seuil que pour une sauvegarde
+qui doit exister (une instance de synchro non déployée ferait sonner `BackupMissing`).
+
+## Hors périmètre
+
+BRK et TimescaleDB (papanglabs) : toujours `remote_username` sur la destination, sans chiffrement. Une seule destination par
+sauvegarde, pas de copie hors ligne. Le compte dédié n'est jamais supprimé par `purge-backup.yml` (il peut porter d'autres
+sources) : `userdel -r <compte>` à la main une fois la destination vide.
 
 # Passerelle MCP de FleetForge (`fleetforge-gateway`)
 

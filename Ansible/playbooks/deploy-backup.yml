@@ -7,11 +7,21 @@
 #   papanglabs : magasin BRK (brk1) → `backup-brk`,
 #                base d'indicateurs (timescale) → `backup-timescale`
 #   web3c      : PostgreSQL de tradekong et ctdapi → `backup-tradekong` /
-#                `backup-ctdapi` ; SQLite des serveurs de synchro → `backup-sync`
+#                `backup-ctdapi` ; SQLite des serveurs de synchro → `backup-sync` ;
+#                base de la passerelle MCP (opt-in) → son `pgbak_dest_host`
 #
 # Les destinations sont des ENTRÉES D'INVENTAIRE (groupe `backups`), pas des IP
 # en dur. Changer de serveur = changer `ansible_host` puis jouer
 # `retarget-backups.yml` (papanglabs) / `retarget-backups-web3c.yml` (web3c).
+#
+# PostgreSQL (postgres-backup-install) et SQLite (sync-backup-install) écrivent
+# sur la destination par un compte DÉDIÉ sans sudo (`backup_account`, rôle
+# backup-setup) : chaque clé de source y est liée à son adresse (`from=`) et à la
+# passerelle `backup-gate` (commande forcée, `restrict`), confinée au répertoire
+# de la source. Chiffrement pour la clé de l'opérateur dès que
+# `backup_encrypt_recipient` (ou `pgbak_/sync_backup_encrypt_recipient`) est posé
+# — EXIGÉ pour la passerelle MCP. Mode d'emploi : Ansible/README.md, « Sauvegardes ».
+# BRK et TimescaleDB (papanglabs) écrivent encore par `remote_username`.
 #
 #   ./play.sh papanglabs deploy-backup.yml
 #   ./play.sh web3c deploy-backup.yml
@@ -28,6 +38,33 @@
 # échecs consécutifs (incident du 29/08/2026). Ici le dump est streamé vers une
 # autre machine et ne touche jamais le disque de la source.
 
+# ── Passerelle MCP : opt-in et garde, SANS connexion ──────────────────────
+# Une entrée de `fleetforge_gateways` n'est sauvegardée que si elle porte
+# `backup` dans `ansible_roles` : elle passe alors la garde de la passerelle
+# (destination d'une AUTRE machine, dump CHIFFRÉ, port explicite —
+# fleetforge-install/tasks/gateway-backup-guard.yml, la même que
+# deploy-fleetforge.yml) avant tout contact, et rejoint le groupe
+# `fleetforge_gateways_backup` que visent les plays suivants. Sans `backup`,
+# l'entrée n'est jamais touchée par ce playbook.
+- name: Passerelle MCP — opt-in et garde de la sauvegarde
+  hosts: fleetforge_gateways
+  gather_facts: false
+  tasks:
+    - name: Check the database backup declaration of the gateway
+      ansible.builtin.include_role:
+        name: fleetforge-install
+        tasks_from: gateway-backup-guard
+        apply:
+          tags: [always]
+      when: "'backup' in (ansible_roles | default([]))"
+      tags: [always]
+
+    - name: Keep the gateways that opt in
+      ansible.builtin.group_by:
+        key: "{{ 'fleetforge_gateways_backup' if 'backup' in (ansible_roles | default([])) else 'fleetforge_gateways_nobackup' }}"
+      changed_when: false
+      tags: [always]
+
 # ── Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ───────────────────────
 - name: Contrôle préalable (sources natives)
   hosts: brk1:timescale1
@@ -37,7 +74,7 @@
       preflight_require_docker: false
 
 - name: Contrôle préalable (sources Docker)
-  hosts: tradekong:ctdapi:fleetforge_gateways:sync_servers
+  hosts: tradekong:ctdapi:fleetforge_gateways_backup:sync_servers
   remote_user: "{{ remote_username }}"
   roles:
     - role: host-preflight
@@ -58,13 +95,12 @@
 
 # ── web3c ──────────────────────────────────────────────────────────────────
 #
-# `fleetforge_gateways` : la base de la passerelle MCP (entrée `webapp` durcie).
-# Le groupe est vide sur un parc sans passerelle, et une entrée qui n'a pas
-# `backup` dans `ansible_roles` ne porte pas de `pgbak_*` : le rôle échoue alors
-# (variable sans défaut) au lieu de sauvegarder à côté — voir
-# docs/etude-passerelle-sur-webapp.md, « Sauvegarde de la base de la passerelle ».
+# `fleetforge_gateways_backup` : la base de la passerelle MCP (entrée `webapp`
+# durcie qui a opté pour `backup`, garde passée ci-dessus). Groupe vide sur un
+# parc sans passerelle — voir docs/etude-passerelle-sur-webapp.md, « Sauvegarde
+# de la base de la passerelle ».
 - name: Sauvegarde PostgreSQL — tradekong, ctdapi et passerelle MCP
-  hosts: tradekong:ctdapi:fleetforge_gateways
+  hosts: tradekong:ctdapi:fleetforge_gateways_backup
   remote_user: "{{ remote_username }}"
   roles:
     - postgres-backup-install
@@ -72,7 +108,7 @@
 # Instantané SQLite cohérent (VACUUM INTO) + blobs, poussé en SSH vers
 # `backup-sync`. Cron quotidien 04:xx, rétention 14 générations, métrique
 # backup_last_success_timestamp_seconds{backup="sync-<instance>"} — seuils
-# BackupStale par instance dans `prom_alert_backup_max_age_hours`
+# BackupStale/BackupMissing par instance dans `prom_alert_backup_max_age_hours`
 # (group_vars/web3c.yml). Pas de limite de débit : bases de quelques Mio.
 - name: Sauvegarde SQLite — serveurs de synchronisation
   hosts: sync_servers

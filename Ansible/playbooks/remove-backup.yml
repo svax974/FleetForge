@@ -24,8 +24,19 @@
   roles:
     - timescaledb-backup-remove
 
-- name: Arrêt de la sauvegarde PostgreSQL — tradekong et ctdapi
-  hosts: tradekong:ctdapi
+# Passerelle MCP : seulement l'entrée qui porte `backup` (les autres n'ont pas
+# de `pgbak_*`, et rien n'a été installé pour elles).
+- name: Passerelle MCP — entrées sauvegardées
+  hosts: fleetforge_gateways
+  gather_facts: false
+  tasks:
+    - name: Keep the gateways that opt in
+      ansible.builtin.group_by:
+        key: "{{ 'fleetforge_gateways_backup' if 'backup' in (ansible_roles | default([])) else 'fleetforge_gateways_nobackup' }}"
+      changed_when: false
+
+- name: Arrêt de la sauvegarde PostgreSQL — tradekong, ctdapi et passerelle MCP
+  hosts: tradekong:ctdapi:fleetforge_gateways_backup
   remote_user: "{{ remote_username }}"
   roles:
     - postgres-backup-remove
