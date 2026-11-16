@@ -89,13 +89,9 @@ par `deploy-fleetforge.yml` (garde du groupe `fleetforge_gateways` puis import d
 - **`OUTPUT -m owner`** pour réserver les ports locaux de la passerelle à nginx et root : non posé, à décider.
 - **Permissions de `/home/srvc/fleetforge` et `~/.ssh`** : le compte `ffgateway` ne doit ni les lire ni
   les traverser. Non vérifié sur la machine ; le premier `--tags hardening` le dira (échec = chmod à faire).
-- **Sauvegarde de la base de la passerelle** : données `pgbak_*` posées, NON activée (décision du
-  15/11/2026 : estimation seulement). Coût estimé pour l'ajouter à la famille `backup` existante : une
-  entrée de destination dans le groupe `backups` sur une machine AUTRE que celle d'`infra1` (les
-  `backup-*` de web3c y sont toutes) ou réutiliser une destination existante hors de cette machine ;
-  `pgbak_dest_host` + `backup` dans `ansible_roles` de l'entrée ; ajouter l'entrée au play
-  `postgres-backup-install` de `deploy-backup.yml` (motif d'hôtes en dur) et à `prom_alert_backup_max_age_hours`
-  ; vérifier `pgbak_db`/`pgbak_user` contre le back/.env ; ~S (une demi-journée, revue comprise).
+- **Sauvegarde de la base de la passerelle** : implémentée (dump chiffré exigé, compte dédié sur la destination
+  `station`), PAS encore activée ni observée — clé de l'opérateur, inventaire privé, déploiement et première
+  vérification supervisée : `docs/etude-passerelle-sur-webapp.md`, « Sauvegarde de la base de la passerelle ».
 - **CNAME `ffg.web3c.cc`** : publié par la synchronisation DNS générique dès que l'entrée existe, avant
   tout déploiement (vhost rendu par les proxies : sans backend joignable tant que l'app n'est pas là).
 - **`max_hosts: 5`** des comptes `ffg_check`/`ffg_run` : à confirmer.
