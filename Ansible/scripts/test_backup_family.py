@@ -311,6 +311,41 @@ class GateTests(unittest.TestCase):
             gate.zlib.decompressobj = real
         self.assertTrue(calls and all(0 < m <= gate.CHUNK for m in calls))
 
+    def test_orphan_tmp_files_older_than_six_hours_go_at_any_call_of_their_source(self):
+        # Review finding: leftovers were removed only by the next `put` of the same source, so a source that stops
+        # writing kept the destination at its floor. Any call of a source now removes ITS OWN stale .tmp files.
+        old, fresh, backup = (f"appdb-{stamp(h)}.sql.gz" for h in (-7, -1, -2))
+        other_old = f"otherdb-{stamp(-8)}.sql.gz.tmp"
+        for directory, name in ((self.app, old + ".tmp"), (self.app, fresh + ".tmp"), (self.app, backup),
+                                (os.path.join(self.root, "other"), other_old)):
+            path = os.path.join(directory, name)
+            with open(path, "wb") as f:
+                f.write(b"partial")
+            if name in (old + ".tmp", backup, other_old):
+                os.utime(path, (time.time() - 7 * 3600, time.time() - 7 * 3600))
+        link = os.path.join(self.app, f"appdb-{stamp(-9)}.sql.gz.tmp")
+        os.symlink(os.path.join(self.tmp, "nowhere"), link)  # never followed, never counted as a leftover
+        for request in ("free-kb", "last-success", "list"):
+            with self.subTest(request=request):
+                self.assertEqual(run_gate(self.root, "app", request).returncode, 0)
+                names = os.listdir(self.app)
+                self.assertNotIn(old + ".tmp", names)
+                self.assertIn(fresh + ".tmp", names)  # a transfer may still be running
+                self.assertIn(backup, names)  # a validated generation is never an orphan, however old
+                self.assertIn(os.path.basename(link), names)
+                self.assertIn(other_old, os.listdir(os.path.join(self.root, "other")))
+                with open(os.path.join(self.app, old + ".tmp"), "wb") as f:
+                    f.write(b"partial")
+                os.utime(os.path.join(self.app, old + ".tmp"), (time.time() - 7 * 3600, time.time() - 7 * 3600))
+        # Not while another transfer of the source holds the lock.
+        fd = os.open(os.path.join(self.app, ".gate.lock"), os.O_WRONLY | os.O_CREAT, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            self.assertEqual(run_gate(self.root, "app", "free-kb").returncode, 0)
+            self.assertIn(old + ".tmp", os.listdir(self.app))
+        finally:
+            os.close(fd)
+
     def test_a_client_gone_after_the_write_does_not_fail_the_commit(self):
         # Review finding: the size printed after `commit` hit a broken pipe (client vanished) and the call failed
         # AFTER last-success was written. The reply goes to a pipe whose reader is already closed.

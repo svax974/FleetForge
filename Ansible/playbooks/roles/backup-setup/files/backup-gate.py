@@ -18,7 +18,9 @@ only do what its backup and restore scripts need (SSH_ORIGINAL_COMMAND, one verb
     last-success     time (destination clock) of the last validated generation, 0 when none
     put <file>       writes standard input to <file>.tmp, never over an existing file. Stops and removes it as soon as
                      the file system falls under <floor GB> free (checked every MiB) ; one writer per source at a time
-                     (exclusive lock), and leftover .tmp files of an interrupted run are removed first
+                     (exclusive lock), and leftover .tmp files of an interrupted run are removed first. Whatever the
+                     verb, any call also removes the source's own .tmp files untouched for more than 6 hours (an
+                     abandoned transfer must not keep the destination at its floor)
     commit <file>    checks <file>.tmp (complete non-empty gzip stream, or a structurally complete age file), makes it
                      visible, keeps the <generations> most recent ones BY DESTINATION TIME (count fixed by the forced
                      command, not by the source), then — only if the new generation is still there — writes
@@ -54,6 +56,7 @@ GZIP_MAGIC = b"\x1f\x8b"
 CHUNK = 1024 * 1024
 ROOM_CHECK_EVERY = 1  # chunks (1 MiB) between two free-space checks during a put
 STAMP_WINDOW = timedelta(hours=26)  # source time zone (±14 h) + cron delays
+STALE_TMP = timedelta(hours=6)  # a .tmp untouched this long is the orphan of an interrupted transfer
 LAST_SUCCESS = "last-success"
 LOCK = ".gate.lock"
 
@@ -116,6 +119,29 @@ def remove_leftovers(directory):
     for name in os.listdir(directory):
         if name.endswith(".tmp") and FILE_RE.fullmatch(name[:-4]):
             os.unlink(os.path.join(directory, name))
+
+
+def remove_stale(directory):
+    """Any call of a source: ITS OWN .tmp files untouched for more than STALE_TMP are orphans (a live transfer writes
+    every MiB and keeps the lock). Skipped, without waiting, when a transfer of the source is running. Returns the
+    names removed."""
+    try:
+        fd = locked(directory)
+    except Refused:
+        return []
+    removed = []
+    try:
+        limit = time.time() - STALE_TMP.total_seconds()
+        for name in os.listdir(directory):
+            if name.endswith(".tmp") and FILE_RE.fullmatch(name[:-4]):
+                path = os.path.join(directory, name)
+                st = os.lstat(path)
+                if stat.S_ISREG(st.st_mode) and st.st_mtime < limit:
+                    os.unlink(path)
+                    removed.append(name)
+    finally:
+        os.close(fd)
+    return removed
 
 
 def receive(directory, tmp, floor):
@@ -320,6 +346,11 @@ def main(argv):
         print("backup-gate: refused", file=sys.stderr)
         return 2
     try:
+        try:
+            for name in remove_stale(directory):
+                log(syslog.LOG_INFO, f"source={source} stale-tmp-removed {name}")
+        except OSError as error:  # housekeeping only: never fails the request
+            log(syslog.LOG_WARNING, f"source={source} stale-tmp sweep failed: {error.strerror or error}")
         detail = run(directory, keep, floor, words)
     except Refused as refused:
         log(syslog.LOG_WARNING, f"source={source} verb={words[0]} refused: {refused}")
