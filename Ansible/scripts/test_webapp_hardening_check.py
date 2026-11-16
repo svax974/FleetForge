@@ -927,6 +927,102 @@ class VhostTests(unittest.TestCase):
         self.assertIn("proxy_pass         http://203.0.113.20:3900;", block)
 
 
+def directives(text):
+    """What nginx reads: each line with its `#…` comment cut to the end of the line, blank lines dropped."""
+    return [line.split("#", 1)[0].strip() for line in text.splitlines() if line.split("#", 1)[0].strip()]
+
+
+_JINJA_TAG = re.compile(r"(\{\{.*?\}\}|\{%.*?%\}|\{#.*?#\})", re.S)
+
+
+def swallowed_by_a_comment(source):
+    """Jinja whitespace control that glues the next output onto a line carrying a `#` comment (nginx, shell, YAML, Postfix:
+    the glued text becomes comment).  `{#-`, `{%-`, `{{-` strip the newline BEFORE the tag; `-#}`, `-%}`, `-}}` strip the
+    newline AFTER it.  Returns [(line, side, text of the commented line)]."""
+    parts = _JINJA_TAG.split(source)
+    flat, pos = [], 0
+    for index, part in enumerate(parts):
+        flat.append((index % 2 == 1, part, pos))
+        pos += len(part)
+
+    def view(items):  # the template as the commented line sees it: blocks and comments vanish, expressions become `X`
+        return "".join(("X" if text.startswith("{{") else "") if is_tag else text for is_tag, text, _ in items)
+
+    found = []
+    for k, (is_tag, tag, start) in enumerate(flat):
+        if not is_tag:
+            continue
+        line = source.count("\n", 0, start) + 1
+        before = view(flat[:k])
+        if tag[2:3] == "-":
+            stripped = before.rstrip()
+            if "\n" in before[len(stripped):] or not before:
+                last = stripped.rsplit("\n", 1)[-1]
+                if "#" in last:
+                    found.append((line, "before", last.strip()))
+        if tag[-3:-2] == "-" and "#" in before.rsplit("\n", 1)[-1] and k + 1 < len(flat):
+            following = view(flat[k + 1:k + 2])
+            if "\n" in following[:len(following) - len(following.lstrip())]:
+                found.append((line, "after", before.rsplit("\n", 1)[-1].strip()))
+    return found
+
+
+class AccessIncNewlineTests(unittest.TestCase):
+    """Regression: the `{#- … #}` after `allow …;  # serveur lié X` swallowed the newline, so the next `allow` lines AND
+    `deny all;` landed on the comment line — nginx read them as a comment and the private vhost was left OPEN."""
+
+    def test_private_mode_puts_every_allow_on_its_own_line_and_ends_with_deny_all(self):
+        rendered = render_infra("proxy1")  # infra1: two linked servers, one on the proxy's own machine with local cidrs
+        self.assertIn("allow 10.73.231.0/24;", rendered, "same-machine case not exercised")
+        lines = directives(rendered)
+        self.assertEqual(lines[-1], "deny all;", lines)
+        self.assertEqual(lines.count("deny all;"), 1)
+        for line in lines:
+            self.assertRegex(line, r"^allow \S+;$|^deny all;$", f"two directives (or a comment) on one line: {line!r}")
+        for address in ["198.51.100.1", "192.0.2.10", "203.0.113.50", "203.0.113.7", "10.73.231.0/24"]:
+            self.assertIn(f"allow {address};", lines)
+        for raw in rendered.splitlines():  # no directive after a `#` on any physical line
+            if "#" in raw:
+                self.assertNotRegex(raw.split("#", 1)[1], r"\b(allow|deny)\b[^#]*;", raw)
+
+    def test_the_other_proxy_also_ends_with_deny_all_on_its_own_line(self):
+        lines = directives(render_infra("proxy3"))
+        self.assertEqual(lines[-1], "deny all;")
+        self.assertIn("allow 203.0.113.7;", lines)
+        self.assertIn("allow 192.0.2.10;", lines)
+
+    def test_the_named_access_and_restricted_blocks_end_with_deny_all(self):
+        text = render_vhost()
+        access = [d for d in directives(check.mcp_block(text)) if d.startswith(("allow ", "deny "))]
+        self.assertEqual(access[-1], "deny all;")
+        listener = directives(_env().from_string(
+            "{% set access_entry = 'infra1' %}{% set access_only_local = ['agenthub', 'fleetforge-gateway'] %}"
+            "{% include '_access.inc' %}").render(
+            hostvars=copy.deepcopy(INVENTORY), ansible_host="192.0.2.10", whitelist=WHITELIST,
+            groups={"vpns": ["vpn1"]}, prometheus_host="monitor"))
+        self.assertEqual(listener[-1], "deny all;")
+        for line in listener:
+            self.assertRegex(line, r"^allow \S+;$|^deny all;$")
+
+    def test_no_template_glues_output_onto_a_commented_line(self):
+        offenders = []
+        for root, _dirs, files in os.walk(PLAYBOOKS):
+            for name in files:
+                if name.endswith((".j2", ".inc")):
+                    path = os.path.join(root, name)
+                    with open(path, encoding="utf-8") as handle:
+                        offenders += [(os.path.relpath(path, PLAYBOOKS),) + hit for hit in swallowed_by_a_comment(handle.read())]
+        self.assertEqual(offenders, [])
+
+    def test_the_lint_catches_the_original_pattern(self):
+        broken = "allow {{ a }};  # lié {{ h }}\n{#- note #}\nallow {{ b }};\ndeny all;\n"
+        self.assertEqual(len(swallowed_by_a_comment(broken)), 1)
+        self.assertEqual(swallowed_by_a_comment(broken.replace("{#-", "{#")), [])
+        self.assertEqual(len(swallowed_by_a_comment("x;  # c {% if a -%}\ny;\n{% endif %}\n")), 1)
+        env = jinja2.Environment(trim_blocks=True, keep_trailing_newline=True)
+        self.assertNotIn("\nallow", env.from_string(broken).render(a=1, b=2, h="h"), "the repro really swallows the newline")
+
+
 class FirewallScriptTests(unittest.TestCase):
     """Le script DOCKER-USER se rend (piège : la syntaxe de longueur de tableau de bash ouvre un commentaire Jinja)
     et insère ses règles en tête, sans plage interne large."""

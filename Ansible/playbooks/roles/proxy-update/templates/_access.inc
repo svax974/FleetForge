@@ -76,7 +76,7 @@
         {% endfor %}
         {% for host in hostvars[access_entry].access_linked | default([]) %}
         allow {{ hostvars[host]['ansible_host'] }};  # serveur lié {{ host }}
-        {#- Serveur lié sur la MÊME machine que ce proxy : il joint le nom public
+        {# Serveur lié sur la MÊME machine que ce proxy : il joint le nom public
             par l'adresse publique de la machine, mais depuis un conteneur le
             paquet arrive en local, avec l'adresse du conteneur (pas de NAT
             pour une destination locale). Ses sous-réseaux Docker DÉDIÉS sont
