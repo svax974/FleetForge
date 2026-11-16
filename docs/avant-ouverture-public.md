@@ -50,14 +50,30 @@ par `deploy-fleetforge.yml` (garde du groupe `fleetforge_gateways` puis import d
   FAIT dans les gabarits (16/11/2026, rôle `mailrelay-setup`, variable optionnelle `mailrelay_sender_bindings`,
   vide par défaut = rien ne change) mais NON ACTIVÉ ni déployé : sans lui, un code compromis envoie sous
   n'importe quelle adresse d'un domaine du relais. À faire côté propriétaire :
-  1. sur mail1, créer le compte SASL propre à la passerelle, royaume = `mailrelay_hostname` (mot de passe SAISI
-     au prompt, jamais en argument) : `sudo saslpasswd2 -c -u <mailrelay_hostname> <login>` ; le mettre au coffre
-     des secrets de la passerelle, pas dans ce dépôt ;
+  1. le compte SASL propre à la passerelle est CRÉÉ par le rôle (variable optionnelle `mailrelay_sasl_accounts:
+     [{login, password}]`, vide par défaut = rien ne change) : `saslpasswd2 -c -p -f /etc/sasldb2 -u <mailrelay_hostname>
+     <login>`, mot de passe sur l'ENTRÉE STANDARD (jamais en argument), `no_log`, mot de passe de 20 caractères au
+     moins exigé, créé seulement s'il est ABSENT de la base (`sasldblistusers2`) : un rejeu ne le réécrit pas. Le
+     mot de passe est une variable de coffre du parc (`ansible-vault encrypt_string --stdin-name`), pas un fichier
+     de ce dépôt. ROTATION : re-chiffrer la variable, puis `./play.sh <parc> deploy-mailrelay.yml --limit <relais>
+     -e mailrelay_sasl_reset_login=<login>` (réécrit CE compte seulement, sans le supprimer d'abord) ; reporter
+     la nouvelle valeur dans l'admin de l'app. Retirer un compte de la liste ne le supprime pas (`saslpasswd2 -d -u
+     <royaume> <login>` à la main). `mailrelay_sasl_require_binding: true` refuse un compte sans liaison ;
   2. déclarer dans le group_vars du parc : `mailrelay_sender_bindings: [{login: <login>, senders: [<adresse@domaine du relais>]}]`
      (adresse complète, domaine de `mail_domains`) ; le compte partagé `relay_user` n'est pas touché ;
-  3. `./play.sh web3c deploy-mailrelay.yml --limit mail1` (rejoue aussi la config SASL/Postfix : redémarrage de
-     Postfix) ; vérifier dans `/var/log/mail.log` (`postfix/submission/smtpd`) que `sasl_username=<login>@<royaume>`
-     a bien cette forme, puis qu'un `MAIL FROM` d'une autre adresse est refusé en `553 5.7.1 … not owned by user`.
+  3. `mailrelay_submission_clients: [<entrée d'inventaire>]` : ouverture ufw 465/587 propre à l'adresse de cette
+     entrée (`ansible_host`, dérivée de l'inventaire), commentaire `mailrelay-submission-client <entrée>`, retirée
+     quand l'entrée sort de la liste. Doublon sans effet tant que `mailrelay_allowed_sources` (whitelist + toutes
+     les adresses de l'inventaire + bridge Docker, défaut de `mailrelay-security`) ouvre déjà 465/587 à cette
+     adresse : ufw ignore la règle identique. Pour ne l'ouvrir QU'à la passerelle, restreindre ce défaut — décision
+     du propriétaire, qui retirerait aussi l'accès d'Alertmanager et des autres hôtes ;
+  4. `./play.sh web3c deploy-mailrelay.yml --check --diff --limit mail1`, puis
+     sans `--check` (rejoue aussi la config SASL/Postfix : redémarrage de Postfix) ; vérifier dans `/var/log/mail.log`
+     (`postfix/submission/smtpd`) que `sasl_username=<login>@<royaume>` a bien cette forme, puis qu'un `MAIL FROM`
+     d'une autre adresse est refusé en `553 5.7.1 … not owned by user`. La passerelle ne lit aucune variable d'env.
+     pour son SMTP : sa configuration e-mail est en base (admin de l'app, `common_email_*` : provider `smtp`, hôte =
+     `mailrelay_hostname`, port 587, `smtpSecure` désactivé = STARTTLS, utilisateur = le login sans royaume, mot de
+     passe, adresse d'expéditeur = l'adresse liée) : à saisir une fois dans l'admin.
   Pour un identifiant LISTÉ : l'enveloppe est liée (`reject_sender_login_mismatch`), l'expéditeur nul (`MAIL FROM:<>`,
   que cette restriction laisse passer) est refusé d'abord par `check_sender_access` (table `bound_null_sender`), et
   `mailfilter.py` (reçoit `${sasl_username}` et `sender_bindings.json`) refuse en 65 (rebond) un `From:` — tous les
@@ -121,8 +137,11 @@ par `deploy-fleetforge.yml` (garde du groupe `fleetforge_gateways` puis import d
   au premier déploiement : sondes `upstream_main` (chemin vers FleetForge), envoi d'un code de connexion par e-mail
   (relais `mail1`, 587), `firewall_egress`. Résolution DNS depuis le conteneur : dépend du résolveur de la machine
   (lu sur place) — un échec de `upstream_main` avec « bad address » la désignerait.
-- **Compte SASL de la passerelle sur `mail1`** (postfix n'admet que la boucle locale sans authentification) : à créer,
-  puis à saisir dans l'admin de l'app (`common_email_*`). Sans lui, aucun code de connexion ne part.
+- **Compte SASL de la passerelle sur `mail1`** (postfix n'admet que la boucle locale sans authentification) : créé par
+  `deploy-mailrelay.yml` (`mailrelay_sasl_accounts`, voir « mail1 pour la passerelle distante ») au premier passage réel,
+  NON joué à ce jour ; sa valeur est à saisir dans l'admin de l'app (`common_email_*`). Sans lui, aucun code de
+  connexion ne part. `saslpasswd2 -c` sur un compte existant (rotation) et le comportement de sasldb après écriture
+  (propriétaire root:sasl 0640) sont supposés d'après la documentation de Cyrus, jamais éprouvés ici.
 - **Destinations de sortie non ouvertes** (décisions) : Prowl, Telegram/Web Push (approbations, lot 6.4), Google/wallet.
 - **`OUTPUT -m owner`** pour réserver les ports locaux de la passerelle à nginx et root : non posé, à décider.
 - **Permissions de `/home/srvc/fleetforge` et `~/.ssh`** : le compte `ffgateway` ne doit ni les lire ni
