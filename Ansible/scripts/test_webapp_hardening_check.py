@@ -2404,6 +2404,15 @@ class GuardTests(unittest.TestCase):
                                or "webapp_hardened" in str(p.get("hosts", "")))
             self.assertLess(imports[0], first_guard, f"{name} : la lecture doit précéder les gardes")
 
+    def test_the_imported_probe_finds_the_roles_like_any_other_playbook(self):
+        # Un playbook importé cherche `roles/` à côté de LUI (playbooks/lib/roles), pas à côté de l'importeur :
+        # sans ce lien, `include_role: webapp-setup` échoue sur le parc réel (« The role 'webapp-setup' was not found »),
+        # alors que les essais qui fixent `roles_path` ne le voient pas (constat du 16/11/2026).
+        for link in ("roles", "filter_plugins"):
+            path = os.path.join(PLAYBOOKS, "lib", link)
+            self.assertTrue(os.path.islink(path), f"playbooks/lib/{link} doit être un lien vers ../{link}")
+            self.assertEqual(os.path.realpath(path), os.path.realpath(os.path.join(PLAYBOOKS, link)))
+
     def test_a_conforming_gateway_passes_and_trusts_only_the_admitted_relays(self):
         code, out = self.guard(guard_inventory())
         self.assertEqual(code, 0, out[-3000:])
