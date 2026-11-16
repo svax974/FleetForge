@@ -1786,10 +1786,11 @@ class GuardTests(unittest.TestCase):
         # Nom PRIVÉ de la machine de l'amont (servi par le proxy co-localisé), jamais le CNAME vers tous les proxies.
         self.assertIn('"baseUrl": "https://infra-priv.example.test"', out.replace('\\"', '"'))
 
-    def test_the_upstream_is_never_reached_through_a_remote_proxy(self):
+    def test_the_upstream_is_never_reached_through_a_remote_proxy_without_an_explicit_ack(self):
         # Quatrième revue : par un proxy distant, le paquet sort par FORWARD, masqué derrière l'adresse publique de la
-        # machine — que le vhost FleetForge admet au titre d'infra1. Refusé par la garde générique du profil (toute
-        # sortie FORWARD vers un proxy) ET par celle de la passerelle (amont = proxy de CETTE machine).
+        # machine — que le vhost FleetForge admet au titre d'infra1. Ici la passerelle est SUR la machine d'infra1 :
+        # refusé par la garde générique du profil (sortie FORWARD vers un proxy, même acquittée : identité de
+        # nœud de contrôle) ET par celle de la passerelle (proxy distant sans `masquerade_ack`, amont hors de sa machine).
         def with_proxy3(**gateway):
             inventory = guard_inventory(**gateway)
             inventory["all"]["children"]["proxies"]["hosts"]["proxy3"] = {"ansible_host": "203.0.113.50"}
@@ -1818,13 +1819,105 @@ class GuardTests(unittest.TestCase):
         self.assertNotEqual(code, 0)
         self.assertIn("proxy DISTANT", out)
 
-    def test_the_upstream_entry_must_share_the_machine_and_declare_its_private_name(self):
+    def test_the_upstream_entry_must_be_served_by_the_egress_proxy_and_declare_its_private_name(self):
         inventory = guard_inventory()
         del inventory["all"]["children"]["infras"]["hosts"]["infra1"]["hostname"]
         self.assertNotEqual(self.guard(inventory)[0], 0)
+        # Le nom privé de l'amont n'est servi que par le proxy de SA machine : la sortie `upstream` doit viser ce proxy.
         inventory = guard_inventory()
         inventory["all"]["children"]["infras"]["hosts"]["infra1"]["ansible_host"] = "203.0.113.60"
         self.assertNotEqual(self.guard(inventory)[0], 0)
+
+    def remote_gateway(self, mutate=None, **gateway):
+        """Passerelle SUR SA PROPRE machine (203.0.113.40), proxy1/infra1/mail1 sur 192.0.2.10 : tout est distant."""
+        base = guard_inventory()["all"]["children"]["fleetforge_gateways"]["hosts"]["fleetforge-gateway"]["webapp_hardening"]
+        egress = [dict(e, masquerade_ack=True) for e in base["egress_allow"]]
+        fields = dict(ansible_host="203.0.113.40", access_local_cidrs=[], webapp_hardening=dict(base, egress_allow=egress))
+        fields.update(gateway)
+        inventory = guard_inventory(**fields)
+        if mutate:
+            mutate(inventory["all"])
+        return inventory
+
+    def test_a_gateway_on_its_own_machine_reaches_the_upstream_through_the_remote_proxy(self):
+        # Machine dédiée aux apps `webapp` : pas de proxy local, donc ni `access_local_cidrs` ni passerelle du pont dans
+        # TRUST_PROXY ; proxy1 (distant, admis) y est joint par FORWARD, proxy2 (adresse du VPN) jamais.
+        def add_other_apps(inventory):
+            inventory["children"]["apps"]["hosts"]["other-app"] = {"ansible_host": "203.0.113.40", "ansible_port": 22,
+                                                                   "ansible_roles": ["webapp"], "app_port": 4500}
+        code, out = self.guard(self.remote_gateway(add_other_apps))
+        self.assertEqual(code, 0, out[-3000:])
+        line = out.split("GUARD=OK", 1)[1].split("\n", 1)[0]
+        self.assertIn(" 192.0.2.10,10.73.231.10,10.73.231.11 192.0.2.10 ", line)
+        self.assertNotIn("10.73.231.1,", line)
+        self.assertNotIn("198.51.100.1", line)
+        self.assertIn('"baseUrl": "https://infra-priv.example.test"', out.replace('\\"', '"'))
+
+    def test_a_remote_proxy_needs_an_ack_on_every_line_that_reaches_a_proxy_address(self):
+        base = guard_inventory()["all"]["children"]["fleetforge_gateways"]["hosts"]["fleetforge-gateway"]["webapp_hardening"]
+        up, smtp = base["egress_allow"]
+        for label, egress in {
+            "upstream": [up, dict(smtp, masquerade_ack=True)],
+            "smtp": [dict(up, masquerade_ack=True), smtp],       # mail1 est à l'adresse de proxy1
+            "false": [dict(up, masquerade_ack=False), dict(smtp, masquerade_ack=True)],
+        }.items():
+            with self.subTest(label):
+                code, out = self.guard(self.remote_gateway(webapp_hardening=dict(base, egress_allow=egress)))
+                self.assertNotEqual(code, 0)
+                self.assertIn("masquerade_ack", out)
+
+    def test_a_masqueraded_machine_must_hold_no_privileged_identity(self):
+        # L'adresse publique de la machine est celle que voient les proxies : elle ne doit être ni celle du nœud de
+        # contrôle, d'un proxy, d'un serveur VPN, de la supervision, ni dans la whitelist, ni celle d'une autre entrée
+        # nommée PAR ADRESSE (serveur lié, liste nommée) — sinon la passerelle en hérite. Un proxy local exige en plus
+        # `access_local_cidrs` : on le donne, pour que seule l'identité soit en cause.
+        def as_identity(group, name="intruder"):
+            def mutate(inventory):
+                inventory["children"].setdefault(group, {"hosts": {}})["hosts"][name] = {"ansible_host": "203.0.113.40"}
+            return mutate
+
+        def as_prometheus(inventory):
+            inventory["vars"]["prometheus_host"] = "prom1"
+            inventory["children"]["apps"]["hosts"]["prom1"] = {"ansible_host": "203.0.113.40"}
+
+        def whitelisted(inventory):
+            inventory["vars"]["whitelist"] = ["203.0.113.40"]
+
+        def named_peer(inventory):          # infra1 nomme `agenthub` dans access_linked : son adresse est admise
+            inventory["children"]["apps"]["hosts"]["agenthub"]["ansible_host"] = "203.0.113.40"
+
+        def named_in_a_list(inventory):
+            inventory["children"]["apps"]["hosts"]["other-app"] = {"ansible_host": "203.0.113.40"}
+            inventory["children"]["apps"]["hosts"]["agenthub"]["webapp_vhost_locations"] = [
+                {"path": "/x", "access": {"hosts": ["other-app"]}}]
+
+        cidrs = ["10.73.231.0/24"]
+        for label, mutate in {"infras": as_identity("infras"), "proxies": as_identity("proxies"), "vpns": as_identity("vpns"),
+                              "prometheus": as_prometheus, "whitelist": whitelisted, "named_peer": named_peer,
+                              "named_in_a_list": named_in_a_list}.items():
+            with self.subTest(label):
+                code, out = self.guard(self.remote_gateway(mutate, access_local_cidrs=cidrs))
+                self.assertNotEqual(code, 0, label)
+                self.assertIn("masquerade_ack", out)
+
+    def test_the_upstream_proxy_must_sit_on_the_machine_of_the_upstream_entry(self):
+        # Le nom privé de l'amont n'est servi que par le proxy de SA machine : une sortie vers un autre proxy (même
+        # acquittée) le joindrait sans vhost.
+        def with_proxy3(inventory):
+            inventory["children"]["proxies"]["hosts"]["proxy3"] = {"ansible_host": "203.0.113.50"}
+        base = guard_inventory()["all"]["children"]["fleetforge_gateways"]["hosts"]["fleetforge-gateway"]["webapp_hardening"]
+        egress = [dict(base["egress_allow"][0], inventory_host="proxy3", masquerade_ack=True),
+                  dict(base["egress_allow"][1], masquerade_ack=True)]
+        code, out = self.guard(self.remote_gateway(with_proxy3, webapp_hardening=dict(base, egress_allow=egress)))
+        self.assertNotEqual(code, 0)
+        self.assertIn("Check each upstream against its FleetForge entry", out)
+
+    def test_a_proxy_on_the_machine_still_needs_the_subnet_in_access_local_cidrs(self):
+        # Co-localisée : le vhost de l'amont n'admet le sous-réseau dédié que par `access_local_cidrs`, sur ce proxy.
+        code, out = self.guard(guard_inventory(access_local_cidrs=[]))
+        self.assertNotEqual(code, 0)
+        self.assertIn("access_local_cidrs", out)
+        self.assertEqual(self.guard(guard_inventory())[0], 0)
 
     def test_a_subnet_in_the_docker_pools_is_refused(self):
         hardening = dict(guard_inventory()["all"]["children"]["fleetforge_gateways"]["hosts"]["fleetforge-gateway"]["webapp_hardening"],

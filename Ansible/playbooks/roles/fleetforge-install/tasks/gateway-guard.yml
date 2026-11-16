@@ -36,8 +36,7 @@
       - "'fleetforge' not in (ansible_roles | default([]))"
       - "'webapp' in (ansible_roles | default([]))"
       - webapp_hardening is defined
-      # E1 : vhost privé, rien de public. Une passerelle qui partage la machine du nœud de contrôle ne sera JAMAIS
-      # publique (prérequis E2/E3 : la déplacer d'abord, voir docs/avant-ouverture-public.md).
+      # E1 : vhost privé, rien de public (prérequis E2/E3 : voir docs/avant-ouverture-public.md).
       - access_mode is defined
       - access_mode == 'private'
       - hostname is defined
@@ -45,15 +44,19 @@
       - proxy_hostname is search('[.]' ~ (domain_name | regex_escape) ~ '$')
       - proxy_hostname != 'proxy.' ~ domain_name
       - _named_mcp | length > 0
-      # Sorties du sous-réseau (pare-feu du profil) : l'amont par le proxy de CETTE machine en 443, et le relais SMTP
+      # Sorties du sous-réseau (pare-feu du profil) : l'amont par UN proxy nommé, en 443, et le relais SMTP
       # (connexion par code e-mail, `authMethods: ["email"]`) — exigées NOMMÉMENT : sans elles, la passerelle ne pilote
-      # rien ou n'envoie aucun code, sans erreur visible au déploiement. Jamais un proxy DISTANT : le paquet y sortirait
-      # par FORWARD, masqué (MASQUERADE) derrière l'adresse publique de la machine, que les vhosts admettent au titre
-      # d'infra1 (et de la supervision) — la passerelle hériterait de leurs droits (quatrième revue).
+      # rien ou n'envoie aucun code, sans erreur visible au déploiement. Le proxy est celui de la machine de
+      # l'amont (contrôlé par amont, plus bas : le nom privé y est servi). Proxy de CETTE machine : INPUT, sous l'adresse
+      # du conteneur. Proxy DISTANT : FORWARD puis MASQUERADE, le proxy voit l'adresse publique de cette machine —
+      # exigé explicitement (`masquerade_ack: true`), la garde générique du profil (webapp-setup/hardening.yml) refusant
+      # en plus toute machine à identité privilégiée ou dont une autre entrée est nommée par adresse.
       - _upstream_egress | length == 1
       - _upstream_egress[0].proxies is not defined and _upstream_egress[0].host is not defined
       - _upstream_egress[0].inventory_host | default('') in (groups['proxies'] | default([]))
-      - hostvars[_upstream_egress[0].inventory_host | default('')].ansible_host | default('') == ansible_host
+      - >-
+        hostvars[_upstream_egress[0].inventory_host | default('')].ansible_host | default('') == ansible_host
+        or (_upstream_egress[0].masquerade_ack | default(false) | bool)
       - _upstream_egress[0].port == 443
       - webapp_hardening.egress_allow | default([]) | selectattr('name', 'defined') | selectattr('name', 'equalto', 'smtp') | list | length == 1
     fail_msg: >-
@@ -61,8 +64,9 @@
       `webapp` (jamais `fleetforge`), `webapp_hardening`, `access_mode: private` (E1), `hostname`, `proxy_hostname`
       (nom de la zone, pas le front des proxies), et une location `/mcp` de `webapp_vhost_locations` relayée au back-lb
       (`upstream: back`) derrière une liste nommée (`access`), URI brute contrôlée (`raw_uri`) ; `webapp_hardening.egress_allow`
-      avec `{name: upstream, inventory_host: <proxy de CETTE machine>, port: 443}` (jamais `proxies: true` ni un proxy
-      distant) et une entrée `smtp` (relais du parc : à renseigner par le propriétaire avant le premier déploiement).
+      avec `{name: upstream, inventory_host: <le proxy de la machine de l'amont>, port: 443}` (jamais `proxies: true` ;
+      `masquerade_ack: true` si ce proxy n'est pas sur CETTE machine) et une entrée `smtp` (relais du parc : à renseigner
+      par le propriétaire avant le premier déploiement).
     quiet: true
 
 # Chaque amont : l'entrée FleetForge qu'il désigne doit admettre la passerelle (`access_linked`) et porter les trois
@@ -77,6 +81,9 @@
     _check: "{{ _accounts | selectattr('user', 'defined') | selectattr('user', 'equalto', _users.check) | first | default({}) }}"
     _run: "{{ _accounts | selectattr('user', 'defined') | selectattr('user', 'equalto', _users.run) | first | default({}) }}"
     _parc: "{{ _ev.parc_name | default('') }}"
+    _upstream_egress: >-
+      {{ (webapp_hardening.egress_allow | default([]) if webapp_hardening is mapping else [])
+         | select('mapping') | selectattr('name', 'defined') | selectattr('name', 'equalto', 'upstream') | list }}
     # Playbooks de la liste blanche qu'un motif de refus de ffg_check/ffg_run toucherait (glob FleetForge : `*`, `?`),
     # traduit en regex sans antislash.
     _denied_allowed: >-
@@ -99,11 +106,12 @@
       - _ev.proxy_hostname is defined
       - _ev.proxy_hostname is match('^[a-z0-9][a-z0-9.-]{0,252}$')
       # L'amont est joint par le nom PRIVÉ de sa machine (`hostname`, enregistrement A), servi par le seul proxy de la
-      # même machine (server_name du vhost FleetForge du parc) : l'entrée FleetForge partage la machine de la passerelle.
+      # même machine (server_name du vhost FleetForge du parc) : la sortie `upstream` de la passerelle vise donc CE proxy
+      # (la machine de l'amont), que la passerelle soit sur cette machine ou non.
       - _ev.hostname is defined
       - _ev.hostname is match('^[a-z0-9][a-z0-9.-]{0,252}$')
       - _ev.hostname is search('[.]' ~ (domain_name | regex_escape) ~ '$')
-      - _ev.ansible_host | default('') == ansible_host
+      - hostvars[_upstream_egress[0].inventory_host | default('')].ansible_host | default('') == _ev.ansible_host | default('')
       - inventory_hostname in (_ev.access_linked | default([]))
       - item.parcs is defined and item.parcs is not string and item.parcs | length > 0
       - (_users.values() | unique | list | length) == 3
@@ -127,8 +135,8 @@
       - _slots.items() | list | difference((webapp_env_from_vault | default({})).items() | list) | length == 0
     fail_msg: >-
       Amont « {{ item.id | default('?') }} » de {{ inventory_hostname }} : l'entrée `{{ _e }}` doit être du groupe
-      `infras`, sur la machine de la passerelle, déclarer `proxy_hostname` et `hostname` (nom privé de la machine,
-      dans {{ domain_name }}, ajouté au server_name du vhost FleetForge du proxy co-localisé), nommer {{ inventory_hostname }} dans `access_linked`, et porter dans
+      `infras`, sur la machine du proxy de la sortie `upstream`, déclarer `proxy_hostname` et `hostname` (nom privé de la
+      machine, dans {{ domain_name }}, ajouté au server_name du vhost FleetForge du proxy de cette machine), nommer {{ inventory_hostname }} dans `access_linked`, et porter dans
       `ff_api_accounts` {{ _users.read }} (read), {{ _users.check }} (check, max_hosts) et {{ _users.run }} (run,
       max_hosts, accept_checks_from: [{{ _users.check }}], accept_own_checks: false) couvrant les parcs
       {{ item.parcs | default([]) | join(', ') }}, check et run avec `allow_playbooks` = {{ ffg_allowed_playbooks | join(', ') }}
@@ -169,8 +177,8 @@
   ansible.builtin.import_tasks: gateway-backup-guard.yml
 
 # FFG_UPSTREAMS : JSON sans secret (id, URL https de l'amont, parcs, noms de comptes), écrit par webapp-env-update.
-# URL : le nom PRIVÉ de la machine de l'amont (`hostname`), jamais `proxy_hostname` (CNAME vers le front de TOUS les
-# proxies : un proxy distant serait joint par FORWARD, sous l'adresse publique de la machine).
+# URL : le nom PRIVÉ de la machine de l'amont (`hostname`, enregistrement A : le proxy de cette machine), jamais
+# `proxy_hostname` (CNAME vers le front de TOUS les proxies : la sortie `upstream` n'en admet qu'un).
 - name: Work out FFG_UPSTREAMS
   vars:
     _upstreams: >-
