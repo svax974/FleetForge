@@ -58,18 +58,46 @@ def load_bindings(path):
     return data
 
 
-def binding_refusal(login, bindings, sender, msg):
+RAW_FROM_FIELD = re.compile(r'(?i)^from[ \t]*:')
+
+
+def raw_from_values(raw):
+    """The unfolded value of every From field of the RAW header block (bytes up to the first blank line). Read from the raw
+    bytes, not from the parsed message: Postfix and OpenDKIM take `From :` (a space before the colon) for a From field, while
+    Python's parser does not, so `From : ceo@d` + `From: approvals@d` would show ONE From to a parsed-message check."""
+    text = raw.decode('latin-1')
+    end = re.search(r'(?:\A|\n)\r?\n', text)
+    block = text if end is None else text[:end.start()]
+    fields = []
+    for line in re.split(r'\r?\n', block):
+        if line[:1] in (' ', '\t') and fields:
+            fields[-1] += ' ' + line.strip()
+        else:
+            fields.append(line)
+    return [f.split(':', 1)[1].strip() for f in fields if RAW_FROM_FIELD.match(f)]
+
+
+def binding_refusal(login, bindings, sender, raw):
     """Reason to refuse the message, or None. Only a login LISTED in `bindings` is checked (an unlisted one, such as the
-    shared relay account, is left alone): the envelope sender and every `From:` address must be bound to it."""
+    shared relay account, is left alone): the envelope sender and the From address must be bound to it, there must be exactly
+    ONE From field, and no `@` or `<` may hide in a display name or a comment (a viewer shows that text as the sender)."""
     owned = bindings.get((login or '').lower())
     if owned is None:
         return None
     owned = {a.lower() for a in owned}
     if (sender or '').lower() not in owned:
         return 'envelope sender %r is not bound to this login' % sender
-    from_addresses = [addr.lower() for _, addr in email.utils.getaddresses([str(v) for v in msg.get_all('From', [])])]
-    if not from_addresses:
+    values = raw_from_values(raw)
+    if not values:
         return 'no From header'
+    if len(values) > 1:
+        return 'more than one From header'
+    pairs = email.utils.getaddresses(values)
+    from_addresses = [addr.lower() for _, addr in pairs if addr]
+    if not from_addresses:
+        return 'no From address'
+    if values[0].count('@') != len(from_addresses) or values[0].count('<') > len(from_addresses):
+        return 'From header carries an address-like text outside the address (display name or comment)'
     for addr in from_addresses:
         if addr not in owned:
             return 'From address %r is not bound to this login' % addr
@@ -115,7 +143,7 @@ def main():
 
     login, bindings_path = parse_binding_args(sys.argv)
     if bindings_path is not None and login:
-        reason = binding_refusal(login, load_bindings(bindings_path), sender, msg)
+        reason = binding_refusal(login, load_bindings(bindings_path), sender, raw)
         if reason:
             sys.stderr.write('mailfilter refused: login=%s %s\n' % (login, reason))
             sys.exit(EX_DATAERR)

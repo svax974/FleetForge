@@ -472,6 +472,64 @@ class MailfilterBindingTests(unittest.TestCase):
         code, sent, _ = self.run_filter("", message=message)
         self.assertEqual((code, sent), (65, False))
 
+    def test_exactly_one_from_field_is_read_on_the_raw_header_block(self):
+        # Postfix and OpenDKIM take `From :` (space or tab before the colon) for a From field; Python's parser does not, so a
+        # parsed-message check saw ONE From (the owned one) while the message was signed and delivered as the other.
+        own, foreign = "approvals@the.example.test", "ceo@the.example.test"
+        cases = {
+            "space before the colon, foreign first": f"From : {foreign}\nFrom: {own}\n",
+            "space before the colon, foreign last": f"From: {own}\nFrom : {foreign}\n",
+            "tab before the colon": f"From: {own}\nFrom\t: {foreign}\n",
+            "lower case name": f"From: {own}\nfrom: {foreign}\n",
+            "two owned From fields": f"From: {own}\nFrom: {own}\n",
+            "the only From has a space before the colon and is foreign": f"From : {foreign}\n",
+        }
+        for label, headers in cases.items():
+            with self.subTest(label):
+                code, sent, err = self.run_filter("", message=headers + "To: x@example.net\n\nbody\n")
+                self.assertEqual((code, sent), (65, False), f"{label}: {err}")
+                self.assertIn("refused", err)
+        # CRLF line endings follow the same rule
+        code, sent, err = self.run_filter("", message=f"From: {own}\r\nFrom : {foreign}\r\nTo: x@example.net\r\n\r\nbody\r\n")
+        self.assertEqual((code, sent), (65, False), err)
+        # a From-looking line in the BODY, and a folded continuation, are not header fields
+        for label, message in {
+                "From line in the body": f"From: {own}\nTo: x@example.net\n\nFrom: {foreign}\nbody\n",
+                "folded value": f"From: Approvals\n <{own}>\nTo: x@example.net\n\nbody\n",
+                "CRLF": f"From: {own}\r\nTo: x@example.net\r\n\r\nbody\r\n",
+                "space before the colon, owned, alone": f"From : {own}\nTo: x@example.net\n\nbody\n"}.items():
+            with self.subTest(label):
+                code, sent, err = self.run_filter("", message=message)
+                self.assertEqual((code, sent), (0, True), f"{label}: {err}")
+
+    def test_an_address_like_text_in_a_display_name_or_a_comment_is_refused(self):
+        own = "approvals@the.example.test"
+        cases = {
+            "owned address in the display name": f'"{own}" <{own}>',
+            "foreign address in the display name": f'"ceo@the.example.test" <{own}>',
+            "at sign in an unquoted display name": f"approvals@ <{own}>",
+            "angle bracket in the display name": f'"a<b" <{own}>',
+            "address in a comment": f"{own} (ceo@the.example.test)",
+            "angle address in a comment": f"{own} (<ceo@the.example.test>)",
+        }
+        for label, frm in cases.items():
+            with self.subTest(label):
+                code, sent, err = self.run_filter(frm)
+                self.assertEqual((code, sent), (65, False), f"{label}: {err}")
+                self.assertIn("refused", err)
+        # a plain display name or a plain comment is fine
+        for frm in (f"Approvals Team <{own}>", f'"Approvals, Team" <{own}>', f"{own} (the approvals desk)", own):
+            with self.subTest(frm):
+                code, sent, err = self.run_filter(frm)
+                self.assertEqual((code, sent), (0, True), f"{frm}: {err}")
+
+    def test_an_unbound_login_with_several_from_fields_is_unchanged(self):
+        message = "From : ceo@the.example.test\nFrom: x@the.example.test\nTo: y@example.net\n\nbody\n"
+        for kwargs in (dict(login=f"relayuser@{HOSTNAME}"), dict(bound=False)):
+            with self.subTest(kwargs):
+                code, sent, err = self.run_filter("", sender="", message=message, **kwargs)
+                self.assertEqual((code, sent), (0, True), err)
+
     def test_a_message_without_a_from_header_is_refused(self):
         code, sent, err = self.run_filter("", message="To: x@example.net\nSubject: s\n\nbody\n")
         self.assertEqual((code, sent), (65, False), err)
