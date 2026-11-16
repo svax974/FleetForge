@@ -28,6 +28,7 @@ import tempfile
 import textwrap
 import time
 import unittest
+import zlib
 
 import jinja2
 import yaml
@@ -70,6 +71,14 @@ def run_gate(root, source, request, stdin=b"", keep="3", floor="0"):
 
 def gzip_bytes(data):
     return subprocess.run(["gzip", "-c"], input=data, capture_output=True, check=True).stdout
+
+
+def zlib_gzip_stored(data):
+    """One gzip member with a STORED deflate block (level 0): its size is exactly len(data) + 23."""
+    compressor = zlib.compressobj(0, zlib.DEFLATED, -zlib.MAX_WBITS)
+    body = compressor.compress(data) + compressor.flush()
+    trailer = zlib.crc32(data).to_bytes(4, "little") + (len(data) & 0xFFFFFFFF).to_bytes(4, "little")
+    return b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\xff" + body + trailer
 
 
 def load_gate():
@@ -301,6 +310,29 @@ class GateTests(unittest.TestCase):
         finally:
             gate.zlib.decompressobj = real
         self.assertTrue(calls and all(0 < m <= gate.CHUNK for m in calls))
+
+    def test_a_multi_member_gzip_is_accepted_wherever_the_read_block_cuts_a_header(self):
+        # Review finding: a second member whose 2-byte header is split by the read block (1 byte left after the first
+        # member) was refused as « trailing garbage ». Stored (level 0) members have a predictable size, so the
+        # first one is sized to end exactly one byte before the end of the (shrunk) read block.
+        gate = load_gate()
+        gate.CHUNK = 64
+        first = second = None
+        for n in range(1, gate.CHUNK):
+            member = zlib_gzip_stored(b"a" * n)
+            if len(member) == gate.CHUNK - 1:
+                first = member
+                break
+        self.assertIsNotNone(first)
+        second = zlib_gzip_stored(b"b" * 10)
+        path = os.path.join(self.tmp, "two-members.gz")
+        with open(path, "wb") as f:
+            f.write(first + second)
+        gate.check_content(path, False)  # raises OSError before the fix
+        with open(path, "wb") as f:
+            f.write(first + second[:1])  # a lone first header byte is still garbage
+        with self.assertRaises(OSError):
+            gate.check_content(path, False)
 
     def test_a_missing_source_directory_is_an_error(self):
         self.assertEqual(run_gate(self.root, "nowhere", "free-kb").returncode, 1)

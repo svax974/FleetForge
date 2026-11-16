@@ -168,8 +168,11 @@ def check_gzip(f):
             out += len(d.decompress(data, CHUNK))
             data = d.unconsumed_tail
         pending = d.unused_data
-        if not pending:
-            pending = f.read(CHUNK)
+        while len(pending) < len(GZIP_MAGIC):  # the next header may straddle the read block: read on before comparing
+            more = f.read(CHUNK)
+            if not more:
+                break
+            pending += more
         if not pending:
             break
         if pending[:2] != GZIP_MAGIC:
