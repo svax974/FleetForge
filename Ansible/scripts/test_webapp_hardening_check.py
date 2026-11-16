@@ -1873,6 +1873,44 @@ class GuardTests(unittest.TestCase):
     def guard(self, inventory):
         return run_local_play(GUARD_PLAY, inventory, {"apps.yml": "fleetforge-gateway: /nonexistent/app/\n"})
 
+    def test_a_neighbour_port_defined_by_a_template_that_reads_hostvars_is_resolved_not_a_crash(self):
+        # Une autre entrée de la machine définit un `*port` par un gabarit qui référence `hostvars` : lue depuis l'objet
+        # hostvars de ce voisin, elle échouait en « 'hostvars' is undefined » (ansible-core 2.21) et bloquait la garde.
+        inventory = guard_inventory()
+        inventory["all"]["children"]["apps"]["hosts"]["mail1"]["smtp_alt_port"] = "{{ hostvars['infra1'].fleetforge_port | int + 1 }}"
+        code, out = self.guard(inventory)
+        self.assertEqual(code, 0, out[-3000:])
+        self.assertNotIn("'hostvars' is undefined", out)
+
+    def test_a_neighbour_with_rules_whose_sources_read_hostvars_is_resolved_not_a_crash(self):
+        # Forme du host_vars de la machine canonique réelle : `docker_ports_rules[].sources` vient de `src_*`, définis par un
+        # gabarit sur `hostvars`. Lue par `flatten`/`map(attribute='port')` sur l'objet hostvars du voisin, la garde des ports
+        # libres échouait en « 'hostvars' is undefined » — constat du rejeu sur l'inventaire réel.
+        inventory = guard_inventory()
+        mail1 = inventory["all"]["children"]["apps"]["hosts"]["mail1"]
+        mail1["src_p"] = "{{ groups['proxies'] | map('extract', hostvars, 'ansible_host') | list }}"
+        mail1["docker_ports_rules"] = [{"port": 4999, "comment": "x", "sources": "{{ src_p }}"}]
+        code, out = self.guard(inventory)
+        self.assertEqual(code, 0, out[-3000:])
+        mail1["docker_ports_rules"][0]["port"] = 4731  # le port de back-lb de l'app : déjà filtré par une autre entrée
+        code, out = self.guard(inventory)
+        self.assertNotEqual(code, 0)
+        self.assertIn("4731", out)
+
+    def test_a_templated_neighbour_port_that_clashes_is_still_refused(self):
+        # La valeur est RENDUE, pas ignorée : un port de l'app pris par un gabarit voisin reste signalé.
+        inventory = guard_inventory()
+        inventory["all"]["children"]["apps"]["hosts"]["agenthub"]["base"] = 4730
+        inventory["all"]["children"]["apps"]["hosts"]["mail1"]["alt_port"] = "{{ hostvars['agenthub'].base | int }}"
+        code, out = self.guard(inventory)
+        self.assertNotEqual(code, 0)
+        self.assertIn("4730", out)
+        self.assertNotIn("'hostvars' is undefined", out)
+        # et un port littéral voisin identique l'était déjà
+        inventory = guard_inventory()
+        inventory["all"]["children"]["apps"]["hosts"]["mail1"]["alt_port"] = 4730
+        self.assertNotEqual(self.guard(inventory)[0], 0)
+
     def test_a_conforming_gateway_passes_and_trusts_only_the_admitted_relays(self):
         code, out = self.guard(guard_inventory())
         self.assertEqual(code, 0, out[-3000:])

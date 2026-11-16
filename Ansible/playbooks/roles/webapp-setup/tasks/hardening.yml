@@ -193,30 +193,37 @@
 # Ports de l'app (front, back-lb, Postgres, Redis) : libres parmi TOUTES les variables `*port` des autres entrées de
 # la machine (pas seulement les `webapp`, dont facts.yml compare déjà les blocs) — un port ajouté demain à une autre
 # famille est comparé aussi.
+# Les valeurs sont lues par machine-ports.yml (chaque entrée dans SON contexte) : `n[k]` sur l'objet hostvars d'une entrée
+# voisine échoue en « 'hostvars' is undefined » dès qu'un de ses `*port` est un gabarit qui référence `hostvars`.
+- name: Read the rendered port variables of the entries on this address
+  vars:
+    _addr: "{{ ansible_host | default('') }}"
+  ansible.builtin.include_tasks:
+    file: machine-ports.yml
+  args:
+    apply:
+      tags: [always]
+      vars:
+        wa_mp_entries: >-
+          {{ groups['all'] | select('in', hostvars) | map('extract', hostvars) | selectattr('ansible_host', 'defined')
+             | selectattr('ansible_host', 'equalto', _addr) | map(attribute='inventory_hostname') | list }}
+  tags: [always]
+
 - name: Check the ports of the application are free on the machine
   vars:
     _ours: "{{ [wa_front_port, wa_back_port, wa_db_port, wa_redis_port] | map('int') | list }}"
-    _neighbours: >-
-      {{ groups['all'] | map('extract', hostvars)
-         | selectattr('ansible_host', 'defined')
-         | selectattr('ansible_host', 'equalto', ansible_host)
-         | rejectattr('inventory_hostname', 'equalto', inventory_hostname) | list }}
     _taken: >-
       {%- set ns = namespace(p=[]) -%}
-      {%- for n in _neighbours -%}
-      {%- for k in n.keys() if k is match('^[a-z0-9_]*port$') and k != 'ansible_port' -%}
-      {%- set v = n[k] | string -%}
-      {%- if v is match('^[0-9]+$') -%}{%- set ns.p = ns.p + [v] -%}{%- endif -%}
+      {%- for n, d in wa_machine_ports.items() if n != inventory_hostname -%}
+      {%- for k, v in d.ports.items() if v is match('^[0-9]+$') -%}
+      {%- set ns.p = ns.p + [v] -%}
       {%- endfor -%}
       {%- endfor -%}
       {{ ns.p | join(',') }}
     _clash: "{{ _ours | intersect((_taken | string).split(',') | reject('equalto', '') | map('int') | list) }}"
     # Ports filtrés par docker-ports-security sur la machine (`docker_ports_rules` de TOUTE entrée de la même adresse,
     # celle-ci comprise) : deux scripts poseraient leurs règles sur le même port.
-    _rule_ports: >-
-      {{ (groups['all'] | map('extract', hostvars) | selectattr('ansible_host', 'defined')
-          | selectattr('ansible_host', 'equalto', ansible_host) | map(attribute='docker_ports_rules', default=[])
-          | flatten | map(attribute='port', default=0) | map('int') | list) }}
+    _rule_ports: "{{ wa_machine_ports.values() | map(attribute='rules') | flatten | map('int') | list }}"
     _rule_clash: "{{ _ours | intersect(_rule_ports) }}"
   ansible.builtin.assert:
     that:
