@@ -24,7 +24,12 @@ par `deploy-fleetforge.yml` (garde du groupe `fleetforge_gateways` puis import d
   mais le noyau d'une machine qui héberge d'autres applications (dont un worker Chromium, `social-manager`) :
   évasion de conteneur ou faille noyau = accès à la base de la passerelle (audit, approbations). Une VM
   dédiée reste l'option propre (`docs/etude-isolation-passerelle-vm.md`). Le play de garde refuse tout
-  `access_mode` autre que `private`.
+  `access_mode` autre que `private`. **E2, côté Ansible (16/11/2026, hors ligne, rien joué)** : `cloudflare_named`,
+  locations `mode: public` sur une liste blanche exacte (`/mcp`, well-known OAuth, `oauth/(authorize|token|revoke)`,
+  `oauth/register`) et sondes `public_edge` / `public_edge_origin` (`docs/etude-passerelle-sur-webapp.md`, « E2 »). Reste :
+  `ipAllow` par credential sur CHAQUE clé `ffg_` AVANT le déploiement (plus aucun filtre nginx sur `/mcp`), règles WAF
+  Cloudflare qui ne défient pas les appels serveur (hors Ansible, une seule règle de limitation de débit au plan gratuit),
+  mode TLS « Full (strict) » lu par le déploiement mais non posé (`cfopull_enforce_tls_strict`), premier passage supervisé.
 - **Accès de test à `/mcp`** : `whitelist: true` dans l'`access` de la location `/mcp` de l'entrée — à passer à `false` dès la
   fin des tests et AVANT toute exposition E2/E3 (la whitelist n'élargit pas l'allow-list propre à chaque
   credential `exec`, ≤ /16, imposée par `mcp-access`).

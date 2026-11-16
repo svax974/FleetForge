@@ -32,13 +32,14 @@
          + ([{'name': 'redis', 'kind': 'docker', 'container': wa_project ~ '_redis'}] if (webapp_monitor_redis | default(webapp_db_engine != 'sqlite')) | bool else []) }}
   tags: [monitoring]
 
-# Profil durci (`firewall_<port>`) et amonts (`webapp_upstream_checks`, `upstream_<id>`) : sondes supplémentaires.
+# Profil durci (`firewall_<port>`), amonts (`webapp_upstream_checks`, `upstream_<id>`) et bord public (`webapp_public_checks`,
+# `<name>` / `<name>_origin`) : sondes supplémentaires.
 - name: Describe the extra checks of the application
   ansible.builtin.include_tasks:
     file: extra-checks.yml
     apply:
       tags: [monitoring]
-  when: webapp_hardening is defined or webapp_upstream_checks is defined
+  when: webapp_hardening is defined or webapp_upstream_checks is defined or webapp_public_checks is defined
   tags: [monitoring]
 
 # `public: true` n'est PAS un détail de style : sans lui, les defaults du rôle inclus (svcprobe_checks_dir,

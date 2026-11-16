@@ -3046,6 +3046,268 @@ class PublicLocationsGuardTests(unittest.TestCase):
         code, out = run_local_play(GUARD_PLAY, inventory, {"apps.yml": "fleetforge-gateway: /nonexistent/app/\n"})
         self.assertNotEqual(code, 0, "la passerelle, elle, refuse une location publique hors liste")
 
+    def test_the_public_edge_probe_is_required_with_the_exact_statuses(self):
+        for label, checks in {
+                "absent": None, "empty": [], "other path": [dict(PUBLIC_CHECKS[0], path="/other")],
+                "edge status": [dict(PUBLIC_CHECKS[0], edge_status=200)],
+                "no origin status": [{k: v for k, v in PUBLIC_CHECKS[0].items() if k != "origin_status"}],
+                "origin status": [dict(PUBLIC_CHECKS[0], origin_status=200)]}.items():
+            with self.subTest(label):
+                inventory = guard_inventory(cloudflare_named=True, webapp_vhost_locations=PUBLIC_SET)
+                gateway = inventory["all"]["children"]["fleetforge_gateways"]["hosts"]["fleetforge-gateway"]
+                if checks is not None:
+                    gateway["webapp_public_checks"] = checks
+                code, out = run_local_play(GUARD_PLAY, inventory, {"apps.yml": "fleetforge-gateway: /nonexistent/app/\n"})
+                self.assertNotEqual(code, 0, out[-1500:])
+                self.assertIn("webapp_public_checks", out)
+        code, out = self.guard(webapp_vhost_locations=PUBLIC_SET)
+        self.assertEqual(code, 0, out[-2000:])
+        # Sans location publique, la sonde n'est pas exigée (forme E1).
+        code, out = run_local_play(GUARD_PLAY, guard_inventory(), {"apps.yml": "fleetforge-gateway: /nonexistent/app/\n"})
+        self.assertEqual(code, 0, out[-2000:])
+
+
+def public_vhost(locations=None, **attributes):
+    return render_vhost(cloudflare_named=True, webapp_vhost_locations=PUBLIC_SET if locations is None else locations, **attributes)
+
+
+def mutate(text, head, old, new):
+    """`text` dont le bloc `head` perd `old` au profit de `new` (la mutation doit exister)."""
+    body = location_body(text, head)
+    assert body is not None and old in body, (head, old)
+    return text.replace(body, body.replace(old, new, 1), 1)
+
+
+class PublicVhostTests(unittest.TestCase):
+    """A3 : les locations publiques sont rendues depuis `webapp_vhost_locations`, et `webapp_hardening_check.py vhost
+    --public` contrôle le vhost RENDU (liste blanche exacte, certificat client, `raw_uri`, amont back-lb, corps, délai)."""
+
+    def test_each_public_location_is_rendered_as_declared(self):
+        text = public_vhost()
+        for location in (PUBLIC_MCP, PUBLIC_PRM, PUBLIC_AS, PUBLIC_OAUTH, PUBLIC_REGISTER):
+            with self.subTest(location["path"]):
+                body = location_body(text, "~* " + location["path"])
+                self.assertIsNotNone(body)
+                self.assertIn(f'if ($request_uri !~* "{location["raw_uri"]}") {{', body)
+                self.assertIn("if ($ssl_client_verify != SUCCESS) {", body)
+                self.assertIn("proxy_pass         http://192.0.2.10:4731;", body, "back-lb, jamais le front")
+                self.assertNotIn("allow ", body)
+                self.assertNotIn("deny all", body)
+        mcp = location_body(text, "~* ^/mcp(/.*)?$")
+        self.assertIn("client_max_body_size    128k;", mcp)
+        self.assertIn("proxy_read_timeout 90s;", mcp)
+        self.assertIn("client_max_body_size    16k;", location_body(text, "~* " + PUBLIC_OAUTH["path"]))
+
+    def test_the_private_part_is_unchanged_and_the_front_pages_stay_on_the_front(self):
+        text = public_vhost()
+        for head in ("/", "^~ /mcp/connections"):
+            body = location_body(text, head)
+            self.assertIn("deny all;", body, head)
+            self.assertIn("allow 198.51.100.1;", body, head)
+            self.assertNotIn("$ssl_client_verify", body, head)
+            self.assertIn("proxy_pass         http://192.0.2.10:4730;", body, head)
+        closed = location_body(text, "/.well-known/")
+        self.assertIn("named-access", closed)
+        self.assertEqual(allows(closed), [])
+        # Les regex publiques précèdent le repli `/` (le préfixe `/.well-known/` n'est PAS `^~`).
+        self.assertIsNone(location_body(text, "^~ /.well-known/"))
+        self.assertTrue(vhost_errors(public_vhost([CONNECTIONS, PUBLIC_MCP, PUBLIC_PRM, dict(WELL_KNOWN_CLOSED, priority=True)]),
+                                     public=True), "un `^~ /.well-known/` masquerait le well-known public")
+
+    def test_the_rendered_vhost_passes_the_public_check_and_the_command_line_agrees(self):
+        text = public_vhost()
+        self.assertEqual(vhost_errors(text, public=True), [])
+        fd, path = tempfile.mkstemp(suffix=".conf")
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        try:
+            self.assertEqual(check.main(["vhost", path, "--public"]), 0)
+            self.assertEqual(check.main(["vhost", path]), 0, "sans --public : le contrôle des listes nommées d'avant")
+            f = open(path, "w")
+            f.write(mutate(text, "~* ^/mcp(/.*)?$", "if ($ssl_client_verify != SUCCESS) {", "if (0) {"))
+            f.close()
+            self.assertEqual(check.main(["vhost", path, "--public"]), 1)
+        finally:
+            os.unlink(path)
+
+    def test_the_public_check_catches_every_way_a_public_location_could_open_too_much(self):
+        text = public_vhost()
+        mcp = "~* ^/mcp(/.*)?$"
+        oauth = "~* " + PUBLIC_OAUTH["path"]
+        mutations = {
+            "client certificate not required": mutate(text, mcp, "if ($ssl_client_verify != SUCCESS) {", "if ($ssl_client_verify = NONE) {"),
+            "certificate answer is not 403": mutate(text, mcp, "return 403;", "return 200;"),
+            "raw uri not checked": mutate(text, mcp, 'if ($request_uri !~* "^/mcp(/|[?]|$)") {', 'if ($request_uri !~* "^/") {'),
+            "raw uri error is not 400": mutate(text, mcp, "return 400;", "return 200;"),
+            "relayed to the front": mutate(text, mcp, "http://192.0.2.10:4731;", "http://192.0.2.10:4730;"),
+            "an address filter mixed in": mutate(text, mcp, "proxy_http_version 1.1;", "allow 0.0.0.0/0;\n        proxy_http_version 1.1;"),
+            "websocket upgrade": mutate(text, mcp, "proxy_http_version 1.1;", "proxy_http_version 1.1;\n        proxy_set_header Upgrade $http_upgrade;"),
+            "body too large": mutate(text, mcp, "client_max_body_size    128k;", "client_max_body_size    129k;"),
+            "body in megabytes": mutate(text, oauth, "client_max_body_size    16k;", "client_max_body_size    1m;"),
+            "no body limit": mutate(text, mcp, "client_max_body_size    128k;", ""),
+            "timeout too long": mutate(text, mcp, "proxy_read_timeout 90s;", "proxy_read_timeout 180s;"),
+            "no timeout": mutate(text, mcp, "proxy_read_timeout 90s;", ""),
+            "server without the client certificate": text.replace("ssl_verify_client optional;", "", 1),
+            "server without the real address": text.replace("real_ip_header CF-Connecting-IP;", "", 1),
+            "server without the client certificate authority": text.replace(
+                "ssl_client_certificate /etc/nginx/cloudflare-origin-pull-ca.pem;", "", 1),
+            "front pages relayed to the back": mutate(text, "^~ /mcp/connections", "http://192.0.2.10:4730;", "http://192.0.2.10:4731;"),
+            "no private root": text.replace("location / {", "location /x/ {", 1),
+            "private root opened": mutate(text, "/", "deny all;", ""),
+        }
+        for label, mutated in mutations.items():
+            with self.subTest(label):
+                self.assertTrue(vhost_errors(mutated, public=True), label)
+        for label, mutated in mutations.items():
+            if label.startswith(("server", "private")):
+                continue
+            with self.subTest(label + " (unchecked without --public)"):
+                self.assertEqual(vhost_errors(mutated), [] if "root" not in label else vhost_errors(mutated))
+
+    def test_a_public_location_outside_the_whitelist_is_caught_in_the_rendered_vhost(self):
+        extra = {"path": "/api/v1/users/", "mode": "public", "upstream": "back"}
+        text = public_vhost(PUBLIC_SET + [extra])
+        errors = vhost_errors(text, public=True)
+        self.assertTrue(any("/api/v1/users/" in e for e in errors), errors)
+        self.assertEqual(vhost_errors(public_vhost(PUBLIC_SET + [dict(extra, path="^/(.*)$", regex=True)]), public=True) != [], True)
+        self.assertEqual(vhost_errors(public_vhost([{"path": "/", "mode": "public"}]), public=True) != [], True)
+
+    def test_the_check_of_the_deployment_play_reads_the_public_locations_of_the_entry(self):
+        play = textwrap.dedent("""\
+            - hosts: proxy1
+              gather_facts: false
+              tasks:
+                - ansible.builtin.include_role:
+                    name: proxy-update
+                    tasks_from: webapp-site-check
+                  vars:
+                    webapp_vhost_entries: [fleetforge-gateway]
+                    nginx_version: "1.26.0"
+                - ansible.builtin.debug: {msg: "SITECHECK rc={{ proxy_webapp_vhost_check.rc }}"}
+            """)
+
+        def run(locations):
+            inventory = guard_inventory(cloudflare_named=True, webapp_vhost_locations=locations)
+            inventory["all"]["vars"]["cloudflare_ips"] = CLOUDFLARE_IPS
+            inventory["all"]["children"]["proxies"]["hosts"]["proxy1"]["ansible_connection"] = "local"
+            return run_local_play(play, inventory, args=["-e", f"webapp_hardening_checker={os.path.join(HERE, 'webapp_hardening_check.py')}"])
+        code, out = run(PUBLIC_SET)
+        self.assertEqual(code, 0, out[-2500:])
+        self.assertIn("SITECHECK rc=0", out)
+        code, out = run(PUBLIC_SET + [{"path": "/api/v1/users/", "mode": "public", "upstream": "back"}])
+        self.assertNotEqual(code, 0)
+        self.assertIn("/api/v1/users/", out)
+        # Une entrée sans liste nommée mais avec des locations publiques est contrôlée aussi (le contrôle ne se saute pas).
+        code, out = run([CONNECTIONS, PUBLIC_MCP, {"path": "/api/v1/users/", "mode": "public", "upstream": "back"}])
+        self.assertNotEqual(code, 0, "sans liste nommée, le contrôle public doit tout de même jouer")
+        # Sans location publique : le contrôle d'avant (listes nommées), sans --public.
+        code, out = run([MCP, WELL_KNOWN])
+        self.assertEqual(code, 0, out[-2500:])
+
+    def test_the_checker_and_the_guard_share_the_same_whitelist(self):
+        guard = yaml.safe_load(open(os.path.join(ROLES, "fleetforge-install", "tasks", "gateway-guard.yml"), encoding="utf-8"))
+        task = next(t for t in guard if t.get("name") == "Check the public locations of the gateway entry")
+        self.assertEqual(task["vars"]["_public_allowed"], check.PUBLIC_LOCATIONS)
+        self.assertEqual(task["vars"]["_public_timeout_max"], check.PUBLIC_TIMEOUT_MAX)
+        self.assertEqual(task["vars"]["_mcp_path"], check.PUBLIC_MCP_PATH)
+        # Les cinq chemins et leurs `raw_uri` sont ceux des fixtures (et du brief), pas une liste qui dérive en silence.
+        self.assertEqual(sorted(check.PUBLIC_LOCATIONS), sorted(l["path"] for l in (PUBLIC_MCP, PUBLIC_PRM, PUBLIC_AS, PUBLIC_OAUTH, PUBLIC_REGISTER)))
+        for location in (PUBLIC_MCP, PUBLIC_PRM, PUBLIC_AS, PUBLIC_OAUTH, PUBLIC_REGISTER):
+            self.assertEqual(check.PUBLIC_LOCATIONS[location["path"]]["raw_uri"], location["raw_uri"])
+
+    def test_the_deployment_runs_the_check_for_a_gateway_with_public_locations_only(self):
+        deploy = yaml.safe_load(open(os.path.join(ROLES, "proxy-update", "tasks", "deploy-webapp-site.yml"), encoding="utf-8"))
+        task = next(t for t in deploy if t.get("name") == "Check the named access lists of the rendered vhost")
+        self.assertLess([t.get("name") for t in deploy].index(task["name"]), [t.get("name") for t in deploy].index("Deploy the generic vhost"))
+
+        def hosts(inventory):
+            return CloudflareNamedPlaybookTests.hosts_running(task, inventory, group="fleetforge_gateways",
+                                                              extra_vars={"webapp_vhost_entries": ["fleetforge-gateway"]})
+        public_only = guard_inventory(webapp_vhost_locations=[CONNECTIONS, PUBLIC_MCP])
+        self.assertEqual(hosts(public_only), ["fleetforge-gateway"], "public sans liste nommée : contrôlé")
+        self.assertEqual(hosts(guard_inventory()), ["fleetforge-gateway"], "liste nommée : contrôlé, comme avant")
+        self.assertEqual(hosts(guard_inventory(webapp_vhost_locations=[{"path": "/api/", "ws": True}])), [],
+                         "aucune liste nommée, aucune location publique : rien à contrôler")
+        # Une entrée qui n'est pas une passerelle n'est jamais soumise à la liste blanche de la passerelle.
+        other = guard_inventory(webapp_vhost_locations=[{"path": "/open/", "mode": "public"}])
+        other["all"]["children"]["apps"]["hosts"]["mail1"].update(webapp_vhost_locations=[{"path": "/open/", "mode": "public"}])
+        self.assertEqual(CloudflareNamedPlaybookTests.hosts_running(task, other, group="apps", extra_vars={"webapp_vhost_entries": ["mail1"]}), [])
+
+
+@unittest.skipUnless(shutil.which("ansible-playbook"), "ansible-playbook absent")
+class PublicEdgeProbeTests(unittest.TestCase):
+    """A3 : `webapp_public_checks` → sondes svcprobe `public_edge` (401 par le nom) et `public_edge_origin` (403 à
+    l'origine sans certificat client), jouées depuis la machine de la passerelle."""
+
+    PLAY = MONITORING_PLAY.replace(
+        "    wa_checks: [{name: front}]\n",
+        "    wa_checks: [{name: front}]\n    proxy_hostname: ffg.example.test\n    wa_h_eligible_proxies: [proxy1, proxy3]\n"
+        "    webapp_public_checks: " + json.dumps(PUBLIC_CHECKS) + "\n")
+    INVENTORY = {"all": {"hosts": {"localhost": {"ansible_connection": "local"}},
+                         "children": {"proxies": {"hosts": {"proxy1": {"ansible_host": "192.0.2.10"}, "proxy3": {"ansible_host": "192.0.2.30"}}}}}}
+
+    def checks(self, play=None):
+        code, out, files = run_local_play(play or self.PLAY, self.INVENTORY, outputs=["checks.json"])
+        self.assertIn("checks.json", files, out[-3000:])
+        return {c["name"]: c for c in json.loads(files["checks.json"])}
+
+    def test_the_edge_and_origin_probes_are_added_after_the_existing_ones(self):
+        checks = self.checks()
+        self.assertEqual(list(checks)[-2:], ["public_edge", "public_edge_origin"])
+        edge = checks["public_edge"]
+        self.assertEqual((edge["kind"], edge["method"], edge["url"], edge["status"]),
+                         ("http", "POST", "https://ffg.example.test/mcp", [401]))
+        origin = checks["public_edge_origin"]
+        self.assertEqual(origin["kind"], "command")
+        script = origin["argv"][2]
+        for fragment in ("for ip in 192.0.2.10 192.0.2.30", "--resolve ffg.example.test:443:$ip", "https://ffg.example.test/mcp", "403",
+                         "-X POST"):
+            self.assertIn(fragment, script)
+        self.assertEqual(list(self.checks(MONITORING_PLAY))[-1], "upstream_main", "sans l'attribut : les sondes d'avant")
+
+    def test_the_origin_probe_succeeds_only_when_every_eligible_proxy_answers_403(self):
+        script = self.checks()["public_edge_origin"]["argv"][2]
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = os.path.join(tmp, "curl")
+            with open(fake, "w") as f:
+                f.write('#!/bin/sh\nfor a in "$@"; do case "$a" in\n  *:443:192.0.2.10) printf "%s" "$CODE10";;\n'
+                        '  *:443:192.0.2.30) printf "%s" "$CODE30";;\nesac; done\n')
+            os.chmod(fake, 0o755)
+
+            def run(code10, code30):
+                env = dict(os.environ, PATH=tmp + os.pathsep + os.environ["PATH"], CODE10=code10, CODE30=code30)
+                return subprocess.run(["/bin/sh", "-c", script], env=env, capture_output=True).returncode
+            self.assertEqual(run("403", "403"), 0)
+            self.assertEqual(run("403", "200"), 1, "un proxy qui répond sans certificat client")
+            self.assertEqual(run("200", "403"), 1)
+            self.assertEqual(run("", "403"), 1, "pas de réponse du tout n'est pas un 403")
+            self.assertEqual(run("401", "403"), 1)
+
+    def test_hostile_or_incomplete_declarations_are_refused(self):
+        bad = [dict(PUBLIC_CHECKS[0], path="/mcp; rm -rf /"), dict(PUBLIC_CHECKS[0], name="Public Edge"),
+               dict(PUBLIC_CHECKS[0], edge_status="401; id"), dict(PUBLIC_CHECKS[0], edge_status=99),
+               dict(PUBLIC_CHECKS[0], origin_status=700), {"name": "public_edge", "edge_status": 401},
+               dict(PUBLIC_CHECKS[0], method="POST; id"), dict(PUBLIC_CHECKS[0], method="post"),
+               {k: v for k, v in PUBLIC_CHECKS[0].items() if k != "name"}]
+        for check_ in bad:
+            with self.subTest(check_):
+                play = self.PLAY.replace(json.dumps(PUBLIC_CHECKS), json.dumps([check_]))
+                code, out = run_local_play(play, self.INVENTORY)
+                self.assertNotEqual(code, 0)
+                self.assertIn("webapp_public_checks", out)
+        without_proxies = self.PLAY.replace("    wa_h_eligible_proxies: [proxy1, proxy3]\n", "")
+        self.assertNotIn("wa_h_eligible_proxies", without_proxies)
+        code, out = run_local_play(without_proxies, self.INVENTORY)
+        self.assertNotEqual(code, 0, "l'origine se déduit des proxies admis du profil durci")
+        self.assertIn("webapp_public_checks", out)
+        self.assertNotIn("YAML parsing failed", out, "le refus doit venir de la garde, pas d'un jeu mal formé")
+        # Sans sonde d'origine (statut d'origine absent), pas besoin des proxies : la sonde du nom suffit.
+        edge_only = without_proxies.replace(json.dumps(PUBLIC_CHECKS), json.dumps([{k: v for k, v in PUBLIC_CHECKS[0].items() if k != "origin_status"}]))
+        self.assertEqual(run_local_play(edge_only, self.INVENTORY)[0], 0)
+        hostile = self.PLAY.replace("proxy_hostname: ffg.example.test", "proxy_hostname: 'x/;id'")
+        self.assertNotEqual(run_local_play(hostile, self.INVENTORY)[0], 0)
+
+
 # ── Écouteur dédié d'un proxy (`dedicated_listeners`) ─────────────────────
 
 GATEWAY_ADDRESS = "203.0.113.40"      # passerelle sur SA machine ; proxy1/infra1 sont sur 192.0.2.10

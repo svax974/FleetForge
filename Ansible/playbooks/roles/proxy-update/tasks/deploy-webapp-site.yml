@@ -36,13 +36,16 @@
     tasks_from: nginx
   when: proxy_update_cloudflare_edge | bool
 
-# Listes NOMMÉES (`webapp_vhost_locations[].access`) : le rendu est contrôlé AVANT d'être posé et rechargé
-# (scripts/webapp_hardening_check.py vhost : allow étroits, aucune adresse VPN sauf décision, `deny all` en dernier).
+# Listes NOMMÉES (`webapp_vhost_locations[].access`) et locations PUBLIQUES (`mode: public`, entrée du groupe `fleetforge_gateways`, E2) : le rendu est
+# contrôlé AVANT d'être posé et rechargé (scripts/webapp_hardening_check.py vhost : allow étroits, aucune adresse VPN sauf
+# décision, `deny all` en dernier ; avec `--public`, liste blanche exacte, certificat client, URI brute, back-lb, bornes).
 - name: Check the named access lists of the rendered vhost
   ansible.builtin.include_tasks:
     file: webapp-site-check.yml
   when:
-    - hostvars[webapp_vhost_entries | first].webapp_vhost_locations | default([]) | selectattr('access', 'defined') | list | length > 0
+    - (hostvars[webapp_vhost_entries | first].webapp_vhost_locations | default([]) | selectattr('access', 'defined') | list | length > 0)
+      or ((webapp_vhost_entries | first) in (groups['fleetforge_gateways'] | default([]))
+          and hostvars[webapp_vhost_entries | first].webapp_vhost_locations | default([]) | selectattr('mode', 'defined') | selectattr('mode', 'equalto', 'public') | list | length > 0)
     - not (hostvars[webapp_vhost_entries | first].webapp_hardening is defined
            and ansible_host in (groups['vpns'] | default([]) | map('extract', hostvars, 'ansible_host') | list))
 

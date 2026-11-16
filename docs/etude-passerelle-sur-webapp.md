@@ -678,3 +678,20 @@ publique sans `cloudflare_named`, un préfixe `^~` qui masquerait une regex publ
 `/mcp` est public (la regex `^/mcp(/.*)?$` l'enverrait sinon au back). La barrière de `/mcp` public est l'allow-list `ipAllow`
 par credential de l'application ; les pages de consentement, `/me/*`, `/admin/*` et `/` restent privées. `cloudflare_named` ne
 change aucune autre garde (la liste blanche vit dans la garde de la passerelle, pas dans `facts.yml`).
+
+### A3 : vhost public contrôlé, sonde du bord public
+
+Les locations publiques sont rendues par le gabarit générique à partir de `webapp_vhost_locations` (`mode: public` + `raw_uri` +
+amont back-lb ; `_access.inc` y ajoute `if ($ssl_client_verify != SUCCESS) { return 403; }`). Avant d'être posé, le vhost RENDU
+d'une entrée du groupe `fleetforge_gateways` qui a des locations publiques est contrôlé (`webapp_hardening_check.py vhost
+--public`, `webapp-site-check.yml`, appelé par `deploy-webapp-site.yml`) : toute location qui relaie sans `deny all;` est publique
+et doit être sur la liste blanche exacte (`PUBLIC_LOCATIONS`, comparée par test à `_public_allowed` de la garde), exiger le
+certificat client (403) et la `raw_uri` attendue (400), relayer au back-lb (jamais à l'amont du front), borner corps et délai
+(≤ 90 s), sans `allow` ni websocket ; le `server {}` lit le certificat client et `CF-Connecting-IP` ; `/` et
+`^~ /mcp/connections` restent privés ; aucun `^~` ne masque une regex publique. Sonde : `webapp_public_checks`
+(`[{name, path, method?, edge_status, origin_status?}]`, exigée par la garde dès qu'une location est publique, avec `/mcp` 401 /
+403) pose deux sondes svcprobe — `<name>` (`public_edge`) : le NOM public (donc Cloudflare) sans identifiant doit répondre
+`edge_status` ; `<name>_origin` : chaque proxy ADMIS joint DIRECTEMENT (`curl --resolve`, sans certificat client) doit répondre
+`origin_status` — qui alimentent `ServiceCheckFailing` (groupe `services`, `for: 15m`, avertissement). Un 200 direct = vhost ouvert
+à qui contourne Cloudflare ; un 403 ou un défi sur la première = règle WAF qui bloque les appels serveur. Non éprouvé : `curl`
+présent sur la machine de la passerelle ; méthode (`POST`) qui donne bien 401 sans identifiant ; comportement réel de Cloudflare.

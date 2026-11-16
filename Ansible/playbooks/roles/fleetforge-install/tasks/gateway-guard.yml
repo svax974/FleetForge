@@ -141,6 +141,12 @@
       {%- endif -%}
       {{ ns.p | join(' | ') }}
     _any_public: "{{ _locations | select('mapping') | selectattr('mode', 'defined') | selectattr('mode', 'equalto', 'public') | list | length > 0 }}"
+    # Sonde du bord public (A3) : `/mcp` sans identifiant → 401 par le nom, 403 en joignant l'origine sans certificat client.
+    _public_probe_ok: >-
+      {{ (webapp_public_checks | default([])) is sequence and (webapp_public_checks | default([])) is not string
+         and (webapp_public_checks | default([]) | select('mapping') | selectattr('path', 'defined') | selectattr('path', 'equalto', '/mcp')
+              | selectattr('edge_status', 'defined') | selectattr('edge_status', 'in', [401, '401'])
+              | selectattr('origin_status', 'defined') | selectattr('origin_status', 'in', [403, '403']) | list | length) > 0 }}
   ansible.builtin.assert:
     that:
       - _locations is not string
@@ -148,12 +154,15 @@
       # Une location publique n'a de sens que derrière NOTRE Cloudflare (certificat client exigé par `_access.inc`) : sans
       # `cloudflare_named`, `mode: public` serait ouvert à Internet, sans barrière d'adresse ni de certificat.
       - not (_any_public | bool) or (cloudflare_named | default(false) | string | lower) == 'true'
+      # Pas de bord public sans sa sonde : un vhost ouvert par erreur doit se voir (service_check_up{check="public_edge"}).
+      - not (_any_public | bool) or (_public_probe_ok | bool)
     fail_msg: >-
       {{ inventory_hostname }} : locations publiques refusées — {{ _public_problems | trim or 'aucune' }}.
       Seules sont admises (`mode: public`, regex, `upstream: back`, `raw_uri` exacte, corps et délai bornés) :
       {{ _public_allowed.keys() | join(' ; ') }} ; l'entrée doit porter `cloudflare_named: true`
-      ({{ cloudflare_named | default('absent') }}), jamais `access` avec `mode`, et `/mcp/connections` reste une location
-      privée du front (`priority: true`).
+      ({{ cloudflare_named | default('absent') }}), jamais `access` avec `mode`, `/mcp/connections` reste une location
+      privée du front (`priority: true`), et `webapp_public_checks` porte la sonde du bord public :
+      { name, path: /mcp, edge_status: 401, origin_status: 403 } (sondes svcprobe `<name>` et `<name>_origin`).
     quiet: true
 
 # Chaque amont : l'entrée FleetForge qu'il désigne doit admettre la passerelle (`access_linked`) et porter les trois

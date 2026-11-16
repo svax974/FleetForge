@@ -27,15 +27,21 @@
 
     - name: Run the vhost check of the named access lists
       vars:
-        _named: "{{ hostvars[webapp_vhost_entries | first].webapp_vhost_locations | selectattr('access', 'defined') | map(attribute='access') | list }}"
+        _named: "{{ hostvars[webapp_vhost_entries | first].webapp_vhost_locations | default([]) | selectattr('access', 'defined') | map(attribute='access') | list }}"
         _vpn_allowed: "{{ _named | map(attribute='vpn_addresses', default=false) | map('bool') | select | list | length > 0 }}"
         _forbid: "{{ [] if _vpn_allowed else (groups['vpns'] | default([]) | map('extract', hostvars, 'ansible_host') | list) }}"
-        _v6: "{{ _named | map(attribute='v6_min_prefix', default=128) | map('int') | min }}"
+        _v6: "{{ (_named | map(attribute='v6_min_prefix', default=128) | map('int') | list + [128]) | min }}"
+        # Locations `mode: public` d'une entrée de PASSERELLE (groupe `fleetforge_gateways`, E2) : le rendu est aussi contrôlé
+        # contre la liste blanche exacte (`--public`). Les autres entrées `webapp` ne sont pas concernées par cette liste.
+        _public: >-
+          {{ (webapp_vhost_entries | first) in (groups['fleetforge_gateways'] | default([]))
+             and hostvars[webapp_vhost_entries | first].webapp_vhost_locations | default([]) | selectattr('mode', 'defined') | selectattr('mode', 'equalto', 'public') | list | length > 0 }}
       ansible.builtin.command:
         argv: >-
           {{ [ansible_playbook_python, '-I', webapp_hardening_checker | default(playbook_dir ~ '/../scripts/webapp_hardening_check.py'), 'vhost',
               proxy_webapp_check_tmp.path, '--v6-min-prefix', _v6 | string]
-             + (_forbid | map('regex_replace', '^', '--forbid=') | list | map('split', '=') | flatten | list) }}
+             + (_forbid | map('regex_replace', '^', '--forbid=') | list | map('split', '=') | flatten | list)
+             + (['--public'] if _public | bool else []) }}
       delegate_to: localhost
       become: false
       register: proxy_webapp_vhost_check

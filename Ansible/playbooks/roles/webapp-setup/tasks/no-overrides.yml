@@ -230,6 +230,7 @@
     _neighbours: __wa_internal_probe__
     _networks: __wa_internal_probe__
     _old: __wa_internal_probe__
+    _origins: __wa_internal_probe__
     _others: __wa_internal_probe__
     _ours: __wa_internal_probe__
     _parc: __wa_internal_probe__
@@ -238,7 +239,9 @@
     _probe: __wa_internal_probe__
     _project: __wa_internal_probe__
     _proxy_addresses: __wa_internal_probe__
+    _public: __wa_internal_probe__
     _public_allowed: __wa_internal_probe__
+    _public_probe_ok: __wa_internal_probe__
     _public_problems: __wa_internal_probe__
     _public_timeout_max: __wa_internal_probe__
     _read: __wa_internal_probe__
@@ -520,6 +523,7 @@
       - lookup('ansible.builtin.vars', '_neighbours') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_networks') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_old') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_origins') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_others') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_ours') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_parc') | string == '__wa_internal_probe__'
@@ -528,7 +532,9 @@
       - lookup('ansible.builtin.vars', '_probe') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_project') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_proxy_addresses') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_public') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_public_allowed') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_public_probe_ok') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_public_problems') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_public_timeout_max') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_read') | string == '__wa_internal_probe__'

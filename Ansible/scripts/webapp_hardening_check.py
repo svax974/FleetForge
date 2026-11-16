@@ -55,10 +55,15 @@ Sous-commandes, chacune code 1 avec la liste des écarts :
       `--docker` : refait l'interpolation par `docker compose config` (aucun hôte contacté) et compare le résultat —
       sans Docker, ou en cas d'écart, le contrôle échoue (fermé).
 
-  vhost <rendu.conf> [--v6-min-prefix N] [--forbid <adresse>]…
+  vhost <rendu.conf> [--v6-min-prefix N] [--forbid <adresse>]… [--public]
       Vhost RENDU : chaque bloc à liste NOMMÉE (marqueur `# named-access`, proxy-update/_named_access.inc) n'a que des
       `allow` d'IPv4 seules (ou /32) ou d'IPv6 de préfixe ≥ N (128 par défaut), aucune des adresses `--forbid` (VPN),
-      puis `deny all` en dernier. Aucun bloc nommé : écart.
+      puis `deny all` en dernier. Aucun bloc nommé : écart (sauf avec `--public`).
+      `--public` (passerelle E2, locations `mode: public` derrière Cloudflare) : toute location qui relaie sans `deny all;`
+      est PUBLIQUE et doit être sur la liste blanche exacte (PUBLIC_LOCATIONS), exiger le certificat client (403) et l'URI
+      brute attendue (400), relayer au back-lb, borner corps et délai (≤ 90 s), sans `allow` ni websocket ; le `server {}`
+      lit le certificat client et CF-Connecting-IP ; `/` et `^~ /mcp/connections` restent privés ; aucun `^~` ne masque
+      une regex publique.
 
   dedicated <rendu.conf> --listener PORT=ADRESSE[,ADRESSE]…   (répétable)
       Écouteur DÉDIÉ d'un proxy (`dedicated_listeners`, proxy-security/tasks/dedicated-listeners.yml) dans le vhost
@@ -1120,15 +1125,116 @@ def check_named_block(where, block, v6_min_prefix=128, forbidden=()):
     return errors
 
 
-def check_vhost(path, v6_min_prefix=128, forbidden=()):
+# Locations PUBLIQUES (sans filtre d'adresse, derrière NOTRE Cloudflare) admises sur le vhost de la passerelle : LISTE BLANCHE
+# EXACTE, même liste que `_public_allowed` de fleetforge-install/tasks/gateway-guard.yml (un test les compare). Clé : le chemin
+# de la regex ; `raw_uri` : la garde d'URI brute exacte ; `body` : corps maximal en octets (`body_required` : limite exigée) ;
+# `timeout_required` : délai exigé. Délai maximal : 90 s (Cloudflare coupe à ~100 s).
+PUBLIC_LOCATIONS = {
+    "^/mcp(/.*)?$": {"raw_uri": "^/mcp(/|[?]|$)", "body": 131072, "body_required": True, "timeout_required": True},
+    "^/.well-known/oauth-protected-resource(/mcp)?$": {
+        "raw_uri": "^/.well-known/oauth-protected-resource(/mcp)?([?]|$)", "body": 16384, "body_required": False,
+        "timeout_required": False},
+    "^/.well-known/oauth-authorization-server$": {
+        "raw_uri": "^/.well-known/oauth-authorization-server([?]|$)", "body": 16384, "body_required": False,
+        "timeout_required": False},
+    "^/api/v1/mcp-access/oauth/(authorize|token|revoke)$": {
+        "raw_uri": "^/api/v1/mcp-access/oauth/(authorize|token|revoke)([?]|$)", "body": 16384, "body_required": True,
+        "timeout_required": False},
+    "^/api/v1/mcp-access/oauth/register$": {
+        "raw_uri": "^/api/v1/mcp-access/oauth/register([?]|$)", "body": 16384, "body_required": True,
+        "timeout_required": False},
+}
+PUBLIC_TIMEOUT_MAX = 90
+PUBLIC_MCP_PATH = "^/mcp(/.*)?$"
+FRONT_CONNECTIONS_HEAD = "^~ /mcp/connections"
+
+
+def _code(body):
+    """Ce que nginx lit d'un corps de location : commentaires retirés, espaces normalisés."""
+    return " ".join(" ".join(line.split("#", 1)[0].split()) for line in body.splitlines() if line.split("#", 1)[0].strip())
+
+
+def _nginx_bytes(value):
+    match = re.fullmatch(r"([0-9]+)([kKmMgG]?)", value)
+    return int(match.group(1)) * {"": 1, "k": 1024, "m": 1048576, "g": 1073741824}[match.group(2).lower()] if match else None
+
+
+def _nginx_seconds(value):
+    match = re.fullmatch(r"([0-9]+)(ms|s|m|h)?", value)
+    return int(match.group(1)) * {None: 1, "ms": 0.001, "s": 1, "m": 60, "h": 3600}[match.group(2)] if match else None
+
+
+def check_public(where, text):
+    """Le vhost RENDU : toute location qui relaie sans `deny all;` est PUBLIQUE et doit être sur la liste blanche, exiger le
+    certificat client (403), contrôler l'URI brute (400), relayer au back-lb (jamais l'amont du front), borner corps et délai,
+    sans `allow`/websocket. Le `server {}` lit le certificat client et l'adresse réelle ; le repli `/` reste privé ; la page
+    `/mcp/connections` du front reste privée quand `/mcp` est public ; aucun préfixe `^~` ne masque une regex publique."""
+    errors = []
+    blocks = _blocks_with_heads(text)
+    private_marker = "deny all;"
+    root = next((body for head, body in blocks if head == "/"), None)
+    if root is None or private_marker not in _code(root):
+        errors.append(f"{where} : le repli `location /` doit exister et rester privé (`deny all;`)")
+    root_pass = re.search(r"proxy_pass\s+(\S+);", root or "")
+    public = [(head, body) for head, body in blocks if head != "/" and private_marker not in _code(body)]
+    for head, body in public:
+        code = _code(body)
+        where_block = f"{where} : location {head}"
+        pattern = head[3:] if head.startswith("~* ") else None
+        rule = PUBLIC_LOCATIONS.get(pattern) if pattern else None
+        if rule is None:
+            errors.append(f"{where_block} : location publique hors liste blanche (aucun `deny all;`)")
+            continue
+        if "if ($ssl_client_verify != SUCCESS) { return 403; }" not in code:
+            errors.append(f"{where_block} : le certificat client de Cloudflare n'est pas exigé (403)")
+        if f'if ($request_uri !~* "{rule["raw_uri"]}") {{ return 400; }}' not in code:
+            errors.append(f"{where_block} : URI brute non contrôlée (`{rule['raw_uri']}` → 400 attendu)")
+        relay = re.search(r"proxy_pass\s+(\S+);", body)
+        if not relay or (root_pass and relay.group(1) == root_pass.group(1)):
+            errors.append(f"{where_block} : doit relayer au back-lb, pas à l'amont du front")
+        if re.search(r"(^|\s)(allow|deny)\s", code) or "Upgrade" in code:
+            errors.append(f"{where_block} : ni `allow`/`deny` ni websocket sur une location publique")
+        size = re.search(r"client_max_body_size\s+(\S+);", code)
+        if size is None and rule["body_required"]:
+            errors.append(f"{where_block} : limite de corps (client_max_body_size) exigée")
+        if size is not None and (_nginx_bytes(size.group(1)) is None or _nginx_bytes(size.group(1)) > rule["body"]):
+            errors.append(f"{where_block} : client_max_body_size {size.group(1)} au-dessus de {rule['body']} octets")
+        read = re.search(r"proxy_read_timeout\s+(\S+);", code)
+        send = re.search(r"proxy_send_timeout\s+(\S+);", code)
+        if read is None and rule["timeout_required"]:
+            errors.append(f"{where_block} : délai (proxy_read_timeout) exigé")
+        for label, found in (("proxy_read_timeout", read), ("proxy_send_timeout", send)):
+            if found is not None and (_nginx_seconds(found.group(1)) is None or _nginx_seconds(found.group(1)) > PUBLIC_TIMEOUT_MAX):
+                errors.append(f"{where_block} : {label} {found.group(1)} au-dessus de {PUBLIC_TIMEOUT_MAX} s")
+        for prefix_head, _ in blocks:
+            if prefix_head.startswith("^~ ") and pattern[1:].startswith(prefix_head[3:]):
+                errors.append(f"{where_block} : masquée par le préfixe prioritaire `{prefix_head}` (nginx ne lit pas les regex)")
+    if public:
+        outside = _code(_without_locations(text))
+        for directive in ("ssl_verify_client optional;", "real_ip_header CF-Connecting-IP;"):
+            if directive not in outside:
+                errors.append(f"{where} : `{directive}` absent du server {{}} (location publique sans certificat client ni IP réelle)")
+        if not re.search(r"ssl_client_certificate\s+\S+;", outside):
+            errors.append(f"{where} : `ssl_client_certificate` absent du server {{}}")
+    if any(head == "~* " + PUBLIC_MCP_PATH for head, _ in public):
+        front = next((body for head, body in blocks if head == FRONT_CONNECTIONS_HEAD), None)
+        pass_ = re.search(r"proxy_pass\s+(\S+);", front or "")
+        if front is None or private_marker not in _code(front) or not pass_ or not root_pass or pass_.group(1) != root_pass.group(1):
+            errors.append(f"{where} : `{FRONT_CONNECTIONS_HEAD}` doit rester une location privée relayée au front tant que /mcp est public")
+    return errors
+
+
+def check_vhost(path, v6_min_prefix=128, forbidden=(), public=False):
     with open(path, encoding="utf-8") as f:
         text = f.read()
     blocks = named_blocks(text)
-    if not blocks:
+    if not blocks and not public:
         return [f"{path}: aucune location à liste nommée (`{NAMED_MARKER}`)"]
     errors = []
     for head, body in blocks:
         errors += check_named_block(f"{path}: location {head}", body, v6_min_prefix, forbidden)
+    if public:
+        errors += check_public(path, text)
     return errors
 
 
@@ -1279,7 +1385,7 @@ def main(argv):
         errors = check_compose(argv[1], hardened, _option_values(argv, "--allow-bind"), use_docker="--docker" in argv)
     elif len(argv) >= 2 and argv[0] == "vhost":
         v6 = int(argv[argv.index("--v6-min-prefix") + 1]) if "--v6-min-prefix" in argv else 128
-        errors = check_vhost(argv[1], v6, _option_values(argv, "--forbid"))
+        errors = check_vhost(argv[1], v6, _option_values(argv, "--forbid"), public="--public" in argv)
     elif len(argv) >= 2 and argv[0] == "dedicated":
         errors = check_dedicated(argv[1], _listener_options(argv))
     else:
