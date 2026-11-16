@@ -94,6 +94,8 @@
   become: true
   changed_when: false
 
+# En mode `--check` le fichier intermédiaire n'est jamais écrit (la tâche de dépôt et promtool sont simulés ou sautés) :
+# copier depuis lui échouerait (« Source … not found »). Rien n'est installé ni retiré en simulation.
 - name: Install validated alert rules
   ansible.builtin.copy:
     src: "{{ prometheus_home }}/rules/.alerts.staged"
@@ -104,9 +106,11 @@
     mode: "0644"
   become: true
   notify: reload prometheus
+  when: not ansible_check_mode
 
 - name: Remove staged alert rules
   ansible.builtin.file:
     path: "{{ prometheus_home }}/rules/.alerts.staged"
     state: absent
   become: true
+  when: not ansible_check_mode
