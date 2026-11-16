@@ -1,0 +1,67 @@
+---
+# Garde d'une machine PARTAGÉE (inventaire seul, AUCUNE connexion, aucun fait calculé : rien à ajouter à no-overrides.yml).
+#
+# `docker-ports-firewall.sh` est UN fichier par machine (rôle docker-ports-security), réécrit à chaque déploiement d'une app
+# avec `docker_ports_rules` de l'entrée CANONIQUE (`webapp_machine`, host_vars) plus les règles DÉRIVÉES de l'app jouée
+# (roles/webapp-security/tasks/main.yml : front, back-lb, Postgres si le moteur en lance un, Redis — sauf celles déjà
+# déclarées à la main). Si le host_vars ne déclare pas TOUS les ports de TOUTES les apps de la machine, le script sur
+# disque ne porte que ceux de la dernière app jouée : un redémarrage de Docker (l'unité systemd rejoue le script) coupe ou
+# ouvre à tort les ports des autres apps, en production. Constat du 16/11/2026 sur 185.237.252.206.
+#
+# Concerne les entrées `webapp` NON durcies (le profil durci a son propre pare-feu) et NON `webapp_proxy: external` (aucun
+# filtrage posé) qui partagent l'adresse ET le port SSH de cette entrée. Il y en a ≥ 2 : alors
+#   - toutes désignent la MÊME entrée canonique (`webapp_machine`, défaut : elles-mêmes), qui existe et porte la même adresse ;
+#   - son `docker_ports_rules` contient chacun des ports de chacune (mêmes défauts que facts.yml : back = app_port+1,
+#     Postgres = webapp_db_port ou app_port+2 si le moteur est postgres|selfhosted, Redis = webapp_redis_port ou app_port+3).
+# Une machine à une seule app n'est pas concernée (les règles dérivées suffisent).
+
+- name: Check that the shared machine declares the Docker ports of every webapp in its canonical host_vars
+  vars:
+    _machine: >-
+      {%- set ns = namespace(out=[]) -%}
+      {%- for n in groups['all'] -%}
+      {%- set h = hostvars[n] -%}
+      {%- if 'webapp' in (h.ansible_roles | default([])) and h.app_port is defined and h.webapp_hardening is not defined
+             and (h.webapp_proxy | default('internal')) != 'external'
+             and (h.ansible_host | default('')) == ansible_host
+             and ((h.ansible_port | default(22)) | string) == ((ansible_port | default(22)) | string) -%}
+      {%- set ap = h.app_port | int -%}
+      {%- set db = (h.webapp_db_engine | default('')) in webapp_db_selfhosted_engines -%}
+      {%- set ports = [ap, (h.back_port | default(ap + 1)) | int, (h.webapp_redis_port | default(ap + 3)) | int]
+                      + ([(h.webapp_db_port | default(ap + 2)) | int] if db else []) -%}
+      {%- set ns.out = ns.out + [{'entry': n, 'canonical': h.webapp_machine | default(n), 'ports': ports}] -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {{ ns.out }}
+    _canonicals: "{{ _machine | map(attribute='canonical') | unique | list }}"
+    _canonical: "{{ _canonicals | first | default('') }}"
+    _declared: >-
+      {{ (hostvars[_canonical].docker_ports_rules | default([]) | map(attribute='port', default=0) | map('int') | list)
+         if _canonical in hostvars else [] }}
+    _missing: >-
+      {%- set ns = namespace(out=[]) -%}
+      {%- for m in _machine -%}
+      {%- for p in m.ports if p not in _declared -%}
+      {%- set ns.out = ns.out + [m.entry ~ ':' ~ p] -%}
+      {%- endfor -%}
+      {%- endfor -%}
+      {{ ns.out }}
+  ansible.builtin.assert:
+    that:
+      - _canonicals | length == 1
+      - _canonical in hostvars
+      - (hostvars[_canonical].ansible_host | default('')) == ansible_host
+      - _missing | length == 0
+    fail_msg: >-
+      {{ inventory_hostname }} partage {{ ansible_host }} avec {{ (_machine | map(attribute='entry') | list) | join(', ') }}
+      (entrées `webapp` non durcies) : un seul docker-ports-firewall.sh par machine, réécrit à chaque déploiement. Elles
+      doivent toutes porter `webapp_machine: <entrée canonique>` (aujourd'hui : {{ _canonicals | join(', ') or '—' }}),
+      présente à la même adresse, dont host_vars/<canonique>.yml déclare dans `docker_ports_rules` TOUS leurs ports (front,
+      back-lb, Postgres, Redis). Manquants (entrée:port) : {{ _missing | join(', ') or 'aucun' }}. Sans cela un redémarrage
+      de Docker ne rétablit que les règles de la dernière app jouée.
+    quiet: true
+  when:
+    - webapp_hardening is not defined
+    - (webapp_proxy | default('internal')) != 'external'
+    - _machine | length > 1
+  tags: [always]

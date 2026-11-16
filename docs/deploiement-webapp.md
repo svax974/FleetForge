@@ -28,6 +28,16 @@ collision refusée sur une même machine), `webapp_machine` (entrée canonique q
 `webapp_upstreams`, `webapp_update_common`, `webapp_migrate`. L'application est retrouvée par `webapp_app_id`
 (`.private/apps/apps.yml`).
 
+**Machine partagée par plusieurs apps `webapp`** : `docker-ports-firewall.sh` est UN fichier par machine, réécrit à chaque
+déploiement avec `docker_ports_rules` de l'entrée canonique plus les règles dérivées de l'app jouée. Chaque entrée porte donc
+`webapp_machine: <entrée canonique>`, et `host_vars/<canonique>.yml` déclare TOUS les ports (front, back-lb, Postgres si le
+moteur en lance un, Redis) de TOUTES les apps non durcies de la machine : le script est alors identique quelle que soit l'app
+jouée, et un redémarrage de Docker (l'unité rejoue le script) rétablit toutes les règles. `webapp-setup/tasks/machine-rules.yml`,
+jouée par `deploy-webapp.yml` avant toute connexion, refuse une machine à plusieurs apps dont une n'a pas `webapp_machine`, dont
+les entrées désignent des canoniques différents, ou dont un port manque (l'app durcie a son propre pare-feu, une app
+`webapp_proxy: external` n'en a aucun : ni l'une ni l'autre n'est comptée). Une nouvelle app : ses quatre ports dans le host_vars
+AVANT le premier déploiement. Tests : `SharedMachineRulesTests` (`scripts/test_webapp_hardening_check.py`).
+
 Attributs pour une app à stack propre (exemple : `social-manager`, entrée de `web3c_inventory.yml`) : `webapp_compose_file`
 (`COMPOSE_FILE_NAME`), `webapp_back_env_example` (modèle du `.env` d'une app neuve), `webapp_publish_bind` (`FRONT_BIND` et
 `BACK_LB_BIND`, `0.0.0.0` pour des proxies distants, filtrés ensuite par DOCKER-USER), `webapp_extra_secrets` (adoptés puis

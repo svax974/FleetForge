@@ -599,7 +599,10 @@ Décision du propriétaire : la passerelle est déployée sur la machine `185.23
   AJOUTÉES en queue) restent en aval. Le script de `docker-ports-security` est UN fichier par machine, réécrit à chaque
   déploiement d'une app avec les seules règles de CELLE-CI plus `docker_ports_rules` de l'entrée jouée : sans
   `host_vars/<entrée canonique>.yml` listant toutes les apps (et `webapp_machine` sur chacune), un redémarrage de
-  Docker ne rétablit que les règles de la dernière app déployée. Hors périmètre de la passerelle.
+  Docker ne rétablit que les règles de la dernière app déployée. Hors périmètre de la passerelle ; depuis le 16/11/2026
+  la garde `webapp-setup/tasks/machine-rules.yml` (jouée par `deploy-webapp.yml`, sans connexion) refuse une machine
+  partagée dont une app n'a pas `webapp_machine` ou dont un port manque dans le host_vars canonique
+  (`docs/deploiement-webapp.md`).
 - **Sauvegarde** : aucun conflit (destination `station`, autre machine) ; la clé de la passerelle est liée à son adresse
   (`from=`) sur la destination : rejouer `deploy-backup.yml --limit fleetforge-gateway:backup-fleetforge-gateway` si la
   sauvegarde avait été posée avec l'ancienne adresse.

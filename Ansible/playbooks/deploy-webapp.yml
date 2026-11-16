@@ -140,6 +140,14 @@
         tasks_from: compose-check
       when: webapp_hardening is defined
 
+    # Machine partagée : tous les ports de toutes ses apps dans le host_vars canonique (un seul script de pare-feu par machine).
+    - name: Check the shared machine declares the Docker ports of every webapp
+      ansible.builtin.include_role:
+        name: webapp-setup
+        tasks_from: machine-rules
+        apply:
+          tags: [always]
+
 # ── Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ───────────────────────
 - name: Contrôle préalable
   hosts: webapp_target

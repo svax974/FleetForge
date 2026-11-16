@@ -2444,5 +2444,250 @@ class EligibleProxiesTests(unittest.TestCase):
             self.assertTrue(any("seconde définition" in e for e in check._check_eligible_proxies(tmp)))
 
 
+STUB_DOCKER_PORTS = """\
+---
+- name: Load the REAL defaults of the role (the internal CIDR)
+  ansible.builtin.include_vars:
+    file: {defaults}
+    name: dps
+- name: Render the REAL docker-ports-firewall.sh.j2 and nothing else
+  vars:
+    docker_ports_internal_cidr: "{{{{ dps.docker_ports_internal_cidr }}}}"
+  ansible.builtin.template:
+    src: {template}
+    dest: "{{{{ play_tmp }}}}/script.sh"
+    mode: '0644'
+  become: false
+"""
+FAKE_DROP_ONLY_IPTABLES = """\
+#!/bin/sh
+awk '/^apply_port /{print "-A DOCKER-USER -p tcp -m tcp --dport " $2 " -m comment --comment x -j DROP"}' "$FW_SCRIPT"
+"""
+SHARED_PLAY = """\
+- hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - ansible.builtin.add_host: {name: "{{ webapp }}", groups: webapp_target}
+      changed_when: false
+    - ansible.builtin.add_host:
+        name: "{{ hostvars[webapp].webapp_machine | default(webapp) }}"
+        groups: webapp_machine
+        webapp_target: "{{ webapp }}"
+      changed_when: false
+- hosts: webapp_target
+  gather_facts: false
+  tasks:
+    - ansible.builtin.include_role: {name: webapp-setup, tasks_from: machine-rules}
+      when: not (skip_guard | default(false) | bool)
+    - ansible.builtin.include_role: {name: webapp-setup, tasks_from: facts}
+      when: not (guard_only | default(false) | bool)
+- hosts: webapp_machine
+  gather_facts: false
+  roles:
+    - role: webapp-security
+      when: not (guard_only | default(false) | bool)
+"""
+
+
+def _shared_rules(base, name, sqlite=False):
+    """Règles du host_vars canonique d'une app : front/back-lb exposés par les proxies, Postgres/Redis non exposés
+    (SQLite : aucune base lancée, donc pas de règle Postgres, `base` + 2)."""
+    exposed = "{{ src_proxies + src_prometheus }}"
+    quiet = "{{ src_prometheus }}"
+    out = []
+    for offset, label, sources, remap in ((0, "front", exposed, True), (1, "back-lb", exposed, False),
+                                           (2, "postgres (non exposé)", quiet, True), (3, "redis (non exposé)", quiet, True)):
+        if sqlite and offset == 2:
+            continue
+        out.append({"port": base + offset, "comment": f"{name} — {label}", "allow_internal": True,
+                    "allow_whitelist": True, "allow_vpns": True, "published_remap": remap, "sources": sources})
+    return out
+
+
+def shared_inventory():
+    """Machine partagée par trois apps `webapp` (a, c : Postgres ; b : SQLite) + une passerelle durcie qui a son pare-feu."""
+    def app(name, port, engine):
+        # `ansible_port` : la vérification de chevauchement de facts.yml le lit sur toute entrée (le parc le pose en group_vars).
+        return {"ansible_host": "203.0.113.7", "ansible_port": 22, "ansible_connection": "local", "ansible_roles": ["webapp"],
+                "app_port": port, "proxy_hostname": f"{name}.example.test", "access_mode": "private",
+                "webapp_db_engine": engine, "webapp_project": name, "webapp_app_id": name,
+                "webapp_registry": False, "webapp_machine": "machine"}
+    rules = [r for name, port, sqlite in (("app-a", 4500, False), ("app-b", 4510, True), ("app-c", 4520, False))
+             for r in _shared_rules(port, name, sqlite)]
+    return {"all": {
+        "vars": {"remote_username": "srvc", "domain_name": "example.test", "parc_name": "demo", "prometheus_host": "monitor",
+                 "whitelist": ["203.0.113.5", "2001:db8:1::/64"], "prom_alert_groups": ["services"],
+                 "ansible_python_interpreter": sys.executable},
+        "children": {
+            "proxies": {"hosts": {"proxy1": {"ansible_host": "192.0.2.10"}, "proxy2": {"ansible_host": "198.51.100.1"},
+                                  "proxy3": {"ansible_host": "203.0.113.50"}}},
+            "vpns": {"hosts": {"vpn1": {"ansible_host": "198.51.100.1"}}},
+            "supervision": {"hosts": {"monitor": {"ansible_host": "192.0.2.20"}}},
+            "misc": {"hosts": {"machine": {
+                "ansible_host": "203.0.113.7", "ansible_connection": "local",
+                "src_proxies": "{{ groups['proxies'] | map('extract', hostvars, 'ansible_host') | list }}",
+                "src_prometheus": "{{ [hostvars[prometheus_host].ansible_host] }}",
+                "docker_ports_rules": rules}}},
+            "apps": {"hosts": {"app-a": app("app-a", 4500, "selfhosted"), "app-b": app("app-b", 4510, "sqlite"),
+                               "app-c": app("app-c", 4520, "postgres")}},
+        }}}
+
+
+def parse_script(text):
+    """Règles du script rendu : {port: (ctorig, commentaire, sources IPv4 dans l'ordre, sources IPv6 dans l'ordre)}."""
+    rules, ctorig = {}, None
+    for line in text.splitlines():
+        if line.startswith("CTORIG="):
+            ctorig = line.split("=", 1)[1]
+        elif line.startswith("apply_port "):
+            parts = line.split()
+            port = int(parts[1])
+            comment_end = next(i for i in range(2, len(parts)) if parts[i].endswith('"'))
+            comment = " ".join(parts[2:comment_end + 1]).strip('"')
+            sources = parts[comment_end + 1:]
+            rules[port] = (ctorig, comment, [s for s in sources if ":" not in s], [s for s in sources if ":" in s])
+    return rules
+
+
+@unittest.skipUnless(shutil.which("ansible-playbook"), "ansible-playbook absent")
+class SharedMachineRulesTests(unittest.TestCase):
+    """Machine partagée par plusieurs apps `webapp` : UN `docker-ports-firewall.sh`, réécrit à chaque déploiement. Le
+    rôle docker-ports-security est remplacé par un rôle factice qui rend le VRAI gabarit dans un fichier (rien n'est posé,
+    aucune connexion) : la relecture de DOCKER-USER est faite par un `iptables` factice qui rend un DROP par port rendu."""
+
+    PORTS = [4500, 4501, 4502, 4503, 4510, 4511, 4513, 4520, 4521, 4522, 4523]
+
+    def run_app(self, app, inventory=None, guard_only=False, skip_guard=False):
+        with tempfile.TemporaryDirectory() as tmp:
+            stub = os.path.join(tmp, "roles", "docker-ports-security", "tasks")
+            os.makedirs(stub)
+            template = os.path.join(ROLES, "docker-ports-security", "templates", "docker-ports-firewall.sh.j2")
+            with open(os.path.join(stub, "main.yml"), "w") as f:
+                f.write(STUB_DOCKER_PORTS.format(template=template, defaults=os.path.join(
+                    ROLES, "docker-ports-security", "defaults", "main.yml")))
+            os.makedirs(os.path.join(tmp, "bin"))
+            with open(os.path.join(tmp, "bin", "iptables"), "w") as f:
+                f.write(FAKE_DROP_ONLY_IPTABLES)
+            os.chmod(os.path.join(tmp, "bin", "iptables"), 0o755)
+            with open(os.path.join(tmp, "apps.yml"), "w") as f:
+                f.write("".join(f"{n}: /nonexistent/{n}/\n" for n in ("app-a", "app-b", "app-c")))
+            with open(os.path.join(tmp, "play.yml"), "w") as f:
+                f.write(SHARED_PLAY)
+            with open(os.path.join(tmp, "inventory.yml"), "w") as f:
+                yaml.safe_dump(inventory or shared_inventory(), f)
+            with open(os.path.join(tmp, "ansible.cfg"), "w") as f:
+                f.write(f"[defaults]\nroles_path={os.path.join(tmp, 'roles')}:{ROLES}\nstdout_callback=default\n")
+            env = dict(os.environ, ANSIBLE_CONFIG=os.path.join(tmp, "ansible.cfg"),
+                       PATH=f"{os.path.join(tmp, 'bin')}:{os.environ['PATH']}", FW_SCRIPT=os.path.join(tmp, "script.sh"))
+            run = subprocess.run(["ansible-playbook", "-i", os.path.join(tmp, "inventory.yml"), os.path.join(tmp, "play.yml"),
+                                  "-c", "local", "-e", f"webapp={app}", "-e", f"play_tmp={tmp}",
+                                  "-e", f"webapp_apps_file={os.path.join(tmp, 'apps.yml')}", "-e", "ansible_become=false",
+                                  "-e", f"guard_only={'true' if guard_only else 'false'}",
+                                  "-e", f"skip_guard={'true' if skip_guard else 'false'}"],
+                                 capture_output=True, text=True, env=env, timeout=300)
+            script = os.path.join(tmp, "script.sh")
+            text = open(script, encoding="utf-8").read() if os.path.exists(script) else None
+            return run.returncode, run.stdout + run.stderr, text
+
+    def test_the_script_is_identical_whichever_application_is_played(self):
+        scripts = {}
+        for app in ("app-a", "app-b", "app-c"):
+            code, out, text = self.run_app(app)
+            self.assertEqual(code, 0, f"{app}: {out[-3000:]}")
+            scripts[app] = text
+        self.assertEqual(scripts["app-a"], scripts["app-b"])
+        self.assertEqual(scripts["app-a"], scripts["app-c"])
+        rules = parse_script(scripts["app-a"])
+        self.assertEqual(sorted(rules), self.PORTS, "ni plus (règle dérivée en double), ni moins")
+        # Profil « exposé par les proxies » : les trois proxies (dont celui qui est un VPN), Prometheus, whitelist, interne.
+        ctorig, comment, v4, v6 = rules[4500]
+        self.assertEqual((ctorig, comment), ("1", "app-a — front"))
+        self.assertEqual(sorted(v4), sorted(["172.16.0.0/12", "203.0.113.5", "198.51.100.1", "192.0.2.10", "203.0.113.50",
+                                             "192.0.2.20"]))
+        self.assertEqual(v6, ["2001:db8:1::/64"])
+        self.assertEqual(rules[4501][0], "0", "le back-lb publie <port>:<port> : pas de published_remap")
+        # Profil « non exposé » : pas les proxies (203.0.113.50 n'y figure pas), Prometheus + whitelist + vpns + interne.
+        self.assertEqual(sorted(rules[4502][2]), sorted(["172.16.0.0/12", "203.0.113.5", "198.51.100.1", "192.0.2.20"]))
+        self.assertNotIn(4512, rules, "SQLite : aucune règle Postgres")
+
+    def test_without_the_canonical_rules_the_script_depends_on_the_played_application(self):
+        # Preuve d'échec : le host_vars vide (état d'origine de 185.237.252.206) → script de la SEULE app jouée.
+        inventory = shared_inventory()
+        inventory["all"]["children"]["misc"]["hosts"]["machine"]["docker_ports_rules"] = []
+        for entry in inventory["all"]["children"]["apps"]["hosts"].values():
+            entry.pop("webapp_machine")
+        scripts = {}
+        for app in ("app-a", "app-c"):
+            code, out, scripts[app] = self.run_app(app, inventory, skip_guard=True)
+            self.assertEqual(code, 0, f"{app}: {out[-3000:]}")
+        self.assertEqual(sorted(parse_script(scripts["app-a"])), [4500, 4501, 4502, 4503])
+        self.assertEqual(sorted(parse_script(scripts["app-c"])), [4520, 4521, 4522, 4523])
+        # La garde refuse ce parc AVANT toute connexion, quelle que soit l'app jouée.
+        for app in ("app-a", "app-c"):
+            code, out, text = self.run_app(app, inventory)
+            self.assertNotEqual(code, 0, app)
+            self.assertIn("webapp_machine", out)
+            self.assertIsNone(text, "aucun script rendu")
+
+    def test_a_port_missing_from_the_canonical_host_vars_is_refused_and_named(self):
+        inventory = shared_inventory()
+        rules = inventory["all"]["children"]["misc"]["hosts"]["machine"]["docker_ports_rules"]
+        rules[:] = [r for r in rules if r["port"] != 4522]
+        for app in ("app-a", "app-c"):  # quelle que soit l'app jouée : c'est la machine qui est incomplète
+            code, out, _ = self.run_app(app, inventory, guard_only=True)
+            self.assertNotEqual(code, 0, app)
+            self.assertIn("app-c:4522", out.replace("\\n", " "))
+
+    def test_an_application_that_names_no_canonical_or_another_one_is_refused(self):
+        inventory = shared_inventory()
+        inventory["all"]["children"]["apps"]["hosts"]["app-b"].pop("webapp_machine")
+        code, out, _ = self.run_app("app-a", inventory, guard_only=True)
+        self.assertNotEqual(code, 0)
+        self.assertIn("webapp_machine", out)
+        inventory = shared_inventory()
+        inventory["all"]["children"]["apps"]["hosts"]["app-c"]["webapp_machine"] = "no-such-entry"
+        code, out, _ = self.run_app("app-a", inventory, guard_only=True)
+        self.assertNotEqual(code, 0)
+        self.assertIn("docker-ports-firewall.sh", out)
+
+    def test_a_canonical_entry_on_another_address_is_refused(self):
+        inventory = shared_inventory()
+        inventory["all"]["children"]["misc"]["hosts"]["machine"]["ansible_host"] = "203.0.113.99"
+        code, out, _ = self.run_app("app-a", inventory, guard_only=True)
+        self.assertNotEqual(code, 0)
+        self.assertIn("docker-ports-firewall.sh", out, "refusée par la garde de la machine, pas pour une autre raison")
+
+    def test_a_dedicated_machine_a_hardened_entry_and_an_external_one_are_not_concerned(self):
+        # Une machine à UNE app : les règles dérivées suffisent, aucun host_vars exigé.
+        inventory = shared_inventory()
+        apps = inventory["all"]["children"]["apps"]["hosts"]
+        apps["app-b"]["ansible_host"] = "203.0.113.8"
+        apps["app-c"]["ansible_host"] = "203.0.113.9"
+        for entry in apps.values():
+            entry.pop("webapp_machine")
+        inventory["all"]["children"]["misc"]["hosts"]["machine"]["docker_ports_rules"] = []
+        code, out, _ = self.run_app("app-a", inventory, guard_only=True)
+        self.assertEqual(code, 0, out[-2000:])
+        # Deux apps sur la machine, mais l'une est durcie (pare-feu propre) : une seule app concernée.
+        inventory = shared_inventory()
+        inventory["all"]["children"]["apps"]["hosts"]["app-c"]["webapp_hardening"] = {"runtime_user": "ffgateway"}
+        inventory["all"]["children"]["apps"]["hosts"]["app-b"]["webapp_proxy"] = "external"
+        inventory["all"]["children"]["misc"]["hosts"]["machine"]["docker_ports_rules"] = []
+        code, out, _ = self.run_app("app-a", inventory, guard_only=True)
+        self.assertEqual(code, 0, out[-2000:])
+
+    def test_the_guard_is_played_by_deploy_webapp_before_any_connection(self):
+        plays = check._load(os.path.join(PLAYBOOKS, "deploy-webapp.yml"))
+        guard = next(p for p in plays if p.get("name") == "Garde du profil durci")
+        self.assertEqual(guard["hosts"], "webapp_target")
+        self.assertNotIn("roles", guard)
+        included = [(t["ansible.builtin.include_role"]["name"], t["ansible.builtin.include_role"].get("tasks_from"))
+                    for t in guard["tasks"] if "ansible.builtin.include_role" in t]
+        self.assertIn(("webapp-setup", "machine-rules"), included)
+        preflight = next(i for i, p in enumerate(plays) if p.get("name") == "Contrôle préalable")
+        self.assertLess(plays.index(guard), preflight, "avant host-preflight, la première connexion")
+
+
 if __name__ == "__main__":
     unittest.main()

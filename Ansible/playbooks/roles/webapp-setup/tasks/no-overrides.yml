@@ -179,8 +179,11 @@
     _back_port: __wa_internal_probe__
     _bad: __wa_internal_probe__
     _bridge_gateway: __wa_internal_probe__
+    _canonical: __wa_internal_probe__
+    _canonicals: __wa_internal_probe__
     _check: __wa_internal_probe__
     _clash: __wa_internal_probe__
+    _declared: __wa_internal_probe__
     _denied_allowed: __wa_internal_probe__
     _denies: __wa_internal_probe__
     _drawn: __wa_internal_probe__
@@ -202,8 +205,10 @@
     _identity_addresses: __wa_internal_probe__
     _ids: __wa_internal_probe__
     _locations: __wa_internal_probe__
+    _machine: __wa_internal_probe__
     _machine_peers: __wa_internal_probe__
     _masquerade: __wa_internal_probe__
+    _missing: __wa_internal_probe__
     _named: __wa_internal_probe__
     _named_mcp: __wa_internal_probe__
     _neighbours: __wa_internal_probe__
@@ -441,8 +446,11 @@
       - lookup('ansible.builtin.vars', '_back_port') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_bad') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_bridge_gateway') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_canonical') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_canonicals') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_check') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_clash') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_declared') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_denied_allowed') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_denies') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_drawn') | string == '__wa_internal_probe__'
@@ -464,8 +472,10 @@
       - lookup('ansible.builtin.vars', '_identity_addresses') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_ids') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_locations') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_machine') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_machine_peers') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_masquerade') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_missing') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_named') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_named_mcp') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_neighbours') | string == '__wa_internal_probe__'
