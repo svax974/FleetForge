@@ -301,14 +301,21 @@ class TaskFile(unittest.TestCase):
             for part in ("tasks", "templates"):
                 os.symlink(os.path.join(ROLE, part), os.path.join(role, part))
         tasks = []
+        # `events` : ordre réel des redémarrages et de la tâche `after` (qui représente la suite du rôle).
+        if os.path.exists(os.path.join(self.tmp, "events")):
+            os.remove(os.path.join(self.tmp, "events"))
         for step in steps:
             if step == "main.cf":
                 tasks.append({"name": "Render main.cf and master.cf (stand-in)",
                               "ansible.builtin.shell": f"ls {self.pf} > {self.tmp}/at_main_cf",
                               "changed_when": True, "notify": "restart postfix"})
+            elif step == "after":
+                tasks.append({"name": "A later task of the role (stand-in)", "changed_when": False,
+                              "ansible.builtin.shell": f"echo after >> {self.tmp}/events"})
             else:
                 tasks.append({"ansible.builtin.include_role": {"name": "mailrelay-setup", "tasks_from": step}})
-        handlers = [{"name": "restart postfix", "ansible.builtin.shell": f"ls {self.pf} > {self.tmp}/at_restart"},
+        handlers = [{"name": "restart postfix",
+                     "ansible.builtin.shell": f"ls {self.pf} > {self.tmp}/at_restart; echo restart >> {self.tmp}/events"},
                     {"name": "say so", "listen": "restart postfix", "ansible.builtin.debug": {"msg": "HANDLER-RESTART-POSTFIX-RAN"}}]
         with open(os.path.join(self.tmp, "play.yml"), "w") as f:
             yaml.safe_dump([{"hosts": "localhost", "gather_facts": False, "tasks": tasks, "handlers": handlers}], f)
@@ -361,6 +368,41 @@ class TaskFile(unittest.TestCase):
         # ... and only then were they removed.
         self.assertEqual(self.files(), [])
         self.assertIn("HANDLER-RESTART-POSTFIX-RAN", out)
+
+    def test_an_ordinary_deploy_without_the_feature_flushes_no_handler_mid_role(self):
+        # Sans liaison ni table sur disque, le nettoyage ne doit pas redémarrer postfix/opendkim avant la suite du rôle :
+        # le redémarrage notifié par main.cf attend la fin du play, APRÈS la tâche suivante.
+        steps = self.FULL + ("after",)
+        for empty in ([], None):
+            with self.subTest(empty=empty):
+                code, out = self.play(empty, steps=steps)
+                self.assertEqual(code, 0, out[-3000:])
+                self.assertEqual(self.recorded("events"), ["after", "restart"], "handlers flushed mid-role")
+                self.assertEqual(self.files(), [])
+
+    def test_removing_the_bindings_still_restarts_before_deleting_then_continues(self):
+        steps = self.FULL + ("after",)
+        self.assertEqual(self.play(BINDINGS, steps=steps)[0], 0)
+        self.assertEqual(self.recorded("events"), ["after", "restart"])
+        code, out = self.play([], steps=steps)
+        self.assertEqual(code, 0, out[-3000:])
+        # restart first (flushed in the cleanup, tables still on disk), tables deleted, then the rest of the role
+        self.assertEqual(self.recorded("events"), ["restart", "after"])
+        self.assertEqual(self.recorded("at_restart"), self.ALL_TABLES)
+        self.assertEqual(self.files(), [])
+        # and a second deploy without bindings is back to the ordinary path
+        code, out = self.play([], steps=steps)
+        self.assertEqual(code, 0, out[-3000:])
+        self.assertEqual(self.recorded("events"), ["after", "restart"])
+
+    def test_a_single_leftover_table_is_enough_to_restart_first(self):
+        self.assertEqual(self.play(BINDINGS)[0], 0)
+        for name in ("sender_login_maps", "sasl_bound_logins", "bound_null_sender"):
+            os.remove(os.path.join(self.pf, name))
+        code, out = self.play([], steps=self.FULL + ("after",))
+        self.assertEqual(code, 0, out[-3000:])
+        self.assertEqual(self.recorded("events"), ["restart", "after"])
+        self.assertEqual(self.files(), [])
 
     def test_the_binding_task_file_alone_never_deletes_a_table(self):
         self.assertEqual(self.play(BINDINGS)[0], 0)

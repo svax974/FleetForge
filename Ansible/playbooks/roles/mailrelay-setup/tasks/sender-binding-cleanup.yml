@@ -4,14 +4,29 @@
 # (comme le faisait sender-binding.yml, joué avant main.cf) laisse un Postfix en marche dont la configuration nomme encore
 # une table texthash absente : toute soumission authentifiée échoue jusqu'au redémarrage. Rien n'est supprimé tant qu'une
 # liaison est déclarée.
+#
+# Le redémarrage anticipé (`flush_handlers`) n'a lieu QUE si une table existe encore : sans liaison déclarée ni table sur
+# disque (le déploiement ordinaire d'un relais, sans la fonction), vider les handlers ici redémarrerait postfix et opendkim
+# au milieu du rôle, avant les tâches qui suivent.
+
+- name: Look for the sender binding tables left on disk
+  ansible.builtin.stat:
+    path: "{{ mailrelay_postfix_dir }}/{{ item }}"
+  loop: [sender_login_maps, sasl_bound_logins, bound_null_sender, sender_bindings.json]
+  register: mailrelay_binding_tables
+  when: mailrelay_sender_bindings | default([], true) | length == 0
 
 - name: Restart Postfix on the configuration that no longer references the binding tables
   ansible.builtin.meta: flush_handlers
-  when: mailrelay_sender_bindings | default([], true) | length == 0
+  when:
+    - mailrelay_sender_bindings | default([], true) | length == 0
+    - mailrelay_binding_tables.results | selectattr('stat', 'defined') | selectattr('stat.exists') | list | length > 0
 
 - name: Remove the sender binding tables when no binding is declared
   ansible.builtin.file:
     path: "{{ mailrelay_postfix_dir }}/{{ item }}"
     state: absent
   loop: [sender_login_maps, sasl_bound_logins, bound_null_sender, sender_bindings.json]
-  when: mailrelay_sender_bindings | default([], true) | length == 0
+  when:
+    - mailrelay_sender_bindings | default([], true) | length == 0
+    - mailrelay_binding_tables.results | selectattr('stat', 'defined') | selectattr('stat.exists') | list | length > 0
