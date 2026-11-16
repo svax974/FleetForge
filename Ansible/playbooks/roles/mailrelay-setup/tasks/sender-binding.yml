@@ -1,0 +1,65 @@
+---
+# Lien identifiant SASL -> adresse expéditrice (`mailrelay_sender_bindings`, optionnel).
+# Vide : rien n'est posé, et les fichiers d'une liaison retirée sont supprimés (main.cf
+# ne les référence alors plus). Joué AVANT main.cf : les tables doivent exister quand
+# Postfix redémarre.
+
+- name: Check the shape of the sender bindings
+  vars:
+    bindings: "{{ mailrelay_sender_bindings | default([], true) }}"
+  ansible.builtin.assert:
+    that:
+      - bindings is sequence and bindings is not string and bindings is not mapping
+      - bindings | selectattr('login', 'undefined') | list | length == 0
+      - bindings | selectattr('senders', 'undefined') | list | length == 0
+      - bindings | map(attribute='login') | reject('string') | list | length == 0
+      - bindings | map(attribute='login') | reject('match', '^[A-Za-z0-9._+-]+(@[A-Za-z0-9.-]+)?$') | list | length == 0
+      - bindings | selectattr('senders', 'mapping') | list | length == 0
+    fail_msg: >-
+      `mailrelay_sender_bindings` invalide : une liste d'entrées `login` (nom SASL, sans espace ni
+      virgule) + `senders` (adresse ou liste d'adresses).
+    quiet: true
+  when: mailrelay_sender_bindings | default([], true) | length > 0
+
+- name: Check the bound sender addresses
+  vars:
+    bindings: "{{ mailrelay_sender_bindings | default([], true) }}"
+    flat_senders: >-
+      {%- set out = [] -%}
+      {%- for b in bindings -%}
+      {%- set _ = out.extend([b.senders] if b.senders is string else b.senders) -%}
+      {%- endfor -%}
+      {{ out }}
+  ansible.builtin.assert:
+    that:
+      - flat_senders | length > 0
+      - bindings | map(attribute='senders') | select('sequence') | reject('string') | map('length') | select('equalto', 0) | list | length == 0
+      - flat_senders | reject('string') | list | length == 0
+      - flat_senders | reject('match', '^[A-Za-z0-9._+-]+@[A-Za-z0-9.-]+$') | list | length == 0
+      - flat_senders | map('regex_replace', '^.*@', '') | map('lower') | reject('in', mail_domains | map(attribute='name') | map('lower') | list) | list | length == 0
+    fail_msg: >-
+      `mailrelay_sender_bindings` : `senders` doit contenir des adresses COMPLÈTES (pas de `@domaine`),
+      d'un domaine de `mail_domains` (les autres ne sont pas signées DKIM), jamais une liste vide.
+    quiet: true
+  when: mailrelay_sender_bindings | default([], true) | length > 0
+
+- name: Deploy the sender binding tables
+  ansible.builtin.template:
+    src: "{{ item.src }}"
+    dest: "{{ mailrelay_postfix_dir }}/{{ item.dest }}"
+    mode: '0644'
+  loop:
+    - { src: sender-login-maps.j2, dest: sender_login_maps }
+    - { src: sasl-bound-logins.j2, dest: sasl_bound_logins }
+  loop_control:
+    label: "{{ item.dest }}"
+  when: mailrelay_sender_bindings | default([], true) | length > 0
+  notify: restart postfix
+
+- name: Remove the sender binding tables when no binding is declared
+  ansible.builtin.file:
+    path: "{{ mailrelay_postfix_dir }}/{{ item }}"
+    state: absent
+  loop: [sender_login_maps, sasl_bound_logins]
+  when: mailrelay_sender_bindings | default([], true) | length == 0
+  notify: restart postfix

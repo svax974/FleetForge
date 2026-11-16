@@ -24,6 +24,9 @@ smtps     inet  n       -       n       -       -       smtpd
   -o smtpd_tls_wrappermode=yes
   -o smtpd_sasl_auth_enable=yes
   -o smtpd_relay_restrictions=permit_mynetworks,permit_sasl_authenticated,reject_unauth_destination
+{% if mailrelay_sender_bindings | default([], true) | length > 0 %}
+  -o smtpd_sender_restrictions=$submission_sender_restrictions
+{% endif %}
   -o smtpd_milters=
   -o content_filter=mailfilter:
 
@@ -33,6 +36,9 @@ submission inet  n       -       n       -       -       smtpd
   -o smtpd_tls_security_level=encrypt
   -o smtpd_sasl_auth_enable=yes
   -o smtpd_relay_restrictions=permit_mynetworks,permit_sasl_authenticated,reject_unauth_destination
+{% if mailrelay_sender_bindings | default([], true) | length > 0 %}
+  -o smtpd_sender_restrictions=$submission_sender_restrictions
+{% endif %}
   -o smtpd_milters=
   -o content_filter=mailfilter:
 

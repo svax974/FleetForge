@@ -44,9 +44,20 @@ par `deploy-fleetforge.yml` (garde du groupe `fleetforge_gateways` puis import d
   (et `webapp_machine`), un redémarrage de Docker ne rétablit que les règles de la dernière app déployée sur
   185.237.252.206 : `companymanager` et `social-manager` y tournent déjà.
 - **mail1 pour la passerelle distante** : 587 ouvert depuis 185.237.252.206 (`mailrelay-security`, rejouer
-  `update-ufw-all.yml --limit mail1` si besoin), compte SASL propre à la passerelle, et lien expéditeur
-  (`smtpd_sender_login_maps` + `reject_sender_login_mismatch`) absent des gabarits postfix : sans lui, un code
-  compromis envoie sous n'importe quelle adresse du domaine ; `fail2ban` ignore l'adresse de la passerelle.
+  `update-ufw-all.yml --limit mail1` si besoin) ; `fail2ban` ignore l'adresse de la passerelle. Lien expéditeur
+  FAIT dans les gabarits (16/11/2026, rôle `mailrelay-setup`, variable optionnelle `mailrelay_sender_bindings`,
+  vide par défaut = rien ne change) mais NON ACTIVÉ ni déployé : sans lui, un code compromis envoie sous
+  n'importe quelle adresse d'un domaine du relais. À faire côté propriétaire :
+  1. sur mail1, créer le compte SASL propre à la passerelle, royaume = `mailrelay_hostname` (mot de passe SAISI
+     au prompt, jamais en argument) : `sudo saslpasswd2 -c -u <mailrelay_hostname> <login>` ; le mettre au coffre
+     des secrets de la passerelle, pas dans ce dépôt ;
+  2. déclarer dans le group_vars du parc : `mailrelay_sender_bindings: [{login: <login>, senders: [<adresse@domaine du relais>]}]`
+     (adresse complète, domaine de `mail_domains`) ; le compte partagé `relay_user` n'est pas touché ;
+  3. `./play.sh web3c deploy-mailrelay.yml --limit mail1` (rejoue aussi la config SASL/Postfix : redémarrage de
+     Postfix) ; vérifier dans `/var/log/mail.log` (`postfix/submission/smtpd`) que `sasl_username=<login>@<royaume>`
+     a bien cette forme, puis qu'un `MAIL FROM` d'une autre adresse est refusé en `553 5.7.1 … not owned by user`.
+  Limites : seule l'enveloppe (`MAIL FROM`) est liée, pas l'en-tête `From:` ; un identifiant NON listé reste
+  libre ; `postfix` réel (smtpd) non exercé hors machine (tests : `Ansible/scripts/test_mailrelay_sender_binding.py`).
 - **Whitelist de test sur `/mcp` filtrée** : IPv4 seule ou /32, IPv6 de préfixe ≥ 128 par défaut ; la
   plage IPv6 /64 de la whitelist n'y passe que si le propriétaire pose `v6_min_prefix: 64` dans l'`access`.
 - **Fenêtre au redémarrage de Docker** : les conteneurs repartent avant que l'unité

@@ -94,3 +94,29 @@ mailrelay_dmarc_org_domains: []
 # coexistence des deux (erreur 81054), donc sans cela un CNAME hérité d'un
 # ancien nommage bloque la publication de façon permanente.
 mailrelay_dns_replace_conflicting: true
+
+# Lien identifiant SASL -> adresse(s) expéditrice(s) (OPTIONNEL, vide = comportement
+# historique inchangé : tout compte authentifié peut émettre sous n'importe quelle
+# adresse, ce qui est le cas du compte `relay_user` partagé).
+#
+# Chaque entrée LIE un identifiant à ses seules adresses d'enveloppe (MAIL FROM) :
+# sur 465 et 587, ce compte ne peut plus émettre sous une autre adresse (« 553 5.7.1
+# Sender address rejected: not owned by user »). Les comptes NON listés (dont
+# `relay_user`) ne sont pas touchés : le contrôle ne vise que les identifiants listés.
+# Rendu : /etc/postfix/sender_login_maps (adresse -> identifiant, `smtpd_sender_login_maps`
+# en texthash) et /etc/postfix/sasl_bound_logins (identifiants liés, aiguillés par
+# `check_sasl_access` vers `reject_sender_login_mismatch`). Aucun mot de passe ici.
+#
+# `login` : nom SASL sans royaume (le royaume `mailrelay_hostname` est ajouté, comme
+# Postfix le fait avec `smtpd_sasl_local_domain`) ou déjà qualifié `nom@royaume`.
+# `senders` : adresse ou liste d'adresses COMPLÈTES, d'un domaine de `mail_domains`
+# (les autres ne sont pas signées DKIM). Pas de `@domaine` : une liaison ne doit pas
+# rouvrir tout le domaine. Le compte SASL lui-même se crée à la main (mot de passe
+# saisi par le propriétaire) — voir docs/avant-ouverture-public.md.
+#   mailrelay_sender_bindings:
+#     - login: gateway
+#       senders: ["approvals@the.example.com"]
+mailrelay_sender_bindings: []
+
+# Répertoire de configuration de Postfix (surchargé seulement par les tests hors machine).
+mailrelay_postfix_dir: /etc/postfix

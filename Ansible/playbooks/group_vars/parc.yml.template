@@ -180,6 +180,12 @@ mailrelay_dmarc_org_domains:
 # [mailrelay-setup, alertmanager-install]
 relay_user: "{{ remote_username }}"
 relay_user_password: CHANGE_ME                   # 🔒
+# Lien identifiant SASL -> adresse expéditrice, OPTIONNEL (absent/vide = inchangé) : un compte listé ne peut
+# émettre que sous ses adresses (465/587). Le compte se crée à la main sur le relais (saslpasswd2, mot de passe
+# saisi), jamais ici. Détails : roles/mailrelay-setup/defaults/main.yml. [mailrelay-setup]
+# mailrelay_sender_bindings:
+#   - login: gateway
+#     senders: ["approvals@the.example.com"]
 # Boîte IMAP relevée par l'exporter DMARC (Gmail : mot de passe d'application).
 # [dmarc-exporter-install, deploy-dmarc-exporter.yml]
 dmarc_exporter_imap_user: "dmarc-reports@example.com"

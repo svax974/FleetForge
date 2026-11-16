@@ -253,6 +253,11 @@
 
 # ── Postfix configuration ─────────────────────────────────────────────────────
 
+# Lien identifiant SASL -> adresse expéditrice (optionnel) : les tables doivent
+# exister avant main.cf / master.cf, qui les référencent.
+- name: Sender binding of the SASL logins (optional)
+  ansible.builtin.include_tasks: sender-binding.yml
+
 - name: Deploy Postfix main.cf
   ansible.builtin.template:
     src: main.cf.j2

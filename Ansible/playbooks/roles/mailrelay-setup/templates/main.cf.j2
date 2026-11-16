@@ -47,6 +47,18 @@ smtpd_sasl_security_options = noanonymous
 smtpd_sasl_tls_security_options = noanonymous
 broken_sasl_auth_clients    = yes
 
+{% if mailrelay_sender_bindings | default([], true) | length > 0 %}
+# ── Sender binding (mailrelay_sender_bindings) ───────────────────────────────
+# A listed SASL login may only send as the envelope address(es) bound to it.
+# Logins that are not listed (relay_user) are left alone: check_sasl_access only
+# returns the restriction class for the listed ones, anything else is a no-match.
+smtpd_sender_login_maps = texthash:{{ mailrelay_postfix_dir }}/sender_login_maps
+smtpd_restriction_classes = bound_sender
+bound_sender = reject_sender_login_mismatch
+# Referenced from master.cf (465/587): a master.cf `-o` value cannot hold spaces.
+submission_sender_restrictions = check_sasl_access texthash:{{ mailrelay_postfix_dir }}/sasl_bound_logins
+
+{% endif %}
 # ── DKIM milter (applied at re-injection port 10026, after header rewrite) ────
 milter_protocol       = 6
 milter_default_action = accept
