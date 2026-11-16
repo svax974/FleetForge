@@ -998,8 +998,54 @@ RETARGET_INVENTORY = {"all": {
         "backups": {"hosts": {"backup-tradekong": {"ansible_host": "192.0.2.30"},
                               "backup-ctdapi": {"ansible_host": "192.0.2.30"},
                               "backup-sync": {"ansible_host": "192.0.2.31"},
-                              "backup-v6": {"ansible_host": "2001:DB8::30"}}},
+                              "backup-v6": {"ansible_host": "2001:DB8::30"},
+                              "backup-mapped": {"ansible_host": "::ffff:192.0.2.32"},
+                              "backup-dns": {"ansible_host": "Backup-Dns.Example.org"}}},
         "local": {"hosts": {"localhost": {"ansible_connection": "local"}}}}}}
+
+
+class NormalizeAddressFilterTests(unittest.TestCase):
+    """The `normalize_address` filter (playbooks/filter_plugins), called directly: no Ansible needed."""
+
+    @classmethod
+    def setUpClass(cls):
+        spec = importlib.util.spec_from_file_location(
+            "normalize_address", os.path.join(PLAYBOOKS, "filter_plugins", "normalize_address.py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        cls.normalize = staticmethod(module.FilterModule().filters()["normalize_address"])
+
+    def test_one_address_one_text(self):
+        for spelled, canonical in (
+                ("192.0.2.1", "192.0.2.1"), (" 192.0.2.1\n", "192.0.2.1"),
+                ("2001:DB8::1", "2001:db8::1"), ("2001:0db8:0:0:0:0:0:1", "2001:db8::1"),
+                ("[2001:0DB8:0000::0001]", "2001:db8::1"), ("[ 2001:db8::1 ]", "2001:db8::1"),
+                ("::ffff:192.0.2.1", "192.0.2.1"), ("::FFFF:c000:201", "192.0.2.1"),
+                ("0:0:0:0:0:ffff:192.0.2.1", "192.0.2.1"), ("[::ffff:192.0.2.1]", "192.0.2.1"),
+                ("::1", "::1"), ("::", "::"),
+                ("fe80::1%eth0", "fe80::1"), ("FE80:0:0:0:0:0:0:1%en0", "fe80::1")):
+            with self.subTest(spelled=spelled):
+                self.assertEqual(self.normalize(spelled), canonical)
+
+    def test_different_addresses_stay_different(self):
+        self.assertNotEqual(self.normalize("2001:db8::1"), self.normalize("2001:db8::10"))
+        self.assertNotEqual(self.normalize("::ffff:192.0.2.1"), self.normalize("::ffff:192.0.2.2"))
+        self.assertNotEqual(self.normalize("::ffff:192.0.2.1"), self.normalize("2001:db8::1"))
+
+    def test_a_name_is_trimmed_and_lower_cased_never_resolved(self):
+        for spelled, expected in (("Backup.Example.ORG", "backup.example.org"), ("  host  ", "host"),
+                                  ("localhost", "localhost"), ("192.000.002.001", "192.000.002.001"),
+                                  ("[not-an-address", "[not-an-address"), ("1.2.3", "1.2.3")):
+            with self.subTest(spelled=spelled):
+                self.assertEqual(self.normalize(spelled), expected)
+
+    def test_it_never_raises(self):
+        for odd in (None, "", " ", "[]", "%", "::%", "[::1", "1.2.3.4%x", 42, 1.5, True, b"2001:DB8::1", ["::1"],
+                    "\x00", "é" * 300):
+            with self.subTest(odd=repr(odd)[:30]):
+                self.assertIsInstance(self.normalize(odd), str)
+        self.assertEqual(self.normalize(None), "")
+        self.assertEqual(self.normalize(42), "42")
 
 
 @unittest.skipUnless(shutil.which("ansible-playbook"), "ansible-playbook absent")
@@ -1040,6 +1086,45 @@ class PlaybookTests(unittest.TestCase):
                 self.assertNotEqual(code, 0, out[-2000:])
                 self.assertIn("encore en service", out)
                 self.assertNotIn("old-backup-host", out)
+
+    def test_purge_old_recognises_another_spelling_of_the_same_ipv6(self):
+        # Zeros omitted vs written out, `::` expanded, upper case: all `2001:db8::30`, the destination `backup-v6`.
+        for spelled in ("2001:0db8:0:0:0:0:0:30", "2001:db8:0:0::30", "2001:0DB8:0000:0000:0000:0000:0000:0030",
+                        "[2001:0db8:0:0:0:0:0:0030]", " 2001:DB8:0::30 "):
+            with self.subTest(spelled=spelled):
+                code, out = self.retarget("-e", f"purge_old='{spelled}'")
+                self.assertNotEqual(code, 0, out[-2000:])
+                self.assertIn("encore en service", out)
+                self.assertNotIn("old-backup-host", out)
+
+    def test_purge_old_recognises_the_ipv4_mapped_form_both_ways(self):
+        # Inventory IPv4 (192.0.2.30) asked as IPv4-mapped IPv6, and inventory IPv4-mapped (::ffff:192.0.2.32) asked as
+        # plain IPv4 or in the hexadecimal mapped spelling.
+        for spelled in ("::ffff:192.0.2.30", "::FFFF:c000:21e", "[::ffff:192.0.2.30]",
+                        "192.0.2.32", "::ffff:c000:220", "0:0:0:0:0:ffff:192.0.2.32"):
+            with self.subTest(spelled=spelled):
+                code, out = self.retarget("-e", f"purge_old='{spelled}'")
+                self.assertNotEqual(code, 0, out[-2000:])
+                self.assertIn("encore en service", out)
+                self.assertNotIn("old-backup-host", out)
+
+    def test_purge_old_accepts_addresses_that_serve_no_destination(self):
+        # Close to a destination in service, but not the same address: accepted, and passed on as typed.
+        for free in ("2001:db8::31", "2001:db8:0:0:0:0:0:3", "::ffff:192.0.2.99", "192.0.2.3", "fe80::30"):
+            with self.subTest(free=free):
+                code, out = self.retarget("-e", f"purge_old={free}")
+                self.assertEqual(code, 0, out[-3000:])
+                self.assertIn(f'"ansible_host": "{free}"', out)
+
+    def test_purge_old_leaves_dns_names_alone(self):
+        # A name is never resolved: compared as lower-case text, so the name of a destination in service in another
+        # case is refused, and any other name goes through unchanged.
+        code, out = self.retarget("-e", "purge_old=' BACKUP-dns.example.ORG '")
+        self.assertNotEqual(code, 0, out[-2000:])
+        self.assertIn("encore en service", out)
+        code, out = self.retarget("-e", "purge_old=old-backup.example.org")
+        self.assertEqual(code, 0, out[-3000:])
+        self.assertIn('"ansible_host": "old-backup.example.org"', out)
 
     def test_remove_and_purge_know_the_gateways_under_any_tag(self):
         for name in ("remove-backup.yml", "purge-backup.yml"):

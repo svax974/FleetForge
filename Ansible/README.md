@@ -250,11 +250,12 @@ source, et seulement APRÈS la pose de la clé restreinte sur le compte dédié 
   `monitor`, une machine dont la destination a déjà changé une fois) n'est retirée que par `purge_old` vers CETTE
   machine — le retrait automatique ci-dessus ne vise que la destination courante. Contrôle : `authorized_keys` de
   `srvc` sur chaque ancienne destination (commentaire `<source>-<nom>-backup`).
-- `purge_old` refuse l'adresse d'une destination encore en service, comparée après normalisation (espaces, casse,
-  crochets d'une IPv6 littérale). Limite : aucune dépendance ajoutée (ni `ansible.utils` ni netaddr), donc deux
-  écritures d'une même IPv6 qui diffèrent autrement (zéros omis, compression `::`, forme IPv4-mappée) ou un NOM et
-  son adresse ne sont pas reconnus égaux — donner l'adresse écrite EXACTEMENT comme l'inventaire de l'ancienne
-  destination l'avait, et vérifier qu'elle n'est pas celle d'une destination en service avant de lancer.
+- `purge_old` refuse l'adresse d'une destination encore en service, comparée après normalisation par le filtre
+  `normalize_address` (`playbooks/filter_plugins/`, bibliothèque standard `ipaddress`, aucune dépendance) : espaces,
+  casse, crochets, zéros omis, compression `::`, forme IPv4-mappée (`::ffff:192.0.2.1` = `192.0.2.1`) et zone IPv6
+  (`%eth0`, ignorée) d'une même adresse sont reconnus égaux. Limite restante, volontaire : un NOM face à son adresse
+  n'est pas reconnu égal (aucune résolution DNS dans un garde-fou) — donner l'adresse de l'ANCIENNE destination, et
+  vérifier qu'elle n'est pas celle d'une destination en service avant de lancer.
 
 ## Supervision
 

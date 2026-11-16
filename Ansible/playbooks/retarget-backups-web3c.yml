@@ -89,18 +89,18 @@
 
     # `purge_old` supprime des sauvegardes : jamais sur une destination ENCORE en service (une entrée du groupe
     # `backups`, ou la destination courante d'une source repointée). Un échec ici arrête le playbook avant tout
-    # repointage. Les deux côtés sont normalisés (espaces, casse, crochets d'une adresse IPv6 littérale) : `2001:DB8::30`,
-    # `2001:db8::30` et `[2001:db8::30]` sont la même destination. Limite assumée (aucune dépendance ajoutée : ni
-    # `ansible.utils` ni netaddr) : deux écritures d'une même IPv6 qui diffèrent autrement (zéros omis ou compression
-    # `::`, forme IPv4-mappée) ou un NOM et son adresse ne sont pas reconnus égaux — voir Ansible/README.md.
+    # repointage. Les deux côtés passent par le filtre `normalize_address` (playbooks/filter_plugins, bibliothèque
+    # standard `ipaddress`, aucune dépendance) : espaces, casse, crochets, zéros omis, compression `::` et forme
+    # IPv4-mappée d'une même adresse sont la même destination (`2001:DB8::30`, `[2001:0db8:0:0:0:0:0:30]`,
+    # `::ffff:192.0.2.1` et `192.0.2.1`). Limite assumée : un NOM et son adresse ne sont pas reconnus égaux (jamais de
+    # résolution DNS ici) — voir Ansible/README.md.
     - name: Refuser de purger une destination encore en service
       vars:
         _current: >-
           {{ ((groups['backups'] | default([])) + (retarget_sources | map('extract', hostvars, 'pgbak_dest_host') | list))
              | select('in', hostvars) | map('extract', hostvars) | selectattr('ansible_host', 'defined')
-             | map(attribute='ansible_host') | map('string') | map('trim') | map('lower')
-             | map('replace', '[', '') | map('replace', ']', '') | unique | list }}
-        _asked: "{{ purge_old | string | trim | lower | replace('[', '') | replace(']', '') }}"
+             | map(attribute='ansible_host') | map('normalize_address') | unique | list }}
+        _asked: "{{ purge_old | normalize_address }}"
       ansible.builtin.fail:
         msg: >-
           purge_old={{ purge_old }} est l'adresse d'une destination encore en service ({{ _current | join(', ') }}) :
