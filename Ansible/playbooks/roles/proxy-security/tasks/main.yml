@@ -186,6 +186,12 @@
     - proxy_backindicators_port is defined
     - proxy_security_backindicators | default(true) | bool
 
+############################# DEDICATED LISTENERS #############################
+# Écouteurs dédiés (`dedicated_listeners` d'une entrée de service) : ouverture ufw du port à ses seuls clients nommés.
+# Rien de déclaré : aucune ouverture (tasks/dedicated-listeners.yml).
+- name: Open the dedicated listeners to their named clients only
+  ansible.builtin.import_tasks: dedicated-listeners.yml
+
 ########## TODO
 
 # Configure DBs firewall rules

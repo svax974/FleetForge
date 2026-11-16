@@ -60,6 +60,13 @@ Sous-commandes, chacune code 1 avec la liste des écarts :
       `allow` d'IPv4 seules (ou /32) ou d'IPv6 de préfixe ≥ N (128 par défaut), aucune des adresses `--forbid` (VPN),
       puis `deny all` en dernier. Aucun bloc nommé : écart.
 
+  dedicated <rendu.conf> --listener PORT=ADRESSE[,ADRESSE]…   (répétable)
+      Écouteur DÉDIÉ d'un proxy (`dedicated_listeners`, proxy-security/tasks/dedicated-listeners.yml) dans le vhost
+      RENDU : exactement UN `server {}` écoute sur PORT (jamais 443), en ssl et sur ce seul port ; hors des locations
+      il n'a que listen/server_name/ssl_*/http2/access_log/error_log (ni `return`, ni `root`, ni `proxy_pass`) ; chaque
+      location est soit un simple `deny all`, soit restreinte (`# restricted-linked`, proxy-update/_access.inc) avec des
+      `allow` EXACTEMENT égaux aux adresses données puis `deny all` en dernier ; au moins une location relaie.
+
 Dépendance : PyYAML (celui d'Ansible). `python3 -I Ansible/scripts/webapp_hardening_check.py playbook Ansible/playbooks`.
 """
 import glob
@@ -1122,6 +1129,110 @@ def check_vhost(path, v6_min_prefix=128, forbidden=()):
     return errors
 
 
+# ── écouteur dédié rendu ──────────────────────────────────────────────────
+
+RESTRICTED_MARKER = re.compile(r"#\s*restricted-linked[^\n]*")
+# Directives admises au niveau du `server {}` d'un écouteur dédié (hors `location`) : rien qui serve ou relaie sans
+# passer par une location filtrée (`return`, `root`, `proxy_pass`, `rewrite`, `if`… sont refusés).
+LISTENER_SERVER_DIRECTIVES = ("listen", "server_name", "ssl_", "http2", "access_log", "error_log")
+
+
+def _balanced(text, start):
+    """Index du caractère qui suit l'accolade fermante du bloc ouvert juste avant `start`."""
+    depth, pos = 1, start
+    while pos < len(text) and depth:
+        depth += {"{": 1, "}": -1}.get(text[pos], 0)
+        pos += 1
+    return pos
+
+
+def _server_blocks(text):
+    out, index = [], 0
+    while True:
+        match = re.search(r"\bserver\s*\{", text[index:])
+        if not match:
+            return out
+        start = index + match.end()
+        end = _balanced(text, start)
+        out.append(text[start:end - 1])
+        index = end
+
+
+def _without_locations(block):
+    out, index = [], 0
+    while True:
+        match = re.search(r"\blocation\b[^{;]*\{", block[index:])
+        if not match:
+            out.append(block[index:])
+            return "".join(out)
+        out.append(block[index:index + match.start()])
+        index = _balanced(block, index + match.end())
+
+
+def _tokens(text):
+    return [t.strip() for t in re.split(r"[;{}]", text) if t.strip()]
+
+
+def check_dedicated_listener(where, text, port, addresses):
+    """Le `server {}` qui écoute sur `port` (dans le vhost RENDU) : le SEUL de ce fichier sur ce port, ne servant qu'à
+    travers des locations restreintes (`# restricted-linked`, proxy-update/_access.inc) dont les `allow` sont EXACTEMENT
+    `addresses` (IPv4 seules), puis `deny all` en dernier."""
+    errors = []
+    text = RESTRICTED_MARKER.sub("restricted_linked;", text)
+    text = "\n".join(line.split("#", 1)[0] for line in text.splitlines())
+    if not re.fullmatch(r"[1-9][0-9]{3,4}", str(port)) or int(port) == 443:
+        return [f"{where} : port {port} invalide (1024-65535, jamais 443)"]
+    wanted = sorted(set(addresses))
+    if not wanted or any(not re.fullmatch(r"[0-9]{1,3}(\.[0-9]{1,3}){3}", a) for a in wanted):
+        return [f"{where} : adresses cliente invalides ({', '.join(addresses) or 'aucune'})"]
+    blocks = [b for b in _server_blocks(text) if re.search(rf"\blisten\s+(\[::\]:)?{int(port)}\b", b)]
+    if len(blocks) != 1:
+        return [f"{where} : {len(blocks)} bloc(s) server écoutent sur {port} (un seul attendu)"]
+    block = blocks[0]
+    for listen in re.findall(r"\blisten\s+([^;]+);", block):
+        words = listen.split()
+        if words[0].rsplit(":", 1)[-1] != str(int(port)):
+            errors.append(f"{where} : `listen {listen}` : le bloc dédié n'écoute que sur {port}")
+        if "ssl" not in words:
+            errors.append(f"{where} : `listen {listen}` sans ssl")
+    for token in _tokens(_without_locations(block)):
+        if not token.startswith(LISTENER_SERVER_DIRECTIVES):
+            errors.append(f"{where} : directive `{token.split()[0]}` au niveau du server dédié (réservé aux locations filtrées)")
+    locations = _blocks_with_heads(block)
+    if not any("proxy_pass" in body for _, body in locations):
+        errors.append(f"{where} : aucune location qui relaie (proxy_pass)")
+    for head, body in locations:
+        tokens = _tokens(body)
+        if "restricted_linked" in tokens:
+            access = [t for t in tokens if t.startswith(("allow ", "deny "))]
+            allows = sorted({t[len("allow "):].strip() for t in access if t.startswith("allow ")})
+            if allows != wanted:
+                errors.append(f"{where} : location {head} : allow {allows} ≠ clients {wanted}")
+            if not access or access[-1] != "deny all" or any(t == "deny all" for t in access[:-1]):
+                errors.append(f"{where} : location {head} : `deny all` doit être la dernière règle d'accès")
+        elif set(t for t in tokens if t.startswith(("allow ", "deny "))) != {"deny all"} or len(tokens) != 1:
+            errors.append(f"{where} : location {head} sans liste restreinte (`# restricted-linked`) et qui n'est pas un simple `deny all`")
+    return errors
+
+
+def check_dedicated(path, listeners):
+    """`listeners` : [(port, [adresses])]."""
+    with open(path, encoding="utf-8") as f:
+        text = f.read()
+    errors = []
+    for port, addresses in listeners:
+        errors += check_dedicated_listener(f"{path}: écouteur {port}", text, port, addresses)
+    return errors or ([] if listeners else [f"{path}: aucun écouteur à contrôler (--listener PORT=ADRESSE[,ADRESSE])"])
+
+
+def _listener_options(argv):
+    out = []
+    for value in _option_values(argv, "--listener"):
+        port, _, addresses = value.partition("=")
+        out.append((port, [a for a in addresses.split(",") if a]))
+    return out
+
+
 def _option_values(argv, option):
     return [argv[i + 1] for i, a in enumerate(argv[:-1]) if a == option]
 
@@ -1141,6 +1252,8 @@ def main(argv):
     elif len(argv) >= 2 and argv[0] == "vhost":
         v6 = int(argv[argv.index("--v6-min-prefix") + 1]) if "--v6-min-prefix" in argv else 128
         errors = check_vhost(argv[1], v6, _option_values(argv, "--forbid"))
+    elif len(argv) >= 2 and argv[0] == "dedicated":
+        errors = check_dedicated(argv[1], _listener_options(argv))
     else:
         print(__doc__)
         return 2

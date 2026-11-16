@@ -57,14 +57,15 @@
       - >-
         hostvars[_upstream_egress[0].inventory_host | default('')].ansible_host | default('') == ansible_host
         or (_upstream_egress[0].masquerade_ack | default(false) | bool)
-      - _upstream_egress[0].port == 443
+      # 443 (vhost partagé du proxy) OU le port d'un écouteur DÉDIÉ de l'amont (contrôlé par amont, plus bas).
+      - (_upstream_egress[0].port | string) is match('^[1-9][0-9]{0,4}$')
       - webapp_hardening.egress_allow | default([]) | selectattr('name', 'defined') | selectattr('name', 'equalto', 'smtp') | list | length == 1
     fail_msg: >-
       Entrée {{ inventory_hostname }} invalide pour la passerelle : entrée dédiée hors du groupe `infras`, famille
       `webapp` (jamais `fleetforge`), `webapp_hardening`, `access_mode: private` (E1), `hostname`, `proxy_hostname`
       (nom de la zone, pas le front des proxies), et une location `/mcp` de `webapp_vhost_locations` relayée au back-lb
       (`upstream: back`) derrière une liste nommée (`access`), URI brute contrôlée (`raw_uri`) ; `webapp_hardening.egress_allow`
-      avec `{name: upstream, inventory_host: <le proxy de la machine de l'amont>, port: 443}` (jamais `proxies: true` ;
+      avec `{name: upstream, inventory_host: <le proxy de la machine de l'amont>, port: 443 ou celui d'un écouteur dédié}` (jamais `proxies: true` ;
       `masquerade_ack: true` si ce proxy n'est pas sur CETTE machine) et une entrée `smtp` (relais du parc : à renseigner
       par le propriétaire avant le premier déploiement).
     quiet: true
@@ -84,6 +85,15 @@
     _upstream_egress: >-
       {{ (webapp_hardening.egress_allow | default([]) if webapp_hardening is mapping else [])
          | select('mapping') | selectattr('name', 'defined') | selectattr('name', 'equalto', 'upstream') | list }}
+    # Port de la sortie `upstream` : 443 (vhost partagé du proxy) ou celui d'un écouteur DÉDIÉ de l'amont — un `server {}`
+    # unique, admis à cette seule passerelle (proxy-security/tasks/dedicated-listeners.yml). Avec un écouteur dédié, le
+    # pare-feu de la passerelle n'admet que ce port du proxy : plus aucun autre vhost de ce proxy n'est joignable.
+    _up_port: "{{ (_upstream_egress[0].port | default(443)) | int }}"
+    _authority: "{{ _ev.hostname | default('') ~ ((':' ~ _up_port) if (_up_port | int) != 443 else '') }}"
+    _listeners: >-
+      {{ (_ev.dedicated_listeners | default([]) if _ev.dedicated_listeners | default([]) is not string else [])
+         | select('mapping') | selectattr('port', 'defined') | selectattr('port', 'in', [_up_port | string, _up_port | int]) | list }}
+    _probe: "{{ webapp_upstream_checks | default([]) | select('mapping') | selectattr('id', 'defined') | selectattr('id', 'equalto', item.id | default('')) | list }}"
     # Playbooks de la liste blanche qu'un motif de refus de ffg_check/ffg_run toucherait (glob FleetForge : `*`, `?`),
     # traduit en regex sans antislash.
     _denied_allowed: >-
@@ -112,6 +122,12 @@
       - _ev.hostname is match('^[a-z0-9][a-z0-9.-]{0,252}$')
       - _ev.hostname is search('[.]' ~ (domain_name | regex_escape) ~ '$')
       - hostvars[_upstream_egress[0].inventory_host | default('')].ansible_host | default('') == _ev.ansible_host | default('')
+      # Hors 443 : l'amont déclare CET écouteur dédié (`dedicated_listeners`), dont le seul client est cette passerelle.
+      # Sans lui la sortie ouverte ne mène à aucun `server {}`. Le contrôle de la déclaration (port, clients, adresses)
+      # est celui de proxy-security/tasks/dedicated-listeners.yml, avant toute ouverture.
+      - (_up_port | int) == 443 or (_listeners | length == 1 and (_listeners[0].clients | default([])) == [inventory_hostname])
+      # La sonde `upstream_<id>` (`webapp_upstream_checks`) joint le MÊME nom et le MÊME port que `FFG_UPSTREAMS`.
+      - _probe | length == 0 or (_probe[0].url | default('')) is match('^https://' ~ (_authority | regex_escape) ~ '(/|$)')
       - inventory_hostname in (_ev.access_linked | default([]))
       - item.parcs is defined and item.parcs is not string and item.parcs | length > 0
       - (_users.values() | unique | list | length) == 3
@@ -141,7 +157,9 @@
       max_hosts, accept_checks_from: [{{ _users.check }}], accept_own_checks: false) couvrant les parcs
       {{ item.parcs | default([]) | join(', ') }}, check et run avec `allow_playbooks` = {{ ffg_allowed_playbooks | join(', ') }}
       et refusant {{ ffg_required_denies | join(', ') }} ; trois noms distincts, aucun égal au compte d'AgentHub
-      (`ff_api_user`) ; `webapp_env_from_vault` de la passerelle : {{ _slots.keys() | join(', ') }}.
+      (`ff_api_user`) ; `webapp_env_from_vault` de la passerelle : {{ _slots.keys() | join(', ') }} ; hors 443 : `dedicated_listeners`
+      de l'entrée avec le port {{ _up_port }} et `clients: [{{ inventory_hostname }}]` ; la sonde `webapp_upstream_checks`
+      de cet amont vise https://{{ _authority }}/…
   loop: "{{ ffg_upstreams | default([]) }}"
   loop_control:
     label: "{{ item.id | default('?') }} → {{ item.entry | default('?') }}"
@@ -181,8 +199,13 @@
 # `proxy_hostname` (CNAME vers le front de TOUS les proxies : la sortie `upstream` n'en admet qu'un).
 - name: Work out FFG_UPSTREAMS
   vars:
+    # Port de la sortie `upstream` (443 : absent de l'URL ; sinon celui de l'écouteur dédié, contrôlé plus haut).
+    _up_port: >-
+      {{ ((webapp_hardening.egress_allow | default([]) if webapp_hardening is mapping else [])
+          | select('mapping') | selectattr('name', 'defined') | selectattr('name', 'equalto', 'upstream') | map(attribute='port')
+          | first | default(443)) | int }}
     _upstreams: >-
-      [{% for u in ffg_upstreams %}{"id": {{ u.id | to_json }}, "baseUrl": {{ ('https://' ~ hostvars[u.entry].hostname) | to_json }}, "parcs": {{ u.parcs | to_json }}{% if u.users is defined %}, "users": {{ u.users | to_json }}{% endif %}}{{ '' if loop.last else ', ' }}{% endfor %}]
+      [{% for u in ffg_upstreams %}{"id": {{ u.id | to_json }}, "baseUrl": {{ ('https://' ~ hostvars[u.entry].hostname ~ ((':' ~ _up_port) if (_up_port | int) != 443 else '')) | to_json }}, "parcs": {{ u.parcs | to_json }}{% if u.users is defined %}, "users": {{ u.users | to_json }}{% endif %}}{{ '' if loop.last else ', ' }}{% endfor %}]
   ansible.builtin.set_fact:
     wa_env_injected:
       FFG_UPSTREAMS: "{{ _upstreams | trim }}"

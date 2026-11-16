@@ -53,7 +53,7 @@
 #   webapp_vhost_file     nom du vhost écrit à la main dans parcs/<parc>/nginx/sites-enabled/ (défaut : `<webapp_project>.conf`)
 #   webapp_trust_proxy    TRUST_PROXY imposé (chaîne) : app jointe directement par Cloudflare, sans proxy du parc (défaut : proxies du parc)
 #   webapp_run_env        { VARIABLE: valeur } ajoutées à l'environnement de `run.sh` (hooks propres à l'app ; jamais un secret)
-#   webapp_upstream_checks  sondes svcprobe `upstream_<id>` : [{ id, url }], URL https lue DEPUIS le conteneur back
+#   webapp_upstream_checks  sondes svcprobe `upstream_<id>` : [{ id, url }], URL https://<nom>[:<port>]/<chemin> lue DEPUIS le conteneur back
 
 # Ports consécutifs réservés à une app : front, back-lb, Postgres, Redis.
 webapp_port_block: 4

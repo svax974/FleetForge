@@ -133,7 +133,10 @@
 # RISQUE RÉSIDUEL d'une machine distante : la sortie vers l'amont est masquée sous
 # l'adresse publique de la machine, que les vhosts écrits à la main du parc
 # admettent au titre de « tous les hôtes de l'inventaire » (le conteneur choisit
-# le `Host` envoyé au proxy : seul l'ensemble IP:443 est filtré, pas le vhost).
+# le `Host` envoyé au proxy : seul l'ensemble IP:443 est filtré, pas le vhost). Fermé en déclarant un ÉCOUTEUR DÉDIÉ
+# (`dedicated_listeners` sur l'entrée FleetForge + `egress_allow.upstream.port` de la passerelle = ce port, ufw de proxy1
+# ouvert à sa seule adresse : docs/etude-passerelle-sur-webapp.md, « Écouteur dédié »). Rejeu : `--tags proxy-conf` AVANT
+# la passerelle ; `-e ff_deploy_scope=gateway` ne pose ni le vhost ni l'ouverture ufw.
 # Comptes aval : `ffg_run` porte `accept_own_checks: false` — seuls les checks
 # de `ffg_check` ouvrent ses runs réels.
 # E2/E3 (OAuth public) : voir docs/avant-ouverture-public.md (machine partagée avec
@@ -233,12 +236,22 @@
                     playbook_dir ~ '/../parcs/' ~ parc_name ~ '/nginx/sites-enabled/fleetforge.conf') | length > 0)
              and (groups['infras'] | default([]) | length > 0) }}
 
+    # Écouteurs DÉDIÉS (`dedicated_listeners` de l'entrée FleetForge, optionnel) : un port propre sur le proxy de la machine
+    # de FleetForge, un `server {}` unique, admis à la seule passerelle (`access_linked`), ouvert dans ufw à sa seule
+    # adresse — AVANT le vhost, qui lit la même déclaration. Rien de déclaré : aucune ouverture, comportement inchangé.
+    - name: Open the dedicated listeners to their named clients only
+      ansible.builtin.include_role:
+        name: proxy-security
+        tasks_from: dedicated-listeners
+      when: ff_vhost_wanted | bool
+
     - name: Deploy just the FleetForge vhost
       ansible.builtin.include_role:
         name: proxy-update
         tasks_from: deploy-one-site
       vars:
         site: fleetforge.conf
+        site_dedicated_listeners: "{{ proxy_dedicated_listeners | default([]) | selectattr('entry', 'in', groups['infras'] | default([])) | list }}"
       when: ff_vhost_wanted | bool
 
 # ── Règles d'alerte ────────────────────────────────────────────────────────

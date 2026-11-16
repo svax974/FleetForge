@@ -15,8 +15,8 @@
       - wa_project is match('^[a-z][a-z0-9-]{0,40}$')
       - webapp_hardening is not defined or wa_h_tag is match('^webapp-[a-z][a-z0-9-]{0,40}$')
       - webapp_upstream_checks | default([]) | map(attribute='id') | reject('match', '^[a-z][a-z0-9_]{0,31}$') | list | length == 0
-      - webapp_upstream_checks | default([]) | map(attribute='url') | reject('match', '^https://[a-z0-9][a-z0-9.-]{0,252}(/[A-Za-z0-9._/-]*)?$') | list | length == 0
-    fail_msg: "Nom de projet, id ou URL (https://<nom>/<chemin>) d'un amont hors grammaire : ils entrent dans la commande de la sonde."
+      - webapp_upstream_checks | default([]) | map(attribute='url') | reject('match', '^https://[a-z0-9][a-z0-9.-]{0,252}(:[1-9][0-9]{0,4})?(/[A-Za-z0-9._/-]*)?$') | list | length == 0
+    fail_msg: "Nom de projet, id ou URL (https://<nom>[:<port>]/<chemin>) d'un amont hors grammaire : ils entrent dans la commande de la sonde."
     quiet: true
 
 - name: Describe the extra checks of the application

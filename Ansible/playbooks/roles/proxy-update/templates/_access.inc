@@ -34,9 +34,36 @@
    bloc qui en dépend la pose lui-même.
 
    `deny all` n'est PAS optionnel en mode privé : sans lui, les `allow`
-   laissent tout le reste AUTORISÉ. #}
+   laissent tout le reste AUTORISÉ.
+
+   ÉCOUTEUR DÉDIÉ (`{% set access_only_local = <liste de noms d'entrées> %}` avant
+   l'include, voir `dedicated_listeners` de proxy-security/tasks/dedicated-listeners.yml) :
+   le bloc ne sert QU'À ces serveurs liés, rien d'autre — ni vpns, ni supervision,
+   ni whitelist, ni les autres serveurs liés de l'entrée, quel que soit
+   `access_mode` — puis `deny all`. Chaque nom doit figurer dans `access_linked`
+   de l'entrée (l'autorité reste `access_linked`), avoir une adresse IPv4 propre
+   (une seule ligne) qui n'est pas celle d'un serveur VPN (NAT partagé) ; sinon il
+   est ignoré, jamais élargi. Liste vide ou valeur qui n'est pas une liste :
+   personne. Sans cette variable, le rendu est celui d'avant, octet pour octet.
+   Marqueur `# restricted-linked`, lu par scripts/webapp_hardening_check.py
+   (`dedicated`). #}
 {% set _access_mode = access_mode_local | default(hostvars[access_entry].access_mode | default('private'), true) %}
-{% if _access_mode == 'private' %}
+{% if access_only_local is defined %}
+        # restricted-linked ({{ access_entry }}) : SEULS les serveurs liés nommés, puis deny all.
+{% set _vpn_addresses = groups['vpns'] | default([]) | map('extract', hostvars, 'ansible_host') | map('string') | list %}
+{% for host in (access_only_local if (access_only_local is iterable and access_only_local is not string and access_only_local is not mapping) else []) %}
+{% set _oh = host | string %}
+{% set _oa = (hostvars[_oh].ansible_host | default('') | string) if _oh in hostvars else '' %}
+{% if _oh in (hostvars[access_entry].access_linked | default([]))
+      and _oa is match('^(0|[1-9][0-9]{0,2})([.](0|[1-9][0-9]{0,2})){3}$') and _oa == (_oa | trim)
+      and (_oa.splitlines() | length) == 1 and _oa not in _vpn_addresses %}
+        allow {{ _oa }};  # serveur lié {{ _oh }}
+{% else %}
+        # serveur « {{ _oh | regex_replace('[^A-Za-z0-9_.-]', '?') }} » ignoré (absent de access_linked, adresse non IPv4, ou adresse d'un serveur VPN)
+{% endif %}
+{% endfor %}
+        deny all;
+{% elif _access_mode == 'private' %}
         # Mode privé ({{ access_entry }}) : vpns + supervision + whitelist.
         {% for host in groups['vpns'] | default([]) %}
         allow {{ hostvars[host]['ansible_host'] }};  # vpn {{ host }}

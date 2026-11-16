@@ -590,10 +590,44 @@ Décision du propriétaire : la passerelle est déployée sur la machine `185.23
   (`access_linked`, serveurs d'une liste nommée) — sinon la passerelle hériterait de leurs droits. La sortie `upstream`
   doit viser le proxy de la machine de l'entrée amont. Tests : `GuardTests` (passerelle sur sa machine, acquittements,
   identités privilégiées, proxy hors machine de l'amont, proxy local sans `access_local_cidrs`).
-- **Limite non fermée** : le filtre ne porte que sur `proxy1:443`, pas sur le `Host` envoyé. Les vhosts écrits à la main
-  qui admettent « tous les hôtes de l'inventaire » (ex. ctdapi.conf, docker-repo-ssl.conf, monitoring.conf `/api/v1/write`)
-  admettent aussi l'adresse de la passerelle : un code compromis peut les joindre en choisissant le `Host`. Fermeture
-  possible (non faite) : un écouteur dédié sur proxy1 (port propre, un seul `server{}`) et `egress_allow.upstream.port` ≠ 443.
+- **Limite du 443 partagé (fermée par l'« Écouteur dédié » ci-dessous, opt-in)** : le filtre ne porte que sur
+  `proxy1:443`, pas sur le `Host` envoyé. Les vhosts écrits à la main qui admettent « tous les hôtes de l'inventaire »
+  (ex. ctdapi.conf, docker-repo-ssl.conf, monitoring.conf `/api/v1/write`) admettent aussi l'adresse de la passerelle : un
+  code compromis peut les joindre en choisissant le `Host`. Sans `dedicated_listeners` sur l'entrée FleetForge, c'est
+  toujours le cas (comportement par défaut inchangé).
+
+### Écouteur dédié sur proxy1 (16/11/2026) : la sortie `upstream` ne joint plus qu'UN `server{}`
+
+Opt-in, par variables d'inventaire ; rien de déclaré = rendu, gardes et pare-feu d'avant (443, `FFG_UPSTREAMS` sans port).
+
+- **Déclaration** (entrée du SERVICE, ici FleetForge) : `dedicated_listeners: [{name: gateway, port: <P>, clients:
+  [fleetforge-gateway]}]`. Côté passerelle, `webapp_hardening.egress_allow` : `{name: upstream, inventory_host: proxy1, port:
+  <P>, masquerade_ack: true}` — le MÊME `<P>` (garde) ; `webapp_upstream_checks[].url` = `https://<hostname>:<P>/…`.
+- **Vhost** (`parcs/<parc>/nginx/sites-enabled/fleetforge.conf`, dépôt privé) : un second `server{}` par écouteur, sur le
+  seul proxy de la machine de l'entrée, `listen <P> ssl`, qui ne relaie que FleetForge. Accès par `_access.inc` avec
+  `{% set access_only_local = <clients> %}` : `allow` des seuls serveurs liés nommés (chacun doit être dans
+  `access_linked`, adresse IPv4 propre, pas celle d'un VPN), puis `deny all` — ni vpns, ni supervision, ni whitelist, ni
+  AgentHub. Sans cette variable `_access.inc` rend les mêmes octets qu'avant (prouvé sur le vhost FleetForge réel).
+- **Pare-feu de proxy1** : `proxy-security/tasks/dedicated-listeners.yml` (appelé par `deploy-proxy.yml` et par le play
+  `proxy-conf` de `deploy-fleetforge.yml`, AVANT le vhost) : valide la déclaration (échec avant toute règle : port
+  1024-65535, ni 80/443/22, ni un port réservé du parc ni celui de l'application, unique ; clients dans `access_linked`,
+  adresses hors VPN), pose `ufw allow proto tcp from <adresse cliente> to any port <P>` (commentaire
+  `dedicated-listener <entrée>/<nom>`), retire les ouvertures `dedicated-listener …` dont le couple (source, port) n'est
+  plus voulu (jamais `ufw reset`). Appliqué par les proxies de la MÊME machine que l'entrée du service seulement.
+- **Gardes** : `gateway-guard.yml` accepte un port ≠ 443 seulement si l'amont déclare cet écouteur avec la passerelle pour
+  UNIQUE client, que la sonde `upstream_<id>` vise le même `nom:port`, et met le port dans `FFG_UPSTREAMS.baseUrl`.
+  `deploy-one-site.yml` (`site_dedicated_listeners`) contrôle le vhost RENDU avant de le poser
+  (`webapp_hardening_check.py dedicated` : un seul `server{}` sur le port, ssl, rien hors locations filtrées, `allow` =
+  EXACTEMENT les clients, `deny all` en dernier) puis, sur `nginx -T`, qu'aucun AUTRE fichier n'écoute sur ce port, avant le
+  reload.
+- **Effet** : le pare-feu de la passerelle (DOCKER-USER, `-d <proxy1> --dport <P>`) n'ouvre que ce port ; proxy1 n'y sert
+  que FleetForge, à la seule adresse de la passerelle. Les autres vhosts de proxy1 (443) ne sont plus joignables par
+  elle. Reste vrai : l'adresse de la machine est partagée avec 4 autres apps (elles peuvent joindre `<P>` si ufw/le
+  `allow` voient leur adresse commune) — le `allow` admet l'ADRESSE, pas le conteneur ; l'authentification basique de
+  FleetForge et les comptes bornés `ffg_*` restent les barrières.
+- **Non éprouvé sur une machine** : aucun `nginx`, `ufw` ni déploiement réel (faux binaires, rendus et gardes locaux).
+  Ordre de rejeu supervisé : voir le compte rendu de livraison ; `--tags proxy-conf` AVANT de déployer la passerelle (sinon
+  sa sonde `upstream_main` reste à 0), et `-e ff_deploy_scope=gateway` ne pose PAS l'écouteur.
 - **Machine partagée avec d'autres apps** : le pare-feu de la passerelle (script et unité propres, règles en TÊTE) n'agit que
   sur son sous-réseau et ses ports ; les règles des autres apps (script unique `docker-ports-firewall.sh`, règles
   AJOUTÉES en queue) restent en aval. Le script de `docker-ports-security` est UN fichier par machine, réécrit à chaque

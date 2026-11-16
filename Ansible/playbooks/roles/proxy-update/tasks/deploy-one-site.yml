@@ -47,6 +47,14 @@
     tasks_from: nginx
   when: groups['all'] | map('extract', hostvars) | selectattr('cloudflare_front', 'defined') | selectattr('cloudflare_front') | list | length > 0
 
+# Écouteurs dédiés (`site_dedicated_listeners`, optionnel : fait `proxy_dedicated_listeners` de
+# proxy-security/tasks/dedicated-listeners.yml) : le rendu est contrôlé AVANT d'être posé (un seul `server {}` par port,
+# locations restreintes aux seules adresses clientes). Absent ou vide : rien de plus, comportement inchangé.
+- name: Check the dedicated listeners of the rendered vhost
+  ansible.builtin.include_tasks:
+    file: dedicated-listener-check.yml
+  when: site_dedicated_listeners | default([]) | length > 0
+
 - name: Deploy the vhost
   ansible.builtin.template:
     src: "{{ proxy_update_dir }}/sites-enabled/{{ site }}"
@@ -61,6 +69,13 @@
   ansible.builtin.command: nginx -t
   changed_when: false
   when: proxy_one_site_deployed.changed
+
+# Un port dédié partagé avec un autre vhost de ce proxy fusionnerait les deux `server {}` : AUCUN autre fichier ne doit y
+# écouter (tasks/dedicated-listener-ports.yml, lu sur la configuration EFFECTIVE, avant le reload).
+- name: Check no other file listens on the dedicated ports
+  ansible.builtin.include_tasks:
+    file: dedicated-listener-ports.yml
+  when: site_dedicated_listeners | default([]) | length > 0
 
 - name: Reload nginx
   ansible.builtin.systemd:

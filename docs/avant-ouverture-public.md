@@ -33,13 +33,15 @@ par `deploy-fleetforge.yml` (garde du groupe `fleetforge_gateways` puis import d
 - **Processus local** : sans proxy sur la machine, la règle OUTPUT n'admet que root sur les ports publiés
   (un compte local non root est rejeté) ; les conteneurs des autres apps (172.x) sont refusés par
   DOCKER-USER (source ≠ proxy admis).
-- **Sortie masquée vers proxy1 (443) et mail1 (587)** : le paquet de la passerelle sort sous l'adresse publique de la
-  machine, admise par FleetForge au titre d'`access_linked`. Le filtre ne porte que sur `62.171.135.125:443`, pas sur
-  le `Host` : les vhosts écrits à la main qui admettent « tous les hôtes de l'inventaire » (`ctdapi.conf`,
-  `docker-repo-ssl.conf`, `monitoring.conf` `/api/v1/write`, groupe `apps` de `ctdapi-back.conf` et
-  `mtbridge-pool.conf`) sont joignables par un code compromis, et l'adresse est commune aux 4 autres apps.
-  Fermeture possible (non faite) : écouteur dédié sur proxy1 (un seul `server{}`, port propre) et
-  `egress_allow.upstream.port` ≠ 443.
+- **Sortie masquée vers proxy1 et mail1 (587)** : le paquet de la passerelle sort sous l'adresse publique de la
+  machine. Sur 443 le filtre ne portait que sur `IP:443`, pas sur le `Host` : les vhosts écrits à la main qui admettent
+  « tous les hôtes de l'inventaire » (`ctdapi.conf`, `docker-repo-ssl.conf`, `monitoring.conf` `/api/v1/write`, groupe
+  `apps` de `ctdapi-back.conf` et `mtbridge-pool.conf`) étaient joignables par un code compromis, l'adresse étant
+  commune aux 4 autres apps. **Fermé par l'écouteur dédié** (`dedicated_listeners` de l'entrée FleetForge, port propre,
+  un seul `server{}`, admis à la seule adresse de la passerelle, ufw ouvert à elle seule ; `egress_allow.upstream.port`
+  = ce port) — écrit le 16/11/2026, jamais éprouvé sur la machine : voir « Écouteur dédié » dans
+  `docs/etude-passerelle-sur-webapp.md` (rejeu supervisé à faire avant le premier déploiement réel). Reste la sortie
+  `smtp` (587, mail1), toujours masquée sous l'adresse commune aux 5 apps.
 - **`docker-ports-firewall.sh` unique par machine** : sans `host_vars/<entrée canonique>.yml` listant toutes les apps
   (et `webapp_machine`), un redémarrage de Docker ne rétablit que les règles de la dernière app déployée sur
   185.237.252.206 : `companymanager` et `social-manager` y tournent déjà.

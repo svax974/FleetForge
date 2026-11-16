@@ -1,0 +1,165 @@
+---
+# Écouteurs DÉDIÉS des proxies : un port propre (jamais 443), un `server {}` unique qui ne sert qu'UNE application, admis
+# seulement à des serveurs liés NOMMÉS. Sert à un client dont la sortie ne peut pas être filtrée finement sur 443 (le
+# pare-feu d'un hôte distant ne voit que IP:port, pas le `Host` : sur 443 il atteindrait tous les vhosts du proxy qui
+# admettent l'adresse de sa machine) — docs/etude-passerelle-sur-webapp.md, « Écouteur dédié ».
+#
+# Déclaration, sur l'entrée d'inventaire du SERVICE (celle dont le vhost écrit à la main porte le second `server {}`) :
+#
+#   dedicated_listeners:
+#     - { name: gateway, port: 9445, clients: [fleetforge-gateway] }
+#
+#   name     [a-z][a-z0-9_-]{0,31}, unique pour l'entrée ;
+#   port     entier 1024-65535, ni 80/443/22, ni un port que le parc réserve déjà (variables `proxy_*_port`, VPN,
+#            registre, scrape…), ni le port de l'application, unique sur tout l'inventaire ;
+#   clients  NOMS d'entrées d'inventaire, chacune déjà dans `access_linked` de l'entrée du service (l'autorité reste
+#            `access_linked`), à adresse IPv4 qui n'est celle d'aucun serveur VPN (NAT partagé).
+#
+# Appliqué par les proxies de LA MÊME machine que l'entrée du service (même règle que le nom privé `hostname` du vhost) :
+#   • le vhost lit la déclaration (`{% set access_only_local = listener.clients %}` + `_access.inc` : allow des seuls
+#     clients, deny all) ;
+#   • ici : contrôle de la déclaration (échec AVANT tout changement), ouverture ufw du port à CHAQUE adresse cliente
+#     seulement, et retrait des ouvertures `dedicated-listener …` dont (source, port) n'est plus voulu — jamais
+#     d'`ufw reset`, les règles des autres services ne sont pas touchées.
+# Rien de déclaré : aucune ouverture, aucune règle retirée hors celles que ce fichier a posées.
+#
+# Fait produit : `proxy_dedicated_listeners` — [{entry, name, port, clients, addresses}] APPLICABLES à ce proxy.
+
+- name: Work out and check the dedicated listeners declared in the inventory
+  vars:
+    _reserved_names:
+      - proxy_back_port
+      - proxy_backindicators_port
+      - proxy_front_port
+      - docker_repo_port
+      - postgres_proxy_port
+      - vpn_tcp_port
+      - vpn_data_port
+      - vpn_data_port2
+      - monitor_port
+      - svcprobe_port
+    _reserved: >-
+      {%- set out = [22, 80, 443, ansible_port | default(22) | int] -%}
+      {%- for k in _reserved_names -%}
+      {%- set v = lookup('ansible.builtin.vars', k, default='') | string -%}
+      {%- if v is match('^[0-9]+$') -%}{%- set _ = out.append(v | int) -%}{%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+    _vpn_addresses: "{{ groups['vpns'] | default([]) | map('extract', hostvars, 'ansible_host') | map('string') | list }}"
+    _ipv4: '^(0|[1-9][0-9]{0,2})([.](0|[1-9][0-9]{0,2})){3}$'
+    _computed: >-
+      {%- set ns = namespace(listeners=[], problems=[], ports=[]) -%}
+      {%- for n in groups['all'] if hostvars[n].dedicated_listeners is defined -%}
+      {%- set hv = hostvars[n] -%}
+      {%- set nm = n | string | regex_replace('[^A-Za-z0-9_.-]', '?') -%}
+      {%- if hv.dedicated_listeners is string or hv.dedicated_listeners is mapping or hv.dedicated_listeners is not iterable -%}
+      {%- set ns.problems = ns.problems + [nm ~ ' : dedicated_listeners doit être une liste'] -%}
+      {%- else -%}
+      {%- set names = namespace(seen=[]) -%}
+      {%- for l in hv.dedicated_listeners -%}
+      {%- if l is not mapping -%}
+      {%- set ns.problems = ns.problems + [nm ~ ' : une ligne de dedicated_listeners n est pas un dictionnaire'] -%}
+      {%- else -%}
+      {%- set lname = l.name | default('') | string -%}
+      {%- set lport = l.port | default('') | string -%}
+      {%- set ok = namespace(v=true) -%}
+      {%- if lname is not match('^[a-z][a-z0-9_-]{0,31}$') or lname in names.seen -%}
+      {%- set ns.problems = ns.problems + [nm ~ ' : nom d écouteur invalide ou en double'] -%}
+      {%- set ok.v = false -%}
+      {%- endif -%}
+      {%- set names.seen = names.seen + [lname] -%}
+      {%- if lport is not match('^[1-9][0-9]{3,4}$') or lport | int > 65535 or lport | int < 1024 -%}
+      {%- set ns.problems = ns.problems + [nm ~ '/' ~ (lname | regex_replace('[^a-z0-9_-]', '?')) ~ ' : port hors 1024-65535'] -%}
+      {%- set ok.v = false -%}
+      {%- elif lport | int in _reserved or lport | int in ns.ports or lport | int in [hv.app_port | default(0) | int, hv.back_port | default(0) | int] -%}
+      {%- set ns.problems = ns.problems + [nm ~ '/' ~ lname ~ ' : port ' ~ lport ~ ' déjà réservé, utilisé par l application ou déclaré deux fois'] -%}
+      {%- set ok.v = false -%}
+      {%- endif -%}
+      {%- if lport is match('^[0-9]+$') -%}{%- set ns.ports = ns.ports + [lport | int] -%}{%- endif -%}
+      {%- set clients = l.clients | default([]) -%}
+      {%- set addrs = namespace(v=[]) -%}
+      {%- if clients is string or clients is mapping or clients is not iterable or clients | length == 0 -%}
+      {%- set ns.problems = ns.problems + [nm ~ '/' ~ lname ~ ' : clients doit être une liste non vide d entrées d inventaire'] -%}
+      {%- set ok.v = false -%}
+      {%- else -%}
+      {%- for c in clients -%}
+      {%- set cn = c | string -%}
+      {%- set ca = (hostvars[cn].ansible_host | default('') | string) if cn in hostvars else '' -%}
+      {%- if cn not in (hv.access_linked | default([])) or ca is not match(_ipv4) or ca in _vpn_addresses -%}
+      {%- set ns.problems = ns.problems + [nm ~ '/' ~ lname ~ ' : client « ' ~ (cn | regex_replace('[^A-Za-z0-9_.-]', '?')) ~ ' » absent de access_linked, sans adresse IPv4 ou à l adresse d un serveur VPN'] -%}
+      {%- set ok.v = false -%}
+      {%- else -%}
+      {%- set addrs.v = addrs.v + [ca] -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {%- endif -%}
+      {%- if ok.v and (hv.ansible_host | default('') | string) == (ansible_host | string) -%}
+      {%- set ns.listeners = ns.listeners + [{'entry': n, 'name': lname, 'port': lport | int, 'clients': clients | list, 'addresses': addrs.v | unique | list}] -%}
+      {%- endif -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {{ {'listeners': ns.listeners, 'problems': ns.problems} }}
+  ansible.builtin.set_fact:
+    proxy_dedicated_listeners: "{{ _computed.listeners }}"
+    proxy_dedicated_problems: "{{ _computed.problems }}"
+  tags: [always]
+
+# Avant toute ouverture : une déclaration invalide ne doit rien ouvrir.
+- name: Refuse an invalid dedicated listener declaration
+  ansible.builtin.assert:
+    that: proxy_dedicated_problems | length == 0
+    fail_msg: "dedicated_listeners invalide : {{ proxy_dedicated_problems | join(' ; ') }}"
+    quiet: true
+  tags: [always]
+
+- name: Allow each dedicated listener from its client servers only
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ item.1 }}"
+    port: "{{ item.0.port }}"
+    comment: "dedicated-listener {{ item.0.entry }}/{{ item.0.name }}"
+  loop: "{{ proxy_dedicated_listeners | subelements('addresses') }}"
+  loop_control:
+    label: "{{ item.0.entry }}/{{ item.0.name }} {{ item.0.port }} <- {{ item.1 }}"
+
+# Retrait des ouvertures périmées (client retiré, port changé, écouteur supprimé) : seules les règles qui portent notre
+# commentaire sont candidates ; le critère est le COUPLE (source, port). `ufw show added` fonctionne ufw inactif.
+- name: Read the user rules ufw holds
+  ansible.builtin.command: ufw show added
+  register: proxy_dedicated_ufw_added
+  changed_when: false
+  check_mode: false
+
+- name: Work out the dedicated-listener openings that are no longer wanted
+  vars:
+    _wanted: >-
+      {%- set out = [] -%}
+      {%- for l in proxy_dedicated_listeners -%}
+      {%- for a in l.addresses -%}{%- set _ = out.append(a ~ ':' ~ l.port) -%}{%- endfor -%}
+      {%- endfor -%}
+      {{ out }}
+    _ours: >-
+      {{ proxy_dedicated_ufw_added.stdout_lines
+         | select('match', '^ufw allow from [0-9.]+ to any port [0-9]+ .*comment .dedicated-listener ') | list }}
+    # `ufw allow from <source> to any port <port> proto tcp comment '…'` : mots 3 (source) et 7 (port).
+    _held: >-
+      {%- set out = [] -%}
+      {%- for line in _ours -%}
+      {%- set w = line.split(' ') -%}
+      {%- set _ = out.append(w[3] ~ ':' ~ w[7]) -%}
+      {%- endfor -%}
+      {{ out }}
+  ansible.builtin.set_fact:
+    proxy_dedicated_stale: "{{ _held | reject('in', _wanted) | unique | list }}"
+
+- name: Remove the dedicated-listener openings that are no longer wanted
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ item.split(':')[0] }}"
+    port: "{{ item.split(':')[1] }}"
+    delete: true
+  loop: "{{ proxy_dedicated_stale }}"

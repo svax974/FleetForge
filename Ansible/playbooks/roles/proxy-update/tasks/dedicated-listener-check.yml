@@ -1,0 +1,67 @@
+---
+# Contrôle du vhost RENDU d'un service qui porte des écouteurs dédiés (`site_dedicated_listeners`, fait
+# `proxy_dedicated_listeners` de proxy-security/tasks/dedicated-listeners.yml), sur le poste de contrôle, AVANT de le poser
+# et de recharger nginx : un seul `server {}` par port dédié, ssl, locations restreintes aux seules adresses clientes
+# (scripts/webapp_hardening_check.py dedicated). Le rendu porte des adresses du parc : fichier temporaire 0600, retiré aussitôt.
+# Entrées : `site` (fichier de sites-enabled), `site_dedicated_listeners` ([{entry, name, port, addresses}]).
+
+- name: Render the vhost into a temporary file of the control machine
+  ansible.builtin.tempfile:
+    state: file
+    suffix: .conf
+  delegate_to: localhost
+  become: false
+  register: proxy_listener_check_tmp
+  changed_when: false
+  check_mode: false
+
+- name: Check the rendered vhost, then remove the temporary file
+  block:
+    - name: Write the rendered vhost
+      ansible.builtin.copy:
+        content: "{{ lookup('ansible.builtin.template', proxy_update_dir ~ '/sites-enabled/' ~ site) }}"
+        dest: "{{ proxy_listener_check_tmp.path }}"
+        mode: '0600'
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      check_mode: false
+      diff: false
+
+    - name: Run the dedicated listener check
+      ansible.builtin.command:
+        argv: >-
+          {{ [ansible_playbook_python, '-I', webapp_hardening_checker | default(playbook_dir ~ '/../scripts/webapp_hardening_check.py'), 'dedicated',
+              proxy_listener_check_tmp.path]
+             + site_listener_options }}
+      vars:
+        site_listener_options: >-
+          {%- set out = [] -%}
+          {%- for l in site_dedicated_listeners -%}
+          {%- set _ = out.append('--listener') -%}
+          {%- set _ = out.append((l.port | string) ~ '=' ~ (l.addresses | join(','))) -%}
+          {%- endfor -%}
+          {{ out }}
+      delegate_to: localhost
+      become: false
+      register: proxy_listener_check
+      changed_when: false
+      check_mode: false
+      failed_when: false
+
+    - name: Refuse a vhost whose dedicated listeners are not narrow
+      ansible.builtin.assert:
+        that: proxy_listener_check.rc == 0
+        fail_msg: >-
+          Vhost {{ site }} refusé avant d'être posé sur {{ inventory_hostname }} :
+          {{ proxy_listener_check.stdout_lines | map('regex_replace', '^[^:]*: ', '') | join(' | ') }}
+        quiet: true
+  always:
+    - name: Remove the temporary rendered vhost
+      ansible.builtin.file:
+        path: "{{ proxy_listener_check_tmp.path }}"
+        state: absent
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      check_mode: false

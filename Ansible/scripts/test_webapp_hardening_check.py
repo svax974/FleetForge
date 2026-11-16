@@ -2273,6 +2273,476 @@ class GuardTests(unittest.TestCase):
         self.assertNotEqual(self.guard(guard_inventory(access_mode="public"))[0], 0)
 
 
+# ── Écouteur dédié d'un proxy (`dedicated_listeners`) ─────────────────────
+
+GATEWAY_ADDRESS = "203.0.113.40"      # passerelle sur SA machine ; proxy1/infra1 sont sur 192.0.2.10
+LISTENER_PORT = 9745
+
+# Vhost de service FACTICE, de même structure que le vhost réel d'un parc (parcs/<parc>/nginx/sites-enabled/<service>.conf,
+# dépôt privé) : un bloc 443 (mode de l'entrée) puis UN `server {}` par écouteur dédié (`_access.inc`, `access_only_local`).
+LISTENER_VHOST = """\
+{% if 'infra1' in hostvars %}
+{% set _dedicated = (hostvars['infra1'].dedicated_listeners | default([])) if (hostvars['infra1'].ansible_host == ansible_host) else [] %}
+{% for _l in [{'port': 443}] + _dedicated %}
+{% if loop.first or (_l is mapping and (_l.port | default('') | string) is match('^[1-9][0-9]{3,4}$') and (_l.port | int) <= 65535 and (_l.port | int) >= 1024 and (_l.port | int) != 443) %}
+server {
+  listen {{ _l.port }} ssl;
+  listen [::]:{{ _l.port }} ssl;
+  server_name infra.{{ domain_name }};
+
+  location / {
+    {% set access_entry = 'infra1' %}
+{% if not loop.first %}
+    {% set access_only_local = _l.clients | default([]) %}
+{% endif %}
+    {% include '_access.inc' %}
+    proxy_pass http://192.0.2.10:9750;
+  }
+
+  location = /metrics {
+    deny all;
+  }
+
+  ssl_certificate /etc/letsencrypt/live/{{ domain_name }}/fullchain.pem;
+  ssl_certificate_key /etc/letsencrypt/live/{{ domain_name }}/privkey.pem;
+}
+{% endif %}
+{% endfor %}
+{% endif %}
+"""
+
+
+def listener_inventory(clients=("fleetforge-gateway",), port=LISTENER_PORT, **infra):
+    hostvars = copy.deepcopy(INVENTORY)
+    hostvars["fleetforge-gateway"]["ansible_host"] = GATEWAY_ADDRESS
+    hostvars["infra1"].update(dedicated_listeners=[{"name": "gateway", "port": port, "clients": list(clients)}], **infra)
+    return hostvars
+
+
+def render_listener_vhost(proxy="proxy1", hostvars=None, whitelist=None, template=LISTENER_VHOST):
+    hostvars = hostvars or listener_inventory()
+    return _env().from_string(template).render(
+        hostvars=hostvars, ansible_host=hostvars[proxy]["ansible_host"],
+        whitelist=WHITELIST if whitelist is None else whitelist, groups={"vpns": ["vpn1"]}, prometheus_host="monitor",
+        domain_name="example.test")
+
+
+def listener_errors(text, port=LISTENER_PORT, addresses=(GATEWAY_ADDRESS,)):
+    return check.check_dedicated_listener("vhost", text, port, list(addresses))
+
+
+class AccessOnlyTests(unittest.TestCase):
+    """`_access.inc` avec `access_only_local` : les seuls serveurs liés nommés, puis deny all."""
+
+    def only(self, names, hostvars=None, proxy="proxy1"):
+        hostvars = hostvars or listener_inventory()
+        template = _env().from_string("{% set access_entry = 'infra1' %}{% set access_only_local = names %}{% include '_access.inc' %}")
+        return template.render(hostvars=hostvars, ansible_host=hostvars[proxy]["ansible_host"], whitelist=WHITELIST,
+                               groups={"vpns": ["vpn1"]}, prometheus_host="monitor", names=names)
+
+    def directives(self, text):
+        return [line.split("#", 1)[0].strip() for line in text.splitlines() if line.split("#", 1)[0].strip()]
+
+    def test_only_the_named_linked_server_is_admitted_then_deny_all(self):
+        text = self.only(["fleetforge-gateway"])
+        self.assertEqual(self.directives(text), [f"allow {GATEWAY_ADDRESS};", "deny all;"])
+        self.assertIn("# restricted-linked", text)
+        # ni vpn, ni supervision, ni whitelist, ni l'autre serveur lié (agenthub), ni plage Docker locale
+        for forbidden in ["198.51.100.1", "192.0.2.10", "203.0.113.7", "203.0.113.50", "2001:db8", "10.73.231.0/24"]:
+            self.assertNotIn(forbidden, text)
+
+    def test_a_name_outside_access_linked_is_ignored_closed(self):
+        hostvars = listener_inventory()
+        hostvars["infra1"]["access_linked"] = ["agenthub"]
+        text = self.only(["fleetforge-gateway"], hostvars)
+        self.assertEqual(self.directives(text), ["deny all;"])
+        self.assertIn("ignoré", text)
+
+    def test_a_vpn_address_an_unknown_name_or_a_bad_address_is_ignored(self):
+        for label, change in {"vpn": {"fleetforge-gateway": "198.51.100.1"}, "hostname": {"fleetforge-gateway": "evil.example.test"},
+                              "multiline": {"fleetforge-gateway": "203.0.113.40\n  allow all;"}}.items():
+            with self.subTest(label):
+                hostvars = listener_inventory()
+                hostvars["fleetforge-gateway"]["ansible_host"] = change["fleetforge-gateway"]
+                self.assertEqual(self.directives(self.only(["fleetforge-gateway"], hostvars)), ["deny all;"])
+        self.assertEqual(self.directives(self.only(["ghost"])), ["deny all;"])
+        injected = self.only(["fleetforge-gateway\n allow all;"])
+        self.assertNotIn("allow all;", self.directives(injected))
+
+    def test_an_empty_or_malformed_list_admits_nobody(self):
+        for value in ([], "fleetforge-gateway", {"fleetforge-gateway": 1}, None, 5):
+            with self.subTest(repr(value)):
+                self.assertEqual(self.directives(self.only(value)), ["deny all;"])
+
+    def test_without_the_variable_the_entry_mode_is_rendered_as_before(self):
+        text = render_infra("proxy3")
+        self.assertIn("Mode privé (infra1)", text)
+        self.assertNotIn("restricted-linked", text)
+        self.assertIn("allow 203.0.113.50;", text, "whitelist toujours admise en mode privé")
+
+
+class DedicatedListenerVhostTests(unittest.TestCase):
+    """Le `server {}` dédié rendu, et son contrôle (`webapp_hardening_check.py dedicated`)."""
+
+    def test_the_dedicated_block_serves_only_the_gateway_and_passes_the_check(self):
+        text = render_listener_vhost()
+        self.assertEqual(listener_errors(text), [])
+        block = text.split(f"listen {LISTENER_PORT} ssl;", 1)[1].split("ssl_certificate_key", 1)[0]
+        self.assertEqual(allows(block), [GATEWAY_ADDRESS])
+        # le bloc 443 garde le mode de l'entrée (whitelist, vpns, serveurs liés…)
+        shared = text.split(f"listen {LISTENER_PORT} ssl;", 1)[0]
+        self.assertIn("allow 203.0.113.50;", shared)
+        self.assertEqual(text.count("listen 443 ssl;"), 1)
+
+    def test_only_the_proxy_of_the_service_machine_gets_the_listener(self):
+        text = render_listener_vhost("proxy3")
+        self.assertNotIn(f"listen {LISTENER_PORT}", text)
+        self.assertIn("listen 443 ssl;", text)
+        self.assertTrue(listener_errors(text), "le contrôle exige un bloc sur le port")
+
+    def test_an_invalid_declared_port_renders_no_listener(self):
+        for port in [443, 80, "443", 70000, "abc", "", 99, None, {"x": 1}]:
+            with self.subTest(repr(port)):
+                text = render_listener_vhost(hostvars=listener_inventory(port=port))
+                self.assertEqual(text.count("server {"), 1, "seul le bloc 443")
+
+    def test_each_mutation_of_the_dedicated_block_is_caught(self):
+        good = render_listener_vhost()
+        head, tail = good.split(f"listen {LISTENER_PORT} ssl;", 1)
+        mutations = {
+            "extra allow": lambda t: t.replace(f"allow {GATEWAY_ADDRESS};", f"allow {GATEWAY_ADDRESS};\n        allow 203.0.113.7;", 1),
+            "wide allow": lambda t: t.replace(f"allow {GATEWAY_ADDRESS};", "allow 0.0.0.0/0;"),
+            "no deny": lambda t: self.drop_last(t, "deny all;"),
+            "wrong client": lambda t: t.replace(f"allow {GATEWAY_ADDRESS};", "allow 203.0.113.99;"),
+            "allow after deny": lambda t: t.replace("deny all;", "deny all;\n        allow 203.0.113.7;", 1),
+            "whitelist back": lambda t: t.replace("deny all;", "allow 203.0.113.50;\n        deny all;", 1),
+        }
+        for label, mutation in mutations.items():
+            with self.subTest(label):
+                mutated = head + f"listen {LISTENER_PORT} ssl;" + self.mutate_dedicated(tail, mutation)
+                self.assertNotEqual(mutated, good, label)
+                self.assertTrue(listener_errors(mutated), label)
+        # structure
+        self.assertTrue(listener_errors(good + "server {\n  listen " + str(LISTENER_PORT) + " ssl;\n  location / { deny all; }\n}\n"),
+                        "deux blocs sur le même port")
+        self.assertTrue(listener_errors(good.replace(f"listen {LISTENER_PORT} ssl;", f"listen {LISTENER_PORT} ssl;\n  listen 443 ssl;", 1)),
+                        "le bloc dédié écoute aussi sur 443")
+        self.assertTrue(listener_errors(good.replace(f"listen [::]:{LISTENER_PORT} ssl;", f"listen [::]:{LISTENER_PORT};")),
+                        "sans ssl")
+        self.assertTrue(listener_errors(good.replace("location = /metrics {", "return 200;\n  location = /metrics {")),
+                        "directive qui sert au niveau du server")
+        self.assertTrue(listener_errors(good.replace("location = /metrics {\n    deny all;", "location = /metrics {\n    proxy_pass http://192.0.2.10:9750;")),
+                        "location qui relaie sans liste restreinte")
+        self.assertTrue(listener_errors(good, addresses=("203.0.113.99",)), "clients attendus ≠ allow")
+        self.assertTrue(listener_errors(good, port=443))
+
+    @staticmethod
+    def drop_last(text, directive):
+        index = text.rindex(directive)
+        return text[:index] + text[index + len(directive):]
+
+    @staticmethod
+    def mutate_dedicated(tail, mutation):
+        # n'agit que sur la première location (`location /`) du bloc dédié
+        first, rest = tail.split("location = /metrics", 1)
+        return mutation(first) + "location = /metrics" + rest
+
+    def test_the_command_line_check_reads_a_rendered_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "vhost.conf")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(render_listener_vhost())
+            ok = subprocess.run([sys.executable, "-I", os.path.join(HERE, "webapp_hardening_check.py"), "dedicated", path,
+                                 "--listener", f"{LISTENER_PORT}={GATEWAY_ADDRESS}"], capture_output=True, text=True)
+            self.assertEqual(ok.returncode, 0, ok.stdout + ok.stderr)
+            bad = subprocess.run([sys.executable, "-I", os.path.join(HERE, "webapp_hardening_check.py"), "dedicated", path,
+                                  "--listener", f"{LISTENER_PORT}=203.0.113.99"], capture_output=True, text=True)
+            self.assertEqual(bad.returncode, 1, bad.stdout)
+            none = subprocess.run([sys.executable, "-I", os.path.join(HERE, "webapp_hardening_check.py"), "dedicated", path],
+                                  capture_output=True, text=True)
+            self.assertEqual(none.returncode, 1)
+
+
+def listener_inventory_yaml(declared=True, gateway_port=None, clients=("fleetforge-gateway",), port=LISTENER_PORT):
+    """Inventaire factice pour jouer les tâches : proxy1/infra1 sur 192.0.2.10, passerelle sur sa machine."""
+    inventory = guard_inventory()
+    children = inventory["all"]["children"]
+    children["proxies"]["hosts"]["proxy1"].update(ansible_connection="local", ansible_python_interpreter=sys.executable)
+    gateway = children["fleetforge_gateways"]["hosts"]["fleetforge-gateway"]
+    gateway["ansible_host"] = GATEWAY_ADDRESS
+    children["infras"]["hosts"]["infra1"]["app_port"] = 9750
+    if declared:
+        children["infras"]["hosts"]["infra1"]["dedicated_listeners"] = [{"name": "gateway", "port": port, "clients": list(clients)}]
+    inventory["all"]["vars"]["proxy_back_port"] = 9741
+    return inventory
+
+
+FAKE_UFW_LISTENER = r"""#!/bin/sh
+echo "ufw $*" >> "$FW_LOG"
+case "$1 $2" in
+  "show added") [ -f "$UFW_ADDED" ] && cat "$UFW_ADDED"; exit 0 ;;
+  "status verbose"|"status "|"status ") printf 'Status: active\n'; exit 0 ;;
+esac
+case "$1" in
+  --version) echo "ufw 0.36.2"; exit 0 ;;
+  --dry-run) echo "Rule added"; exit 0 ;;
+esac
+echo "Rule added"
+exit 0
+"""
+
+LISTENER_SECURITY_PLAY = """\
+- hosts: proxy1
+  gather_facts: false
+  tasks:
+    - ansible.builtin.include_role:
+        name: proxy-security
+        tasks_from: dedicated-listeners
+    - ansible.builtin.copy:
+        content: "{{ proxy_dedicated_listeners | to_json }}|{{ proxy_dedicated_stale | to_json }}"
+        dest: "{{ play_tmp }}/facts.txt"
+"""
+
+
+@unittest.skipUnless(shutil.which("ansible-playbook"), "ansible-playbook absent")
+class DedicatedListenerPlaysTests(unittest.TestCase):
+    """Tâches de proxy-security et de proxy-update JOUÉES en local (ufw et nginx FACTICES) : aucun hôte, aucune règle réelle."""
+
+    def run_security(self, inventory, added=()):
+        with tempfile.TemporaryDirectory() as tmp:
+            bindir = os.path.join(tmp, "bin")
+            os.makedirs(bindir)
+            with open(os.path.join(bindir, "ufw"), "w") as f:
+                f.write(FAKE_UFW_LISTENER)
+            os.chmod(os.path.join(bindir, "ufw"), 0o755)
+            with open(os.path.join(tmp, "added"), "w") as f:
+                f.write("\n".join(added) + ("\n" if added else ""))
+            with open(os.path.join(tmp, "play.yml"), "w") as f:
+                f.write(LISTENER_SECURITY_PLAY)
+            with open(os.path.join(tmp, "ansible.cfg"), "w") as f:
+                f.write(f"[defaults]\nroles_path={ROLES}\nstdout_callback=default\n")
+            with open(os.path.join(tmp, "inventory.yml"), "w") as f:
+                yaml.safe_dump(inventory, f)
+            env = dict(os.environ, ANSIBLE_CONFIG=os.path.join(tmp, "ansible.cfg"), PATH=f"{bindir}:{os.environ['PATH']}",
+                       FW_LOG=os.path.join(tmp, "log"), UFW_ADDED=os.path.join(tmp, "added"))
+            run = subprocess.run(["ansible-playbook", "-i", os.path.join(tmp, "inventory.yml"), os.path.join(tmp, "play.yml"),
+                                  "-e", f"play_tmp={tmp}", "-e", "ansible_become=false"],
+                                 capture_output=True, text=True, env=env, timeout=300)
+            def read(name):
+                path = os.path.join(tmp, name)
+                if not os.path.exists(path):
+                    return None
+                with open(path, encoding="utf-8") as f:
+                    return f.read()
+            return run.returncode, run.stdout + run.stderr, (read("log") or "").splitlines(), read("facts.txt")
+
+    @staticmethod
+    def rules(log):
+        return [line for line in log if line.startswith("ufw ") and " --dry-run" not in line
+                and not line.startswith(("ufw status", "ufw show", "ufw --version"))]
+
+    def test_the_port_is_opened_to_the_named_client_address_only(self):
+        code, out, log, facts = self.run_security(listener_inventory_yaml())
+        self.assertEqual(code, 0, out[-3000:])
+        opened = self.rules(log)
+        self.assertEqual(len(opened), 1, log)
+        self.assertIn(f"from {GATEWAY_ADDRESS}", opened[0])
+        self.assertIn(f"port {LISTENER_PORT}", opened[0])
+        self.assertIn("dedicated-listener infra1/gateway", opened[0])
+        applied, stale = facts.split("|")
+        self.assertEqual(json.loads(applied)[0]["addresses"], [GATEWAY_ADDRESS])
+        self.assertEqual(json.loads(stale), [])
+
+    def test_nothing_declared_opens_nothing_and_removes_only_its_own_old_rules(self):
+        code, out, log, facts = self.run_security(listener_inventory_yaml(declared=False))
+        self.assertEqual(code, 0, out[-3000:])
+        self.assertEqual(self.rules(log), [])
+        mine = f"ufw allow from {GATEWAY_ADDRESS} to any port {LISTENER_PORT} proto tcp comment 'dedicated-listener infra1/gateway'"
+        foreign = ["ufw allow from 192.0.2.99 to any port 9744 proto tcp comment 'papangmetrics'",
+                   "ufw allow from 203.0.113.9 to any port 22 proto tcp"]
+        code, out, log, facts = self.run_security(listener_inventory_yaml(declared=False), added=[mine] + foreign)
+        self.assertEqual(code, 0, out[-3000:])
+        removed = self.rules(log)
+        self.assertEqual(len(removed), 1, log)
+        self.assertIn("delete", removed[0])
+        self.assertIn(f"{GATEWAY_ADDRESS}", removed[0])
+        self.assertEqual(json.loads(facts.split("|")[1]), [f"{GATEWAY_ADDRESS}:{LISTENER_PORT}"])
+
+    def test_a_kept_opening_is_not_removed_and_an_old_port_is_(self):
+        kept = f"ufw allow from {GATEWAY_ADDRESS} to any port {LISTENER_PORT} proto tcp comment 'dedicated-listener infra1/gateway'"
+        old = f"ufw allow from {GATEWAY_ADDRESS} to any port 9799 proto tcp comment 'dedicated-listener infra1/gateway'"
+        code, out, log, facts = self.run_security(listener_inventory_yaml(), added=[kept, old])
+        self.assertEqual(code, 0, out[-3000:])
+        self.assertEqual(json.loads(facts.split("|")[1]), [f"{GATEWAY_ADDRESS}:9799"])
+
+    def test_an_invalid_declaration_fails_before_any_rule(self):
+        cases = {
+            "https port": dict(port=443), "privileged": dict(port=80), "ssh": dict(port=22), "low": dict(port=1000),
+            "reserved by the parc": dict(port=9741), "the application port": dict(port=9750), "too high": dict(port=70000),
+            "not a number": dict(port="abc"),
+            "empty clients": dict(clients=()), "not linked": dict(clients=("agenthub", "fleetforge-gateway", "other")),
+            "vpn client": dict(clients=("vpn1",)),
+        }
+        for label, kwargs in cases.items():
+            with self.subTest(label):
+                inventory = listener_inventory_yaml(**kwargs)
+                inventory["all"]["children"]["infras"]["hosts"]["infra1"]["access_linked"].append("vpn1")
+                code, out, log, _ = self.run_security(inventory)
+                self.assertNotEqual(code, 0, label)
+                self.assertIn("dedicated_listeners invalide", out)
+                self.assertEqual(self.rules(log), [], "aucune règle posée")
+
+    def test_a_listener_of_another_machine_is_checked_but_not_applied_here(self):
+        inventory = listener_inventory_yaml()
+        inventory["all"]["children"]["infras"]["hosts"]["infra1"]["ansible_host"] = "203.0.113.60"
+        code, out, log, facts = self.run_security(inventory)
+        self.assertEqual(code, 0, out[-3000:])
+        self.assertEqual(self.rules(log), [])
+        self.assertEqual(json.loads(facts.split("|")[0]), [])
+
+    def run_proxy_update(self, tasks_from, vhost, listeners, nginx_dump=None):
+        """Joue `dedicated-listener-check` (vhost rendu contrôlé) ou `dedicated-listener-ports` (nginx -T factice)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            bindir = os.path.join(tmp, "bin")
+            os.makedirs(bindir)
+            fake_nginx = "#!/bin/sh\ncat \"$NGINX_DUMP\"\n"
+            with open(os.path.join(bindir, "nginx"), "w") as f:
+                f.write(fake_nginx)
+            os.chmod(os.path.join(bindir, "nginx"), 0o755)
+            parc = os.path.join(tmp, "parc", "sites-enabled")
+            os.makedirs(parc)
+            with open(os.path.join(parc, "fleetforge.conf"), "w") as f:
+                f.write(vhost)
+            with open(os.path.join(tmp, "dump"), "w") as f:
+                f.write(nginx_dump or "")
+            play = textwrap.dedent(f"""\
+                - hosts: proxy1
+                  gather_facts: false
+                  tasks:
+                    - ansible.builtin.include_role:
+                        name: proxy-update
+                        tasks_from: {tasks_from}
+                      vars:
+                        site: fleetforge.conf
+                        proxy_update_dir: "{os.path.join(tmp, 'parc')}"
+                        site_dedicated_listeners: {json.dumps(listeners)}
+                        webapp_hardening_checker: "{os.path.join(HERE, 'webapp_hardening_check.py')}"
+                """)
+            with open(os.path.join(tmp, "play.yml"), "w") as f:
+                f.write(play)
+            with open(os.path.join(tmp, "ansible.cfg"), "w") as f:
+                f.write(f"[defaults]\nroles_path={ROLES}\nstdout_callback=default\n")
+            inventory = listener_inventory_yaml()
+            with open(os.path.join(tmp, "inventory.yml"), "w") as f:
+                yaml.safe_dump(inventory, f)
+            env = dict(os.environ, ANSIBLE_CONFIG=os.path.join(tmp, "ansible.cfg"), PATH=f"{bindir}:{os.environ['PATH']}",
+                       NGINX_DUMP=os.path.join(tmp, "dump"))
+            run = subprocess.run(["ansible-playbook", "-i", os.path.join(tmp, "inventory.yml"), os.path.join(tmp, "play.yml"),
+                                  "-e", "ansible_become=false"], capture_output=True, text=True, env=env, timeout=300)
+            return run.returncode, run.stdout + run.stderr
+
+    LISTENERS = [{"entry": "infra1", "name": "gateway", "port": LISTENER_PORT, "addresses": [GATEWAY_ADDRESS]}]
+
+    def test_the_rendered_vhost_is_checked_before_being_deployed(self):
+        code, out = self.run_proxy_update("dedicated-listener-check", render_listener_vhost(), self.LISTENERS)
+        self.assertEqual(code, 0, out[-3000:])
+        wide = render_listener_vhost().replace(f"allow {GATEWAY_ADDRESS};", "allow 0.0.0.0/0;")
+        code, out = self.run_proxy_update("dedicated-listener-check", wide, self.LISTENERS)
+        self.assertNotEqual(code, 0)
+        self.assertIn("refusé avant d'être posé", out)
+        deploy = check._load(os.path.join(ROLES, "proxy-update", "tasks", "deploy-one-site.yml"))
+        names = [t.get("name") for t in deploy]
+        self.assertLess(names.index("Check the dedicated listeners of the rendered vhost"), names.index("Deploy the vhost"))
+        self.assertLess(names.index("Test the nginx configuration before reloading"),
+                        names.index("Check no other file listens on the dedicated ports"))
+        self.assertLess(names.index("Check no other file listens on the dedicated ports"), names.index("Reload nginx"))
+
+    DUMP = ("nginx: configuration file /etc/nginx/nginx.conf test is successful\n"
+            "# configuration file /etc/nginx/nginx.conf:\nhttp {\n  include /etc/nginx/sites-enabled/*;\n}\n"
+            "# configuration file /etc/nginx/sites-enabled/fleetforge.conf:\nserver {\n  listen 9745 ssl;\n  listen [::]:9745 ssl;\n}\n"
+            "# configuration file /etc/nginx/sites-enabled/www.conf:\nserver {\n  listen 443 ssl;\n}\n")
+
+    def test_a_dedicated_port_that_another_file_listens_on_is_refused(self):
+        code, out = self.run_proxy_update("dedicated-listener-ports", "", self.LISTENERS, self.DUMP)
+        self.assertEqual(code, 0, out[-3000:])
+        for other in ["\tlisten 9745 ssl;", "  listen 0.0.0.0:9745;", "  listen [::]:9745 ssl;"]:
+            with self.subTest(other):
+                shared = self.DUMP + f"# configuration file /etc/nginx/sites-enabled/other.conf:\nserver {{\n{other}\n}}\n"
+                code, out = self.run_proxy_update("dedicated-listener-ports", "", self.LISTENERS, shared)
+                self.assertNotEqual(code, 0)
+                self.assertIn("SEUL", out)
+        near = self.DUMP + "# configuration file /etc/nginx/sites-enabled/other.conf:\nserver {\n  listen 97450 ssl;\n  listen 19745;\n}\n"
+        code, out = self.run_proxy_update("dedicated-listener-ports", "", self.LISTENERS, near)
+        self.assertEqual(code, 0, "un port voisin n'est pas le même port\n" + out[-2000:])
+
+
+@unittest.skipUnless(shutil.which("ansible-playbook"), "ansible-playbook absent")
+class DedicatedListenerGuardTests(unittest.TestCase):
+    """Garde de la passerelle (`gateway-guard.yml`) avec un écouteur dédié : la sortie `upstream` ≠ 443 doit pointer
+    sur un écouteur déclaré dont elle est le seul client."""
+
+    @staticmethod
+    def inventory(egress_port=LISTENER_PORT, declared=True, clients=("fleetforge-gateway",), probe=None, declared_port=LISTENER_PORT):
+        def with_listener(inventory):
+            if declared:
+                inventory["children"]["infras"]["hosts"]["infra1"]["dedicated_listeners"] = [
+                    {"name": "gateway", "port": declared_port, "clients": list(clients)}]
+        base = guard_inventory()["all"]["children"]["fleetforge_gateways"]["hosts"]["fleetforge-gateway"]["webapp_hardening"]
+        egress = [dict(base["egress_allow"][0], port=egress_port, masquerade_ack=True),
+                  dict(base["egress_allow"][1], masquerade_ack=True)]
+        fields = dict(ansible_host=GATEWAY_ADDRESS, access_local_cidrs=[], webapp_hardening=dict(base, egress_allow=egress))
+        if probe:
+            fields["webapp_upstream_checks"] = [{"id": "main", "url": probe}]
+        inventory = guard_inventory(**fields)
+        with_listener(inventory["all"])
+        return inventory
+
+    def guard(self, inventory):
+        return run_local_play(GUARD_PLAY, inventory, {"apps.yml": "fleetforge-gateway: /nonexistent/app/\n"})
+
+    def test_a_declared_dedicated_listener_gives_the_port_in_the_upstream_url(self):
+        code, out = self.guard(self.inventory())
+        self.assertEqual(code, 0, out[-3000:])
+        self.assertIn(f'"baseUrl": "https://infra-priv.example.test:{LISTENER_PORT}"', out.replace('\\"', '"'))
+
+    def test_the_default_443_is_unchanged_and_has_no_port_in_the_url(self):
+        code, out = self.guard(self.inventory(egress_port=443, declared=False))
+        self.assertEqual(code, 0, out[-3000:])
+        self.assertIn('"baseUrl": "https://infra-priv.example.test"', out.replace('\\"', '"'))
+        self.assertNotIn("example.test:", out.replace('\\"', '"').split("GUARD=OK", 1)[1])
+
+    def test_an_egress_port_without_its_listener_is_refused(self):
+        cases = {
+            "not declared": dict(declared=False),
+            "other port": dict(declared_port=9746),
+            "other client": dict(clients=("agenthub",)),
+            "shared with another client": dict(clients=("fleetforge-gateway", "agenthub")),
+            "no client": dict(clients=()),
+        }
+        for label, kwargs in cases.items():
+            with self.subTest(label):
+                code, out = self.guard(self.inventory(**kwargs))
+                self.assertNotEqual(code, 0, label)
+                self.assertIn("dedicated_listeners", out)
+
+    def test_the_upstream_probe_must_reach_the_same_name_and_port(self):
+        good = f"https://infra-priv.example.test:{LISTENER_PORT}/healthz"
+        self.assertEqual(self.guard(self.inventory(probe=good))[0], 0)
+        for url in ["https://infra-priv.example.test/healthz", f"https://infra-priv.example.test:9746/healthz",
+                    f"https://other.example.test:{LISTENER_PORT}/healthz"]:
+            with self.subTest(url):
+                code, out = self.guard(self.inventory(probe=url))
+                self.assertNotEqual(code, 0)
+                self.assertIn("webapp_upstream_checks", out)
+
+    def test_a_port_in_the_probe_url_is_accepted_by_the_monitoring_grammar(self):
+        play = MONITORING_PLAY.replace("https://infra.example.test/healthz", f"https://infra.example.test:{LISTENER_PORT}/healthz")
+        self.assertEqual(run_local_play(play)[0], 0)
+        for hostile in [":0/x", ":99999999/x", ":9745;rm/x", ": 9745/x"]:
+            code, out = run_local_play(MONITORING_PLAY.replace("https://infra.example.test/healthz", "https://infra.example.test" + hostile))
+            self.assertNotEqual(code, 0, hostile)
+
+
 @unittest.skipUnless(shutil.which("ansible-playbook"), "ansible-playbook absent")
 class DbMigrationTests(unittest.TestCase):
     """Bascule vers le compose durci : jamais sur une base VIDE sans migration déclarée."""

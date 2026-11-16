@@ -175,6 +175,7 @@
     # `vars:` de niveau tâche, inclusion ou bloc (variables de travail des contrôles : `_families`, `_reasons`…).
     _accounts: __wa_internal_probe__
     _admitted_by_address: __wa_internal_probe__
+    _authority: __wa_internal_probe__
     _awk: __wa_internal_probe__
     _back_port: __wa_internal_probe__
     _bad: __wa_internal_probe__
@@ -204,6 +205,7 @@
     _hosts: __wa_internal_probe__
     _identity_addresses: __wa_internal_probe__
     _ids: __wa_internal_probe__
+    _listeners: __wa_internal_probe__
     _locations: __wa_internal_probe__
     _machine: __wa_internal_probe__
     _machine_peers: __wa_internal_probe__
@@ -219,6 +221,7 @@
     _parc: __wa_internal_probe__
     _ports: __wa_internal_probe__
     _prefix: __wa_internal_probe__
+    _probe: __wa_internal_probe__
     _project: __wa_internal_probe__
     _proxy_addresses: __wa_internal_probe__
     _read: __wa_internal_probe__
@@ -232,6 +235,7 @@
     _subnet: __wa_internal_probe__
     _tag: __wa_internal_probe__
     _taken: __wa_internal_probe__
+    _up_port: __wa_internal_probe__
     _upstream_egress: __wa_internal_probe__
     _upstreams: __wa_internal_probe__
     _user: __wa_internal_probe__
@@ -442,6 +446,7 @@
       - lookup('ansible.builtin.vars', 'webapp_target') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_accounts') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_admitted_by_address') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_authority') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_awk') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_back_port') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_bad') | string == '__wa_internal_probe__'
@@ -471,6 +476,7 @@
       - lookup('ansible.builtin.vars', '_hosts') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_identity_addresses') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_ids') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_listeners') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_locations') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_machine') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_machine_peers') | string == '__wa_internal_probe__'
@@ -486,6 +492,7 @@
       - lookup('ansible.builtin.vars', '_parc') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_ports') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_prefix') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_probe') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_project') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_proxy_addresses') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_read') | string == '__wa_internal_probe__'
@@ -499,6 +506,7 @@
       - lookup('ansible.builtin.vars', '_subnet') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_tag') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_taken') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_up_port') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_upstream_egress') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_upstreams') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_user') | string == '__wa_internal_probe__'
