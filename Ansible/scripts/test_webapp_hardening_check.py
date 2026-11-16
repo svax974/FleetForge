@@ -749,6 +749,8 @@ INVENTORY = {
               "access_mode": "private", "webapp_vhost_locations": [{"path": "/api/", "ws": True, "body": "20m", "timeout": 300}]},
 }
 WHITELIST = ["203.0.113.50", "2001:db8::/64", "198.51.100.0/24", "2001:db8::5"]
+# Plages de l'edge Cloudflare (`cloudflare_ips`) : adresses de documentation.
+CLOUDFLARE_IPS = ["198.51.100.128/25", "2001:db8:cf::/48"]
 # Ce que /mcp en garde par défaut : IPv4 seule ou /32, IPv6 de préfixe 128.
 WHITELIST_ON_MCP = ["203.0.113.50", "2001:db8::5"]
 
@@ -762,7 +764,24 @@ def render_vhost(proxy="proxy3", entry="fleetforge-gateway", whitelist=None, mcp
     return template.render(hostvars=hostvars, ansible_host=hostvars[proxy]["ansible_host"],
                            whitelist=WHITELIST if whitelist is None else whitelist, webapp_vhost_entries=[entry],
                            groups={"vpns": ["vpn1"]}, prometheus_host="monitor", domain_name="example.test",
-                           nginx_version="1.26.0")
+                           nginx_version="1.26.0", cloudflare_ips=CLOUDFLARE_IPS)
+
+
+def render_access(entry_attributes, mode=None, proxy="proxy3"):
+    """`_access.inc` seul, pour une entrée `x` qui porte `entry_attributes` (mode de la location : `mode`)."""
+    hostvars = copy.deepcopy(INVENTORY)
+    hostvars["x"] = dict(entry_attributes)
+    source = "{% set access_entry = 'x' %}" + ("{% set access_mode_local = '" + mode + "' %}" if mode else "") + "{% include '_access.inc' %}"
+    return _env().from_string(source).render(hostvars=hostvars, ansible_host=hostvars[proxy]["ansible_host"], whitelist=WHITELIST,
+                                             groups={"vpns": ["vpn1"]}, prometheus_host="monitor")
+
+
+def render_edge(entry_attributes):
+    """`_cloudflare_front.inc` seul."""
+    hostvars = copy.deepcopy(INVENTORY)
+    hostvars["x"] = dict(entry_attributes)
+    return _env().from_string("{% set access_entry = 'x' %}{% include '_cloudflare_front.inc' %}").render(
+        hostvars=hostvars, cloudflare_ips=CLOUDFLARE_IPS)
 
 
 def render_infra(proxy):
@@ -925,6 +944,346 @@ class VhostTests(unittest.TestCase):
         block = text.split("location /api/ {", 1)[1].split("}", 1)[0]
         self.assertIn("Mode privé (plain)", block)
         self.assertIn("proxy_pass         http://203.0.113.20:3900;", block)
+
+
+def location_body(text, head):
+    """Corps de la location dont la tête (`~* ^/mcp(/.*)?$`, `/`…) est exactement `head`, ou None."""
+    for found, body in check._blocks_with_heads(text):
+        if found == head:
+            return body
+    return None
+
+
+def edge_inventory(**named):
+    """Parc factice à trois entrées : front Pages (`cloudflare_front`), nom servi par Cloudflare (`cloudflare_named`),
+    entrée ordinaire."""
+    entry = {"ansible_host": "203.0.113.40", "ansible_roles": ["webapp"], "proxy_hostname": "ffg.example.test",
+             "app_port": 4730, "access_mode": "private", "cloudflare_named": True}
+    entry.update(named)
+    return {"all": {
+        "vars": {"domain_name": "example.test"},
+        "children": {
+            "proxies": {"hosts": {"proxy1": {"ansible_host": "192.0.2.10"}, "proxy2": {"ansible_host": "198.51.100.1"}}},
+            "vpns": {"hosts": {"vpn1": {"ansible_host": "198.51.100.1"}}},
+            "apps": {"hosts": {
+                "pages-app": {"ansible_host": "203.0.113.20", "proxy_hostname": "pages-app.example.test", "cloudflare_front": True},
+                "gw": entry,
+                "plain": {"ansible_host": "203.0.113.21", "proxy_hostname": "plain.example.test"}}},
+        }}}
+
+
+def evaluate(variable, role, inventory, host="proxy1"):
+    """Valeur d'une variable de `defaults/main.yml` d'un rôle, évaluée dans le contexte de `host` (jeu local, sans hôte)."""
+    play = textwrap.dedent(f"""\
+        - hosts: {host}
+          gather_facts: false
+          vars_files: ["{os.path.join(ROLES, role, 'defaults', 'main.yml')}"]
+          tasks:
+            - ansible.builtin.copy: {{content: "{{{{ {variable} | to_json }}}}", dest: "{{{{ play_tmp }}}}/value.json"}}
+        """)
+    code, out, files = run_local_play(play, inventory, outputs=["value.json"])
+    assert "value.json" in files, out[-3000:]
+    return json.loads(files["value.json"])
+
+
+class CloudflareNamedRenderTests(unittest.TestCase):
+    """A1 : `cloudflare_named` = nom servi par Cloudflare (IP réelle, Authenticated Origin Pulls) SANS front sur Pages ;
+    `cloudflare_front` garde son sens (Pages, API sous `<projet>-back.<domaine>`). Rien de plus sans l'attribut."""
+
+    def test_the_name_stays_the_public_name_and_the_front_stays_in_the_container(self):
+        text = render_vhost(cloudflare_named=True)
+        self.assertIn("server_name ffg.example.test;", text)
+        self.assertNotIn("-back.", text)
+        self.assertIn("front en conteneur, nom servi par Cloudflare", text)
+        self.assertNotIn("Cloudflare Pages", text)
+        self.assertIn("proxy_pass         http://192.0.2.10:4730;", location_body(text, "/") or "", "le front passe par les proxies")
+        self.assertIn("http://192.0.2.10:4731", location_body(text, "~* ^/mcp(/.*)?$"), "/mcp : back-lb, comme avant")
+
+    def test_the_real_client_address_and_the_origin_pull_are_read_in_the_server_block(self):
+        text = render_vhost(cloudflare_named=True)
+        for ip in CLOUDFLARE_IPS:
+            self.assertIn(f"set_real_ip_from {ip};", text)
+        for line in ("real_ip_header CF-Connecting-IP;", "real_ip_recursive on;",
+                     "ssl_client_certificate /etc/nginx/cloudflare-origin-pull-ca.pem;", "ssl_verify_client optional;"):
+            self.assertIn(line, text)
+        server = text.split("server_name ffg.example.test;", 2)[2]
+        self.assertLess(server.index("ssl_verify_client optional;"), server.index("location "), "au niveau du server {}, pas d'une location")
+
+    def test_without_the_attribute_nothing_of_it_is_rendered_and_the_bytes_do_not_change(self):
+        for entry in ("fleetforge-gateway", "plain"):
+            reference = render_vhost(entry=entry)
+            for label, value in (("false", False), ("string", "false"), ("no", "no")):
+                with self.subTest(entry=entry, value=label):
+                    self.assertEqual(render_vhost(entry=entry, cloudflare_named=value), reference)
+            for marker in ("ssl_verify_client", "real_ip_header", "set_real_ip_from", "$ssl_client_verify", "Cloudflare"):
+                self.assertNotIn(marker, reference, f"{entry} : {marker}")
+
+    def test_cloudflare_front_keeps_its_meaning(self):
+        text = render_vhost(entry="plain", cloudflare_front=True)
+        self.assertIn("server_name plain-back.example.test;", text)
+        self.assertIn("API seule, front sur Cloudflare Pages", text)
+        for line in ("real_ip_header CF-Connecting-IP;", "ssl_verify_client optional;"):
+            self.assertIn(line, text)
+        both = render_vhost(entry="plain", cloudflare_front=True, cloudflare_named=True)
+        self.assertEqual(both, text, "les deux attributs ensemble : refusés par les faits, jamais deux inclusions")
+
+    def test_a_public_location_requires_the_origin_pull_certificate_only_on_a_cloudflare_entry(self):
+        locations = [{"path": "/pub", "mode": "public"}]
+        ordinary = render_vhost(entry="plain", webapp_vhost_locations=locations)
+        named = render_vhost(entry="plain", webapp_vhost_locations=locations, cloudflare_named=True)
+        self.assertNotIn("$ssl_client_verify", location_body(ordinary, "/pub"))
+        self.assertIn("Mode public (plain) : aucun filtre d'adresse", location_body(ordinary, "/pub"))
+        self.assertIn("if ($ssl_client_verify != SUCCESS) {", location_body(named, "/pub"))
+        self.assertIn("return 403;", location_body(named, "/pub"))
+        # Une location privée garde son filtre d'adresse (adresse RÉELLE) et n'exige aucun certificat.
+        root = location_body(named, "/")
+        self.assertIn("deny all;", root)
+        self.assertIn("allow 198.51.100.1;", root)
+        self.assertNotIn("$ssl_client_verify", root)
+        self.assertNotIn("198.51.100.128", root, "jamais les plages Cloudflare dans un allow")
+
+    def test_the_partials_follow_the_same_attribute(self):
+        self.assertEqual(render_edge({}), "")
+        self.assertEqual(render_edge({"cloudflare_named": False}), "")
+        self.assertIn("real_ip_header CF-Connecting-IP;", render_edge({"cloudflare_named": True}))
+        self.assertIn("real_ip_header CF-Connecting-IP;", render_edge({"cloudflare_front": True}))
+        public = {"access_mode": "public"}
+        self.assertIn("aucun filtre d'adresse", render_access(public))
+        self.assertNotIn("ssl_client_verify", render_access(public))
+        self.assertIn("if ($ssl_client_verify != SUCCESS)", render_access(dict(public, cloudflare_named=True)))
+        self.assertIn("if ($ssl_client_verify != SUCCESS)", render_access(dict(public, cloudflare_front=True)))
+        private = render_access(dict(public, access_mode="private", cloudflare_named=True))
+        self.assertNotIn("ssl_client_verify", private)
+        self.assertIn("deny all;", private)
+
+
+@unittest.skipUnless(shutil.which("ansible-playbook"), "ansible-playbook absent")
+class CloudflareNamedPlaybookTests(unittest.TestCase):
+    """A1, côté Ansible : faits, autorité des Authenticated Origin Pulls, noms activés chez Cloudflare, DNS."""
+
+    def facts(self, **gateway):
+        return run_local_play(FACTS_PLAY, guard_inventory(**gateway), {"apps.yml": "fleetforge-gateway: /nonexistent/app/\n"})
+
+    def test_a_hardened_entry_with_the_attribute_passes_and_keeps_the_container_front(self):
+        code, out = self.facts(cloudflare_named=True)
+        self.assertEqual(code, 0, out[-3000:])
+        self.assertIn("FACTS=OK container", out)
+
+    def test_cloudflare_front_is_still_refused_by_the_hardened_profile(self):
+        code, out = self.facts(cloudflare_front=True)
+        self.assertNotEqual(code, 0)
+        self.assertIn("webapp_hardening", out)
+        code, out = self.facts(webapp_front="pages")
+        self.assertNotEqual(code, 0)
+
+    def test_the_attribute_is_checked_before_anything_reads_it(self):
+        bad = {"maybe": {"cloudflare_named": "maybe"}, "front": {"cloudflare_front": True}, "pages": {"webapp_front": "pages"},
+               "external": {"webapp_proxy": "external"}, "shared_front": {"proxy_hostname": "proxy.example.test"},
+               "other_zone": {"proxy_hostname": "ffg.other.test"}, "no_mode": {"access_mode": "open"}}
+        for label, change in bad.items():
+            with self.subTest(label):
+                code, out = self.facts(**dict({"cloudflare_named": True}, **change))
+                self.assertNotEqual(code, 0, label)
+                self.assertIn("cloudflare_named", out)
+
+    def test_the_proxies_install_the_origin_pull_authority_for_either_attribute(self):
+        def wanted(inventory):
+            return evaluate("proxy_update_cloudflare_edge", "proxy-update", inventory)
+        self.assertTrue(wanted(edge_inventory()))
+        self.assertTrue(wanted(edge_inventory(cloudflare_named=False)), "le front Pages l'exigeait déjà")
+        inventory = edge_inventory(cloudflare_named=False)
+        del inventory["all"]["children"]["apps"]["hosts"]["pages-app"]
+        self.assertFalse(wanted(inventory), "aucune entrée : aucune autorité, comme avant")
+        inventory["all"]["children"]["apps"]["hosts"]["gw"]["cloudflare_named"] = "true"
+        self.assertTrue(wanted(inventory))
+        inventory["all"]["children"]["apps"]["hosts"]["gw"]["cloudflare_named"] = "false"
+        self.assertFalse(wanted(inventory), "la chaîne `false` n'active rien")
+
+    def test_the_three_proxy_update_entry_points_read_that_decision(self):
+        for name in ("deploy-webapp-site.yml", "deploy-one-site.yml", "resync.yml"):
+            text = open(os.path.join(ROLES, "proxy-update", "tasks", name), encoding="utf-8").read()
+            tasks = [t for t in check._tasks_in(yaml.safe_load(text)) if t.get("name") == "Install the Cloudflare origin-pull CA"]
+            self.assertEqual(len(tasks), 1, name)
+            self.assertEqual(tasks[0]["when"], "proxy_update_cloudflare_edge | bool", name)
+
+    def test_the_origin_pull_is_activated_on_the_public_name_of_a_named_entry_and_on_the_back_name_of_a_pages_entry(self):
+        names = evaluate("cfopull_hostnames", "cloudflare-origin-pull", edge_inventory())
+        self.assertEqual(names, ["pages-app-back.example.test", "ffg.example.test"], "ni `-back`, ni la zone des autres entrées")
+        self.assertEqual(evaluate("cfopull_hostnames", "cloudflare-origin-pull", edge_inventory(cloudflare_named=False)),
+                         ["pages-app-back.example.test"], "sans l'attribut : la liste d'avant")
+        inventory = edge_inventory(cloudflare_named=False)
+        del inventory["all"]["children"]["apps"]["hosts"]["pages-app"]
+        self.assertEqual(evaluate("cfopull_hostnames", "cloudflare-origin-pull", inventory), [])
+
+    @staticmethod
+    def hosts_running(task, inventory, group="apps", extra_vars=None):
+        """Hôtes de `group` sur lesquels `task` (son `when`) s'exécuterait : le corps est remplacé par un marqueur."""
+        marker = {"name": "marker", "ansible.builtin.debug": {"msg": "RAN-HERE"}}
+        if "when" in task:
+            marker["when"] = task["when"]
+        play = yaml.safe_dump([{"hosts": group, "gather_facts": False, "vars": extra_vars or {}, "tasks": [marker]}])
+        code, out = run_local_play(play, inventory)
+        assert code == 0, out[-2000:]
+        return sorted(re.findall(r"ok: \[([^\]]+)\] => \{\s*\"msg\": \"RAN-HERE\"", out))
+
+    def test_one_deploy_pass_publishes_the_name_enables_the_origin_pull_and_deposits_the_authority_for_the_new_attribute_only(self):
+        plays = yaml.safe_load(open(os.path.join(PLAYBOOKS, "deploy-webapp.yml"), encoding="utf-8"))
+        names = [p.get("name") for p in plays]
+        dns_play = "Install the application prerequisites (DNS, registry login)"
+        pull_play = "Authenticated Origin Pulls côté Cloudflare"
+        vhost_play = "Vhost de l'application sur les proxies"
+        self.assertLess(names.index(dns_play), names.index(pull_play), "le DNS avant les origin pulls")
+        self.assertLess(names.index(pull_play), names.index(vhost_play), "les origin pulls AVANT le vhost qui les exige")
+        pull = next(p for p in plays if p.get("name") == pull_play)["tasks"][0]
+        self.assertEqual(pull["ansible.builtin.include_role"]["name"], "cloudflare-origin-pull")
+        self.assertEqual(pull["vars"]["cfopull_part"], "cloudflare")
+        inventory = edge_inventory()
+        # 1. origin pulls : l'entrée au nom proxifié ET le front Pages, jamais l'entrée ordinaire.
+        self.assertEqual(self.hosts_running(pull, inventory), ["gw", "pages-app"])
+        self.assertEqual(self.hosts_running(pull, edge_inventory(cloudflare_named=False)), ["pages-app"])
+        self.assertEqual(self.hosts_running(pull, edge_inventory(webapp_proxy="external")), ["pages-app"], "webapp_proxy: external : aucun vhost")
+        # 2. DNS (webapp-install) : le CNAME de l'entrée proxifiée est publié (le front Pages reste chez Cloudflare).
+        install = yaml.safe_load(open(os.path.join(ROLES, "webapp-install", "tasks", "main.yml"), encoding="utf-8"))
+        dns = next(t for t in install if t.get("name") == "Ensure the service CNAME to the canonical proxy front")
+        self.assertEqual(dns["vars"]["cfdns_cname_scope"], ["{{ inventory_hostname }}"])
+        self.assertEqual(self.hosts_running(dns, inventory, extra_vars={"wa_external": False}), ["gw", "plain"])
+        # 3. autorité déposée sur les proxies avant tout gabarit, pour chacun des trois points d'entrée de proxy-update.
+        for name in ("deploy-webapp-site.yml", "deploy-one-site.yml", "resync.yml"):
+            tasks = check._tasks_in(yaml.safe_load(open(os.path.join(ROLES, "proxy-update", "tasks", name), encoding="utf-8")))
+            ca = next(t for t in tasks if t.get("name") == "Install the Cloudflare origin-pull CA")
+            self.assertEqual(ca["ansible.builtin.include_role"]["tasks_from"], "nginx")
+            self.assertTrue(evaluate("proxy_update_cloudflare_edge", "proxy-update", inventory))
+            self.assertFalse(evaluate("proxy_update_cloudflare_edge", "proxy-update", self.without_edge(inventory)))
+        deploy = yaml.safe_load(open(os.path.join(ROLES, "proxy-update", "tasks", "deploy-webapp-site.yml"), encoding="utf-8"))
+        order = [t.get("name") for t in deploy]
+        self.assertLess(order.index("Install the Cloudflare origin-pull CA"), order.index("Deploy the generic vhost"))
+
+    @staticmethod
+    def without_edge(inventory):
+        inventory = copy.deepcopy(inventory)
+        hosts = inventory["all"]["children"]["apps"]["hosts"]
+        del hosts["pages-app"]
+        hosts["gw"]["cloudflare_named"] = False
+        return inventory
+
+    def test_the_tls_mode_of_the_zone_is_read_warned_about_and_only_set_on_request(self):
+        import http.server
+        import threading
+
+        state = {"ssl": "flexible", "calls": []}
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def respond(self, status, payload):
+                body = json.dumps(payload).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_GET(self):
+                state["calls"].append(("GET", self.path))
+                if state.get("deny"):
+                    return self.respond(403, {"success": False, "errors": [{"code": 9109}]})
+                self.respond(200, {"result": {"id": "ssl", "value": state["ssl"]}})
+
+            def do_PATCH(self):
+                length = int(self.headers.get("Content-Length", 0))
+                state["calls"].append(("PATCH", json.loads(self.rfile.read(length))))
+                state["ssl"] = state["calls"][-1][1]["value"]
+                self.respond(200, {"result": {"id": "ssl", "value": state["ssl"]}})
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        tasks = [t for t in yaml.safe_load(open(os.path.join(ROLES, "cloudflare-origin-pull", "tasks", "cloudflare.yml"), encoding="utf-8"))
+                 if t.get("name") in ("Read the TLS mode of the zone", "Set the TLS mode of the zone to Full (strict)",
+                                      "Fail when Cloudflare refuses to set the TLS mode that was asked for", "Report the TLS mode of the zone")]
+        self.assertEqual(len(tasks), 4)
+
+        def play(enforce=False):
+            document = yaml.safe_dump([{
+                "hosts": "localhost", "gather_facts": False,
+                "vars": {"cfopull_api": f"http://127.0.0.1:{server.server_port}", "cfopull_zone_id": "z", "cfopull_token": "FAKE",
+                         "cfopull_zone": "example.test", "cfopull_enforce_tls_strict": enforce},
+                "tasks": tasks}])
+            return run_local_play(document)
+        code, out = play()
+        self.assertEqual(code, 0, out[-2000:])
+        self.assertIn("ATTENTION", out)
+        self.assertIn("flexible", out)
+        self.assertEqual([c[0] for c in state["calls"]], ["GET"], "lecture seule par défaut")
+        state["deny"] = True
+        code, out = play()
+        self.assertEqual(code, 0, "une lecture refusée ne bloque pas le déploiement")
+        self.assertIn("illisible", out)
+        state["deny"] = False
+        code, out = play(enforce=True)
+        self.assertEqual(code, 0, out[-2000:])
+        self.assertIn(("PATCH", {"value": "strict"}), state["calls"])
+        self.assertIn("strict (attendu)", out)
+        calls = len(state["calls"])
+        code, out = play(enforce=True)
+        self.assertEqual(code, 0)
+        self.assertEqual([c[0] for c in state["calls"][calls:]], ["GET"], "déjà strict : aucune écriture")
+
+    CNAMES = os.path.join(ROLES, "cloudflare-dns-update", "tasks", "cnames.yml")
+
+    def cnames(self, inventory, private_proxies=("proxy1",), publish_private=True, only=None):
+        build = next(t for t in yaml.safe_load(open(self.CNAMES, encoding="utf-8"))
+                     if t.get("name") == "Build the CNAME list from the proxy_hostname attributes")
+        play = yaml.safe_dump([{
+            "hosts": "proxy1", "gather_facts": False,
+            "vars": {"cfdns_zone": "example.test", "cfdns_group": "apps", "cfdns_publish_private_front": publish_private,
+                     "cfdns_private_proxies": list(private_proxies), **({"cfdns_cname_scope": only} if only else {})},
+            "tasks": [build, {"ansible.builtin.copy": {"content": "{{ cfdns_cnames | default([]) | to_json }}",
+                                                       "dest": "{{ play_tmp }}/cnames.json"}}]}])
+        code, out, files = run_local_play(play, inventory, outputs=["cnames.json"])
+        self.assertEqual(code, 0, out[-3000:])
+        return {c["record"]: c for c in json.loads(files["cnames.json"])}
+
+    def test_a_named_entry_gets_a_proxied_cname_on_the_private_front_never_on_a_vpn_proxy(self):
+        records = self.cnames(edge_inventory())
+        self.assertEqual(records["ffg.example.test"]["proxied"], True)
+        self.assertEqual(records["ffg.example.test"]["front"], "proxy-private.example.test",
+                         "le front privé ne compose que les proxies sans adresse de VPN (proxy2 = vpn1 exclu)")
+        self.assertNotIn("pages-app.example.test", records, "le front Pages reste géré chez Cloudflare")
+        self.assertEqual(records["plain.example.test"]["proxied"], False, "une entrée ordinaire n'est jamais proxifiée")
+        self.assertEqual(records["plain.example.test"]["front"], "proxy.example.test")
+
+    def test_without_the_attribute_the_cname_is_what_it_was(self):
+        records = self.cnames(edge_inventory(cloudflare_named=False))
+        self.assertEqual((records["ffg.example.test"]["proxied"], records["ffg.example.test"]["front"]),
+                         (False, "proxy-private.example.test"))
+        records = self.cnames(edge_inventory(cloudflare_named=False, access_mode="public", proxy_hostname_proxied=True))
+        self.assertEqual((records["ffg.example.test"]["proxied"], records["ffg.example.test"]["front"]),
+                         (True, "proxy.example.test"), "`proxy_hostname_proxied` existant inchangé")
+
+    def test_a_private_named_entry_without_an_eligible_proxy_is_refused_not_sent_to_the_vpn_proxy(self):
+        guard = next((t for t in yaml.safe_load(open(self.CNAMES, encoding="utf-8"))
+                      if t.get("name") == "Check the Cloudflare-served private names have an eligible proxy"), None)
+        self.assertIsNotNone(guard, "garde absente de cnames.yml")
+        for private, publish, ok in (((), True, False), (("proxy1",), False, False), (("proxy1",), True, True)):
+            with self.subTest(private=private, publish=publish):
+                play = yaml.safe_dump([{
+                    "hosts": "proxy1", "gather_facts": False,
+                    "vars": {"cfdns_zone": "example.test", "cfdns_group": "apps", "cfdns_publish_private_front": publish,
+                             "cfdns_private_proxies": list(private)},
+                    "tasks": [guard]}])
+                code, out = run_local_play(play, edge_inventory())
+                self.assertEqual(code == 0, ok, out[-1500:])
+                if not ok:
+                    self.assertIn("proxy-private", out)
+        # Aucun effet sur une entrée ordinaire ni sur une entrée privée sans l'attribut.
+        play = yaml.safe_dump([{
+            "hosts": "proxy1", "gather_facts": False,
+            "vars": {"cfdns_zone": "example.test", "cfdns_group": "apps", "cfdns_publish_private_front": True,
+                     "cfdns_private_proxies": []}, "tasks": [guard]}])
+        self.assertEqual(run_local_play(play, edge_inventory(cloudflare_named=False))[0], 0)
 
 
 def directives(text):
@@ -1910,6 +2269,20 @@ GUARD_PLAY = PROBE_PLAY + """\
         name: fleetforge-install
         tasks_from: gateway-guard
     - ansible.builtin.debug: {msg: "GUARD=OK {{ wa_h_trust_proxy }} {{ wa_h_remote_proxies | join(',') }} {{ wa_env_injected.FFG_UPSTREAMS }}"}
+"""
+
+
+# Faits seuls (sans la garde de la passerelle) : ce que TOUTES les entrées `webapp` subissent.
+FACTS_PLAY = PROBE_PLAY + """\
+- hosts: fleetforge-gateway
+  gather_facts: false
+  tasks:
+    - ansible.builtin.include_role:
+        name: webapp-setup
+        tasks_from: facts
+      vars:
+        webapp_apps_file: "{{ play_tmp }}/apps.yml"
+    - ansible.builtin.debug: {msg: "FACTS=OK {{ wa_front_mode }}"}
 """
 
 

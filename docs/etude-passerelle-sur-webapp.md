@@ -646,3 +646,21 @@ Opt-in, par variables d'inventaire ; rien de déclaré = rendu, gardes et pare-f
 - **Sauvegarde** : aucun conflit (destination `station`, autre machine) ; la clé de la passerelle est liée à son adresse
   (`from=`) sur la destination : rejouer `deploy-backup.yml --limit fleetforge-gateway:backup-fleetforge-gateway` si la
   sauvegarde avait été posée avec l'ancienne adresse.
+
+## E2 (16/11/2026) : OAuth public en lecture seule, côté Ansible
+
+Rien de ceci n'a été joué sur une machine ; tout est prouvé hors ligne (rendus, gardes, jeux locaux).
+
+### A1 : `cloudflare_named`, le nom servi par Cloudflare sans front sur Pages
+
+`cloudflare_front` voulait dire à la fois « nom servi par Cloudflare » et « front sur Pages (API sous `<projet>-back`) », donc
+incompatible avec le profil durci (`wa_front_mode == 'container'`) et avec l'émetteur OAuth `ffg.<domaine>`. L'attribut DISTINCT
+`cloudflare_named: true` ne change NI le front NI le nom : `server_name` = `proxy_hostname`, amonts d'avant. Il ajoute
+`_cloudflare_front.inc` (IP réelle `CF-Connecting-IP`, `ssl_verify_client optional`) et fait exiger par `_access.inc` le
+certificat client dans les locations `mode: public`. Un seul passage de `deploy-webapp.yml` (donc de `deploy-fleetforge.yml`) :
+CNAME PROXIFIÉ vers `proxy-private.<zone>` (`webapp-install` → `cnames.yml` ; garde si aucun proxy hors adresse VPN), autorité
+et certificat client générés une fois puis envoyés à Cloudflare, activés sur `proxy_hostname` (`cfopull_hostnames`), mode TLS de la
+zone lu (signalé s'il n'est pas `strict` ; `cfopull_enforce_tls_strict: true` le pose), autorité déposée sur les proxies avant tout
+gabarit (`proxy_update_cloudflare_edge`). Refus (`facts.yml`) : avec `cloudflare_front`, `webapp_front: pages`, `webapp_proxy:
+external`, `proxy_hostname` hors zone ou égal au front `proxy.<zone>`, valeur ni `true` ni `false`. Absent ou faux : rendus
+identiques octet pour octet (114 rendus réels du parc, trois proxies, avant/après).

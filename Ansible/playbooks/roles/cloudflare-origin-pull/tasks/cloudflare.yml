@@ -300,6 +300,62 @@
   delegate_to: localhost
   become: false
 
+# Mode TLS de la zone : « Full (strict) » (Cloudflare → origine en HTTPS, certificat vérifié). Un autre mode (Flexible : HTTP
+# vers le port 80, qui redirige vers https = boucle) casserait un nom proxifié. Lecture seule par défaut : signalé, jamais bloquant ;
+# `cfopull_enforce_tls_strict: true` le pose (réglage de toute la zone). Aucune valeur secrète ici.
+- name: Read the TLS mode of the zone
+  ansible.builtin.uri:
+    url: "{{ cfopull_api }}/zones/{{ cfopull_zone_id }}/settings/ssl"
+    headers:
+      Authorization: "Bearer {{ cfopull_token }}"
+    status_code: [200, 400, 401, 403, 404]
+  register: cfopull_tls
+  no_log: true
+  changed_when: false
+  delegate_to: localhost
+  become: false
+
+- name: Set the TLS mode of the zone to Full (strict)
+  ansible.builtin.uri:
+    url: "{{ cfopull_api }}/zones/{{ cfopull_zone_id }}/settings/ssl"
+    method: PATCH
+    headers:
+      Authorization: "Bearer {{ cfopull_token }}"
+    body_format: json
+    body: {value: strict}
+    status_code: [200, 400, 401, 403, 404]
+  register: cfopull_tls_set
+  no_log: true
+  changed_when: cfopull_tls_set.status == 200
+  delegate_to: localhost
+  become: false
+  when:
+    - cfopull_enforce_tls_strict | bool
+    - cfopull_tls.status != 200 or (cfopull_tls.json.result.value | default('')) != 'strict'
+
+- name: Fail when Cloudflare refuses to set the TLS mode that was asked for
+  ansible.builtin.assert:
+    that: cfopull_tls_set.status == 200
+    fail_msg: >-
+      Cloudflare refuse de poser le mode TLS « strict » de {{ cfopull_zone }} (HTTP {{ cfopull_tls_set.status }}) :
+      {{ (cfopull_tls_set.json | default({})).errors | default([]) | to_json }}. Permission « Zone → Zone Settings → Edit »
+      requise sur le jeton, ou poser le mode à la main (SSL/TLS → Overview → Full (strict)).
+  delegate_to: localhost
+  become: false
+  when: cfopull_tls_set is not skipped
+
+- name: Report the TLS mode of the zone
+  ansible.builtin.debug:
+    msg: >-
+      {{ 'Mode TLS de ' ~ cfopull_zone ~ ' : strict (attendu).'
+         if (cfopull_tls_set is not skipped or (cfopull_tls.status == 200 and cfopull_tls.json.result.value | default('') == 'strict'))
+         else ('ATTENTION — mode TLS de ' ~ cfopull_zone ~ ' : '
+               ~ ((cfopull_tls.json.result.value | default('illisible')) if cfopull_tls.status == 200
+                  else 'illisible (HTTP ' ~ cfopull_tls.status ~ ', jeton sans « Zone Settings : Read »)')
+               ~ ' — « Full (strict) » est exigé pour les noms proxifiés ; `cfopull_enforce_tls_strict: true` le pose.') }}
+  delegate_to: localhost
+  become: false
+
 - name: Say what is left to do
   ansible.builtin.debug:
     msg: >-

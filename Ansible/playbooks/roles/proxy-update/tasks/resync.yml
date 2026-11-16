@@ -121,7 +121,7 @@
       ansible.builtin.include_role:
         name: cloudflare-origin-pull
         tasks_from: nginx
-      when: groups['all'] | map('extract', hostvars) | selectattr('cloudflare_front', 'defined') | selectattr('cloudflare_front') | list | length > 0
+      when: proxy_update_cloudflare_edge | bool
 
     # Journaux dédiés (et leur rotation 7 jours) des vhosts web3c-sync : le
     # répertoire DOIT exister avant la copie des vhosts, sans quoi `nginx` refuse de

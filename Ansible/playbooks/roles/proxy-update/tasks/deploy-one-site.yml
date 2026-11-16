@@ -45,7 +45,7 @@
   ansible.builtin.include_role:
     name: cloudflare-origin-pull
     tasks_from: nginx
-  when: groups['all'] | map('extract', hostvars) | selectattr('cloudflare_front', 'defined') | selectattr('cloudflare_front') | list | length > 0
+  when: proxy_update_cloudflare_edge | bool
 
 # Écouteurs dédiés (`site_dedicated_listeners`, optionnel : fait `proxy_dedicated_listeners` de
 # proxy-security/tasks/dedicated-listeners.yml) : le rendu est contrôlé AVANT d'être posé (un seul `server {}` par port,

@@ -10,16 +10,30 @@ cfopull_token: "{{ cloudflare_token | default('') }}"
 cfopull_api: "https://api.cloudflare.com/client/v4"
 
 # Noms de domaine sur lesquels Cloudflare présente son certificat client à
-# l'origine : le nom d'API `<hôte>-back.<domaine>` de CHAQUE entrée
-# `cloudflare_front: true` (même dérivation que `cfpages_api_domain`,
-# cloudflare-pages-setup), seuls noms dont le vhost inclut `_cloudflare_front.inc`
-# et dont `_access.inc` exige le certificat en mode public. Une entrée sans
-# l'attribut n'est jamais listée : son vhost ne vérifie rien.
+# l'origine :
+#   • le nom d'API `<hôte>-back.<domaine>` de CHAQUE entrée `cloudflare_front: true`
+#     (front sur Pages ; même dérivation que `cfpages_api_domain`, cloudflare-pages-setup) ;
+#   • le nom PUBLIC (`proxy_hostname`, ex. `ffg.<domaine>`, jamais `-back`) de CHAQUE
+#     entrée `cloudflare_named: true` (nom proxifié, front en conteneur).
+# Ce sont les seuls noms dont le vhost inclut `_cloudflare_front.inc` et dont
+# `_access.inc` exige le certificat en mode public. Une entrée sans l'un ni l'autre
+# attribut n'est jamais listée : son vhost ne vérifie rien.
 cfopull_hostnames: >-
-  {{ groups['all'] | map('extract', hostvars)
+  {%- set pages = groups['all'] | map('extract', hostvars)
      | selectattr('cloudflare_front', 'defined') | selectattr('cloudflare_front')
      | map(attribute='inventory_hostname') | map('lower') | map('replace', '_', '-')
-     | map('regex_replace', '$', '-back.' ~ domain_name) | list }}
+     | map('regex_replace', '$', '-back.' ~ domain_name) | list -%}
+  {%- set ns = namespace(named=[]) -%}
+  {%- for h in groups['all'] if (hostvars[h].cloudflare_named | default(false) | bool) and hostvars[h].proxy_hostname is defined
+        and hostvars[h].proxy_hostname not in ns.named -%}
+  {%- set ns.named = ns.named + [hostvars[h].proxy_hostname] -%}
+  {%- endfor -%}
+  {{ pages + ns.named }}
+
+# Mode TLS de la zone (« Full (strict) » exigé : Cloudflare joint l'origine en HTTPS et vérifie son certificat). Lu après l'activation
+# des noms ; un autre mode ou une lecture refusée (jeton sans « Zone Settings : Read ») est SIGNALÉ, jamais bloquant. `true` : le
+# mode est posé à `strict` (réglage de TOUTE la zone, jeton « Zone Settings : Edit ») — décision explicite, faux par défaut.
+cfopull_enforce_tls_strict: false
 
 # Autorité et certificat client propres à CE parc, générés une fois sur le poste
 # de contrôle. `keys/*` est gitignoré : la clé privée de l'autorité n'est jamais

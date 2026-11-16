@@ -12,10 +12,10 @@
 #   nginx.yml       (proxies)    dépôt de l'autorité que nginx vérifie
 #
 # Rien ici ne FERME un vhost : `_cloudflare_front.inc` pose `ssl_verify_client
-# optional` pour toute entrée `cloudflare_front: true`, et `_access.inc` exige le
-# certificat dans les locations en mode public de ces entrées. `nginx.yml` est
-# aussi inclus par proxy-update (main, deploy-one-site) avant tout gabarit.
-# Aucune entrée `cloudflare_front: true` : aucun nom à activer, Cloudflare n'est
+# optional` pour toute entrée `cloudflare_front: true` ou `cloudflare_named: true`, et
+# `_access.inc` exige le certificat dans les locations en mode public de ces entrées.
+# `nginx.yml` est aussi inclus par proxy-update (main, deploy-one-site, deploy-webapp-site)
+# avant tout gabarit. Aucune de ces entrées : aucun nom à activer, Cloudflare n'est
 # pas appelé (le jeton n'a alors pas besoin de la permission SSL).
 - name: Run the Cloudflare side
   ansible.builtin.include_tasks: cloudflare.yml

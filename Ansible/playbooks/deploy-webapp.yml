@@ -8,8 +8,8 @@
 #   ./play.sh web3c deploy-webapp.yml -e webapp=papanglabs -e webapp_env=preprod
 #
 # `webapp` = le nom de l'entrée d'inventaire (ou son `webapp_project`). L'entrée porte `ansible_roles: [webapp]` et ses
-# attributs (roles/webapp-setup/defaults/main.yml) : `app_port`, `proxy_hostname`, `access_mode`, `cloudflare_front`,
-# `webapp_db_engine` à la main ; tout le reste est dérivé. Les secrets sont ADOPTÉS du .env existant puis mis au coffre,
+# attributs (roles/webapp-setup/defaults/main.yml) : `app_port`, `proxy_hostname`, `access_mode`, `cloudflare_front`
+# (front sur Pages) ou `cloudflare_named` (nom proxifié, front en conteneur), `webapp_db_engine` à la main ; tout le reste est dérivé. Les secrets sont ADOPTÉS du .env existant puis mis au coffre,
 # ou tirés s'ils n'existent nulle part (jamais régénérés : CRYPT_DB_MASTER_KEY perdue = données illisibles).
 #
 # Pas de variable dans un `hosts:` (résolu avant les group_vars) : le premier play valide `webapp` puis range l'entrée
@@ -179,7 +179,11 @@
     - webapp-install
 
 # ── Vhost ──────────────────────────────────────────────────────────────────
-# `cloudflare_front` : les Authenticated Origin Pulls sont activés chez Cloudflare AVANT le vhost, qui les exige.
+# `cloudflare_front` (front sur Pages, API sous `<projet>-back.<domaine>`) OU `cloudflare_named` (nom `proxy_hostname` servi par
+# Cloudflare, front en conteneur) : les Authenticated Origin Pulls sont activés chez Cloudflare AVANT le vhost, qui les exige
+# (autorité propre au parc générée une fois, envoyée à Cloudflare, activée sur les noms de `cfopull_hostnames`, mode TLS de la zone
+# lu). Le DNS (CNAME proxifié pour `cloudflare_named`) est posé par le play précédent (webapp-install) ; l'autorité est déposée
+# sur les proxies par proxy-update avant tout gabarit. Un seul passage : rien à jouer à la main.
 - name: Authenticated Origin Pulls côté Cloudflare
   hosts: webapp_target
   gather_facts: false
@@ -192,7 +196,7 @@
       vars:
         cfopull_part: cloudflare
       when:
-        - cloudflare_front | default(false) | bool
+        - (cloudflare_front | default(false) | bool) or (cloudflare_named | default(false) | bool)
         - (webapp_proxy | default('internal')) != 'external'
 
 # Reload seul, jamais les autres vhosts. Un vhost écrit à la main `<projet>.conf` (parcs/<parc>/nginx/sites-enabled/) a

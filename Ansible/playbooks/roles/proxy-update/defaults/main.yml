@@ -40,6 +40,15 @@ proxy_update_secret_group: www-data
 # Authenticated Origin Pulls.
 proxy_update_backup_items: "{{ proxy_update_subdirs + ['certs', 'auth', 'nginx.conf', 'cloudflare-origin-pull-ca.pem'] }}"
 
+# Vrai quand une entrée de l'inventaire déclare un nom servi par Cloudflare — `cloudflare_front: true` (front sur Pages) OU
+# `cloudflare_named: true` (nom proxifié, front en conteneur) : son vhost inclut `_cloudflare_front.inc`, qui référence l'autorité
+# des Authenticated Origin Pulls (`nginx -t` refuse un fichier absent). Les trois points d'entrée (resync.yml, deploy-one-site.yml,
+# deploy-webapp-site.yml) la déposent AVANT tout gabarit quand c'est vrai. Aucune entrée : rien n'est déposé.
+proxy_update_cloudflare_edge: >-
+  {{ (groups['all'] | map('extract', hostvars) | selectattr('cloudflare_front', 'defined') | selectattr('cloudflare_front') | list | length > 0)
+     or (groups['all'] | map('extract', hostvars) | selectattr('cloudflare_named', 'defined') | map(attribute='cloudflare_named')
+         | map('bool') | select | list | length > 0) }}
+
 # Jeton d'écriture Prometheus (remote-write relayé par les proxies). Seul
 # papanglabs en a l'usage : `true` dans group_vars/papanglabs.yml.
 proxy_write_token_enabled: false

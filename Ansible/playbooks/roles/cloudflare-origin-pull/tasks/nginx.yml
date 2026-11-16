@@ -11,10 +11,10 @@
     that: (cfopull_dir ~ '/ca.pem') is file
     fail_msg: >-
       {{ cfopull_dir }}/ca.pem est absent sur ce poste alors qu'une entrée de
-      l'inventaire porte `cloudflare_front: true` : son vhost exige le certificat
-      client de Cloudflare. Jouer d'abord ./play.sh <parc> deploy-cloudflare-origin-pull.yml
-      (génère l'autorité, l'envoie à Cloudflare), ou reprendre keys/cloudflare-origin-pull/
-      depuis le poste qui l'a générée.
+      l'inventaire porte `cloudflare_front: true` ou `cloudflare_named: true` : son vhost exige le certificat
+      client de Cloudflare. Le play « Authenticated Origin Pulls côté Cloudflare » de deploy-webapp.yml (ou
+      ./play.sh <parc> deploy-cloudflare-origin-pull.yml) le génère et l'envoie à Cloudflare ; sinon reprendre
+      keys/cloudflare-origin-pull/ depuis le poste qui l'a générée.
   delegate_to: localhost
   become: false
   run_once: true

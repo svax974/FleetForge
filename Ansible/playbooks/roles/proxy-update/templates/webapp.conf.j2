@@ -6,14 +6,19 @@
    priorité : c'est la porte de sortie des applications aux besoins propres
    (WebSocket, git smart-HTTP, webhooks privés, limites par zone…).
 
-   Deux modes, selon `cloudflare_front` de l'entrée (voir cloudflare-pages-setup) :
+   Deux modes de front, selon `cloudflare_front` de l'entrée (voir cloudflare-pages-setup) :
    - false : front en conteneur ; `proxy_hostname` → `app_port` (son nginx interne
      relaie /api/ vers le back) ;
    - true  : front sur Cloudflare Pages, qui ne passe PAS par les proxies ; ce
      vhost n'est que l'API, `<projet>-back.<domaine>` → `back_port` (back-lb).
+   `cloudflare_named: true` est un attribut DISTINCT, sans effet sur le front : le nom
+   public (`proxy_hostname`) est servi par l'edge Cloudflare (enregistrement proxifié),
+   le front reste en conteneur derrière les proxies — même `server_name` et mêmes
+   amonts que sans l'attribut, plus `_cloudflare_front.inc` (IP réelle, Authenticated
+   Origin Pulls).
    Accès : `access_mode` de l'entrée (_access.inc : privé par défaut) ; avec
-   `cloudflare_front`, public = joignable seulement par NOTRE Cloudflare (certificat
-   client, `_cloudflare_front.inc`).
+   `cloudflare_front` ou `cloudflare_named`, public = joignable seulement par NOTRE
+   Cloudflare (certificat client, `_cloudflare_front.inc`).
    Plusieurs entrées pour un même nom (ex. deux back de prod) : un `upstream`.
    Blocs supplémentaires : `webapp_vhost_locations` sur la première entrée, une
    liste de { path, regex?, mode?, ws?, body?, timeout?, buffering?, upstream?,
@@ -32,6 +37,7 @@
 {% set _vpn_addresses = groups['vpns'] | default([]) | map('extract', hostvars, 'ansible_host') | list %}
 {% set _xff = '$remote_addr' if _hardened else '$proxy_add_x_forwarded_for' %}
 {% set _pages = _h.cloudflare_front | default(false) | bool %}
+{% set _named = _h.cloudflare_named | default(false) | bool %}
 {% set _project = (_h.webapp_project | default(_first)) | lower | replace('_', '-') %}
 {% set _server_name = (_project ~ '-back.' ~ domain_name) if _pages else _h.proxy_hostname %}
 {% set _slug = _server_name | regex_replace('[^a-z0-9]', '_') %}
@@ -50,7 +56,7 @@
 {% set _upstream = ('webapp_' ~ _slug) if (_backends | length > 1) else ('http://' ~ _backends[0]) %}
 {% set _upstream_back = ('webapp_' ~ _slug ~ '_back') if (_backends_back | length > 1) else ('http://' ~ _backends_back[0]) %}
 {% set _wants_back = (_h.webapp_vhost_locations | default([]) | selectattr('upstream', 'defined') | selectattr('upstream', 'equalto', 'back') | list | length) > 0 %}
-# {{ _server_name }} → {{ _backends | join(', ') }} ({{ 'API seule, front sur Cloudflare Pages' if _pages else 'front en conteneur' }})
+# {{ _server_name }} → {{ _backends | join(', ') }} ({{ 'API seule, front sur Cloudflare Pages' if _pages else ('front en conteneur, nom servi par Cloudflare' if _named else 'front en conteneur') }})
 {% if _backends | length > 1 %}
 upstream webapp_{{ _slug }} {
 {% for _b in _backends %}
@@ -83,7 +89,7 @@ server {
     listen      [::]:443 ssl http2;
 {% endif %}
     server_name {{ _server_name }};
-{% if _pages %}
+{% if _pages or _named %}
     {% include '_cloudflare_front.inc' %}
 {% endif %}
 

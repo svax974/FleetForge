@@ -34,7 +34,7 @@
   ansible.builtin.include_role:
     name: cloudflare-origin-pull
     tasks_from: nginx
-  when: groups['all'] | map('extract', hostvars) | selectattr('cloudflare_front', 'defined') | selectattr('cloudflare_front') | list | length > 0
+  when: proxy_update_cloudflare_edge | bool
 
 # Listes NOMMÉES (`webapp_vhost_locations[].access`) : le rendu est contrôlé AVANT d'être posé et rechargé
 # (scripts/webapp_hardening_check.py vhost : allow étroits, aucune adresse VPN sauf décision, `deny all` en dernier).

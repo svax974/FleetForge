@@ -19,11 +19,12 @@
                  `access_local_cidrs`), puis `deny all` ;
      • public  → aucun filtre d'adresse : l'authentification est celle du
                  service (signatures d'appareil, jeton…), et elle doit exister.
-                 Entrée `cloudflare_front: true` : public MAIS seulement par
-                 NOTRE Cloudflare — le certificat client vérifié par
-                 `_cloudflare_front.inc` est exigé ici (403 sinon), ce qui
+                 Entrée `cloudflare_front: true` OU `cloudflare_named: true`
+                 (nom servi par Cloudflare, front en conteneur) : public MAIS
+                 seulement par NOTRE Cloudflare — le certificat client vérifié
+                 par `_cloudflare_front.inc` est exigé ici (403 sinon), ce qui
                  ferme l'accès direct aux proxies et celui d'un autre compte
-                 Cloudflare pointé sur eux. Sans l'attribut : rien de plus.
+                 Cloudflare pointé sur eux. Sans l'un ni l'autre : rien de plus.
    Une valeur inconnue rend `deny all` : un vhost fermé se remarque, un vhost
    ouvert par erreur non.
 
@@ -120,7 +121,7 @@
         {% endif %}
         {% endfor %}
         deny all;
-{% elif _access_mode == 'public' and hostvars[access_entry].cloudflare_front | default(false) | bool %}
+{% elif _access_mode == 'public' and ((hostvars[access_entry].cloudflare_front | default(false) | bool) or (hostvars[access_entry].cloudflare_named | default(false) | bool)) %}
         # Mode public ({{ access_entry }}) derrière Cloudflare : certificat client de NOTRE zone exigé.
         if ($ssl_client_verify != SUCCESS) {
             return 403;

@@ -1,4 +1,4 @@
-{# ── Vhost derrière Cloudflare (`cloudflare_front: true` sur l'entrée) ───────
+{# ── Vhost derrière Cloudflare (`cloudflare_front: true` OU `cloudflare_named: true`) ─
    Fichier PARTIEL, jamais déployé seul (préfixe `_`). À inclure dans le bloc
    `server {}` (les directives real_ip ne valent pas dans un `location`), après
    avoir posé `access_entry` = nom de l'entrée d'inventaire du service :
@@ -9,8 +9,15 @@
            location / { {% include '_access.inc' %} ... }
        }
 
-   Sans l'attribut sur l'entrée, ne rend RIEN : un vhost non déclaré reste ce
-   qu'il était.
+   Deux attributs d'entrée distincts mènent ici :
+     • `cloudflare_front: true` — front sur Cloudflare Pages, API sous
+       `<projet>-back.<domaine>` (le front ne passe jamais par les proxies) ;
+     • `cloudflare_named: true` — le nom public est servi par l'edge Cloudflare
+       (enregistrement PROXIFIÉ) mais le front reste en conteneur, derrière les
+       proxies : même nom que sans Cloudflare (`proxy_hostname`), même vhost,
+       IP réelle et Authenticated Origin Pulls en plus.
+   Sans l'un ni l'autre sur l'entrée, ne rend RIEN : un vhost non déclaré reste
+   ce qu'il était.
 
    Pourquoi : le nom public est servi par l'edge Cloudflare (enregistrement
    géré chez Cloudflare, hors Ansible — la synchronisation DNS n'y touche pas).
@@ -36,7 +43,7 @@
    proxies) ; le certificat client, lui, n'est présenté que pour NOTRE zone.
    L'autorité est déposée par proxy-update (main et deploy-one-site) AVANT tout
    gabarit : `nginx -t` refuse un `ssl_client_certificate` absent. #}
-{% if hostvars[access_entry].cloudflare_front | default(false) | bool %}
+{% if (hostvars[access_entry].cloudflare_front | default(false) | bool) or (hostvars[access_entry].cloudflare_named | default(false) | bool) %}
     # Derrière Cloudflare ({{ access_entry }}) : IP cliente lue dans CF-Connecting-IP.
     {% for ip in cloudflare_ips %}
     set_real_ip_from {{ ip }};

@@ -4,11 +4,16 @@
 #   ./play.sh web3c deploy-cloudflare-origin-pull.yml
 #
 # Pour TOUTE entrée `cloudflare_front: true` (front sur Cloudflare Pages, API sous
-# `<hôte>-back.<domaine>`) : génère l'autorité et le certificat client du parc
+# `<hôte>-back.<domaine>`) ou `cloudflare_named: true` (nom public servi par Cloudflare,
+# front en conteneur) : génère l'autorité et le certificat client du parc
 # (keys/cloudflare-origin-pull/, une fois), les envoie à Cloudflare, les active
-# sur les noms d'API (`cfopull_hostnames`, dérivés de l'inventaire) et dépose
-# l'autorité sur chaque proxy. Une entrée sans l'attribut n'est pas concernée :
-# son vhost ne vérifie aucun certificat client.
+# sur les noms (`cfopull_hostnames`, dérivés de l'inventaire : `<hôte>-back.<domaine>`
+# ou `proxy_hostname`) et dépose l'autorité sur chaque proxy. Une entrée sans
+# attribut n'est pas concernée : son vhost ne vérifie aucun certificat client.
+# Le play « Authenticated Origin Pulls côté Cloudflare » de deploy-webapp.yml (donc de
+# deploy-fleetforge.yml pour la passerelle) fait déjà tout cela en un passage : ce
+# playbook ne sert qu'au premier passage sans redéployer l'application, au
+# renouvellement et à l'ajout d'une entrée.
 #
 # Côté vhost, rien à écrire : `_cloudflare_front.inc` pose `ssl_verify_client
 # optional`, `_access.inc` exige le certificat dans les locations en mode public.
