@@ -264,7 +264,13 @@ def run(directory, keep, floor, words):
         if not os.path.lexists(final):
             raise OSError(f"{name} evicted by the retention, last-success unchanged")
         at = write_last_success(directory)
-        print(size)
+        try:
+            print(size)
+            sys.stdout.flush()
+        except BrokenPipeError:
+            # The client vanished after the write: the generation is committed and last-success written, so the call
+            # is a success. Point stdout at /dev/null so that the flush at exit does not fail it either.
+            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
         return f"file={name} bytes={size} kept={keep} removed={','.join(removed) or '-'} last-success={at}"
     if verb == "abort":
         name = file_argument(words)

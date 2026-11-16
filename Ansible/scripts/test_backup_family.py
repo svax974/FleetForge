@@ -311,6 +311,24 @@ class GateTests(unittest.TestCase):
             gate.zlib.decompressobj = real
         self.assertTrue(calls and all(0 < m <= gate.CHUNK for m in calls))
 
+    def test_a_client_gone_after_the_write_does_not_fail_the_commit(self):
+        # Review finding: the size printed after `commit` hit a broken pipe (client vanished) and the call failed
+        # AFTER last-success was written. The reply goes to a pipe whose reader is already closed.
+        name = f"appdb-{stamp()}.sql.gz"
+        self.assertEqual(run_gate(self.root, "app", f"put {name}", gzip_bytes(b"x\n" * 100)).returncode, 0)
+        read_end, write_end = os.pipe()
+        os.close(read_end)
+        env = dict(os.environ, SSH_ORIGINAL_COMMAND=f"commit {name}")
+        try:
+            done = subprocess.run([sys.executable, GATE, self.root, "app", "3", "0"], stdout=write_end,
+                                  stderr=subprocess.PIPE, env=env, timeout=60)
+        finally:
+            os.close(write_end)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertNotIn(b"Broken", done.stderr)
+        self.assertEqual(self.backups(), [name])
+        self.assertTrue(os.path.exists(os.path.join(self.app, "last-success")))
+
     def test_a_multi_member_gzip_is_accepted_wherever_the_read_block_cuts_a_header(self):
         # Review finding: a second member whose 2-byte header is split by the read block (1 byte left after the first
         # member) was refused as « trailing garbage ». Stored (level 0) members have a predictable size, so the
