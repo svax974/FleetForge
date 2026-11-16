@@ -54,18 +54,25 @@
   ansible.builtin.template:
     src: webapp.conf.j2
     dest: "{{ proxy_update_nginx_dir }}/sites-enabled/webapp-{{ wa_name }}.conf"
-    owner: root
-    group: root
+    owner: "{{ proxy_update_owner }}"
+    group: "{{ proxy_update_group }}"
   register: proxy_webapp_site_deployed
 
 # Contrôle AVANT de recharger : un vhost mal templaté couperait TOUS les vhosts de ce proxy au reload.
+# Pendant une resynchronisation COMPLÈTE (`proxy_update_full_resync`, posé par resync.yml) ni contrôle ni rechargement ici :
+# sites-enabled vient d'être vidé (ni streams, ni healthz) et le rechargement activerait cette configuration à moitié
+# construite avant les contrôles de resync.yml ; le redémarrage final est celui de main.yml, après ces contrôles.
 - name: Test the nginx configuration before reloading
   ansible.builtin.command: nginx -t
   changed_when: false
-  when: proxy_webapp_site_deployed.changed
+  when:
+    - proxy_webapp_site_deployed.changed
+    - not (proxy_update_full_resync | default(false) | bool)
 
 - name: Reload nginx
   ansible.builtin.systemd:
     name: nginx
     state: reloaded
-  when: proxy_webapp_site_deployed.changed
+  when:
+    - proxy_webapp_site_deployed.changed
+    - not (proxy_update_full_resync | default(false) | bool)

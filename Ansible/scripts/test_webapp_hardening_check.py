@@ -3067,21 +3067,56 @@ class DedicatedListenerPlaysTests(unittest.TestCase):
                         inner.index("Delete the vhost directories"))
 
 
+# `nginx -t` : NGINX_T_RC != 0 le fait échouer tant que l'arbre NOUVEAU (nginx.conf contenant NEW-MAIN) est en place, comme un
+# vrai nginx qui refuserait la nouvelle configuration mais accepterait l'ancienne ; NGINX_T_ALWAYS_FAIL l'échoue aussi sur
+# l'arbre restauré. Chaque appel est consigné dans NGINX_LOG.
 FAKE_NGINX_RESYNC = """\
 #!/bin/sh
+echo "nginx $*" >> "$NGINX_LOG"
 case "$1" in
   -T) cat "$NGINX_DUMP"; exit "${NGINX_T_BIG_RC:-0}" ;;
-  -t) [ "${NGINX_T_RC:-0}" = 0 ] || echo "nginx: [emerg] fake failure of nginx -t" >&2; exit "${NGINX_T_RC:-0}" ;;
+  -t) if [ -n "$NGINX_T_ALWAYS_FAIL" ] || { [ "${NGINX_T_RC:-0}" != 0 ] && grep -qs NEW-MAIN "$NGINX_TREE/nginx.conf"; }; then
+        echo "nginx: [emerg] fake failure of nginx -t" >&2; exit 1
+      fi
+      exit 0 ;;
   -v) echo "nginx version: nginx/1.30.0" >&2; exit 0 ;;
 esac
 exit 0
+"""
+
+# `systemctl is-active` / `reload` du rescue (les tâches du module `systemd` ne se jouent pas hors d'un hôte systemd).
+FAKE_SYSTEMCTL_RESYNC = """\
+#!/bin/sh
+echo "systemctl $*" >> "$SYSTEMCTL_LOG"
+case "$1" in
+  is-active) exit "${SYSTEMCTL_ACTIVE_RC:-0}" ;;
+  reload) [ "${SYSTEMCTL_RELOAD_RC:-0}" = 0 ] || echo "fake reload failure" >&2; exit "${SYSTEMCTL_RELOAD_RC:-0}" ;;
+esac
+exit 0
+"""
+
+# `cp` : CP_FAIL=<fin de chemin> échoue (sauvegarde seulement : la destination est dans ff-nginx-backup-*), CP_SILENT=<fin de
+# chemin> « réussit » sans rien copier.
+FAKE_CP_RESYNC = """\
+#!/bin/sh
+last=""
+for a in "$@"; do last="$a"; done
+if [ -n "$CP_FAIL" ]; then case "$last" in *ff-nginx-backup-*"$CP_FAIL") echo "cp: fake failure (disk full)" >&2; exit 1 ;; esac; fi
+if [ -n "$CP_SILENT" ]; then case "$last" in *ff-nginx-backup-*"$CP_SILENT") exit 0 ;; esac; fi
+# CP_FAIL_RESTORE : la remise en place (source dans la sauvegarde) échoue.
+if [ -n "$CP_FAIL_RESTORE" ]; then
+  src=""; prev=""
+  for a in "$@"; do src="$prev"; prev="$a"; done
+  case "$src" in *ff-nginx-backup-*) echo "cp: fake failure of the restoration" >&2; exit 1 ;; esac
+fi
+exec /bin/cp "$@"
 """
 
 RESYNC_PLAY = """\
 - hosts: proxy1
   gather_facts: false
   tasks:
-    - ansible.builtin.include_role: {name: proxy-update, tasks_from: resync}
+    - ansible.builtin.include_role: {name: proxy-update, tasks_from: TASKS_FROM}
       vars:
         proxy_update_dir: "{{ play_tmp }}/parc"
         proxy_update_nginx_dir: "{{ play_tmp }}/nginx"
@@ -3114,8 +3149,14 @@ class FullResyncRollbackTests(unittest.TestCase):
                     out[os.path.relpath(path, root)] = f.read()
         return out
 
-    def resync(self, nginx_env=None, parc_files=None, owners=None, args=(), previous=None):
-        """(code, sortie, arbre nginx après, restes de sauvegarde)."""
+    WEBAPP_ENTRY = {"ansible_host": "203.0.113.77", "ansible_connection": "local", "ansible_roles": ["webapp"],
+                    "proxy_hostname": "plain.example.test", "app_port": 4600, "webapp_db_engine": "sqlite",
+                    "access_mode": "private", "webapp_project": "plain"}
+
+    def resync(self, nginx_env=None, parc_files=None, owners=None, args=(), previous=None, tasks_from="resync", webapp=False,
+               extra_vars=None):
+        """(code, sortie, arbre nginx après, restes de sauvegarde). `self.logs` : appels consignés de nginx et systemctl.
+        `webapp` : une entrée `webapp` à vhost générique dans l'inventaire (rendu par webapp-sites.yml)."""
         with tempfile.TemporaryDirectory() as tmp:
             nginx = os.path.join(tmp, "nginx")
             for rel, content in (self.PREVIOUS if previous is None else previous).items():
@@ -3133,29 +3174,47 @@ class FullResyncRollbackTests(unittest.TestCase):
             bindir, tmpdir = os.path.join(tmp, "bin"), os.path.join(tmp, "tmpdir")
             os.makedirs(bindir)
             os.makedirs(tmpdir)
-            with open(os.path.join(bindir, "nginx"), "w") as f:
-                f.write(FAKE_NGINX_RESYNC)
-            os.chmod(os.path.join(bindir, "nginx"), 0o755)
+            for name, script in (("nginx", FAKE_NGINX_RESYNC), ("systemctl", FAKE_SYSTEMCTL_RESYNC), ("cp", FAKE_CP_RESYNC)):
+                with open(os.path.join(bindir, name), "w") as f:
+                    f.write(script)
+                os.chmod(os.path.join(bindir, name), 0o755)
             with open(os.path.join(tmp, "dump"), "w") as f:
                 f.write(self.DUMP_OK)
             with open(os.path.join(tmp, "play.yml"), "w") as f:
-                f.write(RESYNC_PLAY)
+                f.write(RESYNC_PLAY.replace("TASKS_FROM", tasks_from))
             with open(os.path.join(tmp, "ansible.cfg"), "w") as f:
                 f.write(f"[defaults]\nroles_path={ROLES}\nstdout_callback=default\n")
             inventory = listener_inventory_yaml()
             # No generic webapp vhost to render in this test (that part has its own checks): the gateway has no vhost here.
             inventory["all"]["children"]["fleetforge_gateways"]["hosts"]["fleetforge-gateway"]["webapp_proxy"] = "external"
+            if webapp:
+                inventory["all"]["children"]["apps"]["hosts"]["plainapp"] = dict(self.WEBAPP_ENTRY)
             with open(os.path.join(tmp, "inventory.yml"), "w") as f:
                 yaml.safe_dump(inventory, f)
             env = {**dict(os.environ, ANSIBLE_CONFIG=os.path.join(tmp, "ansible.cfg"), PATH=f"{bindir}:{os.environ['PATH']}",
-                          NGINX_DUMP=os.path.join(tmp, "dump"), TMPDIR=tmpdir), **(nginx_env or {})}
+                          NGINX_DUMP=os.path.join(tmp, "dump"), TMPDIR=tmpdir, NGINX_TREE=nginx,
+                          NGINX_LOG=os.path.join(tmp, "nginx.log"), SYSTEMCTL_LOG=os.path.join(tmp, "systemctl.log")),
+                   **(nginx_env or {})}
             run = subprocess.run(["ansible-playbook", "-i", os.path.join(tmp, "inventory.yml"), os.path.join(tmp, "play.yml"),
                                   "-e", "ansible_become=false", "-e", f"play_tmp={tmp}",
                                   "-e", json.dumps({"owners": owners if owners is not None else self.OWNERS,
                                                     "proxy_update_owner": str(os.getuid()), "proxy_update_group": str(os.getgid()),
-                                                    "proxy_update_secret_group": str(os.getgid())}), *args],
+                                                    "proxy_update_secret_group": str(os.getgid()), **(extra_vars or {})}), *args],
                                  capture_output=True, text=True, env=env, timeout=300)
+            self.logs = {}
+            for name in ("nginx", "systemctl"):
+                path = os.path.join(tmp, f"{name}.log")
+                self.logs[name] = open(path).read().splitlines() if os.path.exists(path) else []
             return run.returncode, run.stdout + run.stderr, self.snapshot(nginx), os.listdir(tmpdir)
+
+    @staticmethod
+    def task_result(out, name):
+        """Première ligne de résultat (`ok:`, `skipping:`, `fatal:`…) de la tâche `name` dans la sortie d'ansible-playbook."""
+        lines = out.splitlines()
+        for i, line in enumerate(lines):
+            if line.startswith("TASK [") and name in line:
+                return next((l for l in lines[i + 1:] if l.split(":")[0] in ("ok", "changed", "skipping", "fatal")), None)
+        return None
 
     def test_a_successful_resync_replaces_the_tree_and_leaves_no_backup(self):
         code, out, tree, leftovers = self.resync()
@@ -3172,12 +3231,81 @@ class FullResyncRollbackTests(unittest.TestCase):
         self.assertEqual(tree, self.PREVIOUS, "l'ancienne arborescence doit être restaurée à l'identique")
         self.assertEqual(leftovers, [], "sauvegarde non supprimée après restauration")
         self.assertIn(expect, out)
-        self.assertIn("restaurée", out)
+        self.assertIn("remise en place", out)
 
-    def test_a_failing_nginx_t_restores_the_previous_tree_and_fails_loudly(self):
+    def test_a_failing_nginx_t_restores_the_previous_tree_tests_it_and_reloads_nginx_on_it(self):
         res = self.resync(nginx_env={"NGINX_T_RC": "1"})
         self.assert_previous_tree_back(*res, expect="Validate nginx configuration")
-        self.assertIn("nginx n'a pas été redémarré", res[1])
+        self.assertIn("nginx a été rechargé dessus", res[1])
+        self.assertIn("il n'a pas été redémarré", res[1])
+        self.assertEqual(self.logs["nginx"].count("nginx -t"), 2, "une fois sur le nouvel arbre, une fois sur le restauré")
+        self.assertEqual(self.logs["systemctl"], ["systemctl is-active --quiet nginx", "systemctl reload nginx"])
+
+    def test_the_final_message_is_truthful_when_the_restored_tree_cannot_be_reloaded(self):
+        cases = {
+            "reload fails": ({"NGINX_T_RC": "1", "SYSTEMCTL_RELOAD_RC": "1"}, "le rechargement de nginx a échoué"),
+            "nginx not running": ({"NGINX_T_RC": "1", "SYSTEMCTL_ACTIVE_RC": "3"}, "nginx n'est pas actif"),
+            "restored tree refused by nginx -t": ({"NGINX_T_ALWAYS_FAIL": "1"}, "intervention manuelle requise"),
+        }
+        for label, (env, expect) in cases.items():
+            with self.subTest(label):
+                code, out, tree, leftovers = self.resync(nginx_env=env)
+                self.assertNotEqual(code, 0)
+                self.assertEqual(tree, self.PREVIOUS, label)
+                self.assertIn(expect, out, label)
+                self.assertNotIn("nginx a été rechargé dessus", out, label)
+        _, _, _, _ = self.resync(nginx_env={"NGINX_T_RC": "1", "SYSTEMCTL_ACTIVE_RC": "3"})
+        self.assertNotIn("systemctl reload nginx", self.logs["systemctl"], "un nginx arrêté n'est pas rechargé")
+        _, _, _, _ = self.resync(nginx_env={"NGINX_T_ALWAYS_FAIL": "1"})
+        self.assertEqual(self.logs["systemctl"], [], "aucun rechargement si l'arbre restauré est refusé")
+
+    def test_a_full_resync_never_reloads_nginx_while_it_renders_the_generic_vhosts(self):
+        # deploy-webapp-site.yml rechargeait nginx au milieu de la resynchronisation (sites-enabled vidé, ni streams ni healthz).
+        code, out, tree, leftovers = self.resync(webapp=True)
+        self.assertEqual(code, 0, out[-3000:])
+        self.assertIn("sites-enabled/webapp-plain.example.test.conf", tree, "le vhost générique est bien rendu")
+        self.assertTrue(self.task_result(out, "Deploy the generic vhost").startswith("changed"), out[-2500:])
+        self.assertTrue(self.task_result(out, "Test the nginx configuration before reloading").startswith("skipping"))
+        self.assertTrue(self.task_result(out, "Reload nginx").startswith("skipping"))
+        self.assertEqual(self.logs["nginx"].count("nginx -t"), 1, "le seul nginx -t est celui de la fin de la resynchronisation")
+
+    def test_the_standalone_generic_vhost_deployment_still_tests_and_reloads(self):
+        # Hors resynchronisation complète (deploy-webapp.yml, « proxy-conf ») : nginx -t puis rechargement, comme avant.
+        code, out, tree, leftovers = self.resync(tasks_from="deploy-webapp-site", webapp=True,
+                                                 extra_vars={"webapp_vhost_entries": ["plainapp"]})
+        self.assertTrue(self.task_result(out, "Deploy the generic vhost").startswith("changed"), out[-2500:])
+        self.assertTrue(self.task_result(out, "Test the nginx configuration before reloading").startswith("changed")
+                        or self.task_result(out, "Test the nginx configuration before reloading").startswith("ok"), out[-2500:])
+        self.assertIn("nginx -t", self.logs["nginx"])
+        reload_result = self.task_result(out, "Reload nginx")
+        self.assertFalse(reload_result.startswith("skipping"), "le rechargement doit être tenté : " + str(reload_result))
+
+    def test_a_failure_during_the_backup_leaves_the_live_tree_untouched(self):
+        # `cp` échoue (disque plein) après la création du répertoire de sauvegarde : rien n'a été modifié, rien ne doit l'être.
+        for label, env in {"cp fails on certs": {"CP_FAIL": "/certs"}, "cp fails on the first item": {"CP_FAIL": "/sites-enabled"},
+                           "cp succeeds without copying": {"CP_SILENT": "/auth"}}.items():
+            with self.subTest(label):
+                code, out, tree, leftovers = self.resync(nginx_env=env)
+                self.assertNotEqual(code, 0, label)
+                self.assertEqual(tree, self.PREVIOUS, f"{label}: l'arbre vif doit être identique octet pour octet")
+                self.assertEqual(leftovers, [], f"{label}: sauvegarde laissée dans /tmp")
+                self.assertIn("La sauvegarde de l'ancienne arborescence n'a pas abouti", out, label)
+                self.assertIn("n'a pas été modifié", out, label)
+                self.assertEqual(self.logs["systemctl"], [], f"{label}: aucun rechargement, rien n'a changé")
+                self.assertEqual(self.logs["nginx"].count("nginx -t"), 0, label)
+
+    def test_the_backup_directory_is_dropped_in_every_handled_failure_and_kept_only_when_a_restoration_is_unfinished(self):
+        resync = check._load(os.path.join(ROLES, "proxy-update", "tasks", "resync.yml"))
+        block = next(t for t in resync if "block" in t)
+        always = block["always"]
+        self.assertEqual(len(always), 1)
+        self.assertIn("proxy_update_restore_pending", str(always[0]["when"]))
+        # a restoration that fails midway (cp of the restore fails) keeps the only copy of the previous tree
+        code, out, tree, leftovers = self.resync(nginx_env={"NGINX_T_RC": "1", "CP_FAIL_RESTORE": "1"})
+        self.assertNotEqual(code, 0)
+        self.assertEqual(len(leftovers), 1, "la sauvegarde est conservée : c'est la seule copie de l'ancien arbre")
+        self.assertTrue(leftovers[0].startswith("ff-nginx-backup-"))
+        self.assertIn("Previous nginx files kept in", out)
 
     def test_a_dedicated_port_collision_found_by_nginx_T_restores_the_previous_tree(self):
         shared = self.DUMP_OK + "# configuration file /etc/nginx/streams-enabled/s.conf:\nstream { server { listen 9745; } }\n"

@@ -14,8 +14,18 @@
 # `--tags` : une tâche de sauvegarde ou de restauration non retenue par les tags laisse `proxy_update_backup_dir` indéfini :
 # la restauration n'a alors rien à remettre.
 
+# Deux faits suivent l'état : `proxy_update_backup_done` (la sauvegarde est COMPLÈTE et vérifiée : la restauration n'a lieu
+# qu'alors — un échec PENDANT la sauvegarde ne supprime rien du vif, qui n'a pas encore été touché) et
+# `proxy_update_restore_pending` (une restauration est en cours : la sauvegarde est alors CONSERVÉE, c'est la seule copie).
+# Le répertoire de sauvegarde (clés et htpasswd, créé par root dans /tmp) est supprimé dans `always`, sauf restauration
+# inachevée.
 - name: Resynchronise the nginx tree, restoring the previous one when a check fails
   block:
+    - name: Start from no backup and no restoration pending
+      ansible.builtin.set_fact:
+        proxy_update_backup_done: false
+        proxy_update_restore_pending: false
+
     - name: Create the directory that keeps the previous nginx files
       ansible.builtin.tempfile:
         state: directory
@@ -34,6 +44,25 @@
         removes: "{{ proxy_update_nginx_dir }}/{{ item }}"
       loop: "{{ proxy_update_backup_items }}"
       changed_when: false
+      when: not ansible_check_mode
+
+    # Vérification : chaque élément présent est identique dans la sauvegarde (un `cp` qui réussit sans tout copier, un
+    # disque plein, ne doit pas passer pour une sauvegarde).
+    - name: Check the backup is complete
+      ansible.builtin.command:
+        argv:
+          - diff
+          - -rq
+          - "{{ proxy_update_nginx_dir }}/{{ item }}"
+          - "{{ proxy_update_backup_dir.path }}/{{ item }}"
+        removes: "{{ proxy_update_nginx_dir }}/{{ item }}"
+      loop: "{{ proxy_update_backup_items }}"
+      changed_when: false
+      when: not ansible_check_mode
+
+    - name: Note that the backup is complete
+      ansible.builtin.set_fact:
+        proxy_update_backup_done: true
       when: not ansible_check_mode
 
     # Le répertoire du parc FAIT FOI : vidés puis reconstruits, un vhost retiré du
@@ -118,6 +147,8 @@
     # ici, sinon le vidage de sites-enabled ci-dessus les supprimerait à chaque resynchronisation complète.
     - name: Render the generic webapp vhosts
       ansible.builtin.include_tasks: webapp-sites.yml
+      vars:
+        proxy_update_full_resync: true
 
     # Vhost de santé du front (sonde du Load Balancer Cloudflare), posé APRÈS les
     # vhosts du parc : le répertoire sites-enabled vient d'être vidé, il faut donc le
@@ -234,18 +265,30 @@
       when: not ansible_check_mode
 
   rescue:
+    # `ansible_failed_*` sont lus ici, avant toute autre tâche du rescue.
+    - name: Keep what failed
+      ansible.builtin.set_fact:
+        proxy_update_failed_at: >-
+          « {{ ansible_failed_task.name | default('?') }} » ({{ (ansible_failed_result.msg | default('') | string)[:500] }})
+
     - name: Say where the previous nginx files are kept
       ansible.builtin.debug:
         msg: "Previous nginx files kept in {{ proxy_update_backup_dir.path }} on {{ inventory_hostname }}."
-      when: proxy_update_backup_dir.path is defined
+      when: proxy_update_backup_done | default(false) | bool
 
-    # Ce que cette passerelle a supprimé ou réécrit est remis tel quel ; ce qui n'existait pas avant est retiré.
+    # Ce que cette resynchronisation a supprimé ou réécrit est remis tel quel ; ce qui n'existait pas avant est retiré.
+    # Seulement si la sauvegarde est COMPLÈTE : sinon le vif n'a pas été touché et reste tel quel.
+    - name: Note that a restoration starts
+      ansible.builtin.set_fact:
+        proxy_update_restore_pending: true
+      when: proxy_update_backup_done | default(false) | bool
+
     - name: Remove what this resynchronisation wrote
       ansible.builtin.file:
         path: "{{ proxy_update_nginx_dir }}/{{ item }}"
         state: absent
       loop: "{{ proxy_update_backup_items }}"
-      when: proxy_update_backup_dir.path is defined
+      when: proxy_update_backup_done | default(false) | bool
 
     - name: Put the previous nginx files back
       ansible.builtin.command:
@@ -257,25 +300,71 @@
         removes: "{{ proxy_update_backup_dir.path }}/{{ item }}"
       loop: "{{ proxy_update_backup_items }}"
       changed_when: true
-      when: proxy_update_backup_dir.path is defined
+      when: proxy_update_backup_done | default(false) | bool
 
-    - name: Drop the backup once the previous files are back
+    - name: Note that the previous files are back
+      ansible.builtin.set_fact:
+        proxy_update_restore_pending: false
+      when: proxy_update_backup_done | default(false) | bool
+
+    # Un rechargement a pu avoir lieu pendant l'écriture (vhosts génériques posés seuls, hors resynchronisation complète) ou
+    # nginx a pu être rechargé par un autre moyen : nginx est donc relu sur l'arbre restauré — `nginx -t`, puis rechargement
+    # s'il tourne. Si cela échoue aussi, l'échec le dit.
+    - name: Test the restored nginx configuration
+      ansible.builtin.command: nginx -t
+      register: proxy_update_restored_test
+      changed_when: false
+      failed_when: false
+      when: proxy_update_backup_done | default(false) | bool
+
+    - name: Look whether nginx is running
+      ansible.builtin.command: systemctl is-active --quiet nginx
+      register: proxy_update_nginx_active
+      changed_when: false
+      failed_when: false
+      when:
+        - proxy_update_backup_done | default(false) | bool
+        - proxy_update_restored_test.rc == 0
+
+    - name: Reload nginx on the restored configuration
+      ansible.builtin.command: systemctl reload nginx
+      register: proxy_update_restored_reload
+      failed_when: false
+      when:
+        - proxy_update_backup_done | default(false) | bool
+        - proxy_update_restored_test.rc == 0
+        - proxy_update_nginx_active.rc == 0
+
+    - name: Fail loudly, the previous configuration is back
+      vars:
+        _restored: "{{ proxy_update_backup_done | default(false) | bool }}"
+        _test_ok: "{{ _restored and proxy_update_restored_test.rc == 0 }}"
+        _reloaded: "{{ _test_ok and proxy_update_nginx_active.rc == 0 and proxy_update_restored_reload.rc == 0 }}"
+      ansible.builtin.fail:
+        msg: >-
+          {{ inventory_hostname }} : la resynchronisation nginx a échoué à {{ proxy_update_failed_at }}.
+          {% if not _restored %}
+          La sauvegarde de l'ancienne arborescence n'a pas abouti : {{ proxy_update_nginx_dir }} n'a pas été modifié, nginx n'a pas été redémarré.
+          {% elif not _test_ok %}
+          L'ancienne arborescence de {{ proxy_update_nginx_dir }} a été remise en place MAIS `nginx -t` la refuse
+          ({{ (proxy_update_restored_test.stderr | default('') | string)[:300] }}) : nginx n'a pas été rechargé, intervention manuelle requise.
+          {% elif proxy_update_nginx_active.rc != 0 %}
+          L'ancienne arborescence de {{ proxy_update_nginx_dir }} a été remise en place (`nginx -t` passe), nginx n'est pas actif : aucun rechargement.
+          {% elif not _reloaded %}
+          L'ancienne arborescence de {{ proxy_update_nginx_dir }} a été remise en place (`nginx -t` passe) MAIS le rechargement de nginx a échoué
+          ({{ (proxy_update_restored_reload.stderr | default('') | string)[:300] }}) : intervention manuelle requise.
+          {% else %}
+          L'ancienne arborescence de {{ proxy_update_nginx_dir }} a été remise en place, `nginx -t` passe et nginx a été rechargé dessus ;
+          il n'a pas été redémarré.
+          {% endif %}
+
+  always:
+    # Sauvegarde (clés, htpasswd) supprimée dans tous les cas, sauf restauration commencée et inachevée (c'est alors la seule
+    # copie de l'ancienne arborescence). Le chemin est celui du `debug` ci-dessus.
+    - name: Drop the backup of the previous nginx files
       ansible.builtin.file:
         path: "{{ proxy_update_backup_dir.path }}"
         state: absent
-      when: proxy_update_backup_dir.path is defined
-
-    - name: Fail loudly, nginx keeps the previous configuration
-      ansible.builtin.fail:
-        msg: >-
-          {{ inventory_hostname }} : la resynchronisation nginx a échoué à « {{ ansible_failed_task.name | default('?') }} »
-          ({{ (ansible_failed_result.msg | default('') | string)[:500] }}) ; l'ancienne arborescence de {{ proxy_update_nginx_dir }}
-          a été {{ 'restaurée' if proxy_update_backup_dir.path is defined else 'laissée telle quelle (aucune sauvegarde faite)' }},
-          nginx n'a pas été redémarré.
-
-# Succès : la sauvegarde n'a plus d'objet (en cas d'échec, la restauration l'a retirée et le jeu s'est arrêté).
-- name: Drop the backup of the previous nginx files
-  ansible.builtin.file:
-    path: "{{ proxy_update_backup_dir.path }}"
-    state: absent
-  when: proxy_update_backup_dir.path is defined
+      when:
+        - proxy_update_backup_dir.path is defined
+        - not (proxy_update_restore_pending | default(false) | bool)
