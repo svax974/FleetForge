@@ -16,21 +16,37 @@ par `deploy-fleetforge.yml` (garde du groupe `fleetforge_gateways` puis import d
   (`fleetforge-install/tasks/gateway-guard.yml`), transmission des mots de passe (`webapp_env_from_vault`,
   `no_log`), déploiement fermé (`webapp-deploy/tasks/hardened.yml`), contrôle de durcissement
   (`webapp-security/tasks/runtime.yml`).
-- **Choix de la machine** : premier déploiement sur la MÊME machine qu'`infra1` (décision du
-  15/11/2026). La déplacer = changer `ansible_host` (et `provider`, `access_local_cidrs`) de l'entrée.
-- **E2/E3 (OAuth public) INTERDITS tant que la passerelle partage la machine du nœud de contrôle** :
-  prérequis de bascule = la déplacer d'abord (autre machine, ou VM légère :
-  `docs/etude-isolation-passerelle-vm.md`). Le play de garde refuse tout `access_mode` autre que `private`.
+- **Choix de la machine** : 185.237.252.206 (décision du 16/11/2026), hors du nœud de contrôle, partagée avec
+  `companymanager` et `social-manager` (déjà en service), `maestro` et `air-farmer` ; aucun proxy dessus, tous
+  distants. La déplacer = changer `ansible_host` (et `provider` ; `access_local_cidrs` et retrait de
+  `masquerade_ack` si un proxy y est).
+- **E2/E3 (OAuth public) : à décider avant toute exposition.** La passerelle ne partage plus le nœud de contrôle,
+  mais le noyau d'une machine qui héberge d'autres applications (dont un worker Chromium, `social-manager`) :
+  évasion de conteneur ou faille noyau = accès à la base de la passerelle (audit, approbations). Une VM
+  dédiée reste l'option propre (`docs/etude-isolation-passerelle-vm.md`). Le play de garde refuse tout
+  `access_mode` autre que `private`.
 - **Accès de test à `/mcp`** : `whitelist: true` dans l'`access` de la location `/mcp` de l'entrée — à passer à `false` dès la
   fin des tests et AVANT toute exposition E2/E3 (la whitelist n'élargit pas l'allow-list propre à chaque
   credential `exec`, ≤ /16, imposée par `mcp-access`).
 - **`/mcp` admet l'adresse d'`infra1`, donc toute sa machine** (proxy1, monitor, mail1, www…) : la clé
   `ffg_` et l'allow-list du credential restent les barrières. Rien ne distingue ces services au niveau réseau.
-- **Processus local de la machine partagée (risque résiduel)** : tout processus de la machine d'`infra1`
-  joint les ports publiés de la passerelle par la boucle locale, vu comme le proxy local (de confiance
-  dans TRUST_PROXY), et choisit donc l'adresse qu'il annonce. La clé `ffg_` reste exigée, mais
-  l'allow-list d'adresses d'un credential ne protège plus contre lui. Levé seulement en déplaçant la
-  passerelle (autre machine ou VM : `docs/etude-isolation-passerelle-vm.md`).
+- **Processus local** : sans proxy sur la machine, la règle OUTPUT n'admet que root sur les ports publiés
+  (un compte local non root est rejeté) ; les conteneurs des autres apps (172.x) sont refusés par
+  DOCKER-USER (source ≠ proxy admis).
+- **Sortie masquée vers proxy1 (443) et mail1 (587)** : le paquet de la passerelle sort sous l'adresse publique de la
+  machine, admise par FleetForge au titre d'`access_linked`. Le filtre ne porte que sur `62.171.135.125:443`, pas sur
+  le `Host` : les vhosts écrits à la main qui admettent « tous les hôtes de l'inventaire » (`ctdapi.conf`,
+  `docker-repo-ssl.conf`, `monitoring.conf` `/api/v1/write`, groupe `apps` de `ctdapi-back.conf` et
+  `mtbridge-pool.conf`) sont joignables par un code compromis, et l'adresse est commune aux 4 autres apps.
+  Fermeture possible (non faite) : écouteur dédié sur proxy1 (un seul `server{}`, port propre) et
+  `egress_allow.upstream.port` ≠ 443.
+- **`docker-ports-firewall.sh` unique par machine** : sans `host_vars/<entrée canonique>.yml` listant toutes les apps
+  (et `webapp_machine`), un redémarrage de Docker ne rétablit que les règles de la dernière app déployée sur
+  185.237.252.206 : `companymanager` et `social-manager` y tournent déjà.
+- **mail1 pour la passerelle distante** : 587 ouvert depuis 185.237.252.206 (`mailrelay-security`, rejouer
+  `update-ufw-all.yml --limit mail1` si besoin), compte SASL propre à la passerelle, et lien expéditeur
+  (`smtpd_sender_login_maps` + `reject_sender_login_mismatch`) absent des gabarits postfix : sans lui, un code
+  compromis envoie sous n'importe quelle adresse du domaine ; `fail2ban` ignore l'adresse de la passerelle.
 - **Whitelist de test sur `/mcp` filtrée** : IPv4 seule ou /32, IPv6 de préfixe ≥ 128 par défaut ; la
   plage IPv6 /64 de la whitelist n'y passe que si le propriétaire pose `v6_min_prefix: 64` dans l'`access`.
 - **Fenêtre au redémarrage de Docker** : les conteneurs repartent avant que l'unité
