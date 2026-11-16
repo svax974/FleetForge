@@ -1,0 +1,79 @@
+---
+# Ouvertures 465/587 des clients de soumission NOMMÉS (`mailrelay_submission_clients`) : additif ET
+# soustractif, sans `ufw reset` (règle du CLAUDE.md « Règles ufw »). Modèle : fleetforge-security/tasks/prune.yml.
+#
+# - pose : une règle `allow` par client et par port, source = `hostvars[<nom>].ansible_host` (dérivée de
+#   l'inventaire, jamais écrite en dur), commentaire `<tag> <nom>` ;
+# - retrait : toute règle 465/587 dont le commentaire commence par le tag ET dont la source n'est ni un
+#   client nommé ni dans `mailrelay_submission_keep_sources` (critère source : une règle identique posée
+#   sous un autre commentaire reste la règle effective, voir defaults/main.yml). Les règles sans ce tag
+#   (ouvertures générales, SSH, autres services) ne sont JAMAIS touchées.
+#
+# Joué même quand la liste est vide : c'est ce qui retire l'ouverture d'un client qu'on vient d'ôter.
+
+- name: Work out the addresses of the submission clients
+  vars:
+    clients: "{{ mailrelay_submission_clients | default([], true) }}"
+  ansible.builtin.assert:
+    that:
+      - clients is sequence and clients is not string and clients is not mapping
+      - clients | reject('string') | list | length == 0
+      - clients | reject('in', hostvars) | list | length == 0
+      - clients | map('extract', hostvars, 'ansible_host') | reject('defined') | list | length == 0
+      - clients | map('extract', hostvars, 'ansible_host') | reject('match', '^[0-9]{1,3}([.][0-9]{1,3}){3}$') | list | length == 0
+    fail_msg: >-
+      `mailrelay_submission_clients` : une liste de NOMS d'entrées de l'inventaire courant, chacune
+      avec un `ansible_host` en adresse IPv4 (ufw ne filtre pas sur un nom).
+    quiet: true
+  when: mailrelay_submission_clients | default([], true) | length > 0
+
+- name: Open submission 465/587 to the named clients
+  community.general.ufw:
+    rule: allow
+    port: "{{ item.1 }}"
+    proto: tcp
+    from_ip: "{{ hostvars[item.0].ansible_host }}"
+    comment: "{{ mailrelay_submission_ufw_tag }} {{ item.0 }}"
+  loop: "{{ mailrelay_submission_clients | default([], true) | product(['465', '587']) | list }}"
+  loop_control:
+    label: "{{ item.0 }}:{{ item.1 }}"
+  become: true
+
+# `ufw show added` et non `ufw status` : il rend les règles sous forme de commandes, commentaire compris,
+# et fonctionne ufw inactif.
+- name: Read the user rules ufw holds
+  ansible.builtin.command: ufw show added
+  become: true
+  register: mailrelay_ufw_added
+  changed_when: false
+  check_mode: false
+
+- name: Work out the tagged submission rules that are no longer wanted
+  vars:
+    wanted: >-
+      {{ (mailrelay_submission_clients | default([], true) | map('extract', hostvars, 'ansible_host') | list
+          + (mailrelay_submission_keep_sources | default([], true)))
+         | map('regex_replace', '/32$', '') | list }}
+    tagged: >-
+      {{ mailrelay_ufw_added.stdout_lines
+         | select('match', '^ufw allow from [^ ]+ to any port (465|587) .*comment .' ~ mailrelay_submission_ufw_tag) | list }}
+  ansible.builtin.set_fact:
+    mailrelay_ufw_stale: >-
+      {%- set out = [] -%}
+      {%- for line in tagged -%}
+      {%- set f = line.split(' ') -%}
+      {%- if f[3] not in wanted -%}{%- set _ = out.append({'ip': f[3], 'port': f[7]}) -%}{%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+
+- name: Remove the stale submission rules
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ item.ip }}"
+    port: "{{ item.port }}"
+    delete: true
+  loop: "{{ mailrelay_ufw_stale }}"
+  loop_control:
+    label: "{{ item.ip }}:{{ item.port }}"
+  become: true

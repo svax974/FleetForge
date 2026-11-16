@@ -54,6 +54,10 @@
   become: yes
   ignore_errors: true
 
+# Clients de soumission nommés (optionnel) : ouverture propre + retrait des ouvertures taguées périmées.
+- name: Submission clients named in the inventory (optional)
+  ansible.builtin.include_tasks: submission-clients.yml
+
 # ── Fail2ban for Postfix ──────────────────────────────────────────────────────
 
 - name: Install fail2ban

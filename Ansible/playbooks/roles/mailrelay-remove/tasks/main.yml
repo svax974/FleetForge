@@ -58,3 +58,13 @@
     - "587"
   become: yes
   ignore_errors: yes
+
+# Ouvertures par client nommé (`mailrelay_submission_clients`) : tout ce qui porte le tag du rôle part, sans se
+# fier à l'inventaire courant (liste de clients et sources conservées vidées).
+- name: Remove the tagged per-client submission rules
+  ansible.builtin.include_role:
+    name: mailrelay-security
+    tasks_from: submission-clients.yml
+  vars:
+    mailrelay_submission_clients: []
+    mailrelay_submission_keep_sources: []

@@ -21,3 +21,24 @@ mailrelay_allowed_sources: >-
       + [mailrelay_docker_bridge_cidr])
      | select('match', '^[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]{1,2})?$')
      | unique | list }}
+
+# Clients de soumission NOMMÉS (OPTIONNEL, vide = comportement historique inchangé) : entrées
+# d'inventaire dont l'adresse (`hostvars[<nom>].ansible_host`, jamais écrite en dur) reçoit une
+# ouverture 465/587 PROPRE, taguée `mailrelay_submission_ufw_tag` et retirée dès que le client
+# sort de la liste (additif ET soustractif, sans `ufw reset` : voir tasks/submission-clients.yml).
+#
+#   mailrelay_submission_clients: [fleetforge-gateway]
+#
+# Attention : `mailrelay_allowed_sources` ci-dessus ouvre DÉJÀ 465/587 à toutes les adresses de
+# l'inventaire courant. ufw ignore une règle identique à une existante (le commentaire de la
+# seconde n'est pas posé) : tant qu'un client nommé est aussi couvert par `mailrelay_allowed_sources`,
+# l'ouverture taguée est un doublon sans effet, et la règle existante garde son commentaire.
+# Elle ne devient la règle effective que si le propriétaire restreint `mailrelay_allowed_sources`.
+mailrelay_submission_clients: []
+mailrelay_submission_ufw_tag: "mailrelay-submission-client"
+
+# Sources qu'un nettoyage de règles taguées doit CONSERVER en plus des clients nommés (une règle
+# identique posée sous ce commentaire avant que la source n'entre dans `mailrelay_allowed_sources`
+# reste la règle effective, la retirer couperait une source voulue). Vide dans mailrelay-remove,
+# qui retire tout ce que le service possède.
+mailrelay_submission_keep_sources: "{{ mailrelay_allowed_sources }}"
