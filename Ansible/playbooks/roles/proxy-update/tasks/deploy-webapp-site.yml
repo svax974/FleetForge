@@ -53,7 +53,7 @@
     wa_name: "{{ ((wa_first.webapp_project | default(webapp_vhost_entries | first)) | lower | replace('_', '-') ~ '-back.' ~ domain_name) if wa_pages else wa_first.proxy_hostname }}"
   ansible.builtin.template:
     src: webapp.conf.j2
-    dest: "/etc/nginx/sites-enabled/webapp-{{ wa_name }}.conf"
+    dest: "{{ proxy_update_nginx_dir }}/sites-enabled/webapp-{{ wa_name }}.conf"
     owner: root
     group: root
   register: proxy_webapp_site_deployed

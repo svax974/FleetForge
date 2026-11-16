@@ -26,6 +26,20 @@ proxy_update_subdirs:
   - sites-available
   - streams-available
 
+# Arbre nginx des proxies. Seule la resynchronisation complète (tasks/resync.yml) le lit ; il existe pour que les tests
+# la jouent sur un répertoire temporaire — jamais autre chose que /etc/nginx en exploitation.
+proxy_update_nginx_dir: /etc/nginx
+
+# Propriétaires des fichiers posés par la resynchronisation complète (tests : le compte courant, non root).
+proxy_update_owner: root
+proxy_update_group: root
+proxy_update_secret_group: www-data
+
+# Ce que la resynchronisation complète supprime ou réécrit, sauvegardé avant et remis en place si un contrôle échoue
+# (tasks/resync.yml) : les répertoires de vhosts, les certificats et htpasswd du parc, nginx.conf, l'autorité des
+# Authenticated Origin Pulls.
+proxy_update_backup_items: "{{ proxy_update_subdirs + ['certs', 'auth', 'nginx.conf', 'cloudflare-origin-pull-ca.pem'] }}"
+
 # Jeton d'écriture Prometheus (remote-write relayé par les proxies). Seul
 # papanglabs en a l'usage : `true` dans group_vars/papanglabs.yml.
 proxy_write_token_enabled: false

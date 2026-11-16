@@ -63,3 +63,42 @@
   loop: "{{ proxy_listener_owners | selectattr('sites') | list }}"
   loop_control:
     label: "{{ item.listener.port }} -> {{ item.sites[0] }}"
+
+# nginx.conf et les streams ACTIFS du parc sont rendus eux aussi avant de vider /etc/nginx : un `listen` sur un port dédié
+# (dans un `stream {}`, nginx ne démarrerait plus après un redémarrage) y est refusé AVANT toute écriture. Seuls nginx.conf et
+# `streams-enabled/` sont lus — `sites-available/` et `streams-available/` ne sont pas chargés. Même découpage en mots que
+# ci-dessus. Les vhosts GÉNÉRIQUES des applications (webapp.conf.j2, `listen 443`) et le reste de /etc/nginx (conf.d…) sont
+# couverts après l'écriture par la lecture de `nginx -T` (dedicated-listener-sync-ports.yml), dont l'échec restaure l'arbre.
+- name: Find the nginx.conf and the active streams of the parc that listen on a dedicated port
+  vars:
+    _others: >-
+      {{ ([proxy_update_dir ~ '/nginx.conf'] if (proxy_update_dir ~ '/nginx.conf') is file else [])
+         + (query('ansible.builtin.fileglob', proxy_update_dir ~ '/streams-enabled/*') | reject('match', '.*/_[^/]*$') | list) }}
+  ansible.builtin.set_fact:
+    proxy_listener_foreign: >-
+      {%- set out = [] -%}
+      {%- for l in proxy_dedicated_listeners | default([]) -%}
+      {%- for f in _others -%}
+      {%- set words = (lookup('ansible.builtin.template', f).splitlines()
+          | map('regex_replace', '#.*$', '') | join(' ')
+          | replace(';', ' ; ') | replace('{', ' { ') | replace('}', ' } ')).split() -%}
+      {%- for word in words -%}
+      {%- set at = loop.index0 -%}
+      {%- if word == 'listen' and at + 1 < words | length and (at == 0 or words[at - 1] in [';', '{', '}'])
+             and (words[at + 1].split(':') | last) == (l.port | string) -%}
+      {%- set _ = out.append((l.port | string) ~ ' (' ~ (f | basename) ~ ')') -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {%- endfor -%}
+      {%- endfor -%}
+      {{ out | unique | list }}
+  tags: [always]
+
+- name: Refuse a dedicated port that nginx.conf or an active stream of the parc listens on
+  ansible.builtin.assert:
+    that: proxy_listener_foreign | length == 0
+    fail_msg: >-
+      nginx.conf ou un stream actif du parc écoute sur un port dédié de {{ inventory_hostname }} :
+      {{ proxy_listener_foreign | join(', ') }} — un écouteur dédié doit être le SEUL `server {}` de son port (un `listen`
+      de `stream` empêcherait nginx de redémarrer).
+    quiet: true

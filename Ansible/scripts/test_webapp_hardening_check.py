@@ -2906,7 +2906,8 @@ class DedicatedListenerPlaysTests(unittest.TestCase):
         self.assertEqual(self.rules(log), [])
         self.assertEqual(json.loads(facts.split("|")[0]), [])
 
-    def run_proxy_update(self, tasks_from, vhost, listeners, nginx_dump=None, extra_sites=None, inventory=None, extra_vars=None):
+    def run_proxy_update(self, tasks_from, vhost, listeners, nginx_dump=None, extra_sites=None, inventory=None, extra_vars=None,
+                         parc_files=None):
         """Joue `dedicated-listener-check` (vhost rendu contrôlé), `dedicated-listener-ports` (nginx -T factice) ou les
         deux étapes de la resynchronisation complète (`dedicated-listener-sync-check` / `-sync-ports`)."""
         with tempfile.TemporaryDirectory() as tmp:
@@ -2922,6 +2923,10 @@ class DedicatedListenerPlaysTests(unittest.TestCase):
                 f.write(vhost)
             for name, content in (extra_sites or {}).items():
                 with open(os.path.join(parc, name), "w") as f:
+                    f.write(content)
+            for rel, content in (parc_files or {}).items():
+                os.makedirs(os.path.dirname(os.path.join(tmp, "parc", rel)), exist_ok=True)
+                with open(os.path.join(tmp, "parc", rel), "w") as f:
                     f.write(content)
             with open(os.path.join(tmp, "dump"), "w") as f:
                 f.write(nginx_dump or "")
@@ -3049,11 +3054,182 @@ class DedicatedListenerPlaysTests(unittest.TestCase):
         main = check._load(os.path.join(ROLES, "proxy-update", "tasks", "main.yml"))
         names = [t.get("name") for t in main]
         check_step = names.index("Check the dedicated listeners before touching /etc/nginx")
-        self.assertLess(check_step, names.index("Delete the vhost directories"))
-        ports_step = names.index("Check no other file listens on the dedicated ports")
-        self.assertGreater(ports_step, names.index("Copy nginx sites enabled confs"))
-        self.assertLess(ports_step, names.index("Validate nginx configuration"))
-        self.assertLess(ports_step, names.index("Restart Nginx service"))
+        resync_step = names.index("Rebuild the nginx tree and check it, restoring the previous one on failure")
+        self.assertLess(check_step, resync_step)
+        self.assertLess(resync_step, names.index("Restart Nginx service"))
+        resync = check._load(os.path.join(ROLES, "proxy-update", "tasks", "resync.yml"))
+        block = next(t for t in resync if "block" in t)["block"]
+        inner = [t.get("name") for t in block]
+        ports_step = inner.index("Check no other file listens on the dedicated ports")
+        self.assertGreater(ports_step, inner.index("Copy nginx sites enabled confs"))
+        self.assertLess(ports_step, inner.index("Validate nginx configuration"))
+        self.assertLess(inner.index("Keep the nginx files this resynchronisation deletes or rewrites"),
+                        inner.index("Delete the vhost directories"))
+
+
+FAKE_NGINX_RESYNC = """\
+#!/bin/sh
+case "$1" in
+  -T) cat "$NGINX_DUMP"; exit "${NGINX_T_BIG_RC:-0}" ;;
+  -t) [ "${NGINX_T_RC:-0}" = 0 ] || echo "nginx: [emerg] fake failure of nginx -t" >&2; exit "${NGINX_T_RC:-0}" ;;
+  -v) echo "nginx version: nginx/1.30.0" >&2; exit 0 ;;
+esac
+exit 0
+"""
+
+RESYNC_PLAY = """\
+- hosts: proxy1
+  gather_facts: false
+  tasks:
+    - ansible.builtin.include_role: {name: proxy-update, tasks_from: resync}
+      vars:
+        proxy_update_dir: "{{ play_tmp }}/parc"
+        proxy_update_nginx_dir: "{{ play_tmp }}/nginx"
+        proxy_listener_owners: "{{ owners | default([]) }}"
+"""
+
+
+@unittest.skipUnless(shutil.which("ansible-playbook"), "ansible-playbook absent")
+class FullResyncRollbackTests(unittest.TestCase):
+    """Resynchronisation complète (proxy-update/tasks/resync.yml) jouée en local sur un arbre nginx TEMPORAIRE, nginx
+    factice : un contrôle qui échoue après l'écriture doit laisser l'arbre précédent, octet pour octet."""
+
+    PREVIOUS = {
+        "nginx.conf": "OLD-MAIN\n", "sites-enabled/old.conf": "OLD-VHOST\n", "sites-enabled/keep.conf": "OLD-KEEP\n",
+        "streams-enabled/s.conf": "OLD-STREAM\n", "sites-available/a.conf": "OLD-AVAILABLE\n",
+        "certs/c.pem": "OLD-CERT\n", "auth/htpasswd": "OLD-AUTH\n", "cloudflare-origin-pull-ca.pem": "OLD-CA\n",
+    }
+    DUMP_OK = ("nginx: configuration file /etc/nginx/nginx.conf test is successful\n"
+               "# configuration file /etc/nginx/sites-enabled/fleetforge.conf:\nserver { listen 9745 ssl; }\n")
+    OWNERS = [{"listener": {"entry": "infra1", "name": "gateway", "port": LISTENER_PORT, "addresses": [GATEWAY_ADDRESS]},
+               "sites": ["fleetforge.conf"]}]
+
+    @staticmethod
+    def snapshot(root):
+        out = {}
+        for base, _, names in os.walk(root):
+            for name in names:
+                path = os.path.join(base, name)
+                with open(path, encoding="utf-8") as f:
+                    out[os.path.relpath(path, root)] = f.read()
+        return out
+
+    def resync(self, nginx_env=None, parc_files=None, owners=None, args=(), previous=None):
+        """(code, sortie, arbre nginx après, restes de sauvegarde)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            nginx = os.path.join(tmp, "nginx")
+            for rel, content in (self.PREVIOUS if previous is None else previous).items():
+                os.makedirs(os.path.dirname(os.path.join(nginx, rel)), exist_ok=True)
+                with open(os.path.join(nginx, rel), "w") as f:
+                    f.write(content)
+            os.makedirs(nginx, exist_ok=True)
+            files = {"nginx.conf": "NEW-MAIN\n", "sites-enabled/fleetforge.conf": "NEW-VHOST\n",
+                     "sites-enabled/www.conf": "NEW-WWW\n", "streams-enabled/s.conf": "NEW-STREAM\n",
+                     "certs/c.pem": "NEW-CERT\n", "auth/htpasswd": "NEW-AUTH\n", **(parc_files or {})}
+            for rel, content in files.items():
+                os.makedirs(os.path.dirname(os.path.join(tmp, "parc", rel)), exist_ok=True)
+                with open(os.path.join(tmp, "parc", rel), "w") as f:
+                    f.write(content)
+            bindir, tmpdir = os.path.join(tmp, "bin"), os.path.join(tmp, "tmpdir")
+            os.makedirs(bindir)
+            os.makedirs(tmpdir)
+            with open(os.path.join(bindir, "nginx"), "w") as f:
+                f.write(FAKE_NGINX_RESYNC)
+            os.chmod(os.path.join(bindir, "nginx"), 0o755)
+            with open(os.path.join(tmp, "dump"), "w") as f:
+                f.write(self.DUMP_OK)
+            with open(os.path.join(tmp, "play.yml"), "w") as f:
+                f.write(RESYNC_PLAY)
+            with open(os.path.join(tmp, "ansible.cfg"), "w") as f:
+                f.write(f"[defaults]\nroles_path={ROLES}\nstdout_callback=default\n")
+            inventory = listener_inventory_yaml()
+            # No generic webapp vhost to render in this test (that part has its own checks): the gateway has no vhost here.
+            inventory["all"]["children"]["fleetforge_gateways"]["hosts"]["fleetforge-gateway"]["webapp_proxy"] = "external"
+            with open(os.path.join(tmp, "inventory.yml"), "w") as f:
+                yaml.safe_dump(inventory, f)
+            env = {**dict(os.environ, ANSIBLE_CONFIG=os.path.join(tmp, "ansible.cfg"), PATH=f"{bindir}:{os.environ['PATH']}",
+                          NGINX_DUMP=os.path.join(tmp, "dump"), TMPDIR=tmpdir), **(nginx_env or {})}
+            run = subprocess.run(["ansible-playbook", "-i", os.path.join(tmp, "inventory.yml"), os.path.join(tmp, "play.yml"),
+                                  "-e", "ansible_become=false", "-e", f"play_tmp={tmp}",
+                                  "-e", json.dumps({"owners": owners if owners is not None else self.OWNERS,
+                                                    "proxy_update_owner": str(os.getuid()), "proxy_update_group": str(os.getgid()),
+                                                    "proxy_update_secret_group": str(os.getgid())}), *args],
+                                 capture_output=True, text=True, env=env, timeout=300)
+            return run.returncode, run.stdout + run.stderr, self.snapshot(nginx), os.listdir(tmpdir)
+
+    def test_a_successful_resync_replaces_the_tree_and_leaves_no_backup(self):
+        code, out, tree, leftovers = self.resync()
+        self.assertEqual(code, 0, out[-3000:])
+        self.assertEqual(tree["nginx.conf"], "NEW-MAIN\n")
+        self.assertEqual(tree["sites-enabled/fleetforge.conf"], "NEW-VHOST\n")
+        self.assertNotIn("sites-enabled/old.conf", tree, "le répertoire du parc fait foi")
+        self.assertIn("sites-enabled/healthz.conf", tree)
+        self.assertEqual(tree["certs/c.pem"], "NEW-CERT\n")
+        self.assertEqual(leftovers, [], "sauvegarde non supprimée")
+
+    def assert_previous_tree_back(self, code, out, tree, leftovers, expect):
+        self.assertNotEqual(code, 0, out[-2000:])
+        self.assertEqual(tree, self.PREVIOUS, "l'ancienne arborescence doit être restaurée à l'identique")
+        self.assertEqual(leftovers, [], "sauvegarde non supprimée après restauration")
+        self.assertIn(expect, out)
+        self.assertIn("restaurée", out)
+
+    def test_a_failing_nginx_t_restores_the_previous_tree_and_fails_loudly(self):
+        res = self.resync(nginx_env={"NGINX_T_RC": "1"})
+        self.assert_previous_tree_back(*res, expect="Validate nginx configuration")
+        self.assertIn("nginx n'a pas été redémarré", res[1])
+
+    def test_a_dedicated_port_collision_found_by_nginx_T_restores_the_previous_tree(self):
+        shared = self.DUMP_OK + "# configuration file /etc/nginx/streams-enabled/s.conf:\nstream { server { listen 9745; } }\n"
+        with tempfile.NamedTemporaryFile("w", suffix=".dump", delete=False) as f:
+            f.write(shared)
+        self.addCleanup(os.unlink, f.name)
+        res = self.resync(nginx_env={"NGINX_DUMP": f.name})
+        self.assert_previous_tree_back(*res, expect="Check no other file listens on the dedicated ports")
+        self.assertIn("SEUL", res[1])
+
+    def test_a_task_failing_midway_after_the_delete_also_restores_the_previous_tree(self):
+        res = self.resync(parc_files={"sites-enabled/zz-bad.conf": "{{ a_variable_that_does_not_exist }}\n"})
+        self.assert_previous_tree_back(*res, expect="Copy nginx sites enabled confs")
+
+    def test_a_first_resync_on_an_empty_directory_leaves_nothing_behind_on_failure(self):
+        code, out, tree, leftovers = self.resync(nginx_env={"NGINX_T_RC": "1"}, previous={})
+        self.assertNotEqual(code, 0)
+        self.assertEqual(tree, {}, "rien n'existait : rien ne doit rester des fichiers écrits")
+        self.assertEqual(leftovers, [])
+
+    def test_a_simulation_writes_nothing_and_keeps_no_backup(self):
+        code, out, tree, leftovers = self.resync(args=("--check",), nginx_env={"NGINX_T_RC": "1"})
+        self.assertEqual(code, 0, out[-2000:])
+        self.assertEqual(tree, self.PREVIOUS)
+        self.assertEqual(leftovers, [])
+
+    def test_the_restart_is_never_reached_after_a_failure(self):
+        main = check._load(os.path.join(ROLES, "proxy-update", "tasks", "main.yml"))
+        names = [t.get("name") for t in main]
+        self.assertLess(names.index("Rebuild the nginx tree and check it, restoring the previous one on failure"),
+                        names.index("Restart Nginx service"))
+        resync = check._load(os.path.join(ROLES, "proxy-update", "tasks", "resync.yml"))
+        block = next(t for t in resync if "block" in t)
+        self.assertEqual(block["rescue"][-1].get("ansible.builtin.fail") is not None, True, "la restauration finit par un échec")
+
+    def test_nginx_conf_and_the_active_streams_are_checked_before_anything_is_deleted(self):
+        runner = DedicatedListenerPlaysTests("run_proxy_update")
+        for label, parc_files in {
+                "stream in streams-enabled": {"streams-enabled/p2p.conf": "stream {\n  server {\n    listen 9745;\n  }\n}\n"},
+                "nginx.conf": {"nginx.conf": "events {}\nstream { server { listen [::]:9745; } }\n"}}.items():
+            with self.subTest(label):
+                code, out = runner.run_proxy_update("dedicated-listener-sync-check", render_listener_vhost(), [],
+                                                    extra_sites={"www.conf": DedicatedListenerPlaysTests.WWW},
+                                                    parc_files=parc_files)
+                self.assertNotEqual(code, 0, label)
+                self.assertIn("nginx.conf ou un stream actif", out)
+        code, out = runner.run_proxy_update(
+            "dedicated-listener-sync-check", render_listener_vhost(), [], extra_sites={"www.conf": DedicatedListenerPlaysTests.WWW},
+            parc_files={"nginx.conf": "events {}\nhttp { include /etc/nginx/sites-enabled/*; }\n",
+                        "streams-enabled/ok.conf": "stream { server { listen 8333; } }\n",
+                        "streams-enabled/_partial.conf": "listen 9745;\n"})
+        self.assertEqual(code, 0, out[-3000:])
 
 
 @unittest.skipUnless(shutil.which("ansible-playbook"), "ansible-playbook absent")
