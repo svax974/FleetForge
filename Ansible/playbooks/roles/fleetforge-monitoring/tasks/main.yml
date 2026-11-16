@@ -87,10 +87,12 @@
   changed_when: false
   tags: [monitoring]
 
+# Sauté en mode `--check` (la requête précédente l'est) : `ff_metrics` n'a alors pas de `content`.
 - name: Report the health signals
   ansible.builtin.debug:
     msg: >-
       {{ ff_metrics.content.split('\n')
          | select('match', '^fleetforge_(up|ansible_available|inventories|roles) ')
          | list }}
+  when: ff_metrics.content is defined
   tags: [monitoring]
