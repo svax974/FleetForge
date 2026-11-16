@@ -180,6 +180,7 @@
     # `vars:` de niveau tâche, inclusion ou bloc (variables de travail des contrôles : `_families`, `_reasons`…).
     _accounts: __wa_internal_probe__
     _addr: __wa_internal_probe__
+    _any_public: __wa_internal_probe__
     _carriers: __wa_internal_probe__
     _data: __wa_internal_probe__
     _on_machine: __wa_internal_probe__
@@ -221,9 +222,11 @@
     _machine: __wa_internal_probe__
     _machine_peers: __wa_internal_probe__
     _masquerade: __wa_internal_probe__
+    _mcp_locs: __wa_internal_probe__
+    _mcp_ok: __wa_internal_probe__
+    _mcp_path: __wa_internal_probe__
     _missing: __wa_internal_probe__
     _named: __wa_internal_probe__
-    _named_mcp: __wa_internal_probe__
     _neighbours: __wa_internal_probe__
     _networks: __wa_internal_probe__
     _old: __wa_internal_probe__
@@ -235,6 +238,9 @@
     _probe: __wa_internal_probe__
     _project: __wa_internal_probe__
     _proxy_addresses: __wa_internal_probe__
+    _public_allowed: __wa_internal_probe__
+    _public_problems: __wa_internal_probe__
+    _public_timeout_max: __wa_internal_probe__
     _read: __wa_internal_probe__
     _reasons: __wa_internal_probe__
     _rule_clash: __wa_internal_probe__
@@ -464,6 +470,7 @@
       - lookup('ansible.builtin.vars', 'webapp_target') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_accounts') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_addr') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_any_public') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_carriers') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_data') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_on_machine') | string == '__wa_internal_probe__'
@@ -505,9 +512,11 @@
       - lookup('ansible.builtin.vars', '_machine') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_machine_peers') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_masquerade') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_mcp_locs') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_mcp_ok') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_mcp_path') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_missing') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_named') | string == '__wa_internal_probe__'
-      - lookup('ansible.builtin.vars', '_named_mcp') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_neighbours') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_networks') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_old') | string == '__wa_internal_probe__'
@@ -519,6 +528,9 @@
       - lookup('ansible.builtin.vars', '_probe') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_project') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_proxy_addresses') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_public_allowed') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_public_problems') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_public_timeout_max') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_read') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_reasons') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_rule_clash') | string == '__wa_internal_probe__'

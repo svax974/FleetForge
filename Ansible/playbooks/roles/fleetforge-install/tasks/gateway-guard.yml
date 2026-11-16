@@ -23,10 +23,16 @@
 
 - name: Check the gateway entry is dedicated, private and hardened
   vars:
-    _named_mcp: >-
-      {{ webapp_vhost_locations | default([]) | selectattr('access', 'defined')
-         | selectattr('path', 'search', 'mcp') | selectattr('upstream', 'defined') | selectattr('upstream', 'equalto', 'back')
-         | selectattr('raw_uri', 'defined') | list }}
+    # `/mcp` : UNE seule location, relayée au back-lb, URI brute contrôlée, soit derrière une liste nommée (E1), soit en
+    # `mode: public` (E2, exactement la forme de la liste blanche contrôlée par la tâche suivante).
+    _mcp_path: '^/mcp(/.*)?$'
+    _mcp_locs: "{{ webapp_vhost_locations | default([]) | select('mapping') | selectattr('path', 'defined') | selectattr('path', 'equalto', _mcp_path) | list }}"
+    _mcp_ok: >-
+      {{ _mcp_locs | length == 1
+         and (_mcp_locs[0].upstream | default('')) == 'back'
+         and _mcp_locs[0].raw_uri is defined
+         and ((_mcp_locs[0].access is defined and (_mcp_locs[0].mode | default('private')) != 'public')
+              or ((_mcp_locs[0].mode | default('')) == 'public' and _mcp_locs[0].access is not defined)) }}
     _upstream_egress: >-
       {{ (webapp_hardening.egress_allow | default([]) if webapp_hardening is mapping else [])
          | select('mapping') | selectattr('name', 'defined') | selectattr('name', 'equalto', 'upstream') | list }}
@@ -36,14 +42,15 @@
       - "'fleetforge' not in (ansible_roles | default([]))"
       - "'webapp' in (ansible_roles | default([]))"
       - webapp_hardening is defined
-      # E1 : vhost privé, rien de public (prérequis E2/E3 : voir docs/avant-ouverture-public.md).
+      # Vhost PRIVÉ au niveau de l'entrée, E2 compris : seules les locations de la liste blanche exacte (tâche suivante) peuvent
+      # être `mode: public` (docs/avant-ouverture-public.md).
       - access_mode is defined
       - access_mode == 'private'
       - hostname is defined
       - proxy_hostname is defined
       - proxy_hostname is search('[.]' ~ (domain_name | regex_escape) ~ '$')
       - proxy_hostname != 'proxy.' ~ domain_name
-      - _named_mcp | length > 0
+      - _mcp_ok | bool
       # Sorties du sous-réseau (pare-feu du profil) : l'amont par UN proxy nommé, en 443, et le relais SMTP
       # (connexion par code e-mail, `authMethods: ["email"]`) — exigées NOMMÉMENT : sans elles, la passerelle ne pilote
       # rien ou n'envoie aucun code, sans erreur visible au déploiement. Le proxy est celui de la machine de
@@ -62,12 +69,91 @@
       - webapp_hardening.egress_allow | default([]) | selectattr('name', 'defined') | selectattr('name', 'equalto', 'smtp') | list | length == 1
     fail_msg: >-
       Entrée {{ inventory_hostname }} invalide pour la passerelle : entrée dédiée hors du groupe `infras`, famille
-      `webapp` (jamais `fleetforge`), `webapp_hardening`, `access_mode: private` (E1), `hostname`, `proxy_hostname`
-      (nom de la zone, pas le front des proxies), et une location `/mcp` de `webapp_vhost_locations` relayée au back-lb
-      (`upstream: back`) derrière une liste nommée (`access`), URI brute contrôlée (`raw_uri`) ; `webapp_hardening.egress_allow`
+      `webapp` (jamais `fleetforge`), `webapp_hardening`, `access_mode: private`, `hostname`, `proxy_hostname`
+      (nom de la zone, pas le front des proxies), et UNE location `^/mcp(/.*)?$` de `webapp_vhost_locations` relayée au back-lb
+      (`upstream: back`), URI brute contrôlée (`raw_uri`), derrière une liste nommée (`access`, E1) ou en `mode: public`
+      (E2, sans `access`) ; `webapp_hardening.egress_allow`
       avec `{name: upstream, inventory_host: <le proxy de la machine de l'amont>, port: 443 ou celui d'un écouteur dédié}` (jamais `proxies: true` ;
       `masquerade_ack: true` si ce proxy n'est pas sur CETTE machine) et une entrée `smtp` (relais du parc : à renseigner
       par le propriétaire avant le premier déploiement).
+    quiet: true
+
+# E2 : locations PUBLIQUES (`mode: public`, aucune liste d'adresses ; la barrière est l'allow-list par credential de
+# l'application, plus le certificat client de NOTRE Cloudflare exigé par `_access.inc`). LISTE BLANCHE EXACTE : ces cinq
+# chemins, chacun avec SA `raw_uri`, relayé au back-lb, corps borné, délai ≤ 90 s (Cloudflare coupe à ~100 s) ; tout autre chemin
+# public, tout joker, `access` mêlé à `mode`, un chemin déclaré deux fois, un préfixe `^~` qui masquerait une regex publique est
+# REFUSÉ. `/mcp/connections` (page du front « Mes connexions MCP ») reste une location PRIVÉE du front, `^~` : sans elle la regex
+# `^/mcp(/.*)?$` l'enverrait au back. Les mêmes valeurs sont contrôlées sur le vhost RENDU par
+# scripts/webapp_hardening_check.py (`vhost --public`, PUBLIC_LOCATIONS) ; un test compare les deux listes.
+# La liste vit dans `vars:` (une extra-var l'écraserait : no-overrides.yml la détecte).
+- name: Check the public locations of the gateway entry
+  vars:
+    _mcp_path: '^/mcp(/.*)?$'
+    _public_timeout_max: 90
+    _public_allowed:
+      '^/mcp(/.*)?$': {raw_uri: '^/mcp(/|[?]|$)', body: 131072, body_required: true, timeout_required: true}
+      '^/.well-known/oauth-protected-resource(/mcp)?$': {raw_uri: '^/.well-known/oauth-protected-resource(/mcp)?([?]|$)', body: 16384, body_required: false, timeout_required: false}
+      '^/.well-known/oauth-authorization-server$': {raw_uri: '^/.well-known/oauth-authorization-server([?]|$)', body: 16384, body_required: false, timeout_required: false}
+      '^/api/v1/mcp-access/oauth/(authorize|token|revoke)$': {raw_uri: '^/api/v1/mcp-access/oauth/(authorize|token|revoke)([?]|$)', body: 16384, body_required: true, timeout_required: false}
+      '^/api/v1/mcp-access/oauth/register$': {raw_uri: '^/api/v1/mcp-access/oauth/register([?]|$)', body: 16384, body_required: true, timeout_required: false}
+    _locations: "{{ webapp_vhost_locations | default([]) }}"
+    _public_problems: >-
+      {%- set ns = namespace(p=[]) -%}
+      {%- set paths = _locations | select('mapping') | map(attribute='path', default='') | list -%}
+      {%- set mcp_public = _locations | select('mapping') | selectattr('path', 'defined') | selectattr('path', 'equalto', _mcp_path) | selectattr('mode', 'defined') | selectattr('mode', 'equalto', 'public') | list | length > 0 -%}
+      {%- for l in _locations -%}
+      {%- if l is not mapping -%}
+      {%- set ns.p = ns.p + ['a location is not a mapping'] -%}
+      {%- else -%}
+      {%- set path = l.path | default('') | string -%}
+      {%- if l.access is defined and l.mode is defined -%}{%- set ns.p = ns.p + [path ~ ': `access` and `mode` on the same location'] -%}{%- endif -%}
+      {%- if (paths | select('equalto', l.path | default('')) | list | length) > 1 -%}{%- set ns.p = ns.p + [path ~ ': declared twice'] -%}{%- endif -%}
+      {%- if (l.mode | default('')) == 'public' -%}
+      {%- set rule = _public_allowed[path] | default({}) -%}
+      {%- if not rule or not (l.regex | default(false) | bool) -%}
+      {%- set ns.p = ns.p + [path ~ ': not on the whitelist of public locations (exact regex path required)'] -%}
+      {%- else -%}
+      {%- set body = l.body | default('') | string | lower -%}
+      {%- set body_bytes = (body | regex_replace('[kmg]$', '') | int) * ({'k': 1024, 'm': 1048576, 'g': 1073741824}.get(body[-1:], 1)) -%}
+      {%- set timeout = l.timeout | default('') | string | lower -%}
+      {%- set timeout_seconds = (timeout | regex_replace('[a-z]+$', '') | int) * ({'ms': 0.001, 's': 1, 'm': 60, 'h': 3600}.get(timeout | regex_replace('^[0-9]+', ''), 1)) -%}
+      {%- if (l.raw_uri | default('')) != rule.raw_uri -%}{%- set ns.p = ns.p + [path ~ ': raw_uri must be exactly ' ~ rule.raw_uri] -%}{%- endif -%}
+      {%- if (l.upstream | default('')) != 'back' -%}{%- set ns.p = ns.p + [path ~ ': upstream must be back'] -%}{%- endif -%}
+      {%- if l.priority | default(false) | bool or l.ws | default(false) | bool -%}{%- set ns.p = ns.p + [path ~ ': no priority (^~) nor websocket'] -%}{%- endif -%}
+      {%- if rule.body_required and not body -%}{%- set ns.p = ns.p + [path ~ ': body limit required'] -%}{%- endif -%}
+      {%- if body and body_bytes > rule.body -%}{%- set ns.p = ns.p + [path ~ ': body above ' ~ rule.body ~ ' bytes'] -%}{%- endif -%}
+      {%- if rule.timeout_required and not timeout -%}{%- set ns.p = ns.p + [path ~ ': timeout required'] -%}{%- endif -%}
+      {%- if timeout and timeout_seconds > _public_timeout_max -%}{%- set ns.p = ns.p + [path ~ ': timeout above ' ~ _public_timeout_max ~ ' s'] -%}{%- endif -%}
+      {#- Un préfixe `^~` qui couvre ce chemin court-circuite les regex : la location publique ne serait jamais atteinte. -#}
+      {%- for q in _locations if q is mapping and (q.priority | default(false) | bool) and not (q.regex | default(false) | bool) and (q.path | default('')) | string | length > 0 -%}
+      {%- if path[1:].startswith(q.path | string) -%}{%- set ns.p = ns.p + [path ~ ': hidden by the priority prefix ' ~ q.path] -%}{%- endif -%}
+      {%- endfor -%}
+      {%- endif -%}
+      {%- endif -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {%- if mcp_public -%}
+      {%- set conn = _locations | select('mapping') | selectattr('path', 'defined') | selectattr('path', 'equalto', '/mcp/connections') | list -%}
+      {%- if conn | length != 1 or not ((conn[0].priority | default(false) | bool) and not (conn[0].regex | default(false) | bool)
+            and conn[0].mode is not defined and conn[0].access is not defined and (conn[0].upstream | default('front')) == 'front') -%}
+      {%- set ns.p = ns.p + ['/mcp/connections: a private front location with priority (^~) is required while /mcp is public'] -%}
+      {%- endif -%}
+      {%- endif -%}
+      {{ ns.p | join(' | ') }}
+    _any_public: "{{ _locations | select('mapping') | selectattr('mode', 'defined') | selectattr('mode', 'equalto', 'public') | list | length > 0 }}"
+  ansible.builtin.assert:
+    that:
+      - _locations is not string
+      - _public_problems | trim | length == 0
+      # Une location publique n'a de sens que derrière NOTRE Cloudflare (certificat client exigé par `_access.inc`) : sans
+      # `cloudflare_named`, `mode: public` serait ouvert à Internet, sans barrière d'adresse ni de certificat.
+      - not (_any_public | bool) or (cloudflare_named | default(false) | string | lower) == 'true'
+    fail_msg: >-
+      {{ inventory_hostname }} : locations publiques refusées — {{ _public_problems | trim or 'aucune' }}.
+      Seules sont admises (`mode: public`, regex, `upstream: back`, `raw_uri` exacte, corps et délai bornés) :
+      {{ _public_allowed.keys() | join(' ; ') }} ; l'entrée doit porter `cloudflare_named: true`
+      ({{ cloudflare_named | default('absent') }}), jamais `access` avec `mode`, et `/mcp/connections` reste une location
+      privée du front (`priority: true`).
     quiet: true
 
 # Chaque amont : l'entrée FleetForge qu'il désigne doit admettre la passerelle (`access_linked`) et porter les trois

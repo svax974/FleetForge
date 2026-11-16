@@ -2900,6 +2900,152 @@ class GuardTests(unittest.TestCase):
         self.assertNotEqual(self.guard(guard_inventory(access_mode="public"))[0], 0)
 
 
+# ── E2 : locations publiques de la passerelle (liste blanche exacte) ──────
+
+def _public(path, raw_uri, body=None, timeout=None, **more):
+    location = {"path": path, "regex": True, "upstream": "back", "mode": "public", "raw_uri": raw_uri}
+    if body:
+        location["body"] = body
+    if timeout:
+        location["timeout"] = timeout
+    location.update(more)
+    return location
+
+
+PUBLIC_MCP = _public("^/mcp(/.*)?$", "^/mcp(/|[?]|$)", "128k", "90s", buffering=False)
+PUBLIC_PRM = _public("^/.well-known/oauth-protected-resource(/mcp)?$", "^/.well-known/oauth-protected-resource(/mcp)?([?]|$)")
+PUBLIC_AS = _public("^/.well-known/oauth-authorization-server$", "^/.well-known/oauth-authorization-server([?]|$)")
+PUBLIC_OAUTH = _public("^/api/v1/mcp-access/oauth/(authorize|token|revoke)$",
+                       "^/api/v1/mcp-access/oauth/(authorize|token|revoke)([?]|$)", "16k")
+PUBLIC_REGISTER = _public("^/api/v1/mcp-access/oauth/register$", "^/api/v1/mcp-access/oauth/register([?]|$)", "16k")
+# Pages privées servies par le front : `/mcp/connections` reste privé bien que `^/mcp(/.*)?$` le couvre (`^~` l'emporte sur
+# une regex) ; le reste de `/.well-known/` est fermé SANS `^~` (qui masquerait les regex publiques).
+CONNECTIONS = {"path": "/mcp/connections", "priority": True}
+WELL_KNOWN_CLOSED = {"path": "/.well-known/", "access": {"hosts": []}}
+PUBLIC_SET = [CONNECTIONS, PUBLIC_MCP, PUBLIC_PRM, PUBLIC_AS, PUBLIC_OAUTH, PUBLIC_REGISTER, WELL_KNOWN_CLOSED]
+# Sonde de bord public (A3) : 401 sans identifiant par le nom (Cloudflare), 403 directement à l'origine sans certificat client.
+PUBLIC_CHECKS = [{"name": "public_edge", "path": "/mcp", "method": "POST", "edge_status": 401, "origin_status": 403}]
+
+
+@unittest.skipUnless(shutil.which("ansible-playbook"), "ansible-playbook absent")
+class PublicLocationsGuardTests(unittest.TestCase):
+    """A2 : `access_mode: private` d'entrée maintenu ; `mode: public` n'est admis que sur la liste blanche EXACTE de
+    locations (chemin, `raw_uri`, corps, délai), derrière `cloudflare_named`, et jamais mêlé à `access`."""
+
+    def guard(self, **gateway):
+        return run_local_play(GUARD_PLAY, guard_inventory(**dict({"cloudflare_named": True, "webapp_public_checks": PUBLIC_CHECKS},
+                                                                 **gateway)),
+                              {"apps.yml": "fleetforge-gateway: /nonexistent/app/\n"})
+
+    def refused(self, locations, needle=None, **gateway):
+        code, out = self.guard(webapp_vhost_locations=locations, **gateway)
+        self.assertNotEqual(code, 0, out[-2000:])
+        if needle:
+            self.assertIn(needle, out)
+        return out
+
+    def test_the_whole_public_set_passes_and_only_mcp_alone_too(self):
+        code, out = self.guard(webapp_vhost_locations=PUBLIC_SET)
+        self.assertEqual(code, 0, out[-3000:])
+        code, out = self.guard(webapp_vhost_locations=[CONNECTIONS, PUBLIC_MCP, WELL_KNOWN_CLOSED])
+        self.assertEqual(code, 0, out[-3000:])
+
+    def test_the_private_form_with_a_named_list_still_passes_with_or_without_the_attribute(self):
+        for attributes in ({}, {"cloudflare_named": True}):
+            code, out = run_local_play(GUARD_PLAY, guard_inventory(**attributes), {"apps.yml": "fleetforge-gateway: /nonexistent/app/\n"})
+            self.assertEqual(code, 0, out[-3000:])
+
+    def test_a_public_location_needs_the_cloudflare_named_attribute_and_a_private_entry(self):
+        self.refused(PUBLIC_SET, "cloudflare_named", cloudflare_named=False)
+        code, out = run_local_play(GUARD_PLAY, guard_inventory(webapp_vhost_locations=PUBLIC_SET, webapp_public_checks=PUBLIC_CHECKS),
+                                   {"apps.yml": "fleetforge-gateway: /nonexistent/app/\n"})
+        self.assertNotEqual(code, 0)
+        self.assertIn("cloudflare_named", out)
+        self.assertNotEqual(self.guard(webapp_vhost_locations=PUBLIC_SET, access_mode="public")[0], 0)
+
+    def test_a_location_outside_the_whitelist_is_refused_whatever_its_shape(self):
+        cases = {
+            "other path": _public("^/api/v1/users/(me|admin)$", "^/api/v1/users/(me|admin)([?]|$)", "16k"),
+            "root": {"path": "/", "mode": "public"},
+            "wildcard of mcp": _public("^/mcp.*$", "^/mcp", "128k", "90s"),
+            "wildcard of the oauth family": _public("^/api/v1/mcp-access/.*$", "^/api/v1/mcp-access/", "16k"),
+            "whole well-known": _public("^/.well-known/.*$", "^/.well-known/"),
+            "prefix form of mcp": {"path": "/mcp", "mode": "public", "upstream": "back", "raw_uri": "^/mcp(/|[?]|$)", "body": "128k", "timeout": "90s"},
+            "case variant": _public("^/MCP(/.*)?$", "^/mcp(/|[?]|$)", "128k", "90s"),
+            "consent page": _public("^/oauth/consent$", "^/oauth/consent([?]|$)", "16k"),
+            "requests": _public("^/api/v1/mcp-access/oauth/requests/.*$", "^/api/v1/mcp-access/oauth/requests/", "16k"),
+        }
+        for label, location in cases.items():
+            with self.subTest(label):
+                self.refused(PUBLIC_SET + [location], "public")
+
+    def test_each_public_location_keeps_its_exact_shape(self):
+        weaker = {
+            "no raw_uri": {k: v for k, v in PUBLIC_MCP.items() if k != "raw_uri"},
+            "weaker raw_uri": dict(PUBLIC_MCP, raw_uri="^/"),
+            "other raw_uri": dict(PUBLIC_MCP, raw_uri="^/mcp"),
+            "front upstream": dict(PUBLIC_MCP, upstream="front"),
+            "no upstream": {k: v for k, v in PUBLIC_MCP.items() if k != "upstream"},
+            "not a regex": dict(PUBLIC_MCP, regex=False),
+            "body too large": dict(PUBLIC_MCP, body="129k"),
+            "body in megabytes": dict(PUBLIC_MCP, body="1m"),
+            "no body": {k: v for k, v in PUBLIC_MCP.items() if k != "body"},
+            "timeout too long": dict(PUBLIC_MCP, timeout="91s"),
+            "timeout in minutes": dict(PUBLIC_MCP, timeout="2m"),
+            "timeout without unit over the limit": dict(PUBLIC_MCP, timeout="180"),
+            "no timeout": {k: v for k, v in PUBLIC_MCP.items() if k != "timeout"},
+            "priority": dict(PUBLIC_MCP, priority=True),
+            "websocket": dict(PUBLIC_MCP, ws=True),
+            "access and mode mixed": dict(PUBLIC_MCP, access={"hosts": ["infra1"]}),
+            "oauth body": dict(PUBLIC_OAUTH, body="17k"),
+            "oauth no body": {k: v for k, v in PUBLIC_OAUTH.items() if k != "body"},
+            "register body": dict(PUBLIC_REGISTER, body="1m"),
+            "well-known body": dict(PUBLIC_PRM, body="1m"),
+            "well-known long timeout": dict(PUBLIC_PRM, timeout="300s"),
+            "oauth alternative raw_uri": dict(PUBLIC_OAUTH, raw_uri="^/api/v1/mcp-access/oauth/(authorize|token)([?]|$)"),
+            "well-known front upstream": dict(PUBLIC_PRM, upstream="front"),
+            "authorization server no upstream": {k: v for k, v in PUBLIC_AS.items() if k != "upstream"},
+            "oauth front upstream": dict(PUBLIC_OAUTH, upstream="front"),
+            "register front upstream": dict(PUBLIC_REGISTER, upstream="front"),
+        }
+        for label, location in weaker.items():
+            with self.subTest(label):
+                others = [loc for loc in (PUBLIC_MCP, PUBLIC_PRM, PUBLIC_AS, PUBLIC_OAUTH, PUBLIC_REGISTER)
+                          if loc["path"] != location["path"]]
+                self.refused([CONNECTIONS, location] + others + [WELL_KNOWN_CLOSED])
+
+    def test_the_same_path_cannot_be_declared_twice(self):
+        named = dict(MCP)
+        self.refused(PUBLIC_SET + [named], "mcp")
+        self.refused(PUBLIC_SET + [PUBLIC_MCP], "mcp")
+        self.refused(PUBLIC_SET + [PUBLIC_PRM], "declared twice")
+        self.refused(PUBLIC_SET + [dict(PUBLIC_REGISTER)], "declared twice")
+
+    def test_access_and_mode_are_never_mixed_on_a_location(self):
+        self.refused([MCP, WELL_KNOWN, {"path": "/api/", "access": {"hosts": []}, "mode": "private"}], "access", cloudflare_named=False)
+        self.refused([MCP, WELL_KNOWN, {"path": "/api/", "access": {"hosts": []}, "mode": "public"}], "access")
+
+    def test_a_priority_prefix_that_would_hide_a_public_regex_is_refused(self):
+        # nginx : un préfixe `^~` qui couvre le chemin masque les regex — le well-known public ne répondrait jamais.
+        self.refused([CONNECTIONS, PUBLIC_MCP, PUBLIC_PRM, dict(WELL_KNOWN_CLOSED, priority=True)], "priority")
+
+    def test_mcp_connections_must_stay_a_private_front_location_when_mcp_is_public(self):
+        self.refused([PUBLIC_MCP, WELL_KNOWN_CLOSED], "/mcp/connections")
+        for label, location in {"public": dict(CONNECTIONS, mode="public"), "back": dict(CONNECTIONS, upstream="back"),
+                                "no priority": {"path": "/mcp/connections"}, "named": dict(CONNECTIONS, access={"hosts": []}),
+                                "regex": dict(CONNECTIONS, regex=True)}.items():
+            with self.subTest(label):
+                self.refused([location, PUBLIC_MCP, WELL_KNOWN_CLOSED], "/mcp/connections")
+
+    def test_the_attribute_changes_nothing_for_the_generic_checks_of_other_entries(self):
+        # facts.yml (toutes les entrées `webapp`) n'embarque AUCUNE liste blanche : une location publique quelconque y passe
+        # comme avant ; seule la passerelle (gateway-guard.yml) restreint.
+        inventory = guard_inventory(webapp_vhost_locations=[MCP, WELL_KNOWN, {"path": "/open/", "mode": "public"}])
+        code, out = run_local_play(FACTS_PLAY, inventory, {"apps.yml": "fleetforge-gateway: /nonexistent/app/\n"})
+        self.assertEqual(code, 0, out[-3000:])
+        code, out = run_local_play(GUARD_PLAY, inventory, {"apps.yml": "fleetforge-gateway: /nonexistent/app/\n"})
+        self.assertNotEqual(code, 0, "la passerelle, elle, refuse une location publique hors liste")
+
 # ── Écouteur dédié d'un proxy (`dedicated_listeners`) ─────────────────────
 
 GATEWAY_ADDRESS = "203.0.113.40"      # passerelle sur SA machine ; proxy1/infra1 sont sur 192.0.2.10

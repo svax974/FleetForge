@@ -664,3 +664,17 @@ zone lu (signalé s'il n'est pas `strict` ; `cfopull_enforce_tls_strict: true` l
 gabarit (`proxy_update_cloudflare_edge`). Refus (`facts.yml`) : avec `cloudflare_front`, `webapp_front: pages`, `webapp_proxy:
 external`, `proxy_hostname` hors zone ou égal au front `proxy.<zone>`, valeur ni `true` ni `false`. Absent ou faux : rendus
 identiques octet pour octet (114 rendus réels du parc, trois proxies, avant/après).
+
+### A2 : garde de la passerelle, `mode: public` sur une liste blanche exacte
+
+`gateway-guard.yml` garde `access_mode: private` au niveau de l'entrée et exige toujours UNE location `^/mcp(/.*)?$` relayée
+au back-lb avec `raw_uri` (liste nommée, E1, OU `mode: public`, E2). Seules cinq regex peuvent être `mode: public` (`_public_allowed`,
+dans `vars:` donc protégées par `no-overrides.yml`), chacune avec SA `raw_uri` exacte, `upstream: back`, sans `^~` ni websocket :
+`^/mcp(/.*)?$` (corps ≤ 128k exigé, délai exigé ≤ 90 s), `^/.well-known/oauth-protected-resource(/mcp)?$`,
+`^/.well-known/oauth-authorization-server$`, `^/api/v1/mcp-access/oauth/(authorize|token|revoke)$` et `…/oauth/register$` (corps
+≤ 16k exigé). Refusés : tout autre chemin public, tout joker, `access` mêlé à `mode`, un chemin déclaré deux fois, une location
+publique sans `cloudflare_named`, un préfixe `^~` qui masquerait une regex publique (nginx ne lit pas les regex après un `^~` :
+`/.well-known/` fermé ne porte donc PAS `priority`), et l'absence de `/mcp/connections` en location PRIVÉE `^~` du front tant que
+`/mcp` est public (la regex `^/mcp(/.*)?$` l'enverrait sinon au back). La barrière de `/mcp` public est l'allow-list `ipAllow`
+par credential de l'application ; les pages de consentement, `/me/*`, `/admin/*` et `/` restent privées. `cloudflare_named` ne
+change aucune autre garde (la liste blanche vit dans la garde de la passerelle, pas dans `facts.yml`).
