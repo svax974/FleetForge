@@ -432,6 +432,12 @@ interactive=0; [ "$1" = -i ] && { interactive=1; shift; }
 container="$1"; shift
 echo "$container $*" >> "$STUB_LOG/docker.log"
 case "$1" in
+  sh)
+    # `sh -c 'df -Pk "$PGDATA"'` inside the container: the simulated volume of PGDATA.
+    case "$*" in
+      *df*) printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\n/dev/sim 100000000 1 %s 1%% /var/lib/postgresql/data\\n' "${STUB_PGDATA_FREE_KB:-100000000}" ;;
+      *) exit 1 ;;
+    esac ;;
   pg_dump)
     if [ -n "${STUB_PGDUMP_FAIL:-}" ]; then head -c 20000 "$STUB_FIXTURE"; exit 1; fi
     cat "$STUB_FIXTURE" ;;
@@ -439,6 +445,7 @@ case "$1" in
     case "$*" in
       *"SELECT count(*)"*) echo 0 ;;
       *pg_size_pretty*) echo "12 MB" ;;
+      *"SELECT pg_database_size"*) echo "${STUB_DB_BYTES:-1000000}" ;;
       *" -c "*) : ;;
       *)
         if [ "$interactive" = 1 ]; then
@@ -716,6 +723,37 @@ class PostgresScriptTests(unittest.TestCase):
         log = self.docker_log()
         self.assertNotIn("ALTER DATABASE", log)
         self.assertNotIn('DROP DATABASE IF EXISTS "appdb"', log)
+
+    def test_a_full_pgdata_volume_stops_the_restore_before_anything_is_written(self):
+        # Review finding: the copy is loaded BESIDE the live database, which needs room on the PGDATA volume. Under
+        # 1.5 x pg_database_size(<base>) free (measured by df in the container) the restore stops BEFORE any write.
+        self.scripts()
+        self.assertEqual(self.run_script("backup.sh").returncode, 0)
+        size = 10 * 1024 * 1024  # bytes ; 1.5 x = 15360 KiB
+        for free_kb, ok in ((10 * 1024, False), (15359, False), (15361, True)):
+            with self.subTest(free_kb=free_kb):
+                open(os.path.join(self.log, "docker.log"), "w").close()
+                restored = os.path.join(self.log, "restored.sql")
+                if os.path.exists(restored):
+                    os.unlink(restored)
+                done = self.run_script("restore.sh", "--yes",
+                                       extra_env={"STUB_DB_BYTES": str(size), "STUB_PGDATA_FREE_KB": str(free_kb)})
+                if ok:
+                    self.assertEqual(done.returncode, 0, done.stdout.decode() + done.stderr.decode())
+                    continue
+                self.assertNotEqual(done.returncode, 0)
+                self.assertIn("espace libre insuffisant", done.stderr.decode())
+                self.assertIn("base NON modifi", done.stderr.decode())
+                self.assertFalse(os.path.exists(restored))
+                self.assert_live_database_untouched()
+
+    def test_an_unreadable_volume_measure_stops_the_restore_too(self):
+        self.scripts()
+        self.assertEqual(self.run_script("backup.sh").returncode, 0)
+        done = self.run_script("restore.sh", "--yes", extra_env={"STUB_PGDATA_FREE_KB": "n/a"})
+        self.assertNotEqual(done.returncode, 0)
+        self.assertIn("base NON modifi", done.stderr.decode())
+        self.assert_live_database_untouched()
 
     def test_a_load_error_stops_and_never_swaps(self):
         self.scripts()

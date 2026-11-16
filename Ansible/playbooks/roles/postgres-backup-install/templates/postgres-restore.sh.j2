@@ -171,6 +171,21 @@ if [ "${ACTIVE:-0}" -gt 0 ]; then
   log "[WARN] ${ACTIVE} connexion(s) sur ${DB} — l'application tourne probablement encore ; coupées à l'échange."
 fi
 
+# 1b. Place pour la copie : elle est chargée À CÔTÉ de la base vivante, sur le même volume PGDATA du conteneur. Moins de
+#     1,5 × pg_database_size(base) de libre (df dans le conteneur) : arrêt ICI, avant toute écriture — plutôt qu'un
+#     disque plein en plein chargement (qui arrêterait aussi la base vivante). L'ancienne base, gardée après
+#     l'échange, occupe encore sa place : la supprimer une fois validée.
+DB_BYTES="$(sql "SELECT pg_database_size('${DB}');")" || die "taille de ${DB} illisible — base NON modifiée."
+FREE_KB="$(docker exec "${CONTAINER}" sh -c 'df -Pk "${PGDATA:-/var/lib/postgresql/data}"' </dev/null | awk 'END { print $4 }')" \
+  || die "espace libre du volume PGDATA illisible — base NON modifiée."
+case "${DB_BYTES}" in ''|*[!0-9]*) die "taille de ${DB} illisible (« ${DB_BYTES} ») — base NON modifiée." ;; esac
+case "${FREE_KB}" in ''|*[!0-9]*) die "espace libre du volume PGDATA illisible (« ${FREE_KB} ») — base NON modifiée." ;; esac
+NEED_KB=$(( (DB_BYTES * 3 / 2 + 1023) / 1024 ))
+if [ "${FREE_KB}" -le "${NEED_KB}" ]; then
+  die "espace libre insuffisant sur le volume PGDATA de ${CONTAINER} : ${FREE_KB} Kio libres, plus de ${NEED_KB} Kio (1,5 × ${DB}) requis pour charger la copie à côté — base NON modifiée. Libérer de la place (anciennes bases *_before_*), puis relancer."
+fi
+log "Espace libre sur PGDATA : ${FREE_KB} Kio (copie estimée à ${NEED_KB} Kio au plus)."
+
 # 2. Chargement À CÔTÉ : la base vivante n'est pas touchée tant que la copie n'est pas complète.
 log "Chargement dans ${RESTORE_DB} (base vivante intacte)."
 sql "DROP DATABASE IF EXISTS \"${RESTORE_DB}\";"
