@@ -2137,6 +2137,13 @@ class GuardTests(unittest.TestCase):
                                    args=args)
         self.assertNotEqual(code, 0, out[-3000:])
         self.assertIn("pgbak_container", out)
+        # The key of the gateway is bound to its address (`from=`): a DNS name made of hex letters is not one.
+        for address in ("cafe.de", "192.0.2.300"):
+            with self.subTest(address=address):
+                code, out = run_local_play(None, self.backup_inventory(ansible_host=address), playbook=DEPLOY_BACKUP,
+                                           args=args)
+                self.assertNotEqual(code, 0, out[-3000:])
+                self.assertIn("IP littérale", out)
 
     def test_the_database_backup_is_checked_only_when_the_gateway_opts_in(self):
         # Sans `backup` dans ansible_roles : aucune exigence `pgbak_*` (comportement inchangé).

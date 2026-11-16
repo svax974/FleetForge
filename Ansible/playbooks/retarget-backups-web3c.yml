@@ -30,9 +30,12 @@
 #   -e run_now=true            lance immédiatement les sauvegardes en tâche de
 #                              fond au lieu d'attendre le cron
 #   -e purge_old=<adresse>     sur l'ANCIENNE destination, révoque les clés des
-#                              sources repointées ici et supprime LEURS
-#                              répertoires (ceux des autres sources restent),
-#                              une fois la nouvelle vérifiée
+#                              sources repointées ici (compte dédié et
+#                              `remote_username` de l'ancien schéma) et supprime
+#                              LEURS répertoires (ceux des autres sources
+#                              restent), une fois la nouvelle vérifiée. Refusé si
+#                              l'adresse est celle d'une destination encore en
+#                              service.
 #   -e purge_old_port=<port>   port SSH de l'ancienne destination (défaut : celui
 #                              du parc)
 
@@ -84,6 +87,21 @@
         hostvars[item].pgbak_dest_host | default('') not in hostvars
         or hostvars[hostvars[item].pgbak_dest_host].ansible_host | default('') == hostvars[item].ansible_host
 
+    # `purge_old` supprime des sauvegardes : jamais sur une destination ENCORE en service (une entrée du groupe
+    # `backups`, ou la destination courante d'une source repointée). Un échec ici arrête le playbook avant tout
+    # repointage.
+    - name: Refuser de purger une destination encore en service
+      vars:
+        _current: >-
+          {{ ((groups['backups'] | default([])) + (retarget_sources | map('extract', hostvars, 'pgbak_dest_host') | list))
+             | select('in', hostvars) | map('extract', hostvars) | selectattr('ansible_host', 'defined')
+             | map(attribute='ansible_host') | map('string') | unique | list }}
+      ansible.builtin.fail:
+        msg: >-
+          purge_old={{ purge_old }} est l'adresse d'une destination encore en service ({{ _current | join(', ') }}) :
+          refusé. Donner l'adresse de l'ANCIENNE destination, une fois l'inventaire repointé.
+      when: purge_old is defined and (purge_old | string) in _current
+
     # Variables du parc lues sur une source (localhost n'est pas dans le groupe du parc).
     - name: Retenir les sources repointées (purge de l'ancienne destination)
       vars:
@@ -96,6 +114,8 @@
         retarget_parc_port: "{{ _parc.ssh_custom_port | default(22) }}"
         retarget_backup_account: "{{ _account }}"
         retarget_backup_account_root: "{{ _parc.backup_account_root | default('/home/' ~ _account ~ '/backups') }}"
+        # Ancien schéma (clés posées sur `remote_username`, dumps sous `backup_root`) : purgé aussi.
+        retarget_legacy_root: "{{ _parc.backup_root | default('/home/' ~ (_parc.remote_username | default('')) ~ '/backups') }}"
 
 - name: Repointage de la sauvegarde PostgreSQL — tradekong, ctdapi et passerelle MCP
   hosts: tradekong:ctdapi:fleetforge_gateways_backup
@@ -173,7 +193,8 @@
         ansible_user: "{{ retarget_remote_username }}"
         remote_username: "{{ retarget_remote_username }}"
         backup_account: "{{ retarget_backup_account }}"
-        old_root: "{{ retarget_backup_account_root }}"
+        old_roots: ["{{ retarget_backup_account_root }}", "{{ retarget_legacy_root }}"]
+        old_accounts: ["{{ retarget_backup_account }}", "{{ retarget_remote_username }}"]
         retarget_old_entries: "{{ retarget_old_entries }}"
         retarget_old_dirs: "{{ retarget_old_dirs }}"
         groups: [old_backups_web3c]
@@ -185,18 +206,19 @@
   gather_facts: false
   remote_user: "{{ remote_username }}"
   tasks:
+    # Compte dédié ET `remote_username` (ancien schéma, clé sans restriction), par le commentaire de la clé.
     - name: Révoquer les clés des sources repointées
       ansible.builtin.lineinfile:
-        path: "/home/{{ backup_account }}/.ssh/authorized_keys"
-        regexp: " {{ item | regex_escape }}-backup$"
+        path: "/home/{{ item.0 }}/.ssh/authorized_keys"
+        regexp: " {{ item.1 | regex_escape }}-backup$"
         state: absent
-      loop: "{{ retarget_old_entries }}"
+      loop: "{{ old_accounts | product(retarget_old_entries) | list }}"
       become: true
 
     - name: Supprimer leurs sauvegardes
       ansible.builtin.file:
-        path: "{{ old_root }}/{{ item }}"
+        path: "{{ item.0 }}/{{ item.1 }}"
         state: absent
-      loop: "{{ retarget_old_dirs }}"
-      when: item is match('^[a-z0-9][a-z0-9-]{0,62}$')
+      loop: "{{ old_roots | product(retarget_old_dirs) | list }}"
+      when: item.1 is match('^[a-z0-9][a-z0-9-]{0,62}$')
       become: true

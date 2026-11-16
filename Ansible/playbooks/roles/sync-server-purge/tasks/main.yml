@@ -28,8 +28,10 @@
       en connaissance de cause.
     quiet: true
 
-# Lecture seule sur la destination : date de la dernière sauvegarde réussie
-# (écrite par le script de sync-backup-install).
+# Lecture seule sur la destination : date de la dernière sauvegarde réussie,
+# écrite par la passerelle `backup-gate` elle-même (horloge de la destination),
+# au `commit` d'une archive contrôlée et seulement si elle est encore là après
+# l'élagage — une source ne peut pas l'écrire sans déposer une archive valide.
 - name: Read the last successful backup date on the destination
   ansible.builtin.slurp:
     src: "{{ sync_backup_dir }}/last-success"

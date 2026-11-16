@@ -7,24 +7,37 @@
 #   • chaque clé de source y est posée avec `restrict` (ni pty, ni redirection), `from="<adresse de la source>"` et
 #     une commande FORCÉE : la passerelle `backup-gate` (files/backup-gate.py), seule à s'exécuter quoi que demande
 #     le client. Elle confine la source à SON répertoire `<backup_account_root>/<nom>/` (mode 0700) et à une liste
-#     fermée de verbes (écrire une génération, la valider, purger au-delà du nombre de générations fixé par la
-#     commande forcée — pas par la source —, lister, relire pour restaurer). Aucun shell interactif utile ;
-#   • une source ne lit ni n'efface les sauvegardes d'une autre, même avec la même destination.
+#     fermée de verbes (écrire une génération, la valider — ce qui élague au nombre de générations fixé par la
+#     commande forcée, selon l'horloge de la destination —, lister, relire pour restaurer). Aucun shell interactif ;
+#   • une source ne lit ni n'efface les sauvegardes d'une autre, même avec la même destination ;
+#   • la clé de la source est RETIRÉE de `remote_username` sur la destination (ancien schéma, sans restriction) dès
+#     qu'elle est posée sur le compte dédié ; les anciennes sauvegardes de `backup_root/<nom>` sont signalées, jamais
+#     supprimées sans `-e backup_legacy_purge=yes` (tasks/legacy.yml).
 #
 # PAS `backup` : ce nom est un compte SYSTÈME de toutes les Debian/Ubuntu (uid 34, maison /var/backups, shell
 # nologin, base-passwd). Le reprendre modifierait un compte de la distribution — que ses mises à jour peuvent
 # remettre à nologin, ce qui couperait la commande forcée (sshd la lance par le shell du compte). Le rôle refuse
 # tout compte existant d'uid < 1000.
+#
+# LIMITE (dite) : l'authorized_keys du compte est dans SA maison (`~/.ssh`, propriété du compte, comme le veut sshd).
+# Aucun verbe de la passerelle n'y écrit ; seul un contournement de la passerelle le pourrait. Un fichier possédé par
+# root hors de la maison (`AuthorizedKeysFile` par `Match User`) exigerait de modifier sshd_config sur chaque
+# destination — dont une machine de bureau derrière un NAT, où une erreur coupe l'accès : non fait.
 backup_account: fleetbackup
 backup_account_root: "/home/{{ backup_account }}/backups"
 backup_gate_path: /usr/local/sbin/backup-gate
 
-# Plancher d'espace libre (Go) que la passerelle tient PENDANT l'écriture : sous ce seuil, `put` s'arrête et efface son
-# `.tmp`. Une source — même compromise, même en boucle — ne remplit jamais le disque d'une destination qui fait tourner
-# autre chose (proxy1 : partition unique avec nginx, Prometheus, journaux). Surcharge par destination :
+# Plancher d'espace libre (Go) que la passerelle tient PENDANT l'écriture, contrôlé à chaque Mio : sous ce seuil, `put`
+# s'arrête et efface son `.tmp`. Une écriture par source à la fois (verrou) ; des sources différentes en parallèle
+# peuvent chacune dépasser le plancher d'au plus 1 Mio avant de s'arrêter. Surcharge par destination :
 # `backup_floor_gb` sur son entrée. Distinct de `backup_min_free_gb` (20), que la SOURCE exige avant de commencer.
 backup_floor_gb: 5
 
-# Forme admise de l'adresse d'une source pour `from=` (IPv4/IPv6 littérale) : un nom DNS serait comparé au DNS
-# inverse. C'est la même adresse que la règle ufw de la destination (`ansible_host` de la source).
-backup_origin_pattern: '^[0-9A-Fa-f.:]+$'
+# Adresse d'une source pour `from=` et pour la règle ufw de la destination (`ansible_host` de la source) : IPv4 ou
+# IPv6 LITTÉRALE, jamais un nom DNS (`from=` le comparerait au DNS inverse ; `cafe.de` n'est pas une adresse).
+backup_ipv4_pattern: '^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])[.]){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])$'
+backup_ipv6_pattern: '^(?=.*:.*:)(?!.*:::)([0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4}$'
+
+# Ancien schéma (avant le compte dédié) : sauvegardes de `<backup_root>/<nom>` sous `remote_username`. `yes` (chaîne,
+# passée par `-e`) les supprime après la migration décrite dans Ansible/README.md ; tout autre valeur les garde.
+backup_legacy_purge: ""

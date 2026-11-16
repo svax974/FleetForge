@@ -42,13 +42,17 @@
     _recipient: "{{ pgbak_encrypt_recipient | default(backup_encrypt_recipient | default('')) }}"
     _parc_port: "{{ ssh_custom_port | default(22) }}"
     _dest_port: "{{ hostvars[pgbak_dest_host].ansible_port | default(_parc_port) }}"
+    # Mêmes formes que backup-setup/defaults (`backup_ipv4_pattern`, `backup_ipv6_pattern`).
+    _ipv4: '^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])[.]){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])$'
+    _ipv6: '^(?=.*:.*:)(?!.*:::)([0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4}$'
   ansible.builtin.assert:
     that:
       - _recipient is match('^age1[02-9ac-hj-np-z]{58}$')
       - (_dest_port | string) == (_parc_port | string) or pgbak_dest_port is defined
       - pgbak_dest_port is not defined or (pgbak_dest_port | string) == (_dest_port | string)
-      # La clé de la passerelle est liée à son adresse (`from=`) sur la destination, comme l'ouverture ufw.
-      - ansible_host is match('^[0-9A-Fa-f.:]+$')
+      # La clé de la passerelle est liée à son adresse (`from=`) sur la destination, comme l'ouverture ufw : une
+      # adresse IP LITTÉRALE (`cafe.de` n'en est pas une).
+      - ansible_host is match(_ipv4) or ansible_host is match(_ipv6)
     fail_msg: >-
       {{ inventory_hostname }} : la sauvegarde de la passerelle exige un destinataire de chiffrement age
       (`pgbak_encrypt_recipient` ou `backup_encrypt_recipient`, « age1… », clé PUBLIQUE de l'opérateur — la privée

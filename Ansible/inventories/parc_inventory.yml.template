@@ -181,7 +181,11 @@ all:
               # base et rôle = ceux du back/.env (défaut `webapp` : le nom du projet sans tiret) ; destination = une
               # entrée de `backups` sur une AUTRE machine ; `pgbak_dir` propre à l'entrée (le défaut est partagé par
               # toutes les entrées d'une machine) ; seuils BackupStale/BackupMissing : `prom_alert_backup_max_age_hours`.
-              # Dump CHIFFRÉ exigé : `backup_encrypt_recipient` du parc (group_vars) ou `pgbak_encrypt_recipient` ici.
+              # Dump CHIFFRÉ exigé : `pgbak_encrypt_recipient` ici, clé DISTINCTE de celle du parc
+              # (`backup_encrypt_recipient`) — restaurer une autre base sur une machine mutualisée ne doit pas y
+              # envoyer la clé qui déchiffre l'audit de la passerelle.
+              # pgbak_encrypt_recipient: <sortie de `age-keygen -y` d'une clé propre à la passerelle>
+              # Clé d'hôte de la destination lue par la connexion d'Ansible (known_hosts), pas par ssh-keyscan.
               # Port SSH de la destination explicite s'il diffère de `ssh_custom_port` (ici : machine derrière un NAT).
               # Contrôlé sans connexion par la garde de deploy-fleetforge.yml (tag gateway) et de deploy-backup.yml.
               pgbak_name: fleetforge-gateway

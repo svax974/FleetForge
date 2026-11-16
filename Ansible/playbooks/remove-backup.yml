@@ -34,6 +34,8 @@
       ansible.builtin.group_by:
         key: "{{ 'fleetforge_gateways_backup' if 'backup' in (ansible_roles | default([])) else 'fleetforge_gateways_nobackup' }}"
       changed_when: false
+      # Un rejeu `--tags` doit encore savoir quelles passerelles sont concernées.
+      tags: [always]
 
 - name: Arrêt de la sauvegarde PostgreSQL — tradekong, ctdapi et passerelle MCP
   hosts: tradekong:ctdapi:fleetforge_gateways_backup

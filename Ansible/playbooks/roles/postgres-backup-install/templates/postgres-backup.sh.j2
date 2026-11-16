@@ -10,8 +10,9 @@
 #
 # La destination n'offre pas de shell : la clé est liée à la passerelle
 # `backup-gate` (rôle backup-setup), qui ne connaît que les verbes appelés ici
-# (free-kb, last-success, put, commit, abort, prune, stamp) et confine la source
-# à son répertoire. Le nombre de générations gardées est fixé côté destination.
+# (free-kb, last-success, put, commit, abort, list) et confine la source à son
+# répertoire. `commit` contrôle le fichier, élague au nombre de générations
+# fixé côté destination (horloge de la destination) puis enregistre le succès.
 {% if pgbak_encrypt_recipient | length > 0 %}
 #
 # CHIFFRÉ : pg_dump | gzip | age -r <destinataire de l'opérateur>. Aucun repli en
@@ -98,11 +99,14 @@ command -v age >/dev/null 2>&1 || fail "age introuvable : chiffrement exigé, au
 {% endif %}
 
 # ── Auto-limitation ────────────────────────────────────────────────────────
+# En HEURES, avec 2 h de marge : le succès d'hier est enregistré quelques minutes
+# APRÈS le départ du cron, si bien qu'aujourd'hui, à la même minute, il n'a pas
+# encore 24 h — un calcul en jours entiers sautait une sauvegarde sur deux.
 LAST_TS="$(last_success_ts)"
-if [ "${LAST_TS}" != "0" ]; then
-  AGE_DAYS=$(( (START - LAST_TS) / 86400 ))
-  if [ "${AGE_DAYS}" -lt "${INTERVAL_DAYS}" ]; then
-    log "Ignoré : dernière sauvegarde vieille de ${AGE_DAYS} j (< ${INTERVAL_DAYS})."
+if [ "${LAST_TS}" != "0" ] && [ "${INTERVAL_DAYS}" -gt 0 ]; then
+  AGE_H=$(( (START - LAST_TS) / 3600 ))
+  if [ "${AGE_H}" -lt $(( INTERVAL_DAYS * 24 - 2 )) ]; then
+    log "Ignoré : dernière sauvegarde vieille de ${AGE_H} h (< $(( INTERVAL_DAYS * 24 - 2 )) h)."
     exit 0
   fi
 fi
@@ -133,17 +137,18 @@ if ! docker exec "${CONTAINER}" pg_dump -U "${DB_USER}" -d "${DB}" | gzip \
   fail "Échec du dump."
 fi
 
-# La passerelle contrôle le `.tmp` ({{ 'en-tête age' if pgbak_encrypt_recipient | length > 0 else 'gzip -t' }}) et ne le rend visible qu'ensuite : un
-# `.tmp` traînant est visiblement un échec, un dump tronqué ne se fait pas passer pour valide.
+# La passerelle contrôle le `.tmp` ({{ 'fichier age complet' if pgbak_encrypt_recipient | length > 0 else 'flux gzip complet et non vide' }}) et ne le rend visible
+# qu'ensuite ; puis elle élague (APRÈS le succès : purger d'abord laisserait un
+# instant sans copie saine) et enregistre le succès avec SON horloge.
 SIZE_BYTES="$(gate commit "${OUT}")" || { gate abort "${OUT}" || true; fail "Dump refusé par la destination."; }
 case "${SIZE_BYTES}" in ''|*[!0-9]*) SIZE_BYTES=0 ;; esac
 
-# ── Rétention ──────────────────────────────────────────────────────────────
-# Purge APRÈS le succès du nouveau dump : purger d'abord laisserait un instant
-# sans copie saine si le dump échouait ensuite.
-gate prune >/dev/null || log "[WARN] Purge des anciennes générations en échec."
+# Le dump doit encore être là après l'élagage : sinon, c'est un échec visible
+# (BackupFailed), pas une sauvegarde comptée sans copie.
+LISTING="$(gate list)" || fail "Liste des générations illisible après le dépôt."
+printf '%s\n' "${LISTING}" | awk -F'\t' -v n="${OUT}" '$1 == n { found = 1 } END { exit !found }' \
+  || fail "${OUT} absent de la destination après l'élagage."
 
 END=$(date +%s)
-gate stamp >/dev/null || fail "Impossible d'enregistrer le succès sur la destination."
 write_metrics 1 "$(( END - START ))" "${SIZE_BYTES}" "${END}"
 log "Terminé en $(( END - START )) s — $(( SIZE_BYTES / 1024 / 1024 )) Mo{{ ' (chiffré)' if pgbak_encrypt_recipient | length > 0 else '' }}."

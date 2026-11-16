@@ -1,0 +1,62 @@
+---
+# Ancien schéma, côté DESTINATION : la clé de la source posée SANS restriction sur `remote_username` (sudo sans mot de
+# passe) et ses sauvegardes en clair sous `<backup_root>/<nom>`. Importé par source.yml APRÈS la pose de la clé
+# restreinte sur le compte dédié (si celle-ci échoue, on ne vient pas jusqu'ici : la source garde son accès d'avant).
+#
+#   • la clé est RETIRÉE de `remote_username` (par son contenu, et par son commentaire si elle a changé) ;
+#   • les anciennes sauvegardes sont SIGNALÉES, jamais supprimées automatiquement : décision destructive, à prendre
+#     après la migration (Ansible/README.md, « Migration depuis l'ancien schéma ») par `-e backup_legacy_purge=yes`.
+#
+# Variables : bk_dest_host, bk_pubkey, bk_comment, bk_legacy_user, bk_legacy_keys (son authorized_keys),
+# bk_legacy_dir. Tâches DÉLÉGUÉES, une source à la fois.
+
+- name: Withdraw the key of this source from {{ bk_legacy_user }} on the destination (legacy, unrestricted)
+  ansible.posix.authorized_key:
+    user: "{{ bk_legacy_user }}"
+    path: "{{ bk_legacy_keys }}"
+    manage_dir: false
+    state: absent
+    key: "{{ bk_pubkey }}"
+  delegate_to: "{{ bk_dest_host }}"
+  become: true
+  throttle: 1
+
+- name: Withdraw any older key of this source left under its comment
+  ansible.builtin.lineinfile:
+    path: "{{ bk_legacy_keys }}"
+    regexp: " {{ bk_comment | regex_escape }}$"
+    state: absent
+  delegate_to: "{{ bk_dest_host }}"
+  become: true
+  throttle: 1
+
+- name: Look for backups left by the legacy scheme
+  ansible.builtin.find:
+    paths: "{{ bk_legacy_dir }}"
+    file_type: file
+  register: bk_legacy_found
+  delegate_to: "{{ bk_dest_host }}"
+  become: true
+  check_mode: false
+
+- name: Warn about legacy backups (kept until an explicit decision)
+  ansible.builtin.debug:
+    msg: >-
+      AVERTISSEMENT {{ inventory_hostname }} : {{ bk_legacy_found.matched }} fichier(s) de l'ancien schéma dans
+      {{ bk_dest_host }}:{{ bk_legacy_dir }} (EN CLAIR, propriété de {{ bk_legacy_user }}). Gardés. Migration :
+      Ansible/README.md, « Migration depuis l'ancien schéma » ; puis, une fois les nouvelles sauvegardes validées,
+      rejouer avec -e backup_legacy_purge=yes pour les supprimer.
+  when:
+    - bk_legacy_found.matched | default(0) | int > 0
+    - (backup_legacy_purge | default('') | string) != 'yes'
+
+- name: Remove the legacy backups (explicit decision, -e backup_legacy_purge=yes)
+  ansible.builtin.file:
+    path: "{{ bk_legacy_dir }}"
+    state: absent
+  delegate_to: "{{ bk_dest_host }}"
+  become: true
+  throttle: 1
+  when:
+    - (backup_legacy_purge | default('') | string) == 'yes'
+    - bk_legacy_dir is match('^/[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)+$')

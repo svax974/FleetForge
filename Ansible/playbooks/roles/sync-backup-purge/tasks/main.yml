@@ -21,6 +21,20 @@
   register: sync_backup_pubkey
   failed_when: false
 
+# AVANT de supprimer la clé de la source : révoquée sur le compte dédié ET sur
+# `remote_username` (ancien schéma), par son contenu et par son commentaire ;
+# répertoires de CETTE instance supprimés — ceux des autres sources restent.
+- name: Revoke the key and remove the archives on the destination host
+  ansible.builtin.import_role:
+    name: backup-setup
+    tasks_from: revoke
+  vars:
+    bk_dest_host: "{{ sync_backup_dest_host }}"
+    bk_pubkey: "{{ (sync_backup_pubkey.content | b64decode | trim) if sync_backup_pubkey.content is defined else '' }}"
+    bk_comment: "{{ inventory_hostname }}-{{ sync_backup_name }}-backup"
+    bk_name: "{{ sync_backup_name }}"
+    bk_remove_data: true
+
 - name: Remove the backup cron job, script and metric
   ansible.builtin.include_role:
     name: sync-backup-remove
@@ -34,15 +48,3 @@
     - "{{ sync_backup_ssh_key }}"
     - "{{ sync_backup_ssh_key }}.pub"
   become: true
-
-# Compte dédié de la destination (backup-setup) : clé révoquée, répertoire de
-# CETTE instance supprimé — ceux des autres sources restent.
-- name: Revoke the key and remove the archives on the destination host
-  ansible.builtin.import_role:
-    name: backup-setup
-    tasks_from: revoke
-  vars:
-    bk_dest_host: "{{ sync_backup_dest_host }}"
-    bk_pubkey: "{{ (sync_backup_pubkey.content | b64decode | trim) if sync_backup_pubkey.content is defined else '' }}"
-    bk_name: "{{ sync_backup_name }}"
-    bk_remove_data: true

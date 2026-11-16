@@ -3,20 +3,24 @@
 # passerelle `backup-gate` : la clé de cette machine ne lit que SES sauvegardes).
 # Généré par Ansible (rôle postgres-backup-install) — NE PAS ÉDITER À LA MAIN.
 #
-# Usage :
+# Usage (un seul mode) :
 #   {{ pgbak_dir }}/postgres-restore.sh --check                  # liste, ne lit ni ne restaure rien
 #   {{ pgbak_dir }}/postgres-restore.sh --verify [--file <nom>]  # relit, déchiffre, décompresse ; n'écrit RIEN
-#   {{ pgbak_dir }}/postgres-restore.sh --yes [--file <nom>]     # vérifie ENTIÈREMENT, puis remplace la base
+#   {{ pgbak_dir }}/postgres-restore.sh --yes [--file <nom>]     # relit tout, charge à côté, puis échange
 #
 # Sauvegarde chiffrée (`.age`) : la clé PRIVÉE de l'opérateur arrive sur l'ENTRÉE STANDARD, depuis son poste,
 # et n'est jamais écrite sur cette machine (gardée en mémoire, passée à age par un tube) :
-#   age -d ~/fleetforge-backup.key.age | ssh -p <port> {{ remote_username }}@<cette machine> \
+#   age -d ~/.config/fleetforge/backup-key.age | ssh -p <port> {{ remote_username }}@<cette machine> \
 #     '{{ pgbak_dir }}/postgres-restore.sh --verify'
 #
-# ARRÊTE l'application AVANT `--yes` — elle écrit en continu dans la base, la
-# laisser tourner mélange données restaurées et données fraîches sur une base à
-# moitié reconstruite. `--yes` relit d'abord la sauvegarde EN ENTIER (clé,
-# intégrité age, gzip) : la base vivante n'est supprimée qu'après ce contrôle.
+# `--yes`, dans l'ordre — la base vivante n'est JAMAIS supprimée :
+#   1. relecture COMPLÈTE (clé, intégrité age, gzip, ligne finale « -- PostgreSQL database dump complete ») ;
+#   2. chargement dans une base À CÔTÉ (`<base>_restore`), ON_ERROR_STOP=1 : une erreur arrête tout, base vivante
+#      intacte ;
+#   3. les deux relectures doivent avoir la même empreinte (sha256 de ce que la destination a envoyé) ;
+#   4. échange en UNE transaction : la base vivante devient `<base>_before_<horodatage>` (gardée : la supprimer à la
+#      main une fois la restauration validée — elle occupe sa place sur le disque), la copie devient `<base>`.
+# Arrête l'application AVANT `--yes` : ses connexions à la base sont coupées au moment de l'échange.
 set -euo pipefail
 
 DB="{{ pgbak_db }}"
@@ -28,28 +32,44 @@ DEST="{{ pgbak_dest_user }}@{{ pgbak_dest_addr }}"
 DEST_PORT="{{ pgbak_dest_port }}"
 SSH_OPTS=(-p "${DEST_PORT}" -i "${SSH_KEY}" -o IdentitiesOnly=yes -o BatchMode=yes \
           -o ServerAliveInterval=60 -o ServerAliveCountMax=10)
+DUMP_END="-- PostgreSQL database dump complete"
 
-MODE=list
+MODE=""
 DUMP_NAME=""
+
+usage() { echo "Usage : $0 --check | --verify [--file <nom>] | --yes [--file <nom>]" >&2; exit 2; }
+set_mode() {
+  if [ -n "${MODE}" ] && [ "${MODE}" != "$1" ]; then
+    echo "Options contradictoires : --${MODE} et --$1 (un seul mode)." >&2
+    exit 2
+  fi
+  MODE="$1"
+}
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --yes)    MODE=restore ;;
-    --check)  MODE=check ;;
-    --verify) MODE=verify ;;
-    --file)   shift; DUMP_NAME="${1:-}" ;;
-    *) echo "Option inconnue : $1" >&2; exit 2 ;;
+    --yes)    set_mode yes ;;
+    --check)  set_mode check ;;
+    --verify) set_mode verify ;;
+    --file)   [ $# -ge 2 ] || usage; shift; DUMP_NAME="$1" ;;
+    *) echo "Option inconnue : $1" >&2; usage ;;
   esac
   shift
 done
+[ "${MODE}" = "check" ] && [ -n "${DUMP_NAME}" ] && { echo "--check liste tout : --file n'y a pas de sens." >&2; exit 2; }
 
 log() { echo "$(date -Iseconds) $*"; }
 die() { echo "ERREUR : $*" >&2; exit 1; }
+sql() { docker exec "${CONTAINER}" psql -U "${DB_USER}" -d postgres -v ON_ERROR_STOP=1 -qtA -c "$1" </dev/null; }
 
 # Entrée standard fermée (`-n`) : elle porte la clé de l'opérateur, aucun appel ne doit la consommer.
 gate() { ssh -n "${SSH_OPTS[@]}" "${DEST}" "$@"; }
 
+WORK=""
 IDENTITY=""
+cleanup() { IDENTITY=""; [ -n "${WORK}" ] && rm -rf "${WORK}"; return 0; }
+trap cleanup EXIT
+
 # Clé age de l'opérateur, lue sur l'entrée standard, gardée en mémoire (jamais dans un fichier ni dans les
 # arguments d'un processus : `printf` est une commande interne du shell).
 read_identity() {
@@ -62,16 +82,29 @@ read_identity() {
 }
 decrypt() { age -d -i <(printf '%s\n' "${IDENTITY}"); }
 
-# Flux décompressé de la sauvegarde : il ne transite jamais par le disque local.
+# Fichier tel que la destination l'envoie, recopié sur la sortie ; son empreinte (sha256) dans $2. Rien ne
+# transite par le disque local (tube nommé dans un répertoire privé).
+fetch() {
+  local fifo="${WORK}/fifo.${RANDOM}" pid rc=0
+  mkfifo -m 600 "${fifo}"
+  sha256sum < "${fifo}" > "$2" &
+  pid=$!
+  gate get "$1" | tee "${fifo}" || rc=$?
+  wait "${pid}" || rc=1
+  rm -f "${fifo}"
+  return "${rc}"
+}
+
+# Flux SQL décompressé de la sauvegarde $1, empreinte du fichier reçu dans $2.
 stream() {
   case "$1" in
-    *.age) gate get "$1" | decrypt | gunzip -c ;;
-    *)     gate get "$1" | gunzip -c ;;
+    *.age) fetch "$1" "$2" | decrypt | gunzip -c ;;
+    *)     fetch "$1" "$2" | gunzip -c ;;
   esac
 }
 
 echo "Source des sauvegardes : {{ pgbak_dest_addr }}:{{ pgbak_dest_port }} ({{ pgbak_dest_dir }})"
-echo "--- générations disponibles (plus récente en tête) ---"
+echo "--- générations disponibles (plus récente en tête, heure de la destination) ---"
 LISTING="$(gate list)" || die "destination injoignable ou passerelle en refus."
 if [ -z "${LISTING}" ]; then
   echo "(aucune)"
@@ -99,13 +132,14 @@ fi
 
 echo "Sauvegarde retenue : ${DUMP_NAME}"
 
-if [ "${MODE}" = "list" ]; then
+if [ -z "${MODE}" ]; then
   cat >&2 <<EOF
 
 ERREUR : confirmation requise.
 
-Cette opération SUPPRIME la base '${DB}' et la reconstruit depuis
-${DUMP_NAME}. Toutes les données postérieures à cette sauvegarde sont perdues.
+--yes recharge la base '${DB}' depuis ${DUMP_NAME} (chargée à côté, puis
+échangée : l'actuelle est gardée sous un autre nom). Les données postérieures à
+cette sauvegarde ne seront plus dans '${DB}'.
 
 Vérifie que l'application est arrêtée, puis relance avec --yes
 (ou --verify pour seulement relire la sauvegarde).
@@ -114,42 +148,50 @@ EOF
 fi
 
 case "${DUMP_NAME}" in *.age) read_identity ;; esac
+WORK="$(mktemp -d)"
 
-# Relecture COMPLÈTE avant toute écriture : mauvaise clé, fichier tronqué ou altéré
-# (authentification age), gzip corrompu — tout échoue ici, base intacte.
+# 1. Relecture COMPLÈTE avant toute écriture : mauvaise clé, fichier tronqué ou altéré (authentification age),
+#    gzip corrompu, dump interrompu (ligne finale absente) — tout échoue ici, base intacte.
 log "Relecture complète de ${DUMP_NAME}."
-SQL_BYTES="$(stream "${DUMP_NAME}" | wc -c | tr -d ' ')" \
+TAIL="$(stream "${DUMP_NAME}" "${WORK}/sum1" | tail -c 512)" \
   || die "relecture en échec (clé, intégrité ou compression) — base NON modifiée."
-log "Sauvegarde lisible : ${SQL_BYTES} octets de SQL."
+case "${TAIL}" in
+  *"${DUMP_END}"*) ;;
+  *) die "dump incomplet (ligne « ${DUMP_END} » absente) — base NON modifiée." ;;
+esac
+log "Sauvegarde lisible et complète (empreinte $(cut -c1-16 "${WORK}/sum1")…)."
 
-[ "${MODE}" = "verify" ] && { IDENTITY=""; exit 0; }
+[ "${MODE}" = "verify" ] && exit 0
 
-ACTIVE="$(docker exec "${CONTAINER}" psql -U "${DB_USER}" -d "${DB}" -tAc \
-  "SELECT count(*) FROM pg_stat_activity WHERE datname = '${DB}' AND application_name <> 'psql';" </dev/null)"
-if [ "${ACTIVE}" -gt 0 ]; then
-  log "[WARN] ${ACTIVE} connexion(s) active(s) sur ${DB} — l'application tourne probablement encore."
-  log "[WARN] Elles seront coupées par le DROP DATABASE ... WITH (FORCE)."
+RESTORE_DB="${DB:0:54}_restore"
+OLD_DB="${DB:0:40}_before_$(date +%Y%m%d%H%M%S)"
+
+ACTIVE="$(sql "SELECT count(*) FROM pg_stat_activity WHERE datname = '${DB}';")"
+if [ "${ACTIVE:-0}" -gt 0 ]; then
+  log "[WARN] ${ACTIVE} connexion(s) sur ${DB} — l'application tourne probablement encore ; coupées à l'échange."
 fi
 
-log "Suppression et recréation de ${DB}."
-docker exec "${CONTAINER}" psql -U "${DB_USER}" -d postgres -v ON_ERROR_STOP=1 \
-  -c "DROP DATABASE IF EXISTS \"${DB}\" WITH (FORCE);" </dev/null
-docker exec "${CONTAINER}" psql -U "${DB_USER}" -d postgres -v ON_ERROR_STOP=1 \
-  -c "CREATE DATABASE \"${DB}\" OWNER \"${DB_USER}\";" </dev/null
-
-log "Chargement du dump."
-# ON_ERROR_STOP=0 volontairement : un dump PostgreSQL rejoué contient toujours
-# quelques ordres qui échouent sans conséquence (droits, extensions déjà
-# présentes) ; les erreurs réelles sont dans le journal.
-if ! stream "${DUMP_NAME}" | docker exec -i "${CONTAINER}" psql -U "${DB_USER}" -d "${DB}" -v ON_ERROR_STOP=0; then
-  IDENTITY=""
-  log "[ERROR] Le chargement a échoué. La base est dans un état intermédiaire."
-  exit 1
+# 2. Chargement À CÔTÉ : la base vivante n'est pas touchée tant que la copie n'est pas complète.
+log "Chargement dans ${RESTORE_DB} (base vivante intacte)."
+sql "DROP DATABASE IF EXISTS \"${RESTORE_DB}\";"
+sql "CREATE DATABASE \"${RESTORE_DB}\" OWNER \"${DB_USER}\";"
+if ! stream "${DUMP_NAME}" "${WORK}/sum2" \
+     | docker exec -i "${CONTAINER}" psql -U "${DB_USER}" -d "${RESTORE_DB}" -v ON_ERROR_STOP=1 -q >/dev/null; then
+  die "chargement en échec : ${DB} INTACTE ; copie partielle laissée dans ${RESTORE_DB} (à supprimer)."
 fi
-IDENTITY=""
+
+# 3. Ce qui vient d'être chargé est bien ce qui a été vérifié.
+[ "$(cut -d' ' -f1 "${WORK}/sum1")" = "$(cut -d' ' -f1 "${WORK}/sum2")" ] \
+  || die "les deux relectures diffèrent (fichier changé sur la destination ?) : ${DB} INTACTE, ${RESTORE_DB} à supprimer."
+
+# 4. Échange en une transaction : jamais d'instant sans base, jamais de suppression.
+log "Échange : ${DB} → ${OLD_DB}, ${RESTORE_DB} → ${DB}."
+sql "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname IN ('${DB}', '${RESTORE_DB}') AND pid <> pg_backend_pid();" >/dev/null
+sql "BEGIN; ALTER DATABASE \"${DB}\" RENAME TO \"${OLD_DB}\"; ALTER DATABASE \"${RESTORE_DB}\" RENAME TO \"${DB}\"; COMMIT;" \
+  || die "échange refusé (connexion revenue ?) : ${DB} INTACTE, la copie restaurée est dans ${RESTORE_DB}."
 
 log "Contrôle de cohérence."
-docker exec "${CONTAINER}" psql -U "${DB_USER}" -d "${DB}" -c \
-  "SELECT pg_size_pretty(pg_database_size(current_database())) AS taille;" </dev/null
+sql "SELECT pg_size_pretty(pg_database_size('${DB}'));"
 
-log "Restauration terminée. Relance l'application."
+log "Restauration terminée. Ancienne base GARDÉE sous ${OLD_DB} : la supprimer à la main une fois l'application"
+log "validée (DROP DATABASE \"${OLD_DB}\";). Relance l'application."

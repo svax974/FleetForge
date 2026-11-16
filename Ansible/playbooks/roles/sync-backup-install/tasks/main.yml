@@ -27,10 +27,10 @@
   ansible.builtin.assert:
     that:
       - sync_backup_name is match('^[a-z0-9][a-z0-9-]{0,62}$')
-      - sync_backup_keep | string is match('^[0-9]{1,4}$') and sync_backup_keep | int >= 1
+      - sync_backup_keep | string is match('^[0-9]{1,4}$') and sync_backup_keep | int >= 1 and sync_backup_keep | int <= 1000
       - sync_backup_encrypt_recipient | length == 0 or sync_backup_encrypt_recipient is match('^age1[02-9ac-hj-np-z]{58}$')
     fail_msg: >-
-      sync_backup_name (minuscules, chiffres, tirets), sync_backup_keep (>= 1) ou sync_backup_encrypt_recipient
+      sync_backup_name (minuscules, chiffres, tirets), sync_backup_keep (1 à 1000) ou sync_backup_encrypt_recipient
       (vide, ou destinataire age « age1… » de 62 caractères) invalide.
     quiet: true
   tags: [always]
@@ -107,26 +107,13 @@
     bk_comment: "{{ inventory_hostname }}-{{ sync_backup_name }}-backup"
   tags: [retarget]
 
-- name: Scan the destination host key
-  ansible.builtin.set_fact:
-    sync_backup_dest_hostkey: "{{ lookup('pipe', 'ssh-keyscan -p ' ~ (sync_backup_dest_port | string | quote) ~ ' -t ed25519 ' ~ (sync_backup_dest_addr | quote) ~ ' 2>/dev/null | grep -v \"^#\" || true') }}"
-  tags: [retarget]
-
-- name: Check the destination answered on its SSH port
-  ansible.builtin.assert:
-    that: sync_backup_dest_hostkey | length > 0
-    fail_msg: >-
-      Aucune clé d'hôte relevée sur {{ sync_backup_dest_addr }}:{{ sync_backup_dest_port }} depuis ce poste
-      (`ssh-keyscan`) : destination éteinte, port non redirigé (NAT) ou filtré.
-    quiet: true
-  tags: [retarget]
-
-# Les scripts tournent en root : le known_hosts est celui de root.
+# Les scripts tournent en root : le known_hosts est celui de root. Clé d'hôte lue sur la destination par la
+# connexion d'Ansible (backup-setup/tasks/source.yml, `bk_dest_hostkey`), pas par un `ssh-keyscan` du poste.
 - name: Refresh the destination host key in root's known_hosts
   ansible.builtin.known_hosts:
     path: "{{ sync_backup_known_hosts }}"
     name: "{{ sync_backup_known_host }}"
-    key: "{{ sync_backup_dest_hostkey }}"
+    key: "{{ sync_backup_known_host }} {{ bk_dest_hostkey }}"
     state: present
   become: true
   tags: [retarget]

@@ -1,12 +1,13 @@
 ---
 # Côté DESTINATION, pour la source jouée (inventory_hostname) : compte dédié et passerelle (account.yml), répertoire
-# PROPRE à la source, clé de la source liée à la passerelle, ouverture SSH depuis la source. Importé par
+# PROPRE à la source, clé de la source liée à la passerelle, retrait de l'ancien accès sans restriction (legacy.yml),
+# ouverture SSH depuis la source, clé d'hôte de la destination lue par la connexion d'Ansible. Importé par
 # postgres-backup-install et sync-backup-install (`import_role`, tag `retarget`), toutes les tâches DÉLÉGUÉES à la
 # destination, une source à la fois (ufw et authorized_keys : lecture-modification-écriture).
 #
 # Variables : bk_dest_host (entrée d'inventaire de la destination), bk_dest_port (port SSH de la destination),
 # bk_name (répertoire et nom de la sauvegarde), bk_keep (générations gardées par la passerelle), bk_pubkey (clé
-# publique de la source), bk_comment.
+# publique de la source), bk_comment. Rend `bk_dest_hostkey` (« <type> <clé> » de la destination).
 
 - name: Check what the destination will bind the key to
   ansible.builtin.assert:
@@ -14,23 +15,28 @@
       - bk_dest_host in groups['all']
       - bk_name is match('^[a-z0-9][a-z0-9-]{0,62}$')
       - bk_keep | string is match('^[0-9]{1,4}$')
-      - bk_keep | int >= 1
+      # Les bornes de la passerelle (1 à 1000) : au-delà, elle refuserait TOUS les appels de la clé.
+      - bk_keep | int >= 1 and bk_keep | int <= 1000
       - bk_dest_port | string is match('^[0-9]{1,5}$')
       # `from=` et la règle ufw de la destination : l'adresse de la source, littérale.
-      - ansible_host is match(backup_origin_pattern)
+      - ansible_host is match(backup_ipv4_pattern) or ansible_host is match(backup_ipv6_pattern)
     fail_msg: >-
       {{ inventory_hostname }} : destination `{{ bk_dest_host }}` hors inventaire, nom de sauvegarde
-      `{{ bk_name }}` invalide, générations ({{ bk_keep }}) < 1, port de destination ({{ bk_dest_port }}) invalide, ou
-      `ansible_host` ({{ ansible_host }}) qui n'est pas une adresse IP littérale — la clé est liée à cette adresse
-      (`from=`), comme l'ouverture du pare-feu de la destination.
+      `{{ bk_name }}` invalide, générations ({{ bk_keep }}) hors de 1 à 1000, port de destination ({{ bk_dest_port }})
+      invalide, ou `ansible_host` ({{ ansible_host }}) qui n'est pas une adresse IPv4/IPv6 littérale — la clé est liée
+      à cette adresse (`from=`), comme l'ouverture du pare-feu de la destination.
     quiet: true
 
 # Figées AVANT toute délégation : dans une tâche déléguée, `ansible_host` pourrait désigner la destination. Le
 # plancher d'espace libre est une propriété de la DESTINATION (son entrée), que la passerelle tient pendant l'écriture.
-- name: Record the address of this source and the floor of the destination
+- name: Record the address of this source and what the destination holds
   ansible.builtin.set_fact:
     bk_source_addr: "{{ ansible_host }}"
     bk_floor_gb: "{{ hostvars[bk_dest_host]['backup_floor_gb'] | default(backup_floor_gb) }}"
+    bk_legacy_user: "{{ hostvars[bk_dest_host]['remote_username'] | default(remote_username) }}"
+    bk_legacy_dir: >-
+      {{ (hostvars[bk_dest_host]['backup_root'] | default(backup_root | default('/home/'
+         ~ (hostvars[bk_dest_host]['remote_username'] | default(remote_username)) ~ '/backups'))) ~ '/' ~ bk_name }}
 
 - name: Check the free-space floor of the destination
   ansible.builtin.assert:
@@ -69,6 +75,13 @@
   become: true
   throttle: 1
 
+# Seulement maintenant que la clé restreinte est en place : retirer l'ancien accès sans restriction et signaler les
+# anciennes sauvegardes en clair.
+- name: Withdraw the legacy access and report the legacy backups
+  ansible.builtin.import_tasks: legacy.yml
+  vars:
+    bk_legacy_keys: "/home/{{ bk_legacy_user }}/.ssh/authorized_keys"
+
 - name: Open SSH on the destination for this source
   community.general.ufw:
     rule: allow
@@ -79,3 +92,23 @@
   delegate_to: "{{ bk_dest_host }}"
   become: true
   throttle: 1
+
+# Clé d'hôte de la destination pour le known_hosts de la source : lue par la connexion d'Ansible, déjà authentifiée
+# (son propre known_hosts), et non par un `ssh-keyscan` depuis le poste de contrôle — premier contact non vérifié,
+# et une machine derrière un NAT peut y être injoignable depuis le poste alors qu'Ansible la joint.
+- name: Read the host key of the destination
+  ansible.builtin.slurp:
+    src: /etc/ssh/ssh_host_ed25519_key.pub
+  register: bk_dest_hostkey_file
+  delegate_to: "{{ bk_dest_host }}"
+  check_mode: false
+
+- name: Keep the type and the key
+  ansible.builtin.set_fact:
+    bk_dest_hostkey: "{{ (bk_dest_hostkey_file.content | b64decode).split()[:2] | join(' ') }}"
+
+- name: Check the host key of the destination
+  ansible.builtin.assert:
+    that: bk_dest_hostkey is match('^ssh-ed25519 [A-Za-z0-9+/=]{40,}$')
+    fail_msg: "{{ bk_dest_host }} : clé d'hôte ed25519 illisible (/etc/ssh/ssh_host_ed25519_key.pub)."
+    quiet: true

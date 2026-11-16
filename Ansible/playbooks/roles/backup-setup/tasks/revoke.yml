@@ -1,23 +1,62 @@
 ---
-# Révocation, côté DESTINATION, de la clé d'une source et (option) suppression de ses sauvegardes. Importé par
-# postgres-backup-purge et sync-backup-purge. Variables : bk_dest_host, bk_pubkey (vide : clé déjà absente de la
-# source, rien à révoquer), bk_name, bk_remove_data.
+# Révocation, côté DESTINATION, de l'accès d'une source et (option) suppression de ses sauvegardes. Importé par
+# postgres-backup-purge et sync-backup-purge, AVANT qu'ils ne suppriment la clé de la source (sinon on ne saurait
+# plus laquelle révoquer). Révoque sur le compte dédié ET sur `remote_username` (ancien schéma), par le contenu de la
+# clé quand elle est connue et TOUJOURS par son commentaire (`<source>-<nom>-backup`) — une clé déjà disparue de la
+# source est révoquée quand même.
+#
+# Variables : bk_dest_host, bk_pubkey (vide : clé absente de la source), bk_comment, bk_name, bk_remove_data.
 
-- name: Revoke the key of this source on the destination
+- name: Work out the accounts and directories of this source on the destination
+  ansible.builtin.set_fact:
+    bk_revoke_target: "{{ bk_dest_host if bk_dest_host in groups['all'] else undef(hint='bk_dest_host: not an inventory host') }}"
+    bk_legacy_user: "{{ hostvars[bk_dest_host]['remote_username'] | default(remote_username) }}"
+    bk_legacy_dir: >-
+      {{ (hostvars[bk_dest_host]['backup_root'] | default(backup_root | default('/home/'
+         ~ (hostvars[bk_dest_host]['remote_username'] | default(remote_username)) ~ '/backups'))) ~ '/' ~ bk_name }}
+
+# Un compte absent de la destination (jamais déployé) n'a rien à révoquer.
+- name: Look for the accounts on the destination
+  ansible.builtin.command:
+    argv: [getent, passwd, "{{ item }}"]
+  loop: ["{{ backup_account }}", "{{ bk_legacy_user }}"]
+  register: bk_revoke_accounts
+  changed_when: false
+  failed_when: bk_revoke_accounts.rc not in [0, 2]
+  check_mode: false
+  delegate_to: "{{ bk_revoke_target }}"
+
+- name: Revoke the key of this source by its content
   ansible.posix.authorized_key:
-    user: "{{ backup_account }}"
+    user: "{{ item.item }}"
+    path: "/home/{{ item.item }}/.ssh/authorized_keys"
+    manage_dir: false
     state: absent
     key: "{{ bk_pubkey }}"
-  delegate_to: "{{ bk_dest_host if bk_dest_host in groups['all'] else undef(hint='bk_dest_host: not an inventory host') }}"
+  loop: "{{ bk_revoke_accounts.results | selectattr('rc', 'equalto', 0) | list }}"
+  loop_control:
+    label: "{{ item.item }}"
+  delegate_to: "{{ bk_revoke_target }}"
   become: true
   throttle: 1
   when: bk_pubkey | length > 0
 
-- name: Remove the backups of this source on the destination
-  ansible.builtin.file:
-    path: "{{ backup_account_root }}/{{ bk_name }}"
+- name: Revoke the key of this source by its comment
+  ansible.builtin.lineinfile:
+    path: "/home/{{ item }}/.ssh/authorized_keys"
+    regexp: " {{ bk_comment | regex_escape }}$"
     state: absent
-  delegate_to: "{{ bk_dest_host if bk_dest_host in groups['all'] else undef(hint='bk_dest_host: not an inventory host') }}"
+  loop: ["{{ backup_account }}", "{{ bk_legacy_user }}"]
+  delegate_to: "{{ bk_revoke_target }}"
+  become: true
+  throttle: 1
+
+- name: Remove the backups of this source on the destination (dedicated account and legacy scheme)
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: ["{{ backup_account_root }}/{{ bk_name }}", "{{ bk_legacy_dir }}"]
+  delegate_to: "{{ bk_revoke_target }}"
   become: true
   throttle: 1
   when:

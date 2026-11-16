@@ -16,20 +16,25 @@
 #
 # La destination n'offre pas de shell : la clé est liée à la passerelle
 # `backup-gate` (rôle backup-setup), confinée au répertoire de cette instance
-# (verbes : free-kb, last-success, put, commit, abort, prune, stamp, list, get).
+# (verbes : free-kb, last-success, put, commit, abort, list, get). `commit`
+# contrôle l'archive, élague au nombre de générations fixé côté destination
+# (horloge de la destination) et enregistre le succès.
 #
-# RESTAURATION (en root sur cette machine, conteneur arrêté ; `list` donne les archives) :
-#   docker stop sync-{{ sync_instance }}
+# RESTAURATION (en root sur cette machine, conteneur arrêté ; `list` donne les archives,
+# la plus récente en tête). `pipefail` : une archive illisible arrête tout AVANT de
+# toucher aux données (rien n'est supprimé si l'extraction échoue) :
+#   set -o pipefail; docker stop sync-{{ sync_instance }}
 #   G=(ssh -n -p {{ sync_backup_dest_port }} -i {{ sync_backup_ssh_key }} -o IdentitiesOnly=yes {{ sync_backup_dest_user }}@{{ sync_backup_dest_addr }})
 #   "${G[@]}" list
 {% if sync_backup_encrypt_recipient | length > 0 %}
 #   # clé de l'opérateur collée sur l'entrée standard (jamais écrite sur le disque) :
 #   read -rs AGE_KEY   # AGE-SECRET-KEY-1…
 #   mkdir -m 700 /tmp/restore && "${G[@]}" get <archive>.tar.gz.age \
-#     | age -d -i <(printf '%s\n' "$AGE_KEY") | tar -xz -C /tmp/restore; unset AGE_KEY
+#     | age -d -i <(printf '%s\n' "$AGE_KEY") | tar -xz -C /tmp/restore && echo EXTRACTION-OK; unset AGE_KEY
 {% else %}
-#   mkdir -m 700 /tmp/restore && "${G[@]}" get <archive>.tar.gz | tar -xz -C /tmp/restore
+#   mkdir -m 700 /tmp/restore && "${G[@]}" get <archive>.tar.gz | tar -xz -C /tmp/restore && echo EXTRACTION-OK
 {% endif %}
+#   # seulement après « EXTRACTION-OK » :
 #   rm -f {{ sync_backup_data_dir }}/sync.db{,-wal,-shm}; rm -rf {{ sync_backup_data_dir }}/blobs
 #   cp /tmp/restore/sync.db {{ sync_backup_data_dir }}/ ; cp -a /tmp/restore/blobs {{ sync_backup_data_dir }}/
 #   chown -R {{ sync_backup_uid }}:{{ sync_backup_gid }} {{ sync_backup_data_dir }} && docker start sync-{{ sync_instance }}
@@ -57,8 +62,8 @@ SSH_KEY="{{ sync_backup_ssh_key }}"
 KNOWN_HOSTS="{{ sync_backup_known_hosts }}"
 DEST="{{ sync_backup_dest_user }}@{{ sync_backup_dest_addr }}"
 DEST_PORT="{{ sync_backup_dest_port }}"
-SSH_OPTS=(-p "${DEST_PORT}" -i "${SSH_KEY}" -o BatchMode=yes -o UserKnownHostsFile="${KNOWN_HOSTS}" \
-          -o ServerAliveInterval=60 -o ServerAliveCountMax=10)
+SSH_OPTS=(-p "${DEST_PORT}" -i "${SSH_KEY}" -o IdentitiesOnly=yes -o BatchMode=yes \
+          -o UserKnownHostsFile="${KNOWN_HOSTS}" -o ServerAliveInterval=60 -o ServerAliveCountMax=10)
 
 log() { echo "$(date -Iseconds) [${BACKUP_NAME}] $*"; }
 # Un appel = un verbe de la passerelle ; entrée standard fermée sauf pour `put`.
@@ -161,17 +166,17 @@ if ! tar -czf - "${TAR_ARGS[@]}" | gate_put "${OUT}"; then
 fi
 
 # Archive vérifiée par la passerelle AVANT de la rendre visible
-# ({{ 'en-tête age' if sync_backup_encrypt_recipient | length > 0 else 'gzip -t' }}) : un `.tmp` traînant est visiblement un échec, une
-# archive tronquée ne se fait pas passer pour valide.
+# ({{ 'fichier age complet' if sync_backup_encrypt_recipient | length > 0 else 'flux gzip complet et non vide' }}), puis élagage (APRÈS le succès) et
+# enregistrement du succès avec l'horloge de la destination.
 SIZE_BYTES="$(gate commit "${OUT}")" \
   || { gate abort "${OUT}" || true; fail "Archive refusée par la destination."; }
 case "${SIZE_BYTES}" in ''|*[!0-9]*) SIZE_BYTES=0 ;; esac
 
-# Rétention APRÈS le succès (nombre de générations fixé côté destination) :
-# purger d'abord laisserait un instant sans copie saine si le transfert échouait.
-gate prune >/dev/null || log "[WARN] Purge des anciennes générations en échec."
+# L'archive doit encore être là après l'élagage : sinon, échec visible (BackupFailed).
+LISTING="$(gate list)" || fail "Liste des archives illisible après le dépôt."
+printf '%s\n' "${LISTING}" | awk -F'\t' -v n="${OUT}" '$1 == n { found = 1 } END { exit !found }' \
+  || fail "${OUT} absente de la destination après l'élagage."
 
 END=$(date +%s)
-gate stamp >/dev/null || fail "Impossible d'enregistrer le succès sur la destination."
 write_metrics 1 "$(( END - START ))" "${SIZE_BYTES}" "${END}"
 log "Terminé en $(( END - START )) s — $(( SIZE_BYTES / 1024 )) Kio{{ ' (chiffrée)' if sync_backup_encrypt_recipient | length > 0 else '' }}."

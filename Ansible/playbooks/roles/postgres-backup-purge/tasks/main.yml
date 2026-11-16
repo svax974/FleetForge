@@ -18,6 +18,21 @@
   register: pgbak_pubkey
   failed_when: false
 
+# AVANT de supprimer la clé de la source : révoquée sur le compte dédié ET sur
+# `remote_username` (ancien schéma), par son contenu et par son commentaire ;
+# répertoires de CETTE source supprimés (compte dédié et ancien schéma) — ceux
+# des autres sources restent.
+- name: Revoke the key and remove the backup data on the destination host
+  ansible.builtin.import_role:
+    name: backup-setup
+    tasks_from: revoke
+  vars:
+    bk_dest_host: "{{ pgbak_dest_host }}"
+    bk_pubkey: "{{ (pgbak_pubkey.content | b64decode | trim) if pgbak_pubkey.content is defined else '' }}"
+    bk_comment: "{{ inventory_hostname }}-{{ pgbak_name }}-backup"
+    bk_name: "{{ pgbak_name }}"
+    bk_remove_data: true
+
 - name: Remove the backup cron job
   ansible.builtin.cron:
     name: "{{ pgbak_name }} postgres backup"
@@ -48,15 +63,3 @@
   loop:
     - "{{ pgbak_ssh_key_path }}"
     - "{{ pgbak_ssh_key_path }}.pub"
-
-# Compte dédié de la destination (backup-setup) : clé révoquée, répertoire de
-# CETTE source supprimé — ceux des autres sources restent.
-- name: Revoke the key and remove the backup data on the destination host
-  ansible.builtin.import_role:
-    name: backup-setup
-    tasks_from: revoke
-  vars:
-    bk_dest_host: "{{ pgbak_dest_host }}"
-    bk_pubkey: "{{ (pgbak_pubkey.content | b64decode | trim) if pgbak_pubkey.content is defined else '' }}"
-    bk_name: "{{ pgbak_name }}"
-    bk_remove_data: true
