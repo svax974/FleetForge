@@ -115,58 +115,58 @@
   tags: [always]
 
 # `dedicated_listeners_validate_only: true` (proxy-update/tasks/main.yml, avant de toucher à /etc/nginx) : on s'arrête ici,
-# la déclaration est contrôlée et le fait `proxy_dedicated_listeners` posé, sans aucune règle ufw.
-- name: Stop after the declaration check when only validating
-  ansible.builtin.meta: end_role
-  when: dedicated_listeners_validate_only | default(false) | bool
-  tags: [always]
+# la déclaration est contrôlée et le fait `proxy_dedicated_listeners` posé, sans aucune règle ufw. Le reste du fichier est un
+# bloc `when` et non un `meta: end_role` : `end_role` exige ansible-core >= 2.18 et est REFUSÉ dès le chargement des tâches
+# (même sous un `when` faux) par un nœud de contrôle plus ancien — la version de celui d'infra1 (pipx) n'est pas garantie.
+- name: Open the dedicated listeners and remove the stale openings
+  when: not (dedicated_listeners_validate_only | default(false) | bool)
+  block:
+    - name: Allow each dedicated listener from its client servers only
+      community.general.ufw:
+        rule: allow
+        proto: tcp
+        from_ip: "{{ item.1 }}"
+        port: "{{ item.0.port }}"
+        comment: "dedicated-listener {{ item.0.entry }}/{{ item.0.name }}"
+      loop: "{{ proxy_dedicated_listeners | subelements('addresses') }}"
+      loop_control:
+        label: "{{ item.0.entry }}/{{ item.0.name }} {{ item.0.port }} <- {{ item.1 }}"
 
-- name: Allow each dedicated listener from its client servers only
-  community.general.ufw:
-    rule: allow
-    proto: tcp
-    from_ip: "{{ item.1 }}"
-    port: "{{ item.0.port }}"
-    comment: "dedicated-listener {{ item.0.entry }}/{{ item.0.name }}"
-  loop: "{{ proxy_dedicated_listeners | subelements('addresses') }}"
-  loop_control:
-    label: "{{ item.0.entry }}/{{ item.0.name }} {{ item.0.port }} <- {{ item.1 }}"
+    # Retrait des ouvertures périmées (client retiré, port changé, écouteur supprimé) : seules les règles qui portent notre
+    # commentaire sont candidates ; le critère est le COUPLE (source, port). `ufw show added` fonctionne ufw inactif.
+    - name: Read the user rules ufw holds
+      ansible.builtin.command: ufw show added
+      register: proxy_dedicated_ufw_added
+      changed_when: false
+      check_mode: false
 
-# Retrait des ouvertures périmées (client retiré, port changé, écouteur supprimé) : seules les règles qui portent notre
-# commentaire sont candidates ; le critère est le COUPLE (source, port). `ufw show added` fonctionne ufw inactif.
-- name: Read the user rules ufw holds
-  ansible.builtin.command: ufw show added
-  register: proxy_dedicated_ufw_added
-  changed_when: false
-  check_mode: false
+    - name: Work out the dedicated-listener openings that are no longer wanted
+      vars:
+        _wanted: >-
+          {%- set out = [] -%}
+          {%- for l in proxy_dedicated_listeners -%}
+          {%- for a in l.addresses -%}{%- set _ = out.append(a ~ ':' ~ l.port) -%}{%- endfor -%}
+          {%- endfor -%}
+          {{ out }}
+        _ours: >-
+          {{ proxy_dedicated_ufw_added.stdout_lines
+             | select('match', '^ufw allow from [0-9.]+ to any port [0-9]+ .*comment .dedicated-listener ') | list }}
+        # `ufw allow from <source> to any port <port> proto tcp comment '…'` : mots 3 (source) et 7 (port).
+        _held: >-
+          {%- set out = [] -%}
+          {%- for line in _ours -%}
+          {%- set w = line.split(' ') -%}
+          {%- set _ = out.append(w[3] ~ ':' ~ w[7]) -%}
+          {%- endfor -%}
+          {{ out }}
+      ansible.builtin.set_fact:
+        proxy_dedicated_stale: "{{ _held | reject('in', _wanted) | unique | list }}"
 
-- name: Work out the dedicated-listener openings that are no longer wanted
-  vars:
-    _wanted: >-
-      {%- set out = [] -%}
-      {%- for l in proxy_dedicated_listeners -%}
-      {%- for a in l.addresses -%}{%- set _ = out.append(a ~ ':' ~ l.port) -%}{%- endfor -%}
-      {%- endfor -%}
-      {{ out }}
-    _ours: >-
-      {{ proxy_dedicated_ufw_added.stdout_lines
-         | select('match', '^ufw allow from [0-9.]+ to any port [0-9]+ .*comment .dedicated-listener ') | list }}
-    # `ufw allow from <source> to any port <port> proto tcp comment '…'` : mots 3 (source) et 7 (port).
-    _held: >-
-      {%- set out = [] -%}
-      {%- for line in _ours -%}
-      {%- set w = line.split(' ') -%}
-      {%- set _ = out.append(w[3] ~ ':' ~ w[7]) -%}
-      {%- endfor -%}
-      {{ out }}
-  ansible.builtin.set_fact:
-    proxy_dedicated_stale: "{{ _held | reject('in', _wanted) | unique | list }}"
-
-- name: Remove the dedicated-listener openings that are no longer wanted
-  community.general.ufw:
-    rule: allow
-    proto: tcp
-    from_ip: "{{ item.split(':')[0] }}"
-    port: "{{ item.split(':')[1] }}"
-    delete: true
-  loop: "{{ proxy_dedicated_stale }}"
+    - name: Remove the dedicated-listener openings that are no longer wanted
+      community.general.ufw:
+        rule: allow
+        proto: tcp
+        from_ip: "{{ item.split(':')[0] }}"
+        port: "{{ item.split(':')[1] }}"
+        delete: true
+      loop: "{{ proxy_dedicated_stale }}"

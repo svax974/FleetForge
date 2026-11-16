@@ -1192,6 +1192,51 @@ class FactCollisionTests(unittest.TestCase):
         self.assertEqual(sorted(e.split("`")[1] for e in errors), ["p", "x_script", "x_tmp"], errors)
 
 
+def newer_core_features(root):
+    """[(fichier, motif)] des tâches qui exigent un ansible-core récent que le nœud de contrôle (infra1 : ansible installé par
+    pipx, version non garantie) peut ne pas avoir : `meta: end_role` (>= 2.18) est refusé dès le chargement des tâches, même
+    sous un `when` faux."""
+    found = []
+    for base, _, names in os.walk(root):
+        for name in sorted(names):
+            if not name.endswith((".yml", ".yaml")):
+                continue
+            path = os.path.join(base, name)
+            try:
+                data = check._load(path)
+            except yaml.YAMLError:
+                continue
+            for task in check._tasks_in(data or []):
+                meta = task.get("ansible.builtin.meta", task.get("meta"))
+                if isinstance(meta, str) and meta.strip() == "end_role":
+                    found.append((os.path.relpath(path, root), "meta: end_role"))
+    return found
+
+
+class ControlNodeCompatibilityTests(unittest.TestCase):
+    def test_no_task_needs_a_recent_ansible_core_for_end_role(self):
+        self.assertEqual(newer_core_features(PLAYBOOKS), [])
+
+    def test_the_lint_catches_end_role_anywhere_in_a_task_tree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "a.yml"), "w") as f:
+                f.write("- name: x\n  ansible.builtin.meta: end_role\n  when: false\n"
+                        "- block:\n    - name: y\n      meta: end_role\n")
+            self.assertEqual(len(newer_core_features(tmp)), 2)
+
+    def test_the_validate_only_stop_is_a_block_condition_not_a_meta_task(self):
+        with open(os.path.join(ROLES, "proxy-security", "tasks", "dedicated-listeners.yml"), encoding="utf-8") as f:
+            tasks = yaml.safe_load(f)
+        applying = [t for t in tasks if "block" in t]
+        self.assertEqual(len(applying), 1)
+        self.assertIn("dedicated_listeners_validate_only", str(applying[0]["when"]))
+        modules = {next(k for k in t if k.startswith(("ansible.builtin.", "community.general."))) for t in applying[0]["block"]}
+        self.assertIn("community.general.ufw", modules)
+        # everything that touches ufw sits under that condition
+        outside = [t for t in tasks if "community.general.ufw" in t]
+        self.assertEqual(outside, [])
+
+
 class LocalProbeTests(unittest.TestCase):
     """Relecture finale : la règle OUTPUT `local:deny` rejette `srvc` ; toute attente locale sur un port de l'app d'un
     hôte durci passe par root (`become: true`). svcprobe tourne en root (svcprobe-install : `User=root`)."""
