@@ -452,12 +452,14 @@
   changed_when: false
   tags: [config]
 
+# En mode `--check` la tâche précédente est sautée : `ff_metrics` n'a alors pas de `content`.
 - name: Report what the application sees
   ansible.builtin.debug:
     msg: >-
       {{ ff_metrics.content.split('\n')
          | select('match', '^fleetforge_(inventories|roles|ansible_available|fleet_)')
          | list }}
+  when: ff_metrics.content is defined
   tags: [config]
 
 - name: Report the access credentials
