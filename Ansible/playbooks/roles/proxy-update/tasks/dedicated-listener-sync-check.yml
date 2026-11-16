@@ -1,0 +1,65 @@
+---
+# Resynchronisation complète (main.yml, `update-proxy.yml` / `deploy-proxy.yml`) : les écouteurs dédiés sont contrôlés AVANT
+# de vider /etc/nginx et de redémarrer nginx — la déclaration `dedicated_listeners` (fait `proxy_dedicated_listeners`), puis
+# le rendu de CHAQUE vhost qui porte un de ces ports (un seul `server {}`, locations restreintes aux seules adresses clientes),
+# sur le poste de contrôle. Aucun écouteur dédié applicable à ce proxy : rien de plus, comportement inchangé.
+# Produit `proxy_listener_owners` : [{listener, sites}] (`sites` = vhosts du parc dont le rendu écoute sur le port).
+
+# Déclaration invalide : échec ici, avant tout changement (même contrôle que proxy-security, sans règle ufw).
+- name: Check the dedicated listener declaration before touching /etc/nginx
+  ansible.builtin.include_role:
+    name: proxy-security
+    tasks_from: dedicated-listeners
+    apply:
+      tags: [always]
+  vars:
+    dedicated_listeners_validate_only: true
+  tags: [always]
+
+# Un rendu par vhost, découpé en mots (`;`, `{`, `}` isolés, commentaires retirés) : le mot qui suit `listen` donne le port,
+# quelle que soit la forme (`9745`, `*:9745`, `[::]:9745`, `0.0.0.0:9745 default_server`…) et la mise en page. Sans antislash.
+- name: Find the vhost of the parc that listens on each dedicated port
+  vars:
+    _files: >-
+      {{ query('ansible.builtin.fileglob', proxy_update_dir ~ '/sites-enabled/*')
+         | map('basename') | reject('match', '_.*') | list }}
+  ansible.builtin.set_fact:
+    proxy_listener_owners: >-
+      {%- set out = [] -%}
+      {%- for l in proxy_dedicated_listeners | default([]) -%}
+      {%- set hits = [] -%}
+      {%- for f in _files -%}
+      {%- set words = (lookup('ansible.builtin.template', proxy_update_dir ~ '/sites-enabled/' ~ f).splitlines()
+          | map('regex_replace', '#.*$', '') | join(' ')
+          | replace(';', ' ; ') | replace('{', ' { ') | replace('}', ' } ')).split() -%}
+      {%- for word in words -%}
+      {%- set at = loop.index0 -%}
+      {%- if word == 'listen' and at + 1 < words | length and (at == 0 or words[at - 1] in [';', '{', '}'])
+             and (words[at + 1].split(':') | last) == (l.port | string) and f not in hits -%}
+      {%- set _ = hits.append(f) -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {%- endfor -%}
+      {%- set _ = out.append({'listener': l, 'sites': hits}) -%}
+      {%- endfor -%}
+      {{ out }}
+  tags: [always]
+
+- name: Refuse a dedicated port that several vhosts of the parc listen on
+  ansible.builtin.assert:
+    that: proxy_listener_owners | map(attribute='sites') | map('length') | select('gt', 1) | list | length == 0
+    fail_msg: >-
+      Plusieurs vhosts du parc écoutent sur un port dédié sur {{ inventory_hostname }} :
+      {% for o in proxy_listener_owners if o.sites | length > 1 %}{{ o.listener.port }} ({{ o.sites | join(', ') }}) {% endfor %}
+      — un écouteur dédié doit être le SEUL `server {}` de son port.
+    quiet: true
+
+- name: Check the rendered vhost of each dedicated listener
+  ansible.builtin.include_tasks:
+    file: dedicated-listener-check.yml
+  vars:
+    site: "{{ item.sites[0] }}"
+    site_dedicated_listeners: "{{ [item.listener] }}"
+  loop: "{{ proxy_listener_owners | selectattr('sites') | list }}"
+  loop_control:
+    label: "{{ item.listener.port }} -> {{ item.sites[0] }}"

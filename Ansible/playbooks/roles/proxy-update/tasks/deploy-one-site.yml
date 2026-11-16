@@ -55,6 +55,14 @@
     file: dedicated-listener-check.yml
   when: site_dedicated_listeners | default([]) | length > 0
 
+# Un port dédié partagé avec un autre vhost de ce proxy fusionnerait les deux `server {}` : AUCUN autre fichier ne doit y
+# écouter (tasks/dedicated-listener-ports.yml, lu sur la configuration EFFECTIVE). Contrôlé AVANT d'écrire le vhost : un vhost
+# refusé n'est jamais posé sur le disque (le prochain redémarrage de nginx ne l'y retrouverait pas).
+- name: Check no other file listens on the dedicated ports
+  ansible.builtin.include_tasks:
+    file: dedicated-listener-ports.yml
+  when: site_dedicated_listeners | default([]) | length > 0
+
 - name: Deploy the vhost
   ansible.builtin.template:
     src: "{{ proxy_update_dir }}/sites-enabled/{{ site }}"
@@ -69,13 +77,6 @@
   ansible.builtin.command: nginx -t
   changed_when: false
   when: proxy_one_site_deployed.changed
-
-# Un port dédié partagé avec un autre vhost de ce proxy fusionnerait les deux `server {}` : AUCUN autre fichier ne doit y
-# écouter (tasks/dedicated-listener-ports.yml, lu sur la configuration EFFECTIVE, avant le reload).
-- name: Check no other file listens on the dedicated ports
-  ansible.builtin.include_tasks:
-    file: dedicated-listener-ports.yml
-  when: site_dedicated_listeners | default([]) | length > 0
 
 - name: Reload nginx
   ansible.builtin.systemd:

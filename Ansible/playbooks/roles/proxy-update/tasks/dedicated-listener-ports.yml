@@ -1,7 +1,8 @@
 ---
 # Un port dédié partagé avec un autre vhost de ce proxy fusionnerait les deux `server {}` (nginx les distingue par le
 # `Host`, et le bloc dédié cesserait d'être le seul servi sur ce port) : AUCUN autre fichier de /etc/nginx ne doit y
-# écouter. Lu sur la configuration EFFECTIVE (`nginx -T`, lecture seule), avant le reload.
+# écouter. Lu sur la configuration EFFECTIVE (`nginx -T`, lecture seule), AVANT de poser le vhost (deploy-one-site) ou,
+# pour la resynchronisation complète, avant le redémarrage.
 # Entrées : `site` (fichier de sites-enabled du service), `site_dedicated_listeners` ([{port, …}]).
 
 - name: Dump the effective nginx configuration
@@ -10,18 +11,23 @@
   changed_when: false
   check_mode: false
 
-# `nginx -T` fait précéder chaque fichier de `# configuration file <chemin>:`. Une ligne `listen` (adresse nue, `ip:port`
-# ou `[::]:port`) d'un AUTRE fichier que celui du service sur un port dédié est refusée. Sans antislash (scalaire de bloc).
+# `nginx -T` fait précéder chaque fichier de `# configuration file <chemin>:`. Une directive `listen` de TOUTE forme
+# (adresse nue, `ip:port`, `*:port`, `[::]:port`, avec `default_server`…) d'un AUTRE fichier que celui du service sur un port
+# dédié est refusée, y compris un `server { listen … }` tenu sur une seule ligne ou plusieurs `listen` sur la même ligne :
+# le texte est découpé en mots (`;`, `{` et `}` isolés, commentaires retirés), le mot qui suit `listen` donne le port.
+# Sans antislash (scalaire de bloc).
 - name: Refuse a dedicated port another file also listens on
   vars:
     _own: "{{ '/etc/nginx/sites-enabled/' ~ site ~ ':' }}"
     _shared: >-
       {%- set out = [] -%}
       {%- for segment in proxy_listener_dump.stdout.split('# configuration file ') if not segment.startswith(_own) -%}
-      {%- for line in segment.splitlines() -%}
-      {%- set words = line.strip().rstrip(';').split() -%}
-      {%- if words | length >= 2 and words[0] == 'listen' -%}
-      {%- for l in site_dedicated_listeners if (words[1].split(':') | last) == (l.port | string) and l.port not in out -%}
+      {%- set words = (segment.splitlines() | map('regex_replace', '#.*$', '') | join(' ')
+          | replace(';', ' ; ') | replace('{', ' { ') | replace('}', ' } ')).split() -%}
+      {%- for word in words -%}
+      {%- set at = loop.index0 -%}
+      {%- if word == 'listen' and at + 1 < words | length and (at == 0 or words[at - 1] in [';', '{', '}']) -%}
+      {%- for l in site_dedicated_listeners if (words[at + 1].split(':') | last) == (l.port | string) and l.port not in out -%}
       {%- set _ = out.append(l.port) -%}
       {%- endfor -%}
       {%- endif -%}

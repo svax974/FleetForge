@@ -41,6 +41,12 @@
   ansible.builtin.set_fact:
     nginx_version: "{{ ((nginx_version_raw.stderr | default('')) ~ (nginx_version_raw.stdout | default(''))) | regex_search('nginx/([0-9.]+)', '\\1') | first }}"
 
+# Écouteurs DÉDIÉS (`dedicated_listeners`, proxy-security/tasks/dedicated-listeners.yml) : la déclaration et le RENDU de chaque
+# vhost qui porte un de ces ports sont contrôlés ICI, avant de vider /etc/nginx et de redémarrer nginx — pas après, par
+# proxy-security. Rien de déclaré pour ce proxy : rien de plus.
+- name: Check the dedicated listeners before touching /etc/nginx
+  ansible.builtin.include_tasks: dedicated-listener-sync-check.yml
+
 # Le répertoire du parc FAIT FOI : vidés puis reconstruits, un vhost retiré du
 # dépôt est retiré des proxies au passage suivant.
 - name: Delete the vhost directories
@@ -221,6 +227,14 @@
   when:
     - proxy_write_token_enabled | bool
     - not prometheus_write_token_file.stat.exists
+
+# Écouteurs dédiés : aucun autre fichier de /etc/nginx n'écoute sur ces ports (configuration effective, vhosts posés,
+# nginx pas encore redémarré). Simulation : les fichiers ne sont pas posés, la lecture porterait sur l'ancienne configuration.
+- name: Check no other file listens on the dedicated ports
+  ansible.builtin.include_tasks: dedicated-listener-sync-ports.yml
+  when:
+    - not ansible_check_mode
+    - proxy_listener_owners | default([]) | selectattr('sites') | list | length > 0
 
 # Contrôle AVANT de redémarrer : un vhost mal templaté couperait TOUS les
 # vhosts de ce proxy, pas seulement le fautif. En simulation les fichiers ne

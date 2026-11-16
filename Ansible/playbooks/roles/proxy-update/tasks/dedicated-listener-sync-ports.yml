@@ -1,0 +1,14 @@
+---
+# Resynchronisation complète, vhosts écrits MAIS nginx pas encore redémarré : aucun AUTRE fichier de /etc/nginx (hors
+# sites-enabled du parc : nginx.conf, conf.d…) ne doit écouter sur un port dédié — lu sur la configuration effective
+# (`nginx -T`). Suite de dedicated-listener-sync-check.yml (`proxy_listener_owners`).
+
+- name: Check no other file listens on the dedicated ports
+  ansible.builtin.include_tasks:
+    file: dedicated-listener-ports.yml
+  vars:
+    site: "{{ item.sites[0] }}"
+    site_dedicated_listeners: "{{ [item.listener] }}"
+  loop: "{{ proxy_listener_owners | selectattr('sites') | list }}"
+  loop_control:
+    label: "{{ item.listener.port }} -> {{ item.sites[0] }}"

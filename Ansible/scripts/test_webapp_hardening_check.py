@@ -2532,6 +2532,58 @@ class DedicatedListenerVhostTests(unittest.TestCase):
         self.assertTrue(listener_errors(good, addresses=("203.0.113.99",)), "clients attendus ≠ allow")
         self.assertTrue(listener_errors(good, port=443))
 
+    def test_every_listen_form_on_the_port_counts_as_an_extra_server(self):
+        good = render_listener_vhost()
+        for other in [f"*:{LISTENER_PORT}", f"0.0.0.0:{LISTENER_PORT}", f"[::]:{LISTENER_PORT}", f"127.0.0.1:{LISTENER_PORT}",
+                      f"{LISTENER_PORT}", f"[::1]:{LISTENER_PORT} default_server", f"*:{LISTENER_PORT} ssl default_server reuseport",
+                      f"example.test:{LISTENER_PORT}"]:
+            with self.subTest(other):
+                extra = good + f"server {{\n  listen {other};\n  location / {{ return 200; }}\n}}\n"
+                errors = listener_errors(extra)
+                self.assertTrue(errors, other)
+                self.assertIn("2 bloc(s)", errors[0])
+        one_line = good + f"server {{ listen {LISTENER_PORT}; location / {{ deny all; }} }}\n"
+        self.assertIn("2 bloc(s)", listener_errors(one_line)[0])
+        # a neighbouring port is not the same port
+        near = good + "server {\n  listen 97450;\n  listen *:19745;\n  location / { deny all; }\n}\n"
+        self.assertEqual(listener_errors(near), [])
+
+    def test_the_dedicated_block_listening_on_another_form_or_port_too_is_refused(self):
+        good = render_listener_vhost()
+        for extra in ["listen *:9746 ssl;", "listen 0.0.0.0:443 ssl;", "listen [::]:80;"]:
+            with self.subTest(extra):
+                self.assertTrue(listener_errors(good.replace(f"listen {LISTENER_PORT} ssl;", f"listen {LISTENER_PORT} ssl;\n  {extra}", 1)))
+
+    def test_a_directive_outside_the_whitelist_in_the_restricted_location_is_refused(self):
+        good = render_listener_vhost()
+        head, tail = good.split(f"listen {LISTENER_PORT} ssl;", 1)
+        for label, directive in {
+            "return": "return 200 'ok';", "include": "include /etc/nginx/snippets/open.conf;", "satisfy": "satisfy any;",
+            "auth_basic": "auth_basic off;", "rewrite": "rewrite ^ /other last;", "alias": "alias /var/www/;", "root": "root /;",
+            "if": "if ($host) { return 200; }", "set": "set $x 1;", "nested location": "location /x { return 200; }",
+            "error_page": "error_page 403 =200 /ok;", "try_files": "try_files $uri =200;",
+        }.items():
+            with self.subTest(label):
+                mutated = head + f"listen {LISTENER_PORT} ssl;" + self.mutate_dedicated(
+                    tail, lambda t: t.replace("proxy_pass http://192.0.2.10:9750;", f"proxy_pass http://192.0.2.10:9750;\n    {directive}", 1))
+                errors = listener_errors(mutated)
+                self.assertTrue(any("hors liste blanche" in e or "bloc(s)" in e for e in errors), (label, errors))
+        # the directives the real vhost uses stay accepted
+        ok = head + f"listen {LISTENER_PORT} ssl;" + self.mutate_dedicated(tail, lambda t: t.replace(
+            "proxy_pass http://192.0.2.10:9750;",
+            "proxy_pass http://192.0.2.10:9750;\n    proxy_http_version 1.1;\n    proxy_set_header Host $host;\n"
+            "    proxy_read_timeout 300s;\n    proxy_buffering off;\n    chunked_transfer_encoding on;\n    proxy_cache off;", 1))
+        self.assertEqual(listener_errors(ok), [])
+
+    def test_a_server_level_directive_is_matched_by_word_not_by_prefix(self):
+        head, tail = render_listener_vhost().split(f"listen {LISTENER_PORT} ssl;", 1)
+        def with_directive(directive):  # in the DEDICATED block (the 443 block comes first in the file)
+            return head + f"listen {LISTENER_PORT} ssl;" + tail.replace("ssl_certificate /etc", f"{directive}\n  ssl_certificate /etc", 1)
+        for sneaky in ["listener_override on;", "server_name_in_redirect off;", "http2_max_field_size 1k;", "access_logx on;"]:
+            with self.subTest(sneaky):
+                self.assertTrue(listener_errors(with_directive(sneaky)))
+        self.assertEqual(listener_errors(with_directive("ssl_protocols TLSv1.3;")), [])
+
     @staticmethod
     def drop_last(text, directive):
         index = text.rindex(directive)
@@ -2696,8 +2748,9 @@ class DedicatedListenerPlaysTests(unittest.TestCase):
         self.assertEqual(self.rules(log), [])
         self.assertEqual(json.loads(facts.split("|")[0]), [])
 
-    def run_proxy_update(self, tasks_from, vhost, listeners, nginx_dump=None):
-        """Joue `dedicated-listener-check` (vhost rendu contrôlé) ou `dedicated-listener-ports` (nginx -T factice)."""
+    def run_proxy_update(self, tasks_from, vhost, listeners, nginx_dump=None, extra_sites=None, inventory=None, extra_vars=None):
+        """Joue `dedicated-listener-check` (vhost rendu contrôlé), `dedicated-listener-ports` (nginx -T factice) ou les
+        deux étapes de la resynchronisation complète (`dedicated-listener-sync-check` / `-sync-ports`)."""
         with tempfile.TemporaryDirectory() as tmp:
             bindir = os.path.join(tmp, "bin")
             os.makedirs(bindir)
@@ -2709,28 +2762,22 @@ class DedicatedListenerPlaysTests(unittest.TestCase):
             os.makedirs(parc)
             with open(os.path.join(parc, "fleetforge.conf"), "w") as f:
                 f.write(vhost)
+            for name, content in (extra_sites or {}).items():
+                with open(os.path.join(parc, name), "w") as f:
+                    f.write(content)
             with open(os.path.join(tmp, "dump"), "w") as f:
                 f.write(nginx_dump or "")
-            play = textwrap.dedent(f"""\
-                - hosts: proxy1
-                  gather_facts: false
-                  tasks:
-                    - ansible.builtin.include_role:
-                        name: proxy-update
-                        tasks_from: {tasks_from}
-                      vars:
-                        site: fleetforge.conf
-                        proxy_update_dir: "{os.path.join(tmp, 'parc')}"
-                        site_dedicated_listeners: {json.dumps(listeners)}
-                        webapp_hardening_checker: "{os.path.join(HERE, 'webapp_hardening_check.py')}"
-                """)
+            role_vars = {"site": "fleetforge.conf", "proxy_update_dir": os.path.join(tmp, "parc"),
+                         "site_dedicated_listeners": listeners,
+                         "webapp_hardening_checker": os.path.join(HERE, "webapp_hardening_check.py"), **(extra_vars or {})}
+            play = yaml.safe_dump([{"hosts": "proxy1", "gather_facts": False, "tasks": [
+                {"ansible.builtin.include_role": {"name": "proxy-update", "tasks_from": tasks_from}, "vars": role_vars}]}])
             with open(os.path.join(tmp, "play.yml"), "w") as f:
                 f.write(play)
             with open(os.path.join(tmp, "ansible.cfg"), "w") as f:
                 f.write(f"[defaults]\nroles_path={ROLES}\nstdout_callback=default\n")
-            inventory = listener_inventory_yaml()
             with open(os.path.join(tmp, "inventory.yml"), "w") as f:
-                yaml.safe_dump(inventory, f)
+                yaml.safe_dump(inventory or listener_inventory_yaml(), f)
             env = dict(os.environ, ANSIBLE_CONFIG=os.path.join(tmp, "ansible.cfg"), PATH=f"{bindir}:{os.environ['PATH']}",
                        NGINX_DUMP=os.path.join(tmp, "dump"))
             run = subprocess.run(["ansible-playbook", "-i", os.path.join(tmp, "inventory.yml"), os.path.join(tmp, "play.yml"),
@@ -2749,9 +2796,11 @@ class DedicatedListenerPlaysTests(unittest.TestCase):
         deploy = check._load(os.path.join(ROLES, "proxy-update", "tasks", "deploy-one-site.yml"))
         names = [t.get("name") for t in deploy]
         self.assertLess(names.index("Check the dedicated listeners of the rendered vhost"), names.index("Deploy the vhost"))
-        self.assertLess(names.index("Test the nginx configuration before reloading"),
+        # the collision check runs BEFORE the vhost is written: a refused vhost never reaches the disk
+        self.assertLess(names.index("Check no other file listens on the dedicated ports"), names.index("Deploy the vhost"))
+        self.assertLess(names.index("Check the dedicated listeners of the rendered vhost"),
                         names.index("Check no other file listens on the dedicated ports"))
-        self.assertLess(names.index("Check no other file listens on the dedicated ports"), names.index("Reload nginx"))
+        self.assertLess(names.index("Deploy the vhost"), names.index("Reload nginx"))
 
     DUMP = ("nginx: configuration file /etc/nginx/nginx.conf test is successful\n"
             "# configuration file /etc/nginx/nginx.conf:\nhttp {\n  include /etc/nginx/sites-enabled/*;\n}\n"
@@ -2770,6 +2819,83 @@ class DedicatedListenerPlaysTests(unittest.TestCase):
         near = self.DUMP + "# configuration file /etc/nginx/sites-enabled/other.conf:\nserver {\n  listen 97450 ssl;\n  listen 19745;\n}\n"
         code, out = self.run_proxy_update("dedicated-listener-ports", "", self.LISTENERS, near)
         self.assertEqual(code, 0, "un port voisin n'est pas le même port\n" + out[-2000:])
+
+    def test_every_listen_form_and_layout_of_another_file_is_refused(self):
+        forms = {
+            "one line": "server { listen 9745 ssl; location / { deny all; } }",
+            "one line glued": "server{listen 9745;}",
+            "default_server": "server {\n  listen *:9745 ssl default_server;\n}",
+            "two on a line": "server {\n  listen 80; listen [::]:9745 ssl;\n}",
+            "any address": "server {\n  listen 0.0.0.0:9745;\n}",
+            "loopback": "server {\n  listen 127.0.0.1:9745;\n}",
+            "tabs": "server {\n\tlisten\t9745\tssl;\n}",
+            "after another directive on the line": "server { server_name x; listen 9745; }",
+        }
+        for label, other in forms.items():
+            with self.subTest(label):
+                shared = self.DUMP + f"# configuration file /etc/nginx/sites-enabled/other.conf:\n{other}\n"
+                code, out = self.run_proxy_update("dedicated-listener-ports", "", self.LISTENERS, shared)
+                self.assertNotEqual(code, 0, label)
+                self.assertIn("SEUL", out)
+        commented = self.DUMP + ("# configuration file /etc/nginx/sites-enabled/other.conf:\nserver {\n"
+                                 "  # listen 9745 ssl;\n  listen 443; # was listen 9745\n  proxy_set_header X listen;\n}\n")
+        code, out = self.run_proxy_update("dedicated-listener-ports", "", self.LISTENERS, commented)
+        self.assertEqual(code, 0, "un commentaire ou un argument n'est pas un listen\n" + out[-2000:])
+
+    # ── resynchronisation complète (update-proxy.yml / deploy-proxy.yml) ──
+
+    WWW = "server {\n  listen 443 ssl;\n  server_name www.example.test;\n  location / { proxy_pass http://127.0.0.1:1; }\n}\n"
+
+    def sync_check(self, vhost=None, extra_sites=None, inventory=None):
+        return self.run_proxy_update("dedicated-listener-sync-check", vhost if vhost is not None else render_listener_vhost(), [],
+                                     extra_sites={"www.conf": self.WWW, **(extra_sites or {})}, inventory=inventory)
+
+    def test_the_full_sync_checks_the_declaration_and_the_rendered_block_before_any_change(self):
+        code, out = self.sync_check()
+        self.assertEqual(code, 0, out[-3000:])
+        wide = render_listener_vhost().replace(f"allow {GATEWAY_ADDRESS};", "allow 0.0.0.0/0;")
+        code, out = self.sync_check(wide)
+        self.assertNotEqual(code, 0)
+        self.assertIn("refusé avant d'être posé", out)
+        # whatever the form, a second vhost of the parc on the port is refused before /etc/nginx is touched
+        for other in ["server { listen *:9745 ssl default_server; location / { deny all; } }",
+                      "server{listen [::]:9745;location / { deny all; }}", "server {\n\tlisten\t9745;\n}"]:
+            code, out = self.sync_check(extra_sites={"other.conf": other})
+            self.assertNotEqual(code, 0, other)
+            self.assertIn("Plusieurs vhosts", out)
+        # a malformed vhost serving the port (an `include` in the restricted location) is refused
+        head, tail = render_listener_vhost().split(f"listen {LISTENER_PORT} ssl;", 1)
+        hostile = head + f"listen {LISTENER_PORT} ssl;" + tail.replace("deny all;", "deny all;\n    include /etc/nginx/open.conf;", 1)
+        code, out = self.sync_check(hostile)
+        self.assertNotEqual(code, 0)
+        self.assertIn("hors liste blanche", out)
+        invalid = listener_inventory_yaml(port=443)
+        code, out = self.sync_check(inventory=invalid)
+        self.assertNotEqual(code, 0)
+        self.assertIn("dedicated_listeners invalide", out)
+
+    def test_the_full_sync_without_a_declaration_does_nothing_more(self):
+        code, out = self.sync_check(vhost=self.WWW, inventory=listener_inventory_yaml(declared=False))
+        self.assertEqual(code, 0, out[-3000:])
+        self.assertNotIn("Run the dedicated listener check", out)
+        self.assertNotIn("Render the vhost into a temporary file", out)
+
+    def test_the_full_sync_collision_check_reads_the_effective_configuration_before_the_restart(self):
+        owners = [{"listener": self.LISTENERS[0], "sites": ["fleetforge.conf"]}]
+        code, out = self.run_proxy_update("dedicated-listener-sync-ports", "", [], self.DUMP, extra_vars={"proxy_listener_owners": owners})
+        self.assertEqual(code, 0, out[-3000:])
+        shared = self.DUMP + "# configuration file /etc/nginx/conf.d/x.conf:\nserver { listen 0.0.0.0:9745; }\n"
+        code, out = self.run_proxy_update("dedicated-listener-sync-ports", "", [], shared, extra_vars={"proxy_listener_owners": owners})
+        self.assertNotEqual(code, 0)
+        self.assertIn("SEUL", out)
+        main = check._load(os.path.join(ROLES, "proxy-update", "tasks", "main.yml"))
+        names = [t.get("name") for t in main]
+        check_step = names.index("Check the dedicated listeners before touching /etc/nginx")
+        self.assertLess(check_step, names.index("Delete the vhost directories"))
+        ports_step = names.index("Check no other file listens on the dedicated ports")
+        self.assertGreater(ports_step, names.index("Copy nginx sites enabled confs"))
+        self.assertLess(ports_step, names.index("Validate nginx configuration"))
+        self.assertLess(ports_step, names.index("Restart Nginx service"))
 
 
 @unittest.skipUnless(shutil.which("ansible-playbook"), "ansible-playbook absent")

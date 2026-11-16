@@ -617,9 +617,15 @@ Opt-in, par variables d'inventaire ; rien de déclaré = rendu, gardes et pare-f
 - **Gardes** : `gateway-guard.yml` accepte un port ≠ 443 seulement si l'amont déclare cet écouteur avec la passerelle pour
   UNIQUE client, que la sonde `upstream_<id>` vise le même `nom:port`, et met le port dans `FFG_UPSTREAMS.baseUrl`.
   `deploy-one-site.yml` (`site_dedicated_listeners`) contrôle le vhost RENDU avant de le poser
-  (`webapp_hardening_check.py dedicated` : un seul `server{}` sur le port, ssl, rien hors locations filtrées, `allow` =
-  EXACTEMENT les clients, `deny all` en dernier) puis, sur `nginx -T`, qu'aucun AUTRE fichier n'écoute sur ce port, avant le
-  reload.
+  (`webapp_hardening_check.py dedicated` : un seul `server{}` sur le port — TOUTES les formes de `listen` comptent
+  (`*:P`, `0.0.0.0:P`, `[::]:P`, `default_server`, ligne unique) —, ssl, rien hors locations filtrées, corps de location limité
+  à une LISTE BLANCHE (`proxy_*`, `allow`, `deny`, `chunked_transfer_encoding`, `client_max_body_size` : ni `return`, ni
+  `include`, ni `satisfy`, ni `auth_basic`), `allow` = EXACTEMENT les clients, `deny all` en dernier) puis, sur `nginx -T`,
+  qu'aucun AUTRE fichier n'écoute sur ce port — le tout AVANT d'écrire le vhost : un vhost refusé n'atteint jamais le disque.
+  La resynchronisation complète (`update-proxy.yml`, `deploy-proxy.yml` : `proxy-update/tasks/main.yml`) fait de même :
+  déclaration validée et rendu du vhost contrôlé avant de vider `/etc/nginx` (`dedicated-listener-sync-check.yml`), collision
+  sur `nginx -T` après la pose des vhosts et avant le redémarrage (`dedicated-listener-sync-ports.yml`, non joué en simulation :
+  limite — un échec à ce stade laisse les fichiers posés sur le disque, nginx non redémarré).
 - **Effet** : le pare-feu de la passerelle (DOCKER-USER, `-d <proxy1> --dport <P>`) n'ouvre que ce port ; proxy1 n'y sert
   que FleetForge, à la seule adresse de la passerelle. Les autres vhosts de proxy1 (443) ne sont plus joignables par
   elle. Reste vrai : l'adresse de la machine est partagée avec 4 autres apps (elles peuvent joindre `<P>` si ufw/le

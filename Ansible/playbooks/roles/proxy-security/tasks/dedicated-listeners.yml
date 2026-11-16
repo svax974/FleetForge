@@ -114,6 +114,13 @@
     quiet: true
   tags: [always]
 
+# `dedicated_listeners_validate_only: true` (proxy-update/tasks/main.yml, avant de toucher à /etc/nginx) : on s'arrête ici,
+# la déclaration est contrôlée et le fait `proxy_dedicated_listeners` posé, sans aucune règle ufw.
+- name: Stop after the declaration check when only validating
+  ansible.builtin.meta: end_role
+  when: dedicated_listeners_validate_only | default(false) | bool
+  tags: [always]
+
 - name: Allow each dedicated listener from its client servers only
   community.general.ufw:
     rule: allow

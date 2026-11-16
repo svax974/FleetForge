@@ -62,10 +62,13 @@ Sous-commandes, chacune code 1 avec la liste des écarts :
 
   dedicated <rendu.conf> --listener PORT=ADRESSE[,ADRESSE]…   (répétable)
       Écouteur DÉDIÉ d'un proxy (`dedicated_listeners`, proxy-security/tasks/dedicated-listeners.yml) dans le vhost
-      RENDU : exactement UN `server {}` écoute sur PORT (jamais 443), en ssl et sur ce seul port ; hors des locations
+      RENDU : exactement UN `server {}` écoute sur PORT (jamais 443), en ssl et sur ce seul port — toutes les formes de
+      `listen` comptent (`9745`, `*:9745`, `0.0.0.0:9745`, `[::]:9745`, avec `default_server`…) ; hors des locations
       il n'a que listen/server_name/ssl_*/http2/access_log/error_log (ni `return`, ni `root`, ni `proxy_pass`) ; chaque
       location est soit un simple `deny all`, soit restreinte (`# restricted-linked`, proxy-update/_access.inc) avec des
-      `allow` EXACTEMENT égaux aux adresses données puis `deny all` en dernier ; au moins une location relaie.
+      `allow` EXACTEMENT égaux aux adresses données puis `deny all` en dernier ; au moins une location relaie. Le corps
+      d'une location n'admet qu'une LISTE BLANCHE de directives (proxy_*, allow, deny, chunked_transfer_encoding,
+      client_max_body_size) : `return`, `include`, `satisfy`, `auth_basic`, `rewrite`, `if`… sont refusés.
 
 Dépendance : PyYAML (celui d'Ansible). `python3 -I Ansible/scripts/webapp_hardening_check.py playbook Ansible/playbooks`.
 """
@@ -1134,7 +1137,27 @@ def check_vhost(path, v6_min_prefix=128, forbidden=()):
 RESTRICTED_MARKER = re.compile(r"#\s*restricted-linked[^\n]*")
 # Directives admises au niveau du `server {}` d'un écouteur dédié (hors `location`) : rien qui serve ou relaie sans
 # passer par une location filtrée (`return`, `root`, `proxy_pass`, `rewrite`, `if`… sont refusés).
-LISTENER_SERVER_DIRECTIVES = ("listen", "server_name", "ssl_", "http2", "access_log", "error_log")
+LISTENER_SERVER_DIRECTIVES = ("listen", "server_name", "http2", "access_log", "error_log")
+LISTENER_SERVER_PREFIXES = ("ssl_",)
+# Directives admises dans une location d'un écouteur dédié : LISTE BLANCHE (tout le reste est refusé : `return`, `include`,
+# `satisfy`, `auth_basic`, `rewrite`, `if`, `alias`, `root`, `set`, `location` imbriquée…). `restricted_linked` est le marqueur
+# de `_access.inc`, remplacé avant l'analyse.
+LISTENER_LOCATION_DIRECTIVES = ("allow", "deny", "chunked_transfer_encoding", "client_max_body_size", "restricted_linked")
+LISTENER_LOCATION_PREFIXES = ("proxy_",)
+
+
+def _listen_port(listen):
+    """Port d'une directive `listen` (toutes les formes : `9745`, `*:9745`, `0.0.0.0:9745`, `[::]:9745`, `host:9745`,
+    suivies de `ssl`, `default_server`, `reuseport`…), ou None (adresse sans port, `unix:`)."""
+    words = listen.split()
+    if not words or words[0].startswith("unix:"):
+        return None
+    last = words[0].rsplit(":", 1)[-1]
+    return int(last) if last.isdigit() else None
+
+
+def _listens(block):
+    return re.findall(r"(?:^|[;{}\s])listen\s+([^;]+);", block)
 
 
 def _balanced(text, start):
@@ -1185,24 +1208,29 @@ def check_dedicated_listener(where, text, port, addresses):
     wanted = sorted(set(addresses))
     if not wanted or any(not re.fullmatch(r"[0-9]{1,3}(\.[0-9]{1,3}){3}", a) for a in wanted):
         return [f"{where} : adresses cliente invalides ({', '.join(addresses) or 'aucune'})"]
-    blocks = [b for b in _server_blocks(text) if re.search(rf"\blisten\s+(\[::\]:)?{int(port)}\b", b)]
+    blocks = [b for b in _server_blocks(text) if int(port) in {_listen_port(listen) for listen in _listens(b)}]
     if len(blocks) != 1:
         return [f"{where} : {len(blocks)} bloc(s) server écoutent sur {port} (un seul attendu)"]
     block = blocks[0]
-    for listen in re.findall(r"\blisten\s+([^;]+);", block):
+    for listen in _listens(block):
         words = listen.split()
-        if words[0].rsplit(":", 1)[-1] != str(int(port)):
+        if _listen_port(listen) != int(port):
             errors.append(f"{where} : `listen {listen}` : le bloc dédié n'écoute que sur {port}")
         if "ssl" not in words:
             errors.append(f"{where} : `listen {listen}` sans ssl")
     for token in _tokens(_without_locations(block)):
-        if not token.startswith(LISTENER_SERVER_DIRECTIVES):
-            errors.append(f"{where} : directive `{token.split()[0]}` au niveau du server dédié (réservé aux locations filtrées)")
+        word = token.split()[0]
+        if word not in LISTENER_SERVER_DIRECTIVES and not word.startswith(LISTENER_SERVER_PREFIXES):
+            errors.append(f"{where} : directive `{word}` au niveau du server dédié (réservé aux locations filtrées)")
     locations = _blocks_with_heads(block)
     if not any("proxy_pass" in body for _, body in locations):
         errors.append(f"{where} : aucune location qui relaie (proxy_pass)")
     for head, body in locations:
         tokens = _tokens(body)
+        for token in tokens:
+            word = token.split()[0]
+            if word not in LISTENER_LOCATION_DIRECTIVES and not word.startswith(LISTENER_LOCATION_PREFIXES):
+                errors.append(f"{where} : location {head} : directive `{word}` hors liste blanche (proxy_*, allow, deny…)")
         if "restricted_linked" in tokens:
             access = [t for t in tokens if t.startswith(("allow ", "deny "))]
             allows = sorted({t[len("allow "):].strip() for t in access if t.startswith("allow ")})
