@@ -128,7 +128,6 @@
     wa_machine_rules: __wa_internal_probe__
     wa_migrate: __wa_internal_probe__
     wa_mp_entries: __wa_internal_probe__
-    wa_mp_read: __wa_internal_probe__
     wa_mr_entries: __wa_internal_probe__
     wa_missing_manual: __wa_internal_probe__
     wa_missing_required: __wa_internal_probe__
@@ -410,7 +409,6 @@
       - lookup('ansible.builtin.vars', 'wa_machine_ports') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', 'wa_migrate') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', 'wa_mp_entries') | string == '__wa_internal_probe__'
-      - lookup('ansible.builtin.vars', 'wa_mp_read') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', 'wa_mr_entries') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', 'wa_missing_manual') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', 'wa_missing_required') | string == '__wa_internal_probe__'

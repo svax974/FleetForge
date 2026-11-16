@@ -10,9 +10,16 @@
 # celle qu'utiliserait un déploiement de cette entrée. Une valeur qui ne se rend pas fait échouer la tâche (jamais ignorée).
 # Seules les clés `*port` (hors `ansible_port`) et les `port` de `docker_ports_rules` sont rendues.
 
+- name: Start from an empty reading
+  ansible.builtin.set_fact:
+    wa_machine_ports: {}
+  tags: [always]
+
+# `set_fact` (et non `register`) : un nom `register` ne peut pas figurer dans la sonde de no-overrides.yml de ce rôle
+# (collision de faits). Le fait est posé sur l'entrée jouée, pas sur l'entrée lue (`delegate_facts` absent).
 - name: Read the rendered port variables of the entries that share the machine
-  ansible.builtin.debug:
-    msg: >-
+  ansible.builtin.set_fact:
+    wa_machine_ports: >-
       {%- set v = ansible_delegated_vars[item] -%}
       {%- set ports = {} -%}
       {%- for k in v.keys() if k is match('^[a-z0-9_]*port$') and k != 'ansible_port' -%}
@@ -22,19 +29,13 @@
       {%- for r in v.docker_ports_rules | default([]) -%}
       {%- set _ = rules.append(r.port | default(0) | int) -%}
       {%- endfor -%}
-      {{ {'host': v.ansible_host | default('', true) | string, 'ssh': (v.ansible_port | default(22, true)) | string,
+      {{ wa_machine_ports | combine({item: {
+          'host': v.ansible_host | default('', true) | string, 'ssh': (v.ansible_port | default(22, true)) | string,
           'roles': v.ansible_roles | default([]), 'hardened': v.webapp_hardening is defined,
           'proxy': v.webapp_proxy | default('internal') | string, 'engine': v.webapp_db_engine | default('') | string,
-          'machine': v.webapp_machine | default(item) | string, 'ports': ports, 'rules': rules} }}
+          'machine': v.webapp_machine | default(item) | string, 'ports': ports, 'rules': rules}}) }}
   delegate_to: "{{ item }}"
   loop: "{{ wa_mp_entries }}"
   loop_control:
     label: "{{ item }}"
-  register: wa_mp_read
-  changed_when: false
-  tags: [always]
-
-- name: Keep the rendered port variables of the entries
-  ansible.builtin.set_fact:
-    wa_machine_ports: "{{ dict(wa_mp_entries | zip(wa_mp_read.results | map(attribute='msg'))) }}"
   tags: [always]
