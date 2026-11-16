@@ -1,41 +1,43 @@
 ---
-# Lecture des variables de PORT d'entrées d'inventaire AUTRES que celle jouée (inventaire seul, aucune connexion : `debug`
-# ne contacte pas l'hôte). Entrée : `wa_mp_entries` (noms d'entrées). Sortie : fait `wa_machine_ports`
+# Ports d'entrées d'inventaire AUTRES que celle jouée (inventaire seul, aucune connexion). Entrée : `wa_mp_entries` (noms
+# d'entrées). Sortie : fait `wa_machine_ports`
 # {entrée: {host, ssh, roles, hardened, proxy, engine, machine, ports: {<clé *port>: "<valeur rendue>"}, rules: [ports]}}.
 #
-# Pourquoi pas `hostvars[<entrée>][<clé>]` : ansible-core 2.21 y rend les valeurs dans un contexte SANS `hostvars` — un port
-# défini par un gabarit qui référence `hostvars` (`back_port: "{{ hostvars['x'].app_port | int + 1 }}"`) échoue en
-# « 'hostvars' is undefined », y compris par `hostvars[n].clé` et `dict2items`. Ici chaque entrée est lue par une tâche
-# DÉLÉGUÉE à elle-même (`ansible_delegated_vars`), rendue dans SON contexte, où `hostvars` existe : la valeur rendue est
-# celle qu'utiliserait un déploiement de cette entrée. Une valeur qui ne se rend pas fait échouer la tâche (jamais ignorée).
-# Seules les clés `*port` (hors `ansible_port`) et les `port` de `docker_ports_rules` sont rendues.
+# Les valeurs ne sont PAS rendues ici : chaque entrée les a rendues dans SON contexte (variables de l'entrée ET `hostvars`),
+# par un jeu joué sur elle (playbooks/lib/probe-entry-ports.yml, roles/webapp-setup/tasks/probe-ports.yml), fait `wa_mp_self`.
+# Aucune lecture depuis l'entrée jouée : `ansible_delegated_vars[n]` rendrait `app_port` dans le contexte de l'entrée jouée
+# (4801 au lieu de 4901) et `hostvars[n][clé]` échoue en « 'hostvars' is undefined » sur un gabarit qui référence `hostvars`.
+# Une entrée non lue (jeu absent du playbook, `--limit`) ou dont un gabarit ne se rend pas fait ÉCHOUER la garde : jamais
+# ignorée, jamais lue à moitié.
 
-- name: Start from an empty reading
-  ansible.builtin.set_fact:
-    wa_machine_ports: {}
+- name: Check that every entry to compare was read in its own context
+  vars:
+    _unread: >-
+      {%- set ns = namespace(out=[]) -%}
+      {%- for n in wa_mp_entries if hostvars[n].wa_mp_self is not defined or hostvars[n].wa_mp_self.error is defined -%}
+      {%- set ns.out = ns.out + [n] -%}
+      {%- endfor -%}
+      {{ ns.out }}
+  ansible.builtin.assert:
+    that:
+      - _unread | length == 0
+    fail_msg: >-
+      {{ inventory_hostname }} : les variables de port de {{ _unread | join(', ') }} n'ont pas été lues dans le contexte de
+      leur entrée — soit le playbook n'importe pas `probe-entry-ports.yml` (ou est lancé avec `--limit`, qui exclut ces entrées),
+      soit une valeur `*port` ou `docker_ports_rules[].port` de l'entrée ne se rend pas (`ansible-inventory --host <entrée>`).
+    quiet: true
   tags: [always]
 
 # `set_fact` (et non `register`) : un nom `register` ne peut pas figurer dans la sonde de no-overrides.yml de ce rôle
-# (collision de faits). Le fait est posé sur l'entrée jouée, pas sur l'entrée lue (`delegate_facts` absent).
-- name: Read the rendered port variables of the entries that share the machine
+# (collision de faits).
+# `no_log` : les valeurs `*port` d'une entrée peuvent être chiffrées au coffre ; elles ne sortent pas en `-v`.
+- name: Gather the rendered ports of the entries that share the machine
+  no_log: true
   ansible.builtin.set_fact:
     wa_machine_ports: >-
-      {%- set v = ansible_delegated_vars[item] -%}
-      {%- set ports = {} -%}
-      {%- for k in v.keys() if k is match('^[a-z0-9_]*port$') and k != 'ansible_port' -%}
-      {%- set _ = ports.update({k: v[k] | string}) -%}
+      {%- set ns = namespace(out={}) -%}
+      {%- for n in wa_mp_entries -%}
+      {%- set ns.out = ns.out | combine({n: hostvars[n].wa_mp_self}) -%}
       {%- endfor -%}
-      {%- set rules = [] -%}
-      {%- for r in v.docker_ports_rules | default([]) -%}
-      {%- set _ = rules.append(r.port | default(0) | int) -%}
-      {%- endfor -%}
-      {{ wa_machine_ports | combine({item: {
-          'host': v.ansible_host | default('', true) | string, 'ssh': (v.ansible_port | default(22, true)) | string,
-          'roles': v.ansible_roles | default([]), 'hardened': v.webapp_hardening is defined,
-          'proxy': v.webapp_proxy | default('internal') | string, 'engine': v.webapp_db_engine | default('') | string,
-          'machine': v.webapp_machine | default(item) | string, 'ports': ports, 'rules': rules}}) }}
-  delegate_to: "{{ item }}"
-  loop: "{{ wa_mp_entries }}"
-  loop_control:
-    label: "{{ item }}"
+      {{ ns.out }}
   tags: [always]

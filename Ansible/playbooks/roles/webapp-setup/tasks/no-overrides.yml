@@ -127,7 +127,9 @@
     wa_machine_ports: __wa_internal_probe__
     wa_machine_rules: __wa_internal_probe__
     wa_migrate: __wa_internal_probe__
+    wa_mp_addr: __wa_internal_probe__
     wa_mp_entries: __wa_internal_probe__
+    wa_mp_self: __wa_internal_probe__
     wa_mr_entries: __wa_internal_probe__
     wa_missing_manual: __wa_internal_probe__
     wa_missing_required: __wa_internal_probe__
@@ -246,6 +248,8 @@
     _taken: __wa_internal_probe__
     _up_port: __wa_internal_probe__
     _upstream_egress: __wa_internal_probe__
+    _unprobed: __wa_internal_probe__
+    _unread: __wa_internal_probe__
     _upstreams: __wa_internal_probe__
     _user: __wa_internal_probe__
     _users: __wa_internal_probe__
@@ -408,7 +412,9 @@
       - lookup('ansible.builtin.vars', 'wa_machine_rules') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', 'wa_machine_ports') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', 'wa_migrate') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'wa_mp_addr') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', 'wa_mp_entries') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'wa_mp_self') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', 'wa_mr_entries') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', 'wa_missing_manual') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', 'wa_missing_required') | string == '__wa_internal_probe__'
@@ -526,6 +532,8 @@
       - lookup('ansible.builtin.vars', '_taken') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_up_port') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_upstream_egress') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_unprobed') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_unread') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_upstreams') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_user') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_users') | string == '__wa_internal_probe__'

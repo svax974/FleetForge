@@ -112,6 +112,13 @@
         fail_msg: "Le groupe d'alertes `services` n'est pas dans `prom_alert_groups` du parc : ServiceDown ne sonnerait jamais."
         quiet: true
 
+# ── Lecture des adresses et ports de CHAQUE entrée, dans son contexte (aucune connexion) ──
+# Les gardes de ports d'une machine partagée (machine-rules, profil durci) comparent les entrées voisines : une valeur ne se
+# rend correctement que dans le contexte de SON entrée (probe-entry-ports.yml). Jamais de `--limit` : il exclurait des entrées.
+- name: Lecture des ports de chaque entrée
+  ansible.builtin.import_playbook: lib/probe-entry-ports.yml
+  when: groups['webapp_target'] | default([]) | length > 0
+
 # ── Garde du profil durci (inventaire seul, AUCUNE connexion) ──────────────
 - name: Garde du profil durci
   hosts: webapp_target

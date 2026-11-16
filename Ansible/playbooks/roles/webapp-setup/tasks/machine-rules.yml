@@ -23,10 +23,20 @@
 #     Postgres = webapp_db_port ou app_port+2 si le moteur est postgres|selfhosted, Redis = webapp_redis_port ou app_port+3) ;
 #     exigé dans les cas (1) et (2), et dans le cas (3) quand l'entrée canonique porte des règles.
 # Une machine à une seule app, sans autre entrée portant des règles et sans `webapp_machine`, n'est pas concernée (les règles
-# dérivées suffisent). Les ports sont lus par machine-ports.yml : chaque entrée dans SON contexte (une valeur qui référence
-# `hostvars` n'est pas lisible depuis une autre entrée avec ansible-core 2.21 : « 'hostvars' is undefined »).
+# dérivées suffisent). Adresses et ports sont lus par probe-ports.yml (jeu `probe-entry-ports.yml`, chaque entrée dans SON contexte : variables de
+# l'entrée ET `hostvars`), repris par machine-ports.yml.
 # Limite : seuls les ports de la canonique et des apps jouées sont comparés ; les règles d'une AUTRE entrée qui porterait aussi
 # `docker_ports_rules` ne sont pas reportées dans le script (leur place est le host_vars canonique, CLAUDE.md).
+
+- name: Check that every entry was read in its own context
+  ansible.builtin.include_tasks:
+    file: probe-check.yml
+    apply:
+      tags: [always]
+  when:
+    - webapp_hardening is not defined
+    - (webapp_proxy | default('internal')) != 'external'
+  tags: [always]
 
 - name: List the entries that share this machine (same address and SSH port)
   vars:
@@ -36,8 +46,8 @@
     wa_mr_entries: >-
       {%- set ns = namespace(out=[]) -%}
       {%- for n in groups['all'] -%}
-      {%- set h = hostvars[n] -%}
-      {%- if (h.ansible_host | default('')) == _addr and ((h.ansible_port | default(22, true)) | string) == _ssh -%}
+      {%- set h = hostvars[n].wa_mp_addr -%}
+      {%- if h.host == _addr and h.ssh == _ssh -%}
       {%- set ns.out = ns.out + [n] -%}
       {%- endif -%}
       {%- endfor -%}

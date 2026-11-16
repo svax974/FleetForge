@@ -1,0 +1,21 @@
+---
+# Lecture des variables d'adresse et de port de CHAQUE entrée d'inventaire, chacune dans SON contexte (voir
+# roles/webapp-setup/tasks/probe-ports.yml). À IMPORTER (`import_playbook`) avant tout jeu qui joue une garde de ports sur une
+# machine partagée : machine-rules.yml, ou `webapp-setup` `tasks_from: facts` d'une entrée à `webapp_hardening`
+# (deploy-webapp, remove-webapp, purge-webapp, update-ufw-all). Sans elle, ces gardes REFUSENT (jamais de lecture à moitié).
+#
+# Aucune connexion (`set_fact` ne contacte pas l'hôte), jamais de `--limit` (une entrée hors limite ne serait pas lue).
+# `when:` de l'import : passé tel quel à chaque tâche (les imports le portent).
+# Rangé dans `lib/` : pas un playbook à lancer seul (il ne fait que poser des faits), donc hors liste des playbooks.
+- name: Read the address and the ports of every entry, each in its own context
+  hosts: all
+  gather_facts: false
+  connection: local
+  tags: [always]
+  tasks:
+    - name: Read the entry
+      ansible.builtin.include_role:
+        name: webapp-setup
+        tasks_from: probe-ports
+        apply:
+          tags: [always]

@@ -1,0 +1,59 @@
+---
+# Lecture, par UNE entrée d'inventaire, de SES PROPRES variables d'adresse et de port — dans SON contexte. Joué par
+# `playbooks/lib/probe-entry-ports.yml` (jeu `hosts: all`, aucune connexion : `set_fact` ne contacte pas l'hôte), avant toute garde
+# qui compare les ports des entrées d'une même machine (machine-rules.yml, hardening.yml via machine-ports.yml).
+#
+# Pourquoi un jeu par entrée : ansible-core 2.21 ne sait rendre une valeur d'une AUTRE entrée que dans le contexte de
+# l'entrée jouée (`ansible_delegated_vars[n].back_port` : `app_port` y est celui de l'entrée jouée, 4801 au lieu de 4901) ou
+# dans un contexte SANS `hostvars` (`hostvars[n].back_port` : un gabarit qui référence `hostvars` échoue en « 'hostvars' is
+# undefined »). Seule une tâche JOUÉE sur l'entrée voit ses variables ET `hostvars` : la valeur rendue est celle qu'utiliserait
+# un déploiement de cette entrée.
+#
+# Faits posés sur l'entrée (jamais d'échec : un gabarit qui ne se rend pas laisse `error`, que le lecteur — machine-ports.yml,
+# machine-rules.yml, hardening.yml — traite en REFUS, jamais en « entrée hors machine »)
+#   wa_mp_addr : {host, ssh} (chaînes), ou {error: true}
+#   wa_mp_self : {host, ssh, roles, hardened, proxy, engine, machine, ports: {<clé *port>: "<valeur rendue>"}, rules: [ports]},
+#                ou {error: true}. Seules les clés `*port` (hors `ansible_port`) et les `port` de `docker_ports_rules` sont
+#                rendus (les `sources` des règles, gabarits sur `hostvars`, ne sont jamais lues).
+# `no_log` : une valeur `*port` peut être chiffrée au coffre (`!vault`) ; ni sa valeur ni le texte d'une erreur de rendu ne
+# doivent sortir en `-v`. Le lecteur nomme l'entrée fautive, pas la valeur.
+
+- name: Read where the entry is reached, in its own context
+  block:
+    - name: Render the address and the SSH port of the entry
+      ansible.builtin.set_fact:
+        wa_mp_addr:
+          host: "{{ ansible_host | default('', true) | string }}"
+          ssh: "{{ (ansible_port | default(22, true)) | string }}"
+      no_log: true
+  rescue:
+    - name: Record that the address of the entry does not render
+      ansible.builtin.set_fact:
+        wa_mp_addr:
+          error: true
+  tags: [always]
+
+- name: Read the port variables of the entry, in its own context
+  block:
+    - name: Render the port variables of the entry
+      ansible.builtin.set_fact:
+        wa_mp_self: >-
+          {%- set ports = {} -%}
+          {%- for k in query('ansible.builtin.varnames', '^[a-z0-9_]*port$') if k != 'ansible_port' -%}
+          {%- set _ = ports.update({k: lookup('ansible.builtin.vars', k) | string}) -%}
+          {%- endfor -%}
+          {%- set rules = [] -%}
+          {%- for r in docker_ports_rules | default([]) -%}
+          {%- set _ = rules.append(r.port | default(0) | int) -%}
+          {%- endfor -%}
+          {{ {'host': ansible_host | default('', true) | string, 'ssh': (ansible_port | default(22, true)) | string,
+              'roles': ansible_roles | default([]), 'hardened': webapp_hardening is defined,
+              'proxy': webapp_proxy | default('internal') | string, 'engine': webapp_db_engine | default('') | string,
+              'machine': webapp_machine | default(inventory_hostname) | string, 'ports': ports, 'rules': rules} }}
+      no_log: true
+  rescue:
+    - name: Record that the ports of the entry do not render
+      ansible.builtin.set_fact:
+        wa_mp_self:
+          error: true
+  tags: [always]

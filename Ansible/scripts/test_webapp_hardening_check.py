@@ -1849,7 +1849,10 @@ def guard_inventory(**gateway):
         }}}
 
 
-GUARD_PLAY = """\
+# Lecture de chaque entrée dans SON contexte (jeu importé par les playbooks réels qui jouent une garde de ports).
+PROBE_PLAY = f"- ansible.builtin.import_playbook: {os.path.join(PLAYBOOKS, 'lib', 'probe-entry-ports.yml')}\n"
+
+GUARD_PLAY = PROBE_PLAY + """\
 - hosts: fleetforge-gateway
   gather_facts: false
   tasks:
@@ -1910,6 +1913,78 @@ class GuardTests(unittest.TestCase):
         inventory = guard_inventory()
         inventory["all"]["children"]["apps"]["hosts"]["mail1"]["alt_port"] = 4730
         self.assertNotEqual(self.guard(inventory)[0], 0)
+
+    def test_a_neighbour_port_is_rendered_in_the_context_of_the_neighbour_not_of_the_played_entry(self):
+        # `other_port` du voisin dérive de SON `app_port` : 4699 + 33 = 4732 (le Postgres de la passerelle) est refusé. Rendu dans
+        # le contexte de la passerelle (`app_port` 4730), il valait 4763 et la collision passait inaperçue.
+        inventory = guard_inventory()
+        mail1 = inventory["all"]["children"]["apps"]["hosts"]["mail1"]
+        mail1["app_port"] = 4699
+        mail1["other_port"] = "{{ app_port | int + 33 }}"
+        code, out = self.guard(inventory)
+        self.assertNotEqual(code, 0, out[-2000:])
+        self.assertIn("4732", out)
+        # et le même gabarit qui ne collisionne pas passe
+        mail1["app_port"] = 4800
+        code, out = self.guard(inventory)
+        self.assertEqual(code, 0, out[-3000:])
+
+    def test_a_neighbour_port_reading_both_hostvars_and_its_own_variables_is_rendered_in_its_context(self):
+        inventory = guard_inventory()
+        mail1 = inventory["all"]["children"]["apps"]["hosts"]["mail1"]
+        mail1["app_port"] = 3982
+        mail1["other_port"] = "{{ (hostvars['infra1'].fleetforge_port | int - 9000) + app_port | int }}"  # 750 + 3982 = 4732
+        code, out = self.guard(inventory)
+        self.assertNotEqual(code, 0, out[-2000:])
+        self.assertIn("4732", out)
+        self.assertNotIn("'hostvars' is undefined", out)
+
+    def test_a_neighbour_whose_address_reads_hostvars_still_shares_the_machine(self):
+        # `ansible_host` du voisin est un gabarit sur `hostvars` : il était écarté de la machine sans un mot (garde sautée).
+        inventory = guard_inventory()
+        neighbour = {"ansible_host": "{{ hostvars['proxy1'].ansible_host }}",  # 192.0.2.10, l'adresse de la passerelle
+                     "ansible_roles": ["ctdapi"], "alt_port": 4731}
+        inventory["all"]["children"]["apps"]["hosts"]["neigh"] = neighbour
+        code, out = self.guard(inventory)
+        self.assertNotEqual(code, 0, out[-2000:])
+        self.assertIn("4731", out)
+        neighbour["alt_port"] = 4999
+        self.assertEqual(self.guard(inventory)[0], 0)
+
+    def test_an_entry_whose_address_does_not_render_is_refused_and_named_not_skipped(self):
+        inventory = guard_inventory()
+        inventory["all"]["children"]["apps"]["hosts"]["neigh"] = {
+            "ansible_host": "{{ hostvars['proxy1'].no_such_variable }}", "ansible_roles": ["ctdapi"]}
+        code, out = self.guard(inventory)
+        self.assertNotEqual(code, 0, out[-2000:])
+        self.assertIn("neigh", out)
+        self.assertIn("probe-entry-ports.yml", out)
+
+    def test_a_guard_played_without_the_reading_of_the_entries_refuses_instead_of_guessing(self):
+        play = GUARD_PLAY.replace(PROBE_PLAY, "")
+        code, out = run_local_play(play, guard_inventory(), {"apps.yml": "fleetforge-gateway: /nonexistent/app/\n"})
+        self.assertNotEqual(code, 0)
+        self.assertIn("probe-entry-ports.yml", out)
+
+    def test_the_rendered_neighbour_ports_never_reach_the_verbose_output(self):
+        # Une valeur `*port` peut être chiffrée au coffre : ni la sonde ni la lecture ne l'affichent en `-v`.
+        inventory = guard_inventory()
+        inventory["all"]["children"]["apps"]["hosts"]["mail1"]["odd_port"] = "{{ 47311 }}"
+        code, out = run_local_play(GUARD_PLAY, inventory, {"apps.yml": "fleetforge-gateway: /nonexistent/app/\n"}, args=("-vvv",))
+        self.assertEqual(code, 0, out[-3000:])
+        self.assertNotIn("47311", out)
+
+    def test_every_playbook_that_reaches_a_port_guard_imports_the_reading_of_the_entries(self):
+        probe = "lib/probe-entry-ports.yml"
+        for name in ("deploy-webapp.yml", "remove-webapp.yml", "purge-webapp.yml", "update-ufw-all.yml"):
+            with open(os.path.join(PLAYBOOKS, name), encoding="utf-8") as f:
+                plays = yaml.safe_load(f)
+            imports = [i for i, p in enumerate(plays) if p.get("import_playbook") == probe
+                       or p.get("ansible.builtin.import_playbook") == probe]
+            self.assertTrue(imports, f"{name} n'importe pas {probe}")
+            first_guard = next(i for i, p in enumerate(plays) if "webapp_target" in str(p.get("hosts", ""))
+                               or "webapp_hardened" in str(p.get("hosts", "")))
+            self.assertLess(imports[0], first_guard, f"{name} : la lecture doit précéder les gardes")
 
     def test_a_conforming_gateway_passes_and_trusts_only_the_admitted_relays(self):
         code, out = self.guard(guard_inventory())
@@ -3193,7 +3268,7 @@ FAKE_DROP_ONLY_IPTABLES = """\
 #!/bin/sh
 awk '/^apply_port /{print "-A DOCKER-USER -p tcp -m tcp --dport " $2 " -m comment --comment x -j DROP"}' "$FW_SCRIPT"
 """
-SHARED_PLAY = """\
+SHARED_PLAY = PROBE_PLAY + """\
 - hosts: localhost
   connection: local
   gather_facts: false
@@ -3468,6 +3543,40 @@ class SharedMachineRulesTests(unittest.TestCase):
         self.assertNotEqual(code, 0)
         self.assertIn("app-c:4522", out.replace("\\n", " "))
         self.assertNotIn("app-a:4501", out.replace("\\n", " "))
+
+    def test_a_back_port_derived_from_the_own_app_port_of_the_neighbour_is_read_in_its_context(self):
+        # Une app déclare `back_port: "{{ app_port | int + 10 }}"` (4520 → 4530) : la canonique déclare 4530, pas 4521.
+        # Lue dans le contexte de l'entrée JOUÉE, la valeur dépendait de l'app jouée (4500 + 10, 4510 + 10…) et la garde
+        # signalait un port manquant selon l'app choisie — ou, à l'inverse, en acceptait un faux.
+        inventory = shared_inventory()
+        hosts = inventory["all"]["children"]
+        hosts["apps"]["hosts"]["app-c"]["back_port"] = "{{ app_port | int + 10 }}"
+        rules = hosts["misc"]["hosts"]["machine"]["docker_ports_rules"]
+        for rule in rules:
+            if rule["port"] == 4521:
+                rule["port"] = 4530
+        for app in ("app-a", "app-b", "app-c"):
+            code, out, _ = self.run_app(app, inventory, guard_only=True)
+            self.assertEqual(code, 0, f"{app}: {out[-3000:]}")
+        # la canonique qui déclare l'ancienne valeur est refusée, et le port attendu est nommé quelle que soit l'app jouée
+        for rule in rules:
+            if rule["port"] == 4530:
+                rule["port"] = 4521
+        for app in ("app-a", "app-b", "app-c"):
+            code, out, _ = self.run_app(app, inventory, guard_only=True)
+            self.assertNotEqual(code, 0, app)
+            self.assertIn("app-c:4530", out.replace("\\n", " "), app)
+
+    def test_a_neighbour_with_a_templated_address_and_ssh_port_is_still_part_of_the_machine(self):
+        inventory = shared_inventory()
+        apps = inventory["all"]["children"]["apps"]["hosts"]
+        apps["app-c"]["ansible_host"] = "{{ hostvars['app-a'].ansible_host }}"
+        apps["app-c"]["ansible_port"] = "{{ hostvars['app-a'].ansible_port }}"
+        rules = inventory["all"]["children"]["misc"]["hosts"]["machine"]["docker_ports_rules"]
+        rules[:] = [r for r in rules if r["port"] != 4522]
+        code, out, _ = self.run_app("app-a", inventory, guard_only=True)
+        self.assertNotEqual(code, 0, "app-c partage la machine : son port 4522 manquant doit être signalé")
+        self.assertIn("app-c:4522", out.replace("\\n", " "))
 
     def test_a_dedicated_machine_a_hardened_entry_and_an_external_one_are_not_concerned(self):
         # Une machine à UNE app : les règles dérivées suffisent, aucun host_vars exigé.

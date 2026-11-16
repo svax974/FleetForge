@@ -193,8 +193,16 @@
 # Ports de l'app (front, back-lb, Postgres, Redis) : libres parmi TOUTES les variables `*port` des autres entrées de
 # la machine (pas seulement les `webapp`, dont facts.yml compare déjà les blocs) — un port ajouté demain à une autre
 # famille est comparé aussi.
-# Les valeurs sont lues par machine-ports.yml (chaque entrée dans SON contexte) : `n[k]` sur l'objet hostvars d'une entrée
-# voisine échoue en « 'hostvars' is undefined » dès qu'un de ses `*port` est un gabarit qui référence `hostvars`.
+# Les valeurs sont lues par machine-ports.yml : chaque entrée les a rendues dans SON contexte (probe-ports.yml, jeu
+# playbooks/lib/probe-entry-ports.yml) — ni `hostvars[n][k]` (« 'hostvars' is undefined » sur un gabarit qui référence
+# `hostvars`), ni `ansible_delegated_vars` (variables de l'entrée JOUÉE) ne les rendent correctement.
+- name: Check that every entry was read in its own context
+  ansible.builtin.include_tasks:
+    file: probe-check.yml
+    apply:
+      tags: [always]
+  tags: [always]
+
 - name: Read the rendered port variables of the entries on this address
   vars:
     _addr: "{{ ansible_host | default('') }}"
@@ -205,8 +213,11 @@
       tags: [always]
       vars:
         wa_mp_entries: >-
-          {{ groups['all'] | select('in', hostvars) | map('extract', hostvars) | selectattr('ansible_host', 'defined')
-             | selectattr('ansible_host', 'equalto', _addr) | map(attribute='inventory_hostname') | list }}
+          {%- set ns = namespace(out=[]) -%}
+          {%- for n in groups['all'] if _addr != '' and hostvars[n].wa_mp_addr.host == _addr -%}
+          {%- set ns.out = ns.out + [n] -%}
+          {%- endfor -%}
+          {{ ns.out }}
   tags: [always]
 
 - name: Check the ports of the application are free on the machine

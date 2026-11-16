@@ -1,0 +1,23 @@
+---
+# Garde de lecture : chaque entrée d'inventaire a rendu SON adresse et SON port SSH dans SON contexte (probe-ports.yml).
+# Une entrée dont `ansible_host`/`ansible_port` est un gabarit référençant `hostvars` n'est lisible que par un jeu joué sur
+# elle : lue d'ailleurs, elle était écartée de la machine sans un mot (la garde pouvait alors être sautée). On ne sait pas
+# dire si une entrée non lue partage la machine : REFUS, qui la nomme.
+- name: Check that the address of every entry was read in its own context
+  vars:
+    _unprobed: >-
+      {%- set ns = namespace(out=[]) -%}
+      {%- for n in groups['all'] if hostvars[n].wa_mp_addr is not defined or hostvars[n].wa_mp_addr.error is defined -%}
+      {%- set ns.out = ns.out + [n] -%}
+      {%- endfor -%}
+      {{ ns.out }}
+  ansible.builtin.assert:
+    that:
+      - _unprobed | length == 0
+    fail_msg: >-
+      {{ inventory_hostname }} : l'adresse de {{ _unprobed | join(', ') }} n'a pas été lue dans le contexte de leur entrée — soit
+      le playbook n'importe pas `probe-entry-ports.yml` (ou est lancé avec `--limit`, qui exclut ces entrées), soit
+      `ansible_host`/`ansible_port` de l'entrée ne se rend pas (`ansible-inventory --host <entrée>`). Impossible de dire si
+      elle partage la machine de {{ inventory_hostname }} : refus plutôt qu'une garde sautée.
+    quiet: true
+  tags: [always]

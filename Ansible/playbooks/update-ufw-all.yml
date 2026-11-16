@@ -249,6 +249,10 @@
 # puis repose leurs règles (un proxy retiré perd son accès). Aucune entrée
 # durcie (papanglabs) : plays ignorés. Pas de variable dans un `hosts:` : les
 # entrées sont rangées dans un groupe constant.
+# Adresses et ports de chaque entrée, lus dans leur contexte (les gardes de ports du profil durci comparent les voisines).
+- name: Lecture des ports de chaque entrée
+  ansible.builtin.import_playbook: lib/probe-entry-ports.yml
+
 - name: Find the hardened webapp entries
   hosts: localhost
   connection: local

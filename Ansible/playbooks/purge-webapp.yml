@@ -27,6 +27,10 @@
         groups: webapp_target
       changed_when: false
 
+# Adresses et ports de chaque entrée, lus dans leur contexte (les gardes de ports du profil durci comparent les voisines).
+- name: Lecture des ports de chaque entrée
+  ansible.builtin.import_playbook: lib/probe-entry-ports.yml
+
 - name: Purger l'application de sa machine
   hosts: webapp_target
   remote_user: "{{ remote_username }}"
