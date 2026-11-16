@@ -289,8 +289,9 @@ playbook** que FleetForge : `deploy-fleetforge.yml` (garde du groupe `fleetforge
 `webapp_hardening` (`../docs/etude-passerelle-sur-webapp.md`). Mode d'emploi, prérequis et exposition : en-tête de
 `deploy-fleetforge.yml`.
 
-- **Entrée dédiée** (jamais `infras`, jamais la famille `fleetforge`), même quand elle partage la machine
-  d'`infra1` (premier déploiement) : la déplacer = changer son `ansible_host`. Gardes sans connexion.
+- **Entrée dédiée** (jamais `infras`, jamais la famille `fleetforge`), sur sa propre machine (décision du 16/11/2026 :
+  partagée avec d'autres apps `webapp`, aucun proxy dessus) ou sur celle d'`infra1` : la déplacer = changer son
+  `ansible_host` (+ `masquerade_ack` sur les sorties vers un proxy distant). Gardes sans connexion.
 - **Comptes aval** `ffg_read` / `ffg_check` / `ffg_run` dans `ff_api_accounts` de l'entrée FleetForge, qui
   nomme la passerelle dans `access_linked` ; mots de passe au vault du parc, écrits dans le `.env` de l'app par
   `webapp_env_from_vault` (`no_log`) puis rechiffrés au coffre `.private/apps/fleetforge-gateway`.

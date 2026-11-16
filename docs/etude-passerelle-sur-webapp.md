@@ -4,8 +4,8 @@
 (commit `cc7e40e`, complété par `30b63b5` : `deploy-webapp.yml`, `remove-webapp.yml`, `purge-webapp.yml`, rôles `webapp-*`,
 `proxy-update` `deploy-webapp-site.yml`/`webapp.conf.j2`, `vault-secret-setup`). Ce qu'elle ne couvre pas devient des
 **attributs d'hôte génériques et optionnels** ; les rôles `fleetforge-gateway-*` disparaissent. Restent inchangés : UN
-playbook (`deploy-fleetforge.yml`) qui déploie FleetForge ET la passerelle, entrée d'inventaire dédiée (même machine
-qu'`infra1` au départ), whitelist de test sur `/mcp` (adresses VPN exclues par défaut), liste blanche de playbooks des
+playbook (`deploy-fleetforge.yml`) qui déploie FleetForge ET la passerelle, entrée d'inventaire dédiée (machine :
+d'abord celle d'`infra1`, puis une machine propre dès le 16/11/2026 — voir « Machine distante » en fin de document), whitelist de test sur `/mcp` (adresses VPN exclues par défaut), liste blanche de playbooks des
 comptes `ffg_check`/`ffg_run` (`update-prometheus-alerts.yml`, `check-monitoring.yml`), durcissement complet sur la machine.
 
 Lu en entier : `cc7e40e`, `30b63b5`, `deploy-webapp.yml`, `remove-`/`purge-webapp.yml`, `webapp-{setup,install,security,
@@ -53,7 +53,7 @@ Légende : (1) ce que `webapp` fait déjà ; (2) attribut d'hôte générique aj
 | Règles DOCKER-USER | dérivées de l'entrée → `docker-ports-security` (proxies + vpns + Prometheus + whitelist + liés) | Profil : script et unité PROPRES à l'app (`webapp-<projet>-firewall`), proxies ADMIS distants seulement (+ sous-réseau dédié vers le back-lb), insérés EN TÊTE, IPv4+IPv6, purge+repose ; ufw de ses ports purgé ; ufw actif `deny (incoming)` exigé | — |
 | Vérification de l'ordre | `iptables -S` : un DROP par port | Profil : `firewall-check.yml` (DROP présent ET atteint : aucun RETURN/ACCEPT inconditionnel avant) avant `run.sh`, à l'exécution, et sonde `firewall_<port>` | — |
 | Ports publiés exacts | Postgres/Redis sur la boucle locale (`ss`) | Profil : `PortBindings` exacts (front `80/tcp=0.0.0.0:app_port`, back-lb `back_port/tcp=0.0.0.0:back_port`, le reste `127.0.0.1`) | — |
-| Sous-réseau Docker dédié, IP fixes | — | Profil : `docker_subnet`, `front_ip`, `back_lb_ip` → `.env` (`HARDEN_SUBNET`, `HARDEN_FRONT_IP`, `HARDEN_BACK_LB_IP`) ; garde : /24 privé hors pools Docker, ∈ `access_local_cidrs` | — |
+| Sous-réseau Docker dédié, IP fixes | — | Profil : `docker_subnet`, `front_ip`, `back_lb_ip` → `.env` (`HARDEN_SUBNET`, `HARDEN_FRONT_IP`, `HARDEN_BACK_LB_IP`) ; garde : /24 privé hors pools Docker, ∈ `access_local_cidrs` SEULEMENT si un proxy est sur la machine | — |
 | `TRUST_PROXY` / XFF | `TRUST_PROXY` = `loopback,linklocal,uniquelocal,<proxies>` ; vhost AJOUTE à XFF | Profil : `TRUST_PROXY` = liste EXPLICITE (proxies admis, passerelle du pont si un proxy est co-localisé, front et back-lb) ; `HARDEN_BACK_LB_REALIP` ; vhost RÉÉCRIT XFF (`$remote_addr`) dans toutes ses locations | — |
 | Allow-list par chemin (`/mcp`) | `webapp_vhost_locations` : `path`, `regex`, `mode` (`_access.inc`), `ws`, `body`, `timeout`, `buffering` | `webapp_vhost_locations[].access: {hosts, whitelist, vpn_addresses, v6_min_prefix}` (partiel `_named_access.inc`) ; `upstream: back` ; `priority: true` (`^~`) ; `access: {hosts: []}` = fermé | Les VALEURS (`infra1`, `agenthub`) : inventaire |
 | Trois sources puis `deny all` | — | `_named_access.inc` : serveurs nommés (IPv4), whitelist filtrée (IPv4 seule ou /32, IPv6 ≥ préfixe), adresses VPN écartées sauf `vpn_addresses: true`, valeurs jamais réaffichées brutes, puis `deny all` | — |
@@ -81,7 +81,7 @@ Choix entre options :
 ```yaml
 webapp_hardening:                    # absent = AUCUN changement
   runtime_user: ffgateway            # compte dédié (créé) ; ≠ remote_username
-  docker_subnet: 10.73.231.0/24      # /24 privé, hors 172.16/12 et 192.168/16, listé dans access_local_cidrs
+  docker_subnet: 10.73.231.0/24      # /24 privé, hors 172.16/12 et 192.168/16 ; listé dans access_local_cidrs si un proxy est sur la machine
   front_ip: 10.73.231.10             # .2–.254, ≠ back_lb_ip
   back_lb_ip: 10.73.231.11
   protected_paths: [/run/fleetforge] # + /home/<remote_username>, toujours
@@ -134,8 +134,10 @@ règles DOCKER-USER par leur commentaire, ufw de ses ports, compte dédié). Les
   `fleetforge` — elle ne passe pas pour un nœud de contrôle (`openclaw-install` cherche `'fleetforge' in ansible_roles`).
 - Risque : lancer `deploy-fleetforge.yml --limit fleetforge-gateway` depuis l'app inscrirait `fleetforge` sur l'entrée… sauf
   que `families.rs` ne recopie jamais une famille déjà portée par une AUTRE entrée de la même machine (`infra1`) — vrai tant
-  que la passerelle partage la machine. Si elle déménage, la garde (`'fleetforge' not in ansible_roles`) fait échouer le run,
-  et l'inscription est alors retirée (règle d'échec de `families.rs`). Pas de changement Rust nécessaire ; à documenter.
+  que la passerelle partage la machine. Si elle déménage (cas de fait depuis le 16/11/2026 : machine propre), la garde
+  (`'fleetforge' not in ansible_roles`) fait échouer le run, et l'inscription est alors retirée (règle d'échec de
+  `families.rs`) : ne pas lancer `deploy-fleetforge.yml --limit fleetforge-gateway` depuis une application ; utiliser
+  `ff_deploy_scope=gateway` sans `--limit`, ou `deploy-webapp.yml -e webapp=fleetforge-gateway`. Pas de changement Rust nécessaire.
 - `service_tracker.rs` : le libellé `fleetforge-gateway` (service issu de rôles qui n'existent plus) est retiré ;
   `ansible_roles.rs`/`ansible_playbooks.rs` : entrées `fleetforge-gateway-*` et alias retirées, `webapp-*` complétées.
 
@@ -265,6 +267,9 @@ Conforme à l'étude, avec ces précisions :
 - **docker-ports-security** ne purge plus que ses propres règles ; la garde refuse un port déjà dans `docker_ports_rules`.
 
 ### Sortie réseau du sous-réseau dédié (raisonné, non éprouvé sur une machine)
+
+> Écrit pour la passerelle SUR la machine d'`infra1`/proxy1/mail1. Depuis le 16/11/2026 elle est sur une machine propre :
+> proxy1 et mail1 y sont DISTANTS, `upstream` et `smtp` passent par FORWARD, voir « Machine distante » en fin de document.
 
 Un paquet d'un conteneur traverse **FORWARD** (donc `DOCKER-USER`) quand sa destination est une AUTRE machine, et
 **INPUT** quand sa destination est une adresse de L'HÔTE (passerelle du pont `.1`, adresse publique) — c'est le cas de
@@ -493,6 +498,10 @@ surtout PAS `postgres-restore.sh --yes` (il recharge la base à côté puis l'É
 - **ufw** : plages, listes, destination à adresse, `allow from X` (tous ports) vus par l'audit. Non couvert : un profil
   d'application ufw (`Nginx Full`…), ports hors de `ufw status`.
 
+> **Remplacé le 16/11/2026** pour une passerelle hors de la machine de l'amont : le proxy joint peut être DISTANT, sous
+> `masquerade_ack: true` et des conditions sur l'identité de la machine (voir « Machine distante » en fin de document).
+> Ce qui suit décrit le choix initial (passerelle sur la machine d'infra1) et reste vrai dans ce cas.
+
 ### Relecture finale (15/11/2026) : corrigé
 
 - `firewall.yml` : le `register` du gabarit écrasait le chemin du script (`[Errno 2]` à chaque vrai passage, sauté en
@@ -551,3 +560,46 @@ Après :
   commit (22bba7c) ; aucune modification de cette série n'en dépend.
 - **400 avant allow/deny** : une URI brute hors grammaire répond 400 avant le filtre d'adresses de `/mcp` — accepté
   (aucune donnée servie).
+
+## Machine distante (16/11/2026) : passerelle hors du nœud de contrôle
+
+Décision du propriétaire : la passerelle est déployée sur la machine `185.237.252.206`, qui porte déjà `companymanager`,
+`maestro`, `air-farmer` et `social-manager` (famille `webapp`, sans profil durci) ; plus aucun proxy, ni `infra1`, ni
+`mail1` sur sa machine. Seul `ansible_host` de l'entrée change ; les gardes et l'inventaire suivent :
+
+- **Proxies → passerelle** : tous DISTANTS. Le vhost générique vise `185.237.252.206:app_port|back_port` (plus de
+  `127.0.0.1`) ; les règles DOCKER-USER du profil admettent proxy1 et proxy3 (proxy2 = adresse du VPN, jamais) ;
+  aucune règle OUTPUT `local:nginx` (aucun nginx sur la machine, xt_cgroup inutile) ; `TRUST_PROXY` = proxies admis + front
+  et back-lb, SANS passerelle du pont.
+- **Passerelle → FleetForge** : `https://infra-priv.<domaine>` (nom privé de la machine d'`infra1`, enregistrement A =
+  proxy1) : le paquet sort par FORWARD (DOCKER-USER : `-d <proxy1> --dport 443 NEW RETURN`) puis MASQUERADE ; proxy1
+  voit l'adresse PUBLIQUE de la passerelle, déjà admise par le vhost de FleetForge au titre de `access_linked`
+  (`fleetforge-gateway`), à condition de rejouer ce vhost (`deploy-fleetforge.yml --tags proxy-conf`). `server_name`
+  du vhost : le nom privé n'est ajouté que sur le proxy de la machine d'`infra1` (condition sur l'adresse d'`infra1`,
+  inchangée) — c'est donc CE proxy que vise `egress_allow.upstream`.
+- **`access_local_cidrs` / 10.73.231.0/24** : lus sur le serveur lié par `_access.inc`, admis par un proxy de LA MÊME
+  machine seulement ; sans proxy sur la machine de la passerelle, la valeur n'est jamais rendue. Retirée de l'entrée de
+  la passerelle (rien à changer côté FleetForge : `infra1` n'en a jamais porté) ; la garde ne l'exige plus que si un proxy
+  est sur la machine (`wa_h_local_proxy`).
+- **SMTP** : `mail1:587` est distant (même adresse que proxy1) : FORWARD, masqué. Côté mail1 (hors dépôt) : voir la liste
+  des prérequis du compte rendu ; `mailrelay_allowed_sources` contient déjà toute adresse d'hôte de l'inventaire.
+- **Garde** (`webapp-setup/tasks/hardening.yml`, `fleetforge-install/tasks/gateway-guard.yml`) : toute ligne
+  `egress_allow` vers l'adresse d'un proxy qui n'est pas cette machine (FORWARD, masqué) exige `masquerade_ack: true` ;
+  l'adresse de la machine ne doit être ni celle d'un nœud de contrôle (`infras`), d'un proxy, d'un serveur VPN, de la
+  supervision, ni dans `whitelist`, et aucune AUTRE entrée de la machine ne doit être nommée par adresse
+  (`access_linked`, serveurs d'une liste nommée) — sinon la passerelle hériterait de leurs droits. La sortie `upstream`
+  doit viser le proxy de la machine de l'entrée amont. Tests : `GuardTests` (passerelle sur sa machine, acquittements,
+  identités privilégiées, proxy hors machine de l'amont, proxy local sans `access_local_cidrs`).
+- **Limite non fermée** : le filtre ne porte que sur `proxy1:443`, pas sur le `Host` envoyé. Les vhosts écrits à la main
+  qui admettent « tous les hôtes de l'inventaire » (ex. ctdapi.conf, docker-repo-ssl.conf, monitoring.conf `/api/v1/write`)
+  admettent aussi l'adresse de la passerelle : un code compromis peut les joindre en choisissant le `Host`. Fermeture
+  possible (non faite) : un écouteur dédié sur proxy1 (port propre, un seul `server{}`) et `egress_allow.upstream.port` ≠ 443.
+- **Machine partagée avec d'autres apps** : le pare-feu de la passerelle (script et unité propres, règles en TÊTE) n'agit que
+  sur son sous-réseau et ses ports ; les règles des autres apps (script unique `docker-ports-firewall.sh`, règles
+  AJOUTÉES en queue) restent en aval. Le script de `docker-ports-security` est UN fichier par machine, réécrit à chaque
+  déploiement d'une app avec les seules règles de CELLE-CI plus `docker_ports_rules` de l'entrée jouée : sans
+  `host_vars/<entrée canonique>.yml` listant toutes les apps (et `webapp_machine` sur chacune), un redémarrage de
+  Docker ne rétablit que les règles de la dernière app déployée. Hors périmètre de la passerelle.
+- **Sauvegarde** : aucun conflit (destination `station`, autre machine) ; la clé de la passerelle est liée à son adresse
+  (`from=`) sur la destination : rejouer `deploy-backup.yml --limit fleetforge-gateway:backup-fleetforge-gateway` si la
+  sauvegarde avait été posée avec l'ancienne adresse.

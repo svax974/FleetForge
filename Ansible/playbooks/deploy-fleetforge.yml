@@ -76,10 +76,18 @@
 # Retrait : remove-webapp.yml / purge-webapp.yml -e webapp=fleetforge-gateway.
 #
 # PRÉREQUIS AVANT LE PREMIER DÉPLOIEMENT RÉEL de la passerelle :
-#   1. CHOISIR LA MACHINE : `ansible_host` de l'entrée dédiée. Premier
-#      déploiement : la MÊME machine que `infra1` (décision du 15/11/2026) ;
-#      la déplacer = changer cette seule valeur (aucune adresse, aucun chemin
-#      de la machine de contrôle n'est écrit dans les rôles) ;
+#   1. CHOISIR LA MACHINE : `ansible_host` de l'entrée dédiée (aucune adresse,
+#      aucun chemin de la machine de contrôle n'est écrit dans les rôles).
+#      Décision du 16/11/2026 : machine PROPRE (partagée avec d'autres apps
+#      `webapp`), hors du nœud de contrôle `infra1` ; l'ancien choix (la MÊME
+#      machine qu'`infra1`) reste géré : proxy local, `access_local_cidrs`.
+#      Machine distante : AUCUN proxy dessus, tous distants ; l'amont est joint
+#      par le proxy de SA machine (443, FORWARD, MASQUÉ sous l'adresse publique
+#      de la passerelle : `masquerade_ack: true` sur les lignes `egress_allow`
+#      qui visent un proxy), le relais SMTP de même ; prérequis hors dépôt :
+#      A de `hostname`, soumission 587 de mail1 ouverte à cette adresse + compte
+#      SASL lié à un expéditeur, vhost de l'amont rejoué (`--tags proxy-conf`)
+#      pour qu'il admette la nouvelle adresse (`access_linked`) ;
 #   2. les comptes aval `ffg_read`/`ffg_check`/`ffg_run` dans `ff_api_accounts`
 #      de l'entrée FleetForge (mots de passe tirés et chiffrés au group_vars du
 #      parc par fleetforge-install, à COMMITTER), la passerelle dans son
@@ -102,7 +110,10 @@
 # porte sa propre allow-list d'adresses (≤ /16, `mcp-access`), qui ne
 # s'élargit pas avec la whitelist. Ports publiés (DOCKER-USER, règles en tête
 # de chaîne) : proxies ADMIS seulement — jamais un proxy à l'adresse d'un VPN —,
-# plus le seul sous-réseau Docker dédié pour le back-lb. TRUST_PROXY de l'app :
+# plus le seul sous-réseau Docker dédié pour le back-lb. Les autres apps de la
+# machine (chaîne alimentée par `docker-ports-security`, règles AJOUTÉES en
+# queue) ne sont pas touchées : le pare-feu de la passerelle est propre à elle.
+# TRUST_PROXY de l'app :
 # liste EXPLICITE (proxies admis, passerelle du réseau dédié si un proxy est
 # sur la machine, front et back-lb à adresse fixe), et le back-lb réécrit
 # X-Forwarded-For.
@@ -114,14 +125,19 @@
 # et liste de refus couvrant tout playbook « sensible » (scripts/webapp_hardening_check.py).
 # Ports publiés en `0.0.0.0:` EXPLICITE (sinon docker-proxy publierait aussi
 # `[::]`, en INPUT, hors DOCKER-USER) ; ufw actif en `deny` entrant vérifié.
-# RISQUE RÉSIDUEL tant que la machine est partagée : tout processus local peut
+# RISQUE RÉSIDUEL tant qu'un PROXY partage la machine : tout processus local peut
 # joindre les ports publiés par la boucle locale (vu comme le proxy local, donc
 # de confiance) et choisir l'adresse qu'il annonce — la clé `ffg_` reste exigée,
-# mais l'allow-list d'adresses d'un credential ne protège plus contre lui.
+# mais l'allow-list d'adresses d'un credential ne protège plus contre lui (sans
+# proxy sur la machine : seul root joint ces ports en local).
+# RISQUE RÉSIDUEL d'une machine distante : la sortie vers l'amont est masquée sous
+# l'adresse publique de la machine, que les vhosts écrits à la main du parc
+# admettent au titre de « tous les hôtes de l'inventaire » (le conteneur choisit
+# le `Host` envoyé au proxy : seul l'ensemble IP:443 est filtré, pas le vhost).
 # Comptes aval : `ffg_run` porte `accept_own_checks: false` — seuls les checks
 # de `ffg_check` ouvrent ses runs réels.
-# E2/E3 (OAuth public) INTERDITS tant que la passerelle partage la machine du
-# nœud de contrôle : la déplacer d'abord (docs/etude-isolation-passerelle-vm.md).
+# E2/E3 (OAuth public) : voir docs/avant-ouverture-public.md (machine partagée avec
+# d'autres applications ; docs/etude-isolation-passerelle-vm.md pour un noyau séparé).
 
 # ── Paramètres (AVANT toute connexion) ─────────────────────────────────────
 # `ff_deploy_scope` validé d'emblée ; un `-e webapp=…` l'emporterait sur les

@@ -6,8 +6,8 @@
 # Règles, IPv4 et IPv6, sur les seules connexions DNATées vers ces ports (`--ctstate DNAT --ctorigdstport`, le front
 # écoutant sur 80 dans son conteneur), INSÉRÉES EN TÊTE de la chaîne (un RETURN inconditionnel posé avant elles par
 # Docker ou un autre rôle les rendrait décoratives) :
-#   • front et back-lb : proxies ADMIS et distants seulement (hors adresses VPN ; un proxy de la même machine passe
-#     par 127.0.0.1, chaîne OUTPUT, hors DOCKER-USER) ;
+#   • front et back-lb : proxies ADMIS et distants seulement (hors adresses VPN ; un proxy de la même machine, s'il y
+#     en a un, passe par 127.0.0.1, chaîne OUTPUT, hors DOCKER-USER ; sans proxy sur la machine, tous sont distants) ;
 #   • back-lb : plus le sous-réseau Docker DÉDIÉ de l'app (relais front → back-lb) ;
 #   • puis DROP. Ni whitelist, ni vpns, ni Prometheus : les humains passent par le vhost, la supervision par svcprobe
 #     sur la boucle locale.

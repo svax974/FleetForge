@@ -14,8 +14,9 @@
 #     des résolveurs de la machine ; tout le reste DROP.
 #   • INPUT : un paquet d'un conteneur vers une adresse de L'HÔTE (passerelle du pont, adresse publique) ne passe
 #     PAS par FORWARD mais par INPUT. Admis : les réponses, et les entrées de `egress_allow` dont la destination est
-#     cette machine (la passerelle joint FleetForge par https://<amont> via proxy1, et le relais SMTP mail1, tous
-#     deux sur cette machine) ; tout le reste DROP (sshd, exporters…).
+#     cette machine (un proxy ou le relais SMTP qui y serait installé) ; tout le reste DROP (sshd, exporters…).
+#     Une destination sur une AUTRE machine (cas de la passerelle de FleetForge sur sa propre machine : proxy1 en 443,
+#     mail1 en 587) passe par FORWARD : elle sort MASQUÉE, sous l'adresse publique de cette machine.
 #   DNS : le résolveur embarqué de Docker (127.0.0.11, dans le conteneur) interroge les résolveurs de la machine
 #   depuis l'espace réseau du CONTENEUR quand ils ne sont pas en boucle locale : ils sont lus sur la machine et
 #   admis en 53 (udp, tcp).

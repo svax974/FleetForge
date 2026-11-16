@@ -153,8 +153,8 @@ all:
         # ── Passerelle MCP de FleetForge (deploy-fleetforge.yml, tag gateway) ──
         # Entrée `webapp` DURCIE (`webapp_hardening`, docs/etude-passerelle-sur-
         # webapp.md), DÉDIÉE, jamais dans `infras` ni avec la famille
-        # `fleetforge` (même quand elle partage la machine de FleetForge :
-        # copier alors son ansible_host/provider). Son amont (une entrée de
+        # `fleetforge` (sur SA machine, ou sur celle de FleetForge : copier alors
+        # son ansible_host/provider et voir `access_local_cidrs` plus bas). Son amont (une entrée de
         # `infras`) la nomme dans `access_linked` et porte dans
         # `ff_api_accounts` les comptes bornés ffg_read (read), ffg_check (check,
         # max_hosts, allow_playbooks = update-prometheus-alerts.yml +
@@ -197,19 +197,24 @@ all:
               pgbak_dir: "/home/{{ remote_username }}/postgres-backup-fleetforge-gateway"
               pgbak_cron_minute: "20"
               # Sous-réseau Docker dédié (HARDEN_SUBNET du compose durci), hors
-              # 172.16/12 et 192.168/16 ; admis par le vhost de l'amont sur un
-              # proxy CO-LOCALISÉ (`access_local_cidrs`).
+              # 172.16/12 et 192.168/16. Machine PROPRE à la passerelle (ou partagée avec d'autres apps `webapp`) :
+              # AUCUN proxy dessus, tous sont distants ; ses sorties vers le proxy de l'amont (443) et le relais
+              # SMTP (587) passent par FORWARD, MASQUÉES sous l'adresse publique de la machine, que le vhost de
+              # l'amont admet au titre de `access_linked` : `masquerade_ack: true` l'acquitte (la garde refuse en plus
+              # une machine qui porte le nœud de contrôle, un proxy, un VPN, la supervision, ou une autre entrée
+              # nommée par adresse). Co-localisée avec le proxy de l'amont : pas d'`ack`, et le sous-réseau est
+              # déclaré dans `access_local_cidrs` (admis par ce seul proxy, sous l'adresse du conteneur).
               webapp_hardening:
                 runtime_user: ffgateway
                 docker_subnet: 10.73.231.0/24
                 front_ip: 10.73.231.10
                 back_lb_ip: 10.73.231.11
                 protected_paths: ["/run/fleetforge"]
-                # Sorties du sous-réseau (tout le reste refusé) : l'amont par les proxies, le relais SMTP du parc.
+                # Sorties du sous-réseau (tout le reste refusé) : l'amont par le proxy de SA machine (le nom privé de
+                # l'amont n'y est servi que par lui), le relais SMTP du parc.
                 egress_allow:
-                  - { name: upstream, proxies: true, port: 443 }
-                  - { name: smtp, inventory_host: mail1, port: 587 }
-              access_local_cidrs: [10.73.231.0/24]
+                  - { name: upstream, inventory_host: proxy1, port: 443, masquerade_ack: true }
+                  - { name: smtp, inventory_host: mail1, port: 587, masquerade_ack: true }
               # /mcp : seuls ces serveurs (vide = personne), puis deny all.
               # `whitelist: true` = accès de TEST (false hors tests, et avant
               # toute exposition E2/E3) ; adresses VPN toujours écartées.
@@ -227,7 +232,7 @@ all:
               webapp_extra_secrets:
                 - { key: REDIS_PASSWORD, kind: hex_32 }
               webapp_upstream_checks:
-                - { id: main, url: "https://infra.{{ domain_name }}/healthz" }
+                - { id: main, url: "https://{{ hostvars['infra1'].hostname }}/healthz" }
 
         # ── Destinations de sauvegarde (une entrée par sauvegarde) ────────────
         # Les sources y écrivent par le compte dédié `backup_account` (rôle backup-setup, créé au premier

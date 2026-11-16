@@ -1,7 +1,9 @@
 # Étude : isolation de la passerelle par VM légère
 
 > Date : 15/11/2026 · Statut : **étude seulement** — rien n'est implémenté, aucune machine n'a été
-> contactée. Contexte : la passerelle MCP de FleetForge (`fleetforge-gateway`, étape 6.6 du lot 6)
+> contactée. (Mise à jour du 16/11/2026 : la passerelle est affectée à une machine propre, `185.237.252.206`, hors du
+> nœud de contrôle ; le risque « noyau partagé avec `infra1` » ci-dessous vaut alors pour les autres applications de
+> cette machine, non pour le nœud de contrôle. Voir `etude-passerelle-sur-webapp.md`, « Machine distante ».) Contexte : la passerelle MCP de FleetForge (`fleetforge-gateway`, étape 6.6 du lot 6)
 > démarre sur la MÊME machine que le nœud de contrôle `infra1` (décision du 15/11/2026). Cette étude
 > regarde comment lui donner un **noyau séparé sur ce même serveur**, sans nouvelle adresse publique,
 > avec une entrée d'inventaire dédiée dont `ansible_host` deviendrait l'adresse de la VM.

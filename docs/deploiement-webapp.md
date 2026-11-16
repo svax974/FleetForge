@@ -77,8 +77,10 @@ du parc**, et les clés de chiffrement à sauvegarder hors du serveur. Restent m
     AVANT `run.sh`, durcissement RÉEL vérifié après (`--tags hardening` pour le recontrôle seul), conteneurs ARRÊTÉS au
     moindre écart, vhost qui réécrit X-Forwarded-For, sondes `firewall_<port>` ;
     Sortie du sous-réseau bornée : `webapp_hardening.egress_allow: [{name, proxies: true | inventory_host | host, port,
-    proto}]` (vide = rien, hors réponses, trafic interne et DNS de la machine), FORWARD pour une autre machine, INPUT
-    pour celle-ci — jamais un proxy DISTANT (MASQUERADE : il verrait l'adresse de la machine) ; trafic LOCAL vers
+    proto, masquerade_ack?}]` (vide = rien, hors réponses, trafic interne et DNS de la machine), FORWARD pour une autre
+    machine, INPUT pour celle-ci — une ligne vers un proxy DISTANT (MASQUERADE : il voit l'adresse de la machine) exige
+    `masquerade_ack: true` et une machine sans identité privilégiée (nœud de contrôle, proxy, VPN, supervision,
+    whitelist) ni autre entrée nommée par adresse (`access_linked`, listes nommées) ; trafic LOCAL vers
     l'app (OUTPUT) réservé à nginx (groupe de contrôle) et root ; aucune règle ufw supprimée (une règle d'une autre
     origine sur ses ports bloque le déploiement) ; base jamais vierge (marqueur d'état
     `/var/lib/fleetforge/webapp/<entrée>.state`, `-e webapp_hardening_db_migrated=true` après migration) ; faits
