@@ -82,4 +82,8 @@ postlog   unix-dgram n  -       n       -       1       postlogd
 # ── Header rewrite pipe transport ─────────────────────────────────────────────
 mailfilter unix  -  n  n  -  10  pipe
   flags=Rq user=mailfilter null_sender=
+{% if mailrelay_sender_bindings | default([], true) | length > 0 %}
+  argv=/usr/local/lib/mailserver/mailfilter.py -f ${sender} --sasl-username=${sasl_username} --bindings={{ mailrelay_postfix_dir }}/sender_bindings.json -- ${recipient}
+{% else %}
   argv=/usr/local/lib/mailserver/mailfilter.py -f ${sender} -- ${recipient}
+{% endif %}

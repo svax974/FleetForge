@@ -9,11 +9,13 @@ import re
 import json
 import email
 import email.policy
+import email.utils
 import smtplib
 
 CONFIG_FILE = '/etc/postfix/mailserver-domains.json'
 REINJECT_HOST = '127.0.0.1'
 REINJECT_PORT = 10026
+EX_DATAERR = 65   # permanent failure: pipe(8) bounces the message
 EX_TEMPFAIL = 75
 
 
@@ -31,6 +33,47 @@ def parse_args(argv):
         else:
             i += 1
     return sender, recipients
+
+
+def parse_binding_args(argv):
+    """`--sasl-username=<login>` and `--bindings=<file>`, given by master.cf ONLY when mailrelay_sender_bindings is set.
+    (login, file): file is None without the option, login is '' for a message that did not come from an authenticated client."""
+    login, path = '', None
+    for arg in argv[1:]:
+        if arg == '--':
+            break
+        if arg.startswith('--sasl-username='):
+            login = arg.split('=', 1)[1]
+        elif arg.startswith('--bindings='):
+            path = arg.split('=', 1)[1]
+    return login, path
+
+
+def load_bindings(path):
+    # No `except`: an unreadable or malformed file defers the message (EX_TEMPFAIL) instead of waving everything through.
+    with open(path) as fh:
+        data = json.load(fh)
+    if not isinstance(data, dict):
+        raise ValueError('bindings file is not a mapping')
+    return data
+
+
+def binding_refusal(login, bindings, sender, msg):
+    """Reason to refuse the message, or None. Only a login LISTED in `bindings` is checked (an unlisted one, such as the
+    shared relay account, is left alone): the envelope sender and every `From:` address must be bound to it."""
+    owned = bindings.get((login or '').lower())
+    if owned is None:
+        return None
+    owned = {a.lower() for a in owned}
+    if (sender or '').lower() not in owned:
+        return 'envelope sender %r is not bound to this login' % sender
+    from_addresses = [addr.lower() for _, addr in email.utils.getaddresses([str(v) for v in msg.get_all('From', [])])]
+    if not from_addresses:
+        return 'no From header'
+    for addr in from_addresses:
+        if addr not in owned:
+            return 'From address %r is not bound to this login' % addr
+    return None
 
 
 def load_config():
@@ -69,6 +112,13 @@ def main():
 
     domain_config = load_config()
     msg = email.message_from_bytes(raw, policy=email.policy.compat32)
+
+    login, bindings_path = parse_binding_args(sys.argv)
+    if bindings_path is not None and login:
+        reason = binding_refusal(login, load_bindings(bindings_path), sender, msg)
+        if reason:
+            sys.stderr.write('mailfilter refused: login=%s %s\n' % (login, reason))
+            sys.exit(EX_DATAERR)
 
     from_domain = extract_domain(msg.get('From', ''))
     config = domain_config.get(from_domain, {})

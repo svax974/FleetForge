@@ -276,6 +276,10 @@
     mode: '0644'
   notify: restart postfix
 
+# Liaison retirée : les tables ne partent qu'après le redémarrage sur le main.cf/master.cf qui ne les nomment plus.
+- name: Remove the sender binding tables once Postfix no longer references them
+  ansible.builtin.include_tasks: sender-binding-cleanup.yml
+
 - name: Deploy TLS SNI map source file
   ansible.builtin.template:
     src: tls-sni-map.j2

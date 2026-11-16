@@ -1,8 +1,8 @@
 ---
 # Lien identifiant SASL -> adresse expéditrice (`mailrelay_sender_bindings`, optionnel).
-# Vide : rien n'est posé, et les fichiers d'une liaison retirée sont supprimés (main.cf
-# ne les référence alors plus). Joué AVANT main.cf : les tables doivent exister quand
-# Postfix redémarre.
+# Vide : rien n'est posé ; les fichiers d'une liaison retirée sont supprimés par
+# sender-binding-cleanup.yml, APRÈS main.cf/master.cf et le redémarrage. Joué AVANT main.cf :
+# les tables doivent exister quand Postfix redémarre.
 
 - name: Check the shape of the sender bindings
   vars:
@@ -51,15 +51,14 @@
   loop:
     - { src: sender-login-maps.j2, dest: sender_login_maps }
     - { src: sasl-bound-logins.j2, dest: sasl_bound_logins }
+    - { src: sasl-bound-null-sender.j2, dest: bound_null_sender }
+    # Read by mailfilter.py (user `mailfilter`, via the postfix group like mailserver-domains.json).
+    - { src: sender-bindings.json.j2, dest: sender_bindings.json }
   loop_control:
     label: "{{ item.dest }}"
   when: mailrelay_sender_bindings | default([], true) | length > 0
   notify: restart postfix
 
-- name: Remove the sender binding tables when no binding is declared
-  ansible.builtin.file:
-    path: "{{ mailrelay_postfix_dir }}/{{ item }}"
-    state: absent
-  loop: [sender_login_maps, sasl_bound_logins]
-  when: mailrelay_sender_bindings | default([], true) | length == 0
-  notify: restart postfix
+# Binding removed: the tables are deleted by sender-binding-cleanup.yml, AFTER main.cf and master.cf stopped referencing
+# them and Postfix restarted. Deleting them here (before main.cf) would leave a running Postfix whose config still names
+# a missing texthash table, which fails closed on every authenticated submission until the restart.

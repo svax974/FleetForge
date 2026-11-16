@@ -1,0 +1,7 @@
+{% set owned = {} %}
+{% for binding in mailrelay_sender_bindings %}
+{% set login = (binding.login if '@' in binding.login else binding.login ~ '@' ~ mailrelay_hostname) | lower %}
+{% set listed = [binding.senders] if binding.senders is string else binding.senders %}
+{% set _ = owned.update({login: (owned.get(login, []) + (listed | map('lower') | list)) | unique | sort | list}) %}
+{% endfor %}
+{{ owned | tojson }}

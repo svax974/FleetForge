@@ -54,7 +54,8 @@ broken_sasl_auth_clients    = yes
 # returns the restriction class for the listed ones, anything else is a no-match.
 smtpd_sender_login_maps = texthash:{{ mailrelay_postfix_dir }}/sender_login_maps
 smtpd_restriction_classes = bound_sender
-bound_sender = reject_sender_login_mismatch
+# reject_sender_login_mismatch skips the null sender (MAIL FROM:<>): refuse it first, for the bound logins only.
+bound_sender = check_sender_access texthash:{{ mailrelay_postfix_dir }}/bound_null_sender, reject_sender_login_mismatch
 # Referenced from master.cf (465/587): a master.cf `-o` value cannot hold spaces.
 submission_sender_restrictions = check_sasl_access texthash:{{ mailrelay_postfix_dir }}/sasl_bound_logins
 

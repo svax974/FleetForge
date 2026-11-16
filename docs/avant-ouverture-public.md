@@ -58,8 +58,17 @@ par `deploy-fleetforge.yml` (garde du groupe `fleetforge_gateways` puis import d
   3. `./play.sh web3c deploy-mailrelay.yml --limit mail1` (rejoue aussi la config SASL/Postfix : redémarrage de
      Postfix) ; vérifier dans `/var/log/mail.log` (`postfix/submission/smtpd`) que `sasl_username=<login>@<royaume>`
      a bien cette forme, puis qu'un `MAIL FROM` d'une autre adresse est refusé en `553 5.7.1 … not owned by user`.
-  Limites : seule l'enveloppe (`MAIL FROM`) est liée, pas l'en-tête `From:` ; un identifiant NON listé reste
-  libre ; `postfix` réel (smtpd) non exercé hors machine (tests : `Ansible/scripts/test_mailrelay_sender_binding.py`).
+  Pour un identifiant LISTÉ : l'enveloppe est liée (`reject_sender_login_mismatch`), l'expéditeur nul (`MAIL FROM:<>`,
+  que cette restriction laisse passer) est refusé d'abord par `check_sender_access` (table `bound_null_sender`), et
+  `mailfilter.py` (reçoit `${sasl_username}` et `sender_bindings.json`) refuse en 65 (rebond) un `From:` — tous les
+  `From:` du message — qui n'appartient pas au login, ou l'absence de `From:` ; un fichier de liaisons illisible
+  fait différer le message (75). Limites : un identifiant NON listé reste libre (`relay_user`) ; seuls `MAIL FROM` et
+  `From:` sont liés (pas `Sender:`, `Reply-To:` ni `Resent-*`) ; un `From:` malformé que l'analyseur de Python lit
+  autrement que le destinataire n'est pas exclu ; retirer une liaison supprime les tables APRÈS le redémarrage de
+  Postfix sur le main.cf/master.cf qui ne les nomment plus ; `postfix` réel (smtpd, pipe) non exercé hors machine
+  (tests : `Ansible/scripts/test_mailrelay_sender_binding.py`, `postconf`/`postmap` 3.2 sur ce poste, cible plus récente).
+  À surveiller après activation : `postfix/pipe … status=bounced` avec `mailfilter refused: login=` dans
+  `/var/log/mail.log`, et `status=deferred` avec `mailfilter error:` si le fichier de liaisons manque.
 - **Whitelist de test sur `/mcp` filtrée** : IPv4 seule ou /32, IPv6 de préfixe ≥ 128 par défaut ; la
   plage IPv6 /64 de la whitelist n'y passe que si le propriétaire pose `v6_min_prefix: 64` dans l'`access`.
 - **Fenêtre au redémarrage de Docker** : les conteneurs repartent avant que l'unité

@@ -1,0 +1,17 @@
+---
+# Liaison identifiant SASL -> adresse retirée (`mailrelay_sender_bindings` vide) : les tables ne sont supprimées qu'ICI,
+# APRÈS que main.cf et master.cf ont été réécrits sans les référencer et que Postfix a redémarré dessus. Les supprimer avant
+# (comme le faisait sender-binding.yml, joué avant main.cf) laisse un Postfix en marche dont la configuration nomme encore
+# une table texthash absente : toute soumission authentifiée échoue jusqu'au redémarrage. Rien n'est supprimé tant qu'une
+# liaison est déclarée.
+
+- name: Restart Postfix on the configuration that no longer references the binding tables
+  ansible.builtin.meta: flush_handlers
+  when: mailrelay_sender_bindings | default([], true) | length == 0
+
+- name: Remove the sender binding tables when no binding is declared
+  ansible.builtin.file:
+    path: "{{ mailrelay_postfix_dir }}/{{ item }}"
+    state: absent
+  loop: [sender_login_maps, sasl_bound_logins, bound_null_sender, sender_bindings.json]
+  when: mailrelay_sender_bindings | default([], true) | length == 0

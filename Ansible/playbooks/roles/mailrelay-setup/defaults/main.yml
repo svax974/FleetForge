@@ -105,7 +105,10 @@ mailrelay_dns_replace_conflicting: true
 # `relay_user`) ne sont pas touchés : le contrôle ne vise que les identifiants listés.
 # Rendu : /etc/postfix/sender_login_maps (adresse -> identifiant, `smtpd_sender_login_maps`
 # en texthash) et /etc/postfix/sasl_bound_logins (identifiants liés, aiguillés par
-# `check_sasl_access` vers `reject_sender_login_mismatch`). Aucun mot de passe ici.
+# `check_sasl_access` vers `reject_sender_login_mismatch`), /etc/postfix/bound_null_sender
+# (l'expéditeur nul `<>`, que cette restriction laisse passer, est refusé aux seuls identifiants
+# liés) et /etc/postfix/sender_bindings.json (lu par mailfilter.py, qui refuse un `From:` qui
+# n'appartient pas à l'identifiant listé). Aucun mot de passe ici.
 #
 # `login` : nom SASL sans royaume (le royaume `mailrelay_hostname` est ajouté, comme
 # Postfix le fait avec `smtpd_sasl_local_domain`) ou déjà qualifié `nom@royaume`.
