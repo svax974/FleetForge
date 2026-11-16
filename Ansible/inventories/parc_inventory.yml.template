@@ -173,9 +173,22 @@ all:
               back_port: 4731       # back-lb : sert /mcp
               access_mode: private  # E1 : jamais public
               ufw_app_ports: false  # ports publiés par Docker : DOCKER-USER seulement
-              ansible_roles: [webapp]
+              ansible_roles: [webapp, backup]
               webapp_db_engine: postgres
               webapp_update_common: false
+              # Sauvegarde de SA base (famille `backup`, deploy-backup.yml ; docs/etude-passerelle-sur-webapp.md,
+              # « Sauvegarde de la base de la passerelle »). Conteneur = `<projet>_postgres` (projet = nom de l'entrée) ;
+              # base et rôle = ceux du back/.env (défaut `webapp` : le nom du projet sans tiret) ; destination = une
+              # entrée de `backups` sur une AUTRE machine ; `pgbak_dir` propre à l'entrée (le défaut est partagé par
+              # toutes les entrées d'une machine) ; seuil BackupStale : `prom_alert_backup_max_age_hours`.
+              # Contrôlé sans connexion par la garde de deploy-fleetforge.yml (tag gateway).
+              pgbak_name: fleetforge-gateway
+              pgbak_container: fleetforge-gateway_postgres
+              pgbak_db: fleetforgegateway
+              pgbak_user: fleetforgegateway
+              pgbak_dest_host: backup-fleetforge-gateway
+              pgbak_dir: "/home/{{ remote_username }}/postgres-backup-fleetforge-gateway"
+              pgbak_cron_minute: "20"
               # Sous-réseau Docker dédié (HARDEN_SUBNET du compose durci), hors
               # 172.16/12 et 192.168/16 ; admis par le vhost de l'amont sur un
               # proxy CO-LOCALISÉ (`access_local_cidrs`).
@@ -218,4 +231,13 @@ all:
               provider: contabo
               server_type: backup
               backup_sources: [monapp]
+              ansible_roles: [backup]
+
+            # Destination de la base de la passerelle : JAMAIS la machine de la passerelle.
+            backup-fleetforge-gateway:
+              hostname: backup-ffg.{{ domain_name }}
+              ansible_host: 203.0.113.60
+              provider: contabo
+              server_type: backup
+              backup_sources: [fleetforge-gateway]
               ansible_roles: [backup]

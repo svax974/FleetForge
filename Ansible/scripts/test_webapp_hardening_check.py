@@ -2064,6 +2064,48 @@ class GuardTests(unittest.TestCase):
         self.assertNotEqual(code, 0)
         self.assertIn("docker_ports_rules", out)
 
+    def backup_inventory(self, **gateway):
+        """Passerelle qui opte pour la famille `backup` : destination sur une AUTRE machine, seuil d'alerte déclaré."""
+        entry = dict(ansible_roles=["webapp", "backup"], pgbak_name="fleetforge-gateway", pgbak_db="fleetforgegateway",
+                     pgbak_user="fleetforgegateway", pgbak_container="fleetforge-gateway_postgres",
+                     pgbak_dest_host="backup-fleetforge-gateway",
+                     pgbak_dir="/home/srvc/postgres-backup-fleetforge-gateway")
+        entry.update(gateway)
+        inventory = guard_inventory(**entry)
+        inventory["all"]["vars"]["prom_alert_backup_max_age_hours"] = {"fleetforge-gateway": 48}
+        inventory["all"]["children"]["backups"] = {"hosts": {"backup-fleetforge-gateway": {"ansible_host": "203.0.113.90"}}}
+        return inventory
+
+    def test_the_database_backup_is_checked_only_when_the_gateway_opts_in(self):
+        # Sans `backup` dans ansible_roles : aucune exigence `pgbak_*` (comportement inchangé).
+        code, out = self.guard(guard_inventory(pgbak_container="anything"))
+        self.assertEqual(code, 0, out[-3000:])
+        code, out = self.guard(self.backup_inventory())
+        self.assertEqual(code, 0, out[-3000:])
+
+    def test_a_database_backup_that_would_miss_the_database_or_the_alert_is_refused(self):
+        cases = {
+            "container": dict(pgbak_container="fleetforge-gateway_back"),
+            "same_machine": dict(pgbak_dest_host="infra1"),
+            "no_destination": dict(pgbak_dest_host="nowhere"),
+            "shared_dir": dict(pgbak_dir="/home/srvc/postgres-backup"),
+            "relative_dir": dict(pgbak_dir="postgres-backup-fleetforge-gateway"),
+            "bad_db": dict(pgbak_db="x; drop"),
+        }
+        for label, change in cases.items():
+            with self.subTest(label):
+                inventory = self.backup_inventory(**change)
+                if label == "same_machine":
+                    inventory["all"]["children"]["backups"]["hosts"]["infra1"] = {"ansible_host": "192.0.2.10"}
+                code, out = self.guard(inventory)
+                self.assertNotEqual(code, 0, label)
+                self.assertIn("pgbak_", out)
+        inventory = self.backup_inventory()
+        del inventory["all"]["vars"]["prom_alert_backup_max_age_hours"]
+        code, out = self.guard(inventory)
+        self.assertNotEqual(code, 0)
+        self.assertIn("prom_alert_backup_max_age_hours", out)
+
     def test_the_gateway_never_carries_the_fleetforge_family_nor_goes_public(self):
         self.assertNotEqual(self.guard(guard_inventory(ansible_roles=["webapp", "fleetforge"]))[0], 0)
         self.assertNotEqual(self.guard(guard_inventory(access_mode="public"))[0], 0)

@@ -295,6 +295,63 @@ projet, conteneur sur un autre volume, déploiement antérieur avec volume absen
 Automatiser (`--tags db-migrate` : dump, restauration, comparaison des comptages, échec fermé) : estimé **M** (une
 journée, revue comprise), non implémenté.
 
+### Sauvegarde de la base de la passerelle
+
+Famille `backup` EXISTANTE, rôle générique `postgres-backup-install` joué par `deploy-backup.yml` : le play
+`tradekong:ctdapi:fleetforge_gateways` (motif en dur ; groupe vide sur un parc sans passerelle, rien d'autre ne change). Aucun
+nouveau mécanisme.
+
+- **Ce qui est sauvegardé** : la base Postgres du conteneur `<projet>_postgres` (`fleetforge-gateway_postgres` : le projet est
+  le nom de l'entrée sauf `webapp_project`), base et rôle `fleetforgegateway` (défaut de `webapp` : nom du projet sans tiret ;
+  clés « si absentes » de back/.env, donc à confirmer sur la machine). `pg_dump` logique en UNE transaction (instantané
+  cohérent : audit synchrone `mcp_audit`, approbations `mcp_approval`, registre `ffg_launch` et le reste), compressé et
+  STREAMÉ en SSH vers l'entrée du groupe `backups` — jamais sur le disque de la machine de la passerelle. Fichier
+  `<base>-<horodatage>.sql.gz` sous `<backup_root>/<pgbak_name>/`, `.tmp` renommé seulement après un dump complet.
+- **Même garanties que tradekong/ctdapi, pas plus** : cron quotidien (minute `pgbak_cron_minute`), 3 générations
+  (`pgbak_keep`), purge APRÈS le succès du nouveau dump, marge libre exigée sur la destination (5 Go), métriques
+  `backup_last_*{backup="<pgbak_name>"}` (collecteur textfile de node_exporter). Chiffrement : EN TRANSIT seulement (SSH) ;
+  le dump n'est PAS chiffré au repos sur la destination, et les clés de chiffrement de l'app (back/.env, coffre) n'y sont pas :
+  une restauration les exige à part. Pas de test de restauration automatique (`postgres-restore.sh --check` liste seulement) :
+  la vérification est la procédure ci-dessous.
+- **Ce que l'entrée déclare** (modèle : `Ansible/inventories/parc_inventory.yml.template`, un seul endroit) : `backup` dans
+  `ansible_roles`, `pgbak_name`, `pgbak_container`, `pgbak_db`, `pgbak_user`, `pgbak_dest_host` (entrée de `backups` sur une
+  AUTRE machine que celle d'`infra1`), `pgbak_dir` PROPRE à l'entrée (le défaut du rôle est partagé par toutes les entrées
+  d'une machine : le script de l'une écraserait celui de l'autre), et le seuil `prom_alert_backup_max_age_hours` (48 h).
+  La garde de la passerelle (`gateway-guard.yml`, sans connexion) le contrôle quand `backup` est présent : conteneur =
+  `<projet>_postgres`, destination d'un autre hôte, répertoire propre, seuil déclaré. Absent : rien n'est vérifié.
+- **Supervision** : `BackupStale` (règle générée par nom à partir de `prom_alert_backup_max_age_hours`) et `BackupFailed`.
+  LIMITE (commune à toutes les sauvegardes) : `BackupStale` ne sonne pas si la série n'a JAMAIS existé — d'où le contrôle
+  `count(...)` ci-dessous, à faire une fois.
+- **Activation** (inventaire et group_vars PRIVÉS, hors de ce dépôt) : entrée de destination, `backup` + `pgbak_*` sur l'entrée de
+  la passerelle, seuil ; puis `./play.sh web3c deploy-backup.yml --limit <entrée>` — jamais contre une machine sans décision du
+  propriétaire. Repointer la destination : `deploy-backup.yml --tags retarget --limit <entrée>`.
+
+#### Première vérification supervisée (lecture seule, sans secret)
+
+À faire après le PREMIER passage du cron (ou du play), jamais avant. Ne rien lancer qui écrive dans la base vivante ;
+surtout PAS `postgres-restore.sh --yes` (il SUPPRIME la base puis la recrée).
+
+1. Machine de la passerelle : `tail -n 20 <pgbak_dir>/backup.log` doit finir par « Terminé en N s — X Mo » (« Place
+   insuffisante » ou « Destination injoignable » = échec) ; `cat /var/lib/node_exporter/textfile_collector/backup_<pgbak_name>.prom`
+   : `backup_last_status … 1`, `backup_last_size_bytes` non nul.
+2. Destination : `ls -l <backup_root>/<pgbak_name>/` montre `<base>-<horodatage>.sql.gz` (aucun `.tmp` qui traîne) et
+   `last-success` ; `gzip -t` sur le dernier fichier répond sans erreur ; sa taille est plausible, non nulle, comparée à
+   `docker exec <conteneur> psql -U <pgbak_user> -d <pgbak_db> -tAc "select pg_size_pretty(pg_database_size(current_database()))"`
+   (ordre de grandeur seulement ; la tendance sur plusieurs jours compte plus que la valeur).
+3. Prometheus (`monitor`) : `count(backup_last_success_timestamp_seconds{backup="<pgbak_name>"})` vaut 1 et
+   `time() - backup_last_success_timestamp_seconds{backup="<pgbak_name>"}` reste sous le seuil ; la règle `BackupStale` portant
+   le label `backup="<pgbak_name>"` figure dans `/api/v1/rules`.
+4. Restauration dans une base JETABLE, sur un poste du propriétaire (pas sur la machine de la passerelle) : récupérer le dump
+   dans un dossier temporaire en 0700, lancer un Postgres jetable de la MÊME version majeure que la base
+   (`docker exec <conteneur> postgres --version`) SANS publier de port : `docker run --rm -d --name ffg-restore-check -e
+   POSTGRES_HOST_AUTH_METHOD=trust postgres:<majeure>` ; `docker exec ffg-restore-check createuser -U postgres <pgbak_user>` puis
+   `createdb -U postgres -O <pgbak_user> restorecheck` ; `gunzip -c <dump> | docker exec -i ffg-restore-check psql -U postgres -d
+   restorecheck -v ON_ERROR_STOP=1 -q` doit finir sans erreur. Comparer les comptes de `mcp_audit`, `mcp_approval` et
+   `ffg_launch` entre la base jetable et la base vivante (`select count(*)`, lecture seule) : l'écart doit se limiter aux lignes
+   écrites depuis le dump. Puis `docker stop ffg-restore-check` (le conteneur s'efface seul) et supprimer le dossier temporaire.
+5. Consigner le résultat (date, taille, comptes) dans `docs/avant-ouverture-public.md`, point « Sauvegarde de la base de la
+   passerelle ».
+
 ## 9. Choix à valider par le propriétaire
 
 1. Allow-list par chemin portée par `webapp_vhost_locations[].access` (plutôt qu'un `webapp_path_access` séparé).

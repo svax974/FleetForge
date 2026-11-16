@@ -135,6 +135,7 @@ backup_root: "/home/{{ remote_username }}/backups"
 # Péremption (h) avant alerte, par nom de sauvegarde (postgres-backup, sync-backup). [prometheus-alerts-update]
 prom_alert_backup_max_age_hours:
   monapp: 48
+  fleetforge-gateway: 48   # exigé par la garde de la passerelle dès qu'elle porte `backup`
 # Péremption (h) des sauvegardes BRK et TimescaleDB (papanglabs). [prometheus-alerts-update]
 # backup_max_age_hours_brk: 240
 # backup_max_age_hours_tsdb: 96

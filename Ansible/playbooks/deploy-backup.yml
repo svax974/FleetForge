@@ -37,7 +37,7 @@
       preflight_require_docker: false
 
 - name: Contrôle préalable (sources Docker)
-  hosts: tradekong:ctdapi:sync_servers
+  hosts: tradekong:ctdapi:fleetforge_gateways:sync_servers
   remote_user: "{{ remote_username }}"
   roles:
     - role: host-preflight
@@ -57,8 +57,14 @@
     - timescaledb-backup-install
 
 # ── web3c ──────────────────────────────────────────────────────────────────
-- name: Sauvegarde PostgreSQL — tradekong et ctdapi
-  hosts: tradekong:ctdapi
+#
+# `fleetforge_gateways` : la base de la passerelle MCP (entrée `webapp` durcie).
+# Le groupe est vide sur un parc sans passerelle, et une entrée qui n'a pas
+# `backup` dans `ansible_roles` ne porte pas de `pgbak_*` : le rôle échoue alors
+# (variable sans défaut) au lieu de sauvegarder à côté — voir
+# docs/etude-passerelle-sur-webapp.md, « Sauvegarde de la base de la passerelle ».
+- name: Sauvegarde PostgreSQL — tradekong, ctdapi et passerelle MCP
+  hosts: tradekong:ctdapi:fleetforge_gateways
   remote_user: "{{ remote_username }}"
   roles:
     - postgres-backup-install
