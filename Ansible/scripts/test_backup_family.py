@@ -997,7 +997,8 @@ RETARGET_INVENTORY = {"all": {
                                       "pgbak_dest_host": "backup-ctdapi"}}},
         "backups": {"hosts": {"backup-tradekong": {"ansible_host": "192.0.2.30"},
                               "backup-ctdapi": {"ansible_host": "192.0.2.30"},
-                              "backup-sync": {"ansible_host": "192.0.2.31"}}},
+                              "backup-sync": {"ansible_host": "192.0.2.31"},
+                              "backup-v6": {"ansible_host": "2001:DB8::30"}}},
         "local": {"hosts": {"localhost": {"ansible_connection": "local"}}}}}}
 
 
@@ -1030,6 +1031,15 @@ class PlaybookTests(unittest.TestCase):
         # The old destination loses the keys and directories of these sources on BOTH accounts.
         self.assertIn('"old_accounts": ["dbbackup", "srvc"]', out)
         self.assertIn('"/home/srvc/backups"', out)
+
+    def test_purge_old_compares_addresses_after_normalising_spelling(self):
+        # Review finding: a plain string comparison let `2001:db8::30` through when the inventory said `2001:DB8::30`.
+        for spelled in ("2001:db8::30", "2001:DB8::30", "[2001:db8::30]", " 192.0.2.30 "):
+            with self.subTest(spelled=spelled):
+                code, out = self.retarget("-e", f"purge_old='{spelled}'")
+                self.assertNotEqual(code, 0, out[-2000:])
+                self.assertIn("encore en service", out)
+                self.assertNotIn("old-backup-host", out)
 
     def test_remove_and_purge_know_the_gateways_under_any_tag(self):
         for name in ("remove-backup.yml", "purge-backup.yml"):

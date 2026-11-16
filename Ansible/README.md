@@ -157,7 +157,9 @@ et SQLite (`sync-backup-install`) ; BRK et TimescaleDB (papanglabs) écrivent en
   n'écrit `last-success` (horloge de la destination) que si la nouvelle génération est encore là. Les scripts vérifient
   ensuite par `list` que leur fichier y est : sinon, échec (BackupFailed).
 - Une écriture par source à la fois (verrou exclusif dans son répertoire) ; les `.tmp` d'un transfert interrompu sont
-  effacés au transfert suivant.
+  effacés au transfert suivant, et tout appel d'une source efface ceux de SON répertoire restés plus de 6 h sans
+  écriture (jamais ceux d'une autre source : une source abandonnée qui ne rappelle plus garde son `.tmp` — à
+  supprimer à la main si le disque approche du plancher).
 - Pare-feu (`backup-security`) : même logique qu'avant, sur le port SSH de LA destination (`ansible_port` de son entrée
   — une machine derrière un NAT a le sien). known_hosts de la source : clé d'hôte LUE sur la destination par la connexion
   d'Ansible (déjà authentifiée), plus de `ssh-keyscan` depuis le poste ; sur le port 22, l'entrée porte l'adresse seule.
@@ -215,7 +217,9 @@ mutualisée) y enverrait aussi de quoi déchiffrer l'audit et les approbations d
   --check` (liste, sans clé), `--verify [--file <nom>]` (relit, déchiffre, décompresse, exige la ligne finale
   `-- PostgreSQL database dump complete`, n'écrit rien), `--yes [--file <nom>]` (application arrêtée) :
   1. relecture COMPLÈTE comme `--verify` ;
-  2. chargement dans une base À CÔTÉ, `<base>_restore`, `ON_ERROR_STOP=1` — une erreur arrête tout, base vivante intacte ;
+  2. place : sous 1,5 × `pg_database_size(<base>)` libres sur le volume PGDATA du conteneur (`df` dans le conteneur),
+     arrêt AVANT toute écriture avec les chiffres — pas de disque plein en plein chargement ;
+     chargement dans une base À CÔTÉ, `<base>_restore`, `ON_ERROR_STOP=1` — une erreur arrête tout, base vivante intacte ;
   3. les deux relectures doivent avoir la même empreinte sha256 ;
   4. échange en UNE transaction : la base vivante devient `<base>_before_<horodatage>` (GARDÉE, jamais supprimée par le
      script : `DROP DATABASE` à la main après validation — la machine doit avoir la place de deux copies), la copie
@@ -242,6 +246,15 @@ source, et seulement APRÈS la pose de la clé restreinte sur le compte dédié 
   les nouvelles sauvegardes validées, rejouer `deploy-backup.yml --limit <source>` avec
   `-e backup_legacy_purge=yes` pour supprimer `<backup_root>/<nom>`. Les purges (`purge-backup.yml`, `purge_old` de
   `retarget-backups-web3c.yml`) révoquent et suppriment aussi l'ancien schéma.
+- **À vérifier après un changement de destination** : une clé restée sur `srvc` d'une destination ANTÉRIEURE (ex.
+  `monitor`, une machine dont la destination a déjà changé une fois) n'est retirée que par `purge_old` vers CETTE
+  machine — le retrait automatique ci-dessus ne vise que la destination courante. Contrôle : `authorized_keys` de
+  `srvc` sur chaque ancienne destination (commentaire `<source>-<nom>-backup`).
+- `purge_old` refuse l'adresse d'une destination encore en service, comparée après normalisation (espaces, casse,
+  crochets d'une IPv6 littérale). Limite : aucune dépendance ajoutée (ni `ansible.utils` ni netaddr), donc deux
+  écritures d'une même IPv6 qui diffèrent autrement (zéros omis, compression `::`, forme IPv4-mappée) ou un NOM et
+  son adresse ne sont pas reconnus égaux — donner l'adresse écrite EXACTEMENT comme l'inventaire de l'ancienne
+  destination l'avait, et vérifier qu'elle n'est pas celle d'une destination en service avant de lancer.
 
 ## Supervision
 
