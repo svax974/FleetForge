@@ -123,3 +123,50 @@ mailrelay_sender_bindings: []
 
 # Répertoire de configuration de Postfix (surchargé seulement par les tests hors machine).
 mailrelay_postfix_dir: /etc/postfix
+
+# Comptes SASL dédiés (OPTIONNEL, vide = comportement historique inchangé : seul `relay_user` existe).
+#
+# Chaque entrée crée, dans la base Cyrus sasldb du relais (royaume = `mailrelay_hostname`), un compte
+# qui n'est PAS `relay_user` — typiquement celui d'une application qui n'envoie que sous UNE adresse,
+# liée par `mailrelay_sender_bindings` (même `login`). Le compte et sa liaison se déclarent donc côte à
+# côte ; `mailrelay_sasl_require_binding: true` en fait une obligation.
+#
+#   mailrelay_sasl_accounts:
+#     - login: gateway                       # minuscules, sans royaume (« nom », pas « nom@royaume »)
+#       password: "{{ vault_gateway_smtp }}" # variable de coffre — jamais en clair dans un fichier suivi
+#
+# Garanties :
+#   - le mot de passe voyage sur l'ENTRÉE STANDARD de `saslpasswd2 -c -p -f <base> -u <royaume> <login>` :
+#     jamais en argument (visible dans `ps`), jamais dans un fichier du rôle ; toutes les tâches qui le
+#     touchent sont en `no_log` ;
+#   - IDEMPOTENT : un compte déjà présent dans la base (`sasldblistusers2`) n'est PAS réécrit à chaque
+#     passage — on ne peut pas relire un mot de passe sasldb, donc on ne sait pas s'il a changé. Changer
+#     la valeur du coffre ne change donc RIEN sur le relais tant que la rotation n'est pas demandée ;
+#   - ROTATION explicite : `-e mailrelay_sasl_reset_login=<login>` réécrit le mot de passe de CE compte
+#     (qui doit être déclaré ici), sur ce passage seulement. Le compte n'est pas supprimé puis recréé :
+#     pas de fenêtre où il n'existe pas ;
+#   - un mot de passe absent, vide, plus court que `mailrelay_sasl_min_password_length` ou contenant un
+#     saut de ligne est refusé AVANT toute écriture (le message nomme les identifiants, jamais la valeur) ;
+#   - un compte déclaré n'est jamais retiré en le supprimant d'ici : `saslpasswd2 -d -u <royaume> <login>`
+#     à la main (un retrait automatique couperait un client en service sur une simple faute de frappe).
+#
+# Le fichier sasldb garde son propriétaire et son mode (root:sasl 0640, voir tâche « Set sasldb2
+# permissions » de main.yml, jouée APRÈS la création) : postfix y accède par le groupe `sasl`.
+# Les mots de passe y sont stockés EN CLAIR (propre à sasldb et aux mécanismes PLAIN/LOGIN) : c'est
+# le fichier à protéger, et la raison de lier chaque compte à une seule adresse expéditrice.
+mailrelay_sasl_accounts: []
+
+# Identifiant dont on réécrit le mot de passe sur ce passage (rotation). Vide = aucune.
+# À passer en ligne de commande (`-e`), pas ici.
+mailrelay_sasl_reset_login: ""
+
+# Longueur minimale d'un mot de passe de `mailrelay_sasl_accounts`.
+mailrelay_sasl_min_password_length: 20
+
+# true : tout compte de `mailrelay_sasl_accounts` doit apparaître dans `mailrelay_sender_bindings`
+# (sinon il pourrait émettre sous n'importe quelle adresse des domaines du relais, comme `relay_user`).
+mailrelay_sasl_require_binding: false
+
+# Base sasldb (mêmes valeur et chemin que `sasldb_path` de sasl-smtpd.conf.j2) ; surchargé
+# seulement par les tests hors machine.
+mailrelay_sasldb_path: /etc/sasldb2

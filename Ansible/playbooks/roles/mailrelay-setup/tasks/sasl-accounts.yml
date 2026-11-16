@@ -1,0 +1,116 @@
+---
+# Comptes SASL dédiés (`mailrelay_sasl_accounts`, optionnel) : voir defaults/main.yml pour le contrat.
+# Inclus par main.yml seulement quand la liste n'est pas vide, APRÈS la création de `relay_user` (la base
+# existe) et AVANT « Set sasldb2 permissions » (le propriétaire et le mode sont corrigés après toute écriture).
+#
+# Aucune tâche qui touche un mot de passe n'affiche quoi que ce soit : `no_log` partout, le message d'échec
+# est construit à part et ne contient que des identifiants.
+
+# ── 1. Contrôle de forme, AVANT toute écriture ───────────────────────────────
+# Les problèmes sont rassemblés sous forme de « identifiant : raison » (jamais la valeur) dans un fait ; la
+# tâche qui les calcule voit les mots de passe, donc `no_log`.
+- name: Look for malformed SASL accounts (names only)
+  vars:
+    accounts: "{{ mailrelay_sasl_accounts | default([], true) }}"
+  ansible.builtin.set_fact:
+    mailrelay_sasl_problems: >-
+      {%- set out = [] -%}
+      {%- if accounts is not sequence or accounts is string or accounts is mapping -%}
+      {%- set _ = out.append('mailrelay_sasl_accounts: not a list') -%}
+      {%- else -%}
+      {%- set seen = [] -%}
+      {%- for a in accounts -%}
+      {%- if a is not mapping or a.login is not defined or a.login is not string
+             or not (a.login is match('^[a-z0-9._+-]{1,64}$')) -%}
+      {%- set _ = out.append('entry ' ~ loop.index ~ ': login must be lowercase [a-z0-9._+-], no realm') -%}
+      {%- else -%}
+      {%- if a.login in seen -%}{%- set _ = out.append(a.login ~ ': declared twice') -%}{%- endif -%}
+      {%- set _ = seen.append(a.login) -%}
+      {%- if a.login == (relay_user | default('') | string) -%}{%- set _ = out.append(a.login ~ ': is relay_user, which this role manages on its own') -%}{%- endif -%}
+      {%- set pw = a.password | default('', true) -%}
+      {%- if pw is not string or pw | length < (mailrelay_sasl_min_password_length | int) -%}
+      {%- set _ = out.append(a.login ~ ': password missing, not a string or shorter than ' ~ (mailrelay_sasl_min_password_length | int)) -%}
+      {%- elif '\n' in pw or '\r' in pw or '\0' in pw -%}
+      {%- set _ = out.append(a.login ~ ': password contains a line break or NUL') -%}
+      {%- endif -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {%- endif -%}
+      {{ out }}
+  no_log: true
+
+- name: Refuse malformed SASL accounts
+  ansible.builtin.assert:
+    that: mailrelay_sasl_problems | length == 0
+    fail_msg: >-
+      `mailrelay_sasl_accounts` invalide (aucune valeur de mot de passe n'est affichée) :
+      {{ mailrelay_sasl_problems | join(' ; ') }}
+    quiet: true
+
+- name: Check the rotation request and the binding requirement
+  vars:
+    logins: "{{ mailrelay_sasl_accounts | map(attribute='login') | list }}"
+    bound: >-
+      {%- set out = [] -%}
+      {%- for b in mailrelay_sender_bindings | default([], true) -%}
+      {%- set _ = out.append((b.login if '@' in b.login else b.login ~ '@' ~ mailrelay_hostname) | lower) -%}
+      {%- endfor -%}
+      {{ out }}
+    unbound: "{{ logins | reject('in', bound | map('regex_replace', '@.*$', '') | list) | list }}"
+  ansible.builtin.assert:
+    that:
+      - (mailrelay_sasl_reset_login | default('', true) | string) == '' or (mailrelay_sasl_reset_login | string) in logins
+      - not (mailrelay_sasl_require_binding | default(false) | bool) or unbound | length == 0
+    fail_msg: >-
+      {{ 'mailrelay_sasl_reset_login=' ~ (mailrelay_sasl_reset_login | default('', true) | string)
+         ~ ' ne désigne aucun compte de mailrelay_sasl_accounts. ' if (mailrelay_sasl_reset_login | default('', true) | string) != '' and (mailrelay_sasl_reset_login | string) not in logins else '' }}
+      {{ 'Comptes sans liaison dans mailrelay_sender_bindings (mailrelay_sasl_require_binding) : ' ~ (unbound | join(', ')) if unbound | length > 0 else '' }}
+    quiet: true
+
+# ── 2. État de la base ───────────────────────────────────────────────────────
+# `sasldblistusers2` n'imprime que `login@royaume: userPassword` (jamais la valeur) : pas de `no_log` utile,
+# mais la sortie n'est lue que pour les noms. Base absente (première installation, ou mode --check où le
+# compte `relay_user` n'a pas été créé) : aucun compte n'existe.
+- name: Look for the SASL database
+  ansible.builtin.stat:
+    path: "{{ mailrelay_sasldb_path }}"
+  register: mailrelay_sasldb_stat
+
+- name: List the accounts already in the SASL database
+  ansible.builtin.command:
+    argv: [sasldblistusers2, -f, "{{ mailrelay_sasldb_path }}"]
+  register: mailrelay_sasldb_users
+  changed_when: false
+  check_mode: false
+  when: mailrelay_sasldb_stat.stat.exists
+
+- name: Work out the accounts to create or rotate (names only)
+  vars:
+    present: "{{ (mailrelay_sasldb_users.stdout_lines | default([])) | map('regex_replace', ': .*$', '') | list }}"
+    reset: "{{ mailrelay_sasl_reset_login | default('', true) | string }}"
+  ansible.builtin.set_fact:
+    mailrelay_sasl_to_write: >-
+      {%- set out = [] -%}
+      {%- for a in mailrelay_sasl_accounts -%}
+      {%- if (a.login ~ '@' ~ mailrelay_hostname) not in present or a.login == reset -%}{%- set _ = out.append(a.login) -%}{%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+
+- name: Report which SASL accounts are written (names only)
+  ansible.builtin.debug:
+    msg: >-
+      Comptes SASL écrits sur ce passage (royaume {{ mailrelay_hostname }}) :
+      {{ mailrelay_sasl_to_write | join(', ') or 'aucun (déjà présents, rotation non demandée)' }}.
+
+# ── 3. Écriture ──────────────────────────────────────────────────────────────
+# Le mot de passe passe par l'entrée standard du module (`stdin`), jamais par `argv` ni par un fichier.
+# `-c` crée l'entrée et, si elle existe, remplace son mot de passe (rotation sans suppression préalable).
+- name: Create or rotate the dedicated SASL accounts
+  ansible.builtin.command:
+    argv: [saslpasswd2, -c, -p, -f, "{{ mailrelay_sasldb_path }}", -u, "{{ mailrelay_hostname }}", "{{ item.login }}"]
+    stdin: "{{ item.password }}"
+  loop: "{{ mailrelay_sasl_accounts }}"
+  loop_control:
+    label: "{{ item.login }}"
+  when: item.login in mailrelay_sasl_to_write
+  no_log: true

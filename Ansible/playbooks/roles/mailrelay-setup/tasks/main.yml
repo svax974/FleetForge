@@ -214,6 +214,13 @@
   no_log: true
   changed_when: false
 
+# Comptes dédiés (optionnel, vide = rien) : créés dans la base AVANT la correction du propriétaire ci-dessous.
+- name: Dedicated SASL accounts (optional)
+  ansible.builtin.include_tasks: sasl-accounts.yml
+  when: >-
+    (mailrelay_sasl_accounts | default([], true) | length > 0)
+    or (mailrelay_sasl_reset_login | default('', true) | string) != ''
+
 # postfix doit pouvoir lire /etc/sasldb2, livré en root:sasl 0660. Sans cette
 # appartenance au groupe, l'authentification échoue en « Permission denied »
 # quel que soit le mot de passe fourni.
