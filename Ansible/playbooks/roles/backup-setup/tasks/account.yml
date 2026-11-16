@@ -30,13 +30,13 @@
     fail_msg: >-
       {{ bk_target }} : `{{ backup_account }}` existe déjà comme compte SYSTÈME (uid
       {{ bk_existing_account.stdout.split(':')[2] | default('?') }}) — `backup` (uid 34) l'est sur toute Debian/Ubuntu.
-      Choisir un autre `backup_account` (défaut : fleetbackup).
+      Choisir un autre `backup_account` (défaut : dbbackup).
     quiet: true
 
 - name: Create the dedicated backup account on {{ bk_target }}
   ansible.builtin.user:
     name: "{{ backup_account }}"
-    comment: "FleetForge backup destination (forced command {{ backup_gate_path }})"
+    comment: "Database backup destination (forced command {{ backup_gate_path }})"
     # sshd lance la commande forcée par le shell du compte : nologin la refuserait. Aucun shell interactif n'est
     # pour autant possible : `restrict` (pas de pty) et la commande forcée remplacent toute demande du client.
     shell: /bin/sh

@@ -13,6 +13,6 @@ sync_server_build_dir: "/home/{{ remote_username }}/sync-src"
 sync_purge_backup_max_age_days: 7
 sync_backup_dest_host: backup-sync
 # Répertoire de l'instance sous le compte dédié de la destination (backup-setup/defaults).
-backup_account: fleetbackup
+backup_account: dbbackup
 backup_account_root: "/home/{{ backup_account }}/backups"
 sync_backup_dir: "{{ backup_account_root }}/sync-{{ sync_instance }}"

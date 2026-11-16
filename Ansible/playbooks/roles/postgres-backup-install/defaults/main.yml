@@ -26,7 +26,7 @@ pgbak_dir: "{{ ansible_env.HOME }}/postgres-backup"
 
 # Destination : compte DÉDIÉ (backup-setup : sans sudo, clé liée à la passerelle `backup-gate`, un répertoire par
 # source), jamais `remote_username`. Mêmes valeurs que backup-setup/defaults (surchargeables au niveau du parc).
-backup_account: fleetbackup
+backup_account: dbbackup
 backup_account_root: "/home/{{ backup_account }}/backups"
 
 pgbak_dest_addr: "{{ hostvars[pgbak_dest_host]['ansible_host'] }}"

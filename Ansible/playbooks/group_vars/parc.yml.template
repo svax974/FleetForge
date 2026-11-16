@@ -135,8 +135,8 @@ backup_root: "/home/{{ remote_username }}/backups"
 # PostgreSQL et SQLite (postgres-backup-*, sync-backup-*) écrivent par un compte DÉDIÉ de la destination : sans sudo,
 # chaque clé de source liée à son adresse et à la passerelle `backup-gate` (commande forcée), un répertoire 0700 par
 # source sous `backup_account_root`. Jamais `backup` (compte système Debian/Ubuntu, uid 34 : refusé). [backup-setup]
-# backup_account: fleetbackup
-# backup_account_root: "/home/fleetbackup/backups"
+# backup_account: dbbackup
+# backup_account_root: "/home/dbbackup/backups"
 # Destinataire age des dumps et archives : la clé PUBLIQUE de l'opérateur (« age1… », 62 caractères, pas un secret).
 # Posé : chiffrement sans repli en clair ; absent : en clair (comportement d'avant). EXIGÉ pour la passerelle MCP.
 # La clé PRIVÉE ne va jamais dans ce dépôt ni sur une machine du parc (Ansible/README.md, « Sauvegardes »).

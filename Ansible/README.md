@@ -139,8 +139,9 @@ et SQLite (`sync-backup-install`) ; BRK et TimescaleDB (papanglabs) écrivent en
 
 ## Compte dédié et passerelle sur la destination
 
-- Compte `backup_account` (défaut `fleetbackup`, rôle `backup-setup`, créé par la première source qui vise la
-  destination) : sans sudo ni groupe, mot de passe verrouillé. Jamais `backup` : compte SYSTÈME de toute Debian/Ubuntu
+- Compte `backup_account` (défaut `dbbackup`, rôle `backup-setup`, créé par la première source qui vise la
+  destination) : compte dédié à toutes les sauvegardes de bases, sans lien avec FleetForge ; sans sudo ni groupe, mot
+  de passe verrouillé. Jamais `backup` : compte SYSTÈME de toute Debian/Ubuntu
   (uid 34), qu'une mise à jour de la distribution peut remettre à `nologin` — le rôle refuse tout compte existant
   d'uid < 1000.
 - Chaque clé de source : `restrict,from="<adresse IP littérale de la source>",command="/usr/local/sbin/backup-gate
@@ -234,8 +235,8 @@ source, et seulement APRÈS la pose de la clé restreinte sur le compte dédié 
 - la clé de la source est RETIRÉE de `srvc` sur la destination (par son contenu, et par son commentaire
   `<source>-<nom>-backup`) — automatique ;
 - les anciennes sauvegardes sont SIGNALÉES (« AVERTISSEMENT … fichier(s) de l'ancien schéma »), jamais supprimées
-  d'office. Pour les garder dans le nouveau schéma : sur la destination, `sudo install -p -o fleetbackup -g fleetbackup
-  -m 0600 <ancien fichier> /home/fleetbackup/backups/<nom>/` (en le chiffrant d'abord si voulu : `age -r <destinataire>
+  d'office. Pour les garder dans le nouveau schéma : sur la destination, `sudo install -p -o dbbackup -g dbbackup
+  -m 0600 <ancien fichier> /home/dbbackup/backups/<nom>/` (en le chiffrant d'abord si voulu : `age -r <destinataire>
   -o <fichier>.age <fichier>`, le nom gardant sa grammaire), vérifier par `postgres-restore.sh --check` puis
   `--verify` ; `-p` garde leur date : ils sortent de la rotation les premiers, au fil des nouvelles générations. Une fois
   les nouvelles sauvegardes validées, rejouer `deploy-backup.yml --limit <source>` avec

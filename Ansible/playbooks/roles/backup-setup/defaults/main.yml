@@ -18,12 +18,14 @@
 # nologin, base-passwd). Le reprendre modifierait un compte de la distribution — que ses mises à jour peuvent
 # remettre à nologin, ce qui couperait la commande forcée (sshd la lance par le shell du compte). Le rôle refuse
 # tout compte existant d'uid < 1000.
+# Le compte par défaut s'appelle `dbbackup` : un compte dédié à toutes les sauvegardes de bases, sans lien avec
+# FleetForge (le nom pourra servir à d'autres sauvegardes).
 #
 # LIMITE (dite) : l'authorized_keys du compte est dans SA maison (`~/.ssh`, propriété du compte, comme le veut sshd).
 # Aucun verbe de la passerelle n'y écrit ; seul un contournement de la passerelle le pourrait. Un fichier possédé par
 # root hors de la maison (`AuthorizedKeysFile` par `Match User`) exigerait de modifier sshd_config sur chaque
 # destination — dont une machine de bureau derrière un NAT, où une erreur coupe l'accès : non fait.
-backup_account: fleetbackup
+backup_account: dbbackup
 backup_account_root: "/home/{{ backup_account }}/backups"
 backup_gate_path: /usr/local/sbin/backup-gate
 

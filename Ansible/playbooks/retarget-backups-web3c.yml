@@ -106,7 +106,7 @@
     - name: Retenir les sources repointées (purge de l'ancienne destination)
       vars:
         _parc: "{{ hostvars[retarget_sources[0]] if retarget_sources | length > 0 else {} }}"
-        _account: "{{ _parc.backup_account | default('fleetbackup') }}"
+        _account: "{{ _parc.backup_account | default('dbbackup') }}"
       ansible.builtin.set_fact:
         retarget_old_entries: "{{ retarget_sources | zip(retarget_sources | map('extract', hostvars, 'pgbak_name')) | map('join', '-') | list }}"
         retarget_old_dirs: "{{ retarget_sources | map('extract', hostvars, 'pgbak_name') | list }}"

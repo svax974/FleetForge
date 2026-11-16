@@ -1,6 +1,6 @@
 ---
 # Dupliqué depuis postgres-backup-install/defaults (compte dédié : backup-setup/defaults).
-backup_account: fleetbackup
+backup_account: dbbackup
 backup_account_root: "/home/{{ backup_account }}/backups"
 pgbak_dir: "{{ ansible_env.HOME }}/postgres-backup"
 pgbak_dest_addr: "{{ hostvars[pgbak_dest_host]['ansible_host'] }}"

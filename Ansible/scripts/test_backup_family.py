@@ -437,8 +437,8 @@ class PostgresScriptTests(unittest.TestCase):
     def scripts(self, recipient="", min_free_gb=0, interval_days=0):
         variables = dict(
             pgbak_db="appdb", pgbak_name="app", pgbak_user="app", pgbak_container="app_postgres",
-            pgbak_dest_host="backup-app", pgbak_dest_user="fleetbackup", pgbak_dest_addr="192.0.2.5",
-            pgbak_dest_port=22, pgbak_dest_dir="/home/fleetbackup/backups/app", pgbak_interval_days=interval_days,
+            pgbak_dest_host="backup-app", pgbak_dest_user="dbbackup", pgbak_dest_addr="192.0.2.5",
+            pgbak_dest_port=22, pgbak_dest_dir="/home/dbbackup/backups/app", pgbak_interval_days=interval_days,
             pgbak_min_free_gb=min_free_gb, node_exporter_textfile_dir=self.metrics,
             pgbak_ssh_key_path="/nonexistent/key", pgbak_encrypt_recipient=recipient, pgbak_dir=self.tmp,
             remote_username="srvc")
@@ -692,8 +692,8 @@ class SyncScriptTests(unittest.TestCase):
 
     def render(self, recipient):
         return render(SYNC_TEMPLATES, "sync-backup.sh.j2", sync_instance="iptv", sync_backup_dest_host="backup-sync",
-                      sync_backup_dest_user="fleetbackup", sync_backup_dest_addr="192.0.2.6", sync_backup_dest_port=2222,
-                      sync_backup_dest_dir="/home/fleetbackup/backups/sync-iptv", sync_backup_name="sync-iptv",
+                      sync_backup_dest_user="dbbackup", sync_backup_dest_addr="192.0.2.6", sync_backup_dest_port=2222,
+                      sync_backup_dest_dir="/home/dbbackup/backups/sync-iptv", sync_backup_name="sync-iptv",
                       sync_backup_data_dir="/home/srvc/sync-iptv/data", sync_backup_uid=65532, sync_backup_gid=65532,
                       sync_backup_min_free_gb=20, node_exporter_textfile_dir="/var/lib/node_exporter/textfile_collector",
                       sync_backup_ssh_key="/root/.ssh/id_ed25519_sync-iptv", sync_backup_known_hosts="/root/.ssh/known_hosts",
@@ -905,7 +905,7 @@ class PlaybookTests(unittest.TestCase):
         self.assertEqual(code, 0, out[-3000:])
         self.assertIn('"ansible_host": "198.51.100.99"', out)
         # The old destination loses the keys and directories of these sources on BOTH accounts.
-        self.assertIn('"old_accounts": ["fleetbackup", "srvc"]', out)
+        self.assertIn('"old_accounts": ["dbbackup", "srvc"]', out)
         self.assertIn('"/home/srvc/backups"', out)
 
     def test_remove_and_purge_know_the_gateways_under_any_tag(self):

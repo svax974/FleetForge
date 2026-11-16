@@ -328,8 +328,8 @@ restauration) : `Ansible/README.md`, « Sauvegardes (famille `backup`) ».
   avec le nœud Storj, un service de minage et des relais publics, aucune alimentation garantie. D'où : dump chiffré (une
   machine plus exposée que la source ne doit rien lire de l'audit ni des approbations), et supervision de fraîcheur
   INDISPENSABLE (une machine de bureau éteinte ou une IP changée arrête la sauvegarde sans autre symptôme).
-- **Compte de destination dédié** (rôle `backup-setup`) : `fleetbackup` (variable `backup_account` ; jamais `backup`, compte
-  système de toute Debian/Ubuntu, refusé), sans sudo ni groupe. La clé de la passerelle y est posée avec `restrict`,
+- **Compte de destination dédié** (rôle `backup-setup`) : `dbbackup` (variable `backup_account` ; compte dédié à toutes les
+  sauvegardes de bases, sans lien avec FleetForge ; jamais `backup`, compte système de toute Debian/Ubuntu, refusé), sans sudo ni groupe. La clé de la passerelle y est posée avec `restrict`,
   `from="<adresse IP littérale de la passerelle>"` et la commande forcée `backup-gate <racine> fleetforge-gateway
   <pgbak_keep> <plancher>` : aucun shell, verbes fermés, répertoire de la seule passerelle, une écriture à la fois,
   écriture arrêtée sous le plancher d'espace libre de `station` (`backup_floor_gb`, 5 Go, contrôlé à chaque Mio : le disque
@@ -378,8 +378,8 @@ surtout PAS `postgres-restore.sh --yes` (il recharge la base à côté puis l'É
    `docker exec <conteneur> psql -U <pgbak_user> -d <pgbak_db> -tAc "select pg_size_pretty(pg_database_size(current_database()))"`
    — un dump compressé fait une fraction de la base ; la tendance sur plusieurs jours compte plus que la valeur). Sur `station`,
    `journalctl -t backup-gate` (ou `/var/log/syslog`) montre `source=fleetforge-gateway verb=put …` puis `verb=commit …
-   bytes=… kept=3 removed=… last-success=…` ; `sudo ls -l /home/fleetbackup/backups/fleetforge-gateway/` : aucun `.tmp` qui
-   traîne, propriétaire `fleetbackup`, mode 0600. Si la passerelle avait déjà été sauvegardée par l'ancien schéma, le play
+   bytes=… kept=3 removed=… last-success=…` ; `sudo ls -l /home/dbbackup/backups/fleetforge-gateway/` : aucun `.tmp` qui
+   traîne, propriétaire `dbbackup`, mode 0600. Si la passerelle avait déjà été sauvegardée par l'ancien schéma, le play
    a affiché « AVERTISSEMENT … ancien schéma » : migration dans `Ansible/README.md`.
 3. Relecture complète avec la clé, sans rien écrire, depuis le poste du propriétaire :
    `age -d ~/.config/fleetforge/backup-key-ffg.age | ssh -p <port> srvc@<machine de la passerelle> '<pgbak_dir>/postgres-restore.sh --verify'`
@@ -392,7 +392,7 @@ surtout PAS `postgres-restore.sh --yes` (il recharge la base à côté puis l'É
 5. Restauration dans une base JETABLE, sur le poste du propriétaire (pas sur la machine de la passerelle, la clé ne quitte pas
    le poste) : récupérer le fichier chiffré par la clé de la passerelle, seule à pouvoir le lire —
    `ssh -p <port> srvc@<machine de la passerelle> "ssh -n -p 22 -i ~/.ssh/id_ed25519_<pgbak_name>backup -o IdentitiesOnly=yes
-   fleetbackup@<adresse de station> get <fichier>" > <dossier 0700>/dump.sql.gz.age` ; lancer un Postgres jetable de la MÊME
+   dbbackup@<adresse de station> get <fichier>" > <dossier 0700>/dump.sql.gz.age` ; lancer un Postgres jetable de la MÊME
    version majeure que la base (`docker exec <conteneur> postgres --version`) SANS publier de port : `docker run --rm -d --name
    ffg-restore-check -e POSTGRES_HOST_AUTH_METHOD=trust postgres:<majeure>` ; `docker exec ffg-restore-check createuser -U
    postgres <pgbak_user>` puis `createdb -U postgres -O <pgbak_user> restorecheck` ; `age -d -i <(age -d
@@ -421,7 +421,7 @@ surtout PAS `postgres-restore.sh --yes` (il recharge la base à côté puis l'É
 - Restauration `--yes` vérifiée de bout en bout sur un PostgreSQL 17 jetable (vrai `pg_dump`, double de `docker` et d'`age`) :
   chargement à côté, échange en une transaction, ancienne base gardée. La machine de la base doit avoir la place de DEUX
   copies le temps de valider.
-- Ni exécuté ni observé sur une machine : passerelle `backup-gate`, compte `fleetbackup`, retrait de l'ancien accès sur
+- Ni exécuté ni observé sur une machine : passerelle `backup-gate`, compte `dbbackup`, retrait de l'ancien accès sur
   `srvc`, `age` des dépôts (Ubuntu 22.04+, Debian 12+ — un OS plus ancien fait échouer le déploiement, sans repli),
   redirection du port 22 de `station`, lecture de sa clé d'hôte par Ansible.
 
