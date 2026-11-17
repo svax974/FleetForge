@@ -3787,6 +3787,16 @@ class CloudflareFrontGuardTests(unittest.TestCase):
         self.assertNotIn("cf_untrusted", reference)
         self.assertEqual(render_access({"access_mode": "private", "cloudflare_front": True}, cf_var=False),
                          render_access({"access_mode": "private"}, cf_var=False))
+
+        def named_list(attributes, cf_var):  # `_named_access.inc` seul
+            hostvars = copy.deepcopy(INVENTORY)
+            hostvars["x"] = dict(attributes)
+            source = ("{% set access_entry = 'x' %}" + ("{% set cf_untrusted_var = 'cf_untrusted_x' %}" if cf_var else "")
+                      + "{% set named_access = {'hosts': ['agenthub']} %}{% include '_named_access.inc' %}")
+            return _env().from_string(source).render(hostvars=hostvars, groups={"vpns": ["vpn1"]}, whitelist=WHITELIST)
+        self.assertEqual(named_list({"cloudflare_front": True}, cf_var=False), named_list({}, cf_var=False))
+        self.assertIn("if ($cf_untrusted_x) {", named_list({"cloudflare_front": True}, cf_var=True))
+        self.assertNotIn("cf_untrusted", named_list({}, cf_var=True))
         self.assertEqual(edge_errors(reference), [], "sans real_ip_header CF-Connecting-IP : rien à contrôler")
 
     def test_the_check_catches_each_way_the_guard_could_be_lost(self):
