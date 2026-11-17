@@ -15,8 +15,8 @@
   ansible.builtin.assert:
     that:
       - mailserver_domains | length > 0
-      - addresses | reject('match', '^[^@\s\x27]+@[^@\s\x27]+$') | list | length == 0
-      - mailserver_aliases | map(attribute='source') | reject('match', '^[^@\s\x27]*@[^@\s\x27]+$') | list | length == 0
+      - addresses | reject('match', '^[^@ \t\n\r\f\v\x27]+@[^@ \t\n\r\f\v\x27]+$') | list | length == 0
+      - mailserver_aliases | map(attribute='source') | reject('match', '^[^@ \t\n\r\f\v\x27]*@[^@ \t\n\r\f\v\x27]+$') | list | length == 0
       - mailserver_users | map(attribute='address') | map('lower') | map('regex_replace', '^.*@', '') | reject('in', domains) | list | length == 0
       - mailserver_users | selectattr('password', 'undefined') | list | length == 0
     fail_msg: >-
@@ -38,7 +38,7 @@
 - name: Require Dovecot 2.3
   ansible.builtin.assert:
     that:
-      - mailserver_dovecot_version.stdout is match('2\.3\.')
+      - mailserver_dovecot_version.stdout is match('2[.]3[.]')
     fail_msg: >-
       Dovecot {{ mailserver_dovecot_version.stdout }} : cette configuration vise
       la 2.3. Adapter dovecot.conf.j2 avant de déployer sur cette distribution.

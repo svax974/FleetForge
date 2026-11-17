@@ -21,7 +21,7 @@
       {%- set ns = namespace(errs=[], entries=0) -%}
       {%- for raw in scripting_cron_body.splitlines() -%}
         {%- set l = raw | trim -%}
-        {%- if l and not l.startswith('#') and l is not match('^[A-Za-z_][A-Za-z0-9_]*\s*=') -%}
+        {%- if l and not l.startswith('#') and l is not match('^[A-Za-z_][A-Za-z0-9_]*[ \t\n\r\f\v]*=') -%}
           {%- set f = l.split() -%}
           {%- set ns.entries = ns.entries + 1 -%}
           {%- if f[0].startswith('@') -%}

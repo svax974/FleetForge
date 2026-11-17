@@ -27,7 +27,7 @@
       apostrophe). Valeur non affichée : elle contient le secret du webhook.
   when:
     - alertmanager_agenthub_webhook_url | default('') | length > 0
-    - alertmanager_agenthub_webhook_url is not match("^https?://[^\s'/]+/api/v1/agenthub/hooks/[^\s'/]+/[^\s'/]+$")
+    - alertmanager_agenthub_webhook_url is not match("^https?://[^ \t\n\r\f\v'/]+/api/v1/agenthub/hooks/[^ \t\n\r\f\v'/]+/[^ \t\n\r\f\v'/]+$")
 
 - name: Create Alertmanager directories
   ansible.builtin.file:
