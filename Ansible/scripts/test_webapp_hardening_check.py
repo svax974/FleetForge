@@ -2515,7 +2515,10 @@ class GuardTests(unittest.TestCase):
         # Un playbook importé cherche `roles/` à côté de LUI (playbooks/lib/roles), pas à côté de l'importeur :
         # sans ce lien, `include_role: webapp-setup` échoue sur le parc réel (« The role 'webapp-setup' was not found »),
         # alors que les essais qui fixent `roles_path` ne le voient pas (constat du 16/11/2026).
-        for link in ("roles", "filter_plugins"):
+        # group_vars/host_vars aussi : ceux de `playbooks/` (liens vers le dépôt privé) ne sont lus que PAR UN PLAY du
+        # dossier du playbook lancé — un play de `lib/` sans eux ne voit ni `remote_username` ni `pgbak_dir` (constaté sur
+        # le parc réel le 17/11/2026 : la garde de sauvegarde de la passerelle refusait une déclaration pourtant complète).
+        for link in ("roles", "filter_plugins", "group_vars", "host_vars"):
             path = os.path.join(PLAYBOOKS, "lib", link)
             self.assertTrue(os.path.islink(path), f"playbooks/lib/{link} doit être un lien vers ../{link}")
             self.assertEqual(os.path.realpath(path), os.path.realpath(os.path.join(PLAYBOOKS, link)))
