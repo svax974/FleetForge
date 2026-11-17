@@ -24,7 +24,8 @@
 {% set _na_v6_min = named_access.v6_min_prefix | default(128) | int %}
 {% set _na_ipv4 = '^(0|[1-9][0-9]{0,2})([.](0|[1-9][0-9]{0,2})){3}(?!(?s:.))' %}
         # named-access
-{% if (hostvars[access_entry].cloudflare_named | default(false) | bool) and not (hostvars[access_entry].cloudflare_front | default(false) | bool) %}
+{% if ((hostvars[access_entry].cloudflare_named | default(false) | bool) and not (hostvars[access_entry].cloudflare_front | default(false) | bool))
+      or ((hostvars[access_entry].cloudflare_front | default(false) | bool) and cf_untrusted_var is defined) %}
         # Nom servi par Cloudflare : socket Cloudflare sans certificat client valide refusée avant tout filtre d'adresse
         # (voir `_access.inc`), et jamais de mise en cache par l'edge.
         add_header Cloudflare-CDN-Cache-Control "no-store" always;
