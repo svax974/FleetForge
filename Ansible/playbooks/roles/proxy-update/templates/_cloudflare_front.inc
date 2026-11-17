@@ -51,6 +51,11 @@
    L'autorité est déposée par proxy-update (main et deploy-one-site) AVANT tout
    gabarit : `nginx -t` refuse un `ssl_client_certificate` absent. #}
 {% if (hostvars[access_entry].cloudflare_front | default(false) | bool) or (hostvars[access_entry].cloudflare_named | default(false) | bool) %}
+{# FERMÉ : un vhost qui lit CF-Connecting-IP doit avoir posé `cf_untrusted_var` ET inclus `_cloudflare_untrusted.inc` avant son
+   `server {}`. Sans la variable, `_access.inc` / `_named_access.inc` ne poseraient AUCUNE garde pour `cloudflare_front` : le rendu
+   échoue ici (variable non définie, dont le nom dit quoi ajouter). Un vhost qui n'inclut pas ce partiel (agenthub-preview.conf,
+   openclaw.conf, ctdapi.conf) n'est pas concerné. Si la variable est posée mais le partiel oublié, `nginx -t` refuse la variable inconnue. #}
+{% if cf_untrusted_var is not defined %}{{ ERREUR_rendu_refuse__un_vhost_qui_inclut__cloudflare_front_inc__doit_poser__cf_slug__et__cf_untrusted_var__puis_inclure__cloudflare_untrusted_inc__avant_son_server }}{% endif %}
     # Derrière Cloudflare ({{ access_entry }}) : IP cliente lue dans CF-Connecting-IP.
     {% for ip in cloudflare_ips %}
     set_real_ip_from {{ ip }};

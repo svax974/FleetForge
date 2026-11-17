@@ -778,11 +778,13 @@ def render_access(entry_attributes, mode=None, proxy="proxy3", cf_var=True):
                                              groups={"vpns": ["vpn1"]}, prometheus_host="monitor")
 
 
-def render_edge(entry_attributes):
-    """`_cloudflare_front.inc` seul."""
+def render_edge(entry_attributes, cf_var=True):
+    """`_cloudflare_front.inc` seul ; `cf_var=False` : le vhost ne pose pas `cf_untrusted_var` (le rendu doit alors ÉCHOUER pour une
+    entrée `cloudflare_front` / `cloudflare_named`, et rester vide pour les autres)."""
     hostvars = copy.deepcopy(INVENTORY)
     hostvars["x"] = dict(entry_attributes)
-    return _env().from_string("{% set access_entry = 'x' %}{% include '_cloudflare_front.inc' %}").render(
+    return _env().from_string("{% set access_entry = 'x' %}" + ("{% set cf_untrusted_var = 'cf_untrusted_x' %}" if cf_var else "")
+                              + "{% include '_cloudflare_front.inc' %}").render(
         hostvars=hostvars, cloudflare_ips=CLOUDFLARE_IPS)
 
 
@@ -3670,10 +3672,12 @@ HAND_WRITTEN_GUARD = """\
 
 
 def render_hand_written(guard=True, source=None, **attributes):
+    """`guard` : True (variable + partiel), "var" (variable posée, partiel OUBLIÉ), False (ni l'un ni l'autre)."""
     hostvars = copy.deepcopy(INVENTORY)
     hostvars["hand"] = {"ansible_host": "203.0.113.60", "access_mode": "private", "cloudflare_front": True}
     hostvars["hand"].update(attributes)
-    template = "{% set access_entry = 'hand' %}\n" + (HAND_WRITTEN_GUARD if guard else "") + "\n" + (source or HAND_WRITTEN_SERVER)
+    prelude = HAND_WRITTEN_GUARD if guard is True else ("\n".join(HAND_WRITTEN_GUARD.splitlines()[:2]) + "\n" if guard == "var" else "")
+    template = "{% set access_entry = 'hand' %}\n" + prelude + "\n" + (source or HAND_WRITTEN_SERVER)
     return _env().from_string(template).render(hostvars=hostvars, ansible_host=hostvars["proxy3"]["ansible_host"], whitelist=WHITELIST,
                                                groups={"vpns": ["vpn1"]}, prometheus_host="monitor", cloudflare_ips=CLOUDFLARE_IPS)
 
@@ -3771,14 +3775,36 @@ class CloudflareFrontGuardTests(unittest.TestCase):
             self.assertEqual(nginx_untrusted(text, address, verify), expected, (address, verify))
         self.assertEqual(edge_errors(text), [])
 
-    def test_a_hand_written_vhost_that_forgets_the_partial_is_unguarded_and_the_check_says_so(self):
-        # `cf_untrusted_var` absente : `_access.inc` ne pose rien (c'est ce qui laisse agenthub-preview.conf, qui ne lit pas
-        # CF-Connecting-IP, rendu comme avant). L'oubli sur un vhost qui LIT CF-Connecting-IP est donc silencieux au rendu :
-        # `vhost --cloudflare-edge` le refuse.
-        text = render_hand_written(guard=False)
-        self.assertNotIn("cf_untrusted", text)
-        errors = edge_errors(text)
+    def test_a_hand_written_vhost_that_reads_cloudflare_without_the_guard_variable_fails_to_render(self):
+        # `_access.inc` ne pose aucune garde pour `cloudflare_front` sans `cf_untrusted_var` (c'est ce qui laisse
+        # agenthub-preview.conf, qui ne lit pas CF-Connecting-IP, rendu comme avant) : l'oubli sur un vhost qui inclut
+        # `_cloudflare_front.inc` (donc lit CF-Connecting-IP) ferait un vhost SANS protection. `_cloudflare_front.inc` refuse le rendu.
+        for attributes in ({"cloudflare_front": True}, {"cloudflare_named": True, "cloudflare_front": False}):
+            with self.subTest(attributes):
+                with self.assertRaises(jinja2.UndefinedError) as raised:
+                    render_hand_written(guard=False, **attributes)
+                self.assertIn("cloudflare_untrusted_inc", str(raised.exception), "le message nomme le partiel à inclure")
+                self.assertIn("cf_untrusted_var", str(raised.exception))
+        with self.assertRaises(jinja2.UndefinedError):
+            render_edge({"cloudflare_front": True}, cf_var=False)
+        with self.assertRaises(jinja2.UndefinedError):
+            render_edge({"cloudflare_named": True}, cf_var=False)
+        # Une entrée sans l'un ni l'autre attribut ne lit rien : pas de variable exigée, rendu vide comme avant.
+        self.assertEqual(render_edge({}, cf_var=False), "")
+        self.assertEqual(render_edge({"cloudflare_front": False, "cloudflare_named": "false"}, cf_var=False), "")
+        # Variable posée, partiel oublié : `nginx -t` refuserait la variable inconnue, et le contrôle le voit déjà.
+        errors = edge_errors(render_hand_written(guard="var"))
         self.assertTrue(any("`geo $realip_remote_addr` et `map $ssl_client_verify`" in e for e in errors), errors)
+        self.assertEqual(edge_errors(render_hand_written()), [])
+
+    def test_a_vhost_that_does_not_include_the_cloudflare_partial_renders_without_the_variable(self):
+        # agenthub-preview.conf, openclaw.conf, ctdapi.conf : pas d'`_cloudflare_front.inc`, donc aucune variable exigée.
+        inline_real_ip = ("server {\n  {% for ip in cloudflare_ips %}\n  set_real_ip_from {{ ip }};\n  {% endfor %}\n  real_ip_header CF-Connecting-IP;\n"
+                          "  location / {\n    {% include '_access.inc' %}\n    proxy_pass http://203.0.113.60:4701;\n  }\n}\n")
+        for source in (inline_real_ip, "server {\n  location / {\n    {% include '_access.inc' %}\n  }\n}\n"):
+            text = render_hand_written(guard=False, source=source)
+            self.assertNotIn("cf_untrusted", text)
+            self.assertEqual(text, render_hand_written(guard=False, source=source, cloudflare_front=False))
 
     def test_a_vhost_of_a_front_entry_that_does_not_read_cloudflare_keeps_its_bytes(self):
         preview = "{% set access_entry = 'hand' %}server {\n    location / {\n        {% include '_access.inc' %}\n        proxy_pass http://203.0.113.60:4701;\n    }\n}\n"
@@ -3826,6 +3852,43 @@ class CloudflareFrontGuardTests(unittest.TestCase):
             with self.subTest(label):
                 self.assertNotEqual(mutated, text, label)
                 self.assertTrue(edge_errors(mutated), label)
+
+    def test_a_closed_location_needs_neither_the_guard_nor_no_store(self):
+        # `deny all;` sans aucun `allow` : mode inconnu (`_access.inc` ferme) ou `restricted-linked` sans serveur : personne n'y entre.
+        closed = ("    location /unknown-mode/ {\n        {% set access_mode_local = 'bogus' %}\n        {% include '_access.inc' %}\n    }\n"
+                  "    location /no-linked-server/ {\n        {% set access_only_local = [] %}\n        {% include '_access.inc' %}\n    }\n")
+        source = HAND_WRITTEN_SERVER.rstrip()[:-1] + closed + "}\n"
+        text = render_hand_written(source=source)
+        for head in ("/unknown-mode/", "/no-linked-server/"):
+            body = location_body(text, head)
+            self.assertIn("deny all;", body)
+            self.assertNotIn("allow ", body)
+            self.assertNotIn("cf_untrusted", body, "fermée par le gabarit : aucune garde posée")
+        self.assertEqual(edge_errors(text), [])
+        # Une location qui admet quelqu'un reste tenue d'avoir la garde.
+        hooks = location_body(text, "~* ^/api/v1/hooks/")
+        self.assertTrue(edge_errors(text.replace(hooks, hooks.replace("return 403;", "return 200;", 1), 1)))
+        # Une location ouverte (ni `deny all;` ni certificat) reste refusée.
+        opened = text.replace(location_body(text, "/unknown-mode/"), "\n        proxy_pass http://203.0.113.60:4701;\n    ", 1)
+        self.assertTrue(any("/unknown-mode/" in e for e in edge_errors(opened)))
+
+    def test_the_edge_check_runs_in_addition_to_the_other_vhost_checks_never_instead(self):
+        text = public_vhost()
+        self.assertEqual(edge_errors(text), [])
+        self.assertEqual(vhost_errors(text, public=True, cloudflare_edge=True), [])
+        # Liste nommée : un `allow` trop large reste refusé AVEC le drapeau.
+        wide = mutate(text, "/.well-known/", "deny all;", "allow 10.0.0.0/8;\n        deny all;")
+        self.assertTrue(any("allow trop large" in e for e in vhost_errors(wide, cloudflare_edge=True)))
+        self.assertTrue(any("allow trop large" in e for e in vhost_errors(wide, public=True, cloudflare_edge=True)))
+        # `--public` : la liste blanche des locations publiques reste contrôlée AVEC le drapeau.
+        stripped = mutate(text, "~* " + PUBLIC_MCP["path"], "if ($ssl_client_verify != SUCCESS) {", "if (0) {")
+        self.assertTrue(any("certificat client" in e for e in vhost_errors(stripped, public=True, cloudflare_edge=True)))
+        # Et chaque contrôle ne dépend pas de l'autre : l'écart du bord se voit même quand les autres sont satisfaits.
+        self.assertTrue(vhost_errors(text.replace("ssl_verify_client optional;", "", 1), public=True, cloudflare_edge=True))
+        # Sans aucune location à liste nommée : l'erreur d'avant sans le drapeau, pas avec (vhost écrit à la main : rien à nommer).
+        hand = render_hand_written()
+        self.assertTrue(any("aucune location à liste nommée" in e for e in vhost_errors(hand)))
+        self.assertFalse(any("aucune location à liste nommée" in e for e in vhost_errors(hand, cloudflare_edge=True)))
 
     def test_the_check_reads_the_generic_front_vhost_and_the_command_line_agrees(self):
         text = self.front()

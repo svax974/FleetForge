@@ -25,6 +25,9 @@
    `cloudflare_named` ET `cloudflare_front` dès que `cf_untrusted_var` est posée par le vhost. Même mécanisme
    pour les deux attributs : `webapp.conf.j2` et les vhosts écrits à la main (agenthub.conf) incluent ce partiel.
 
+   Fermé au rendu : `_cloudflare_front.inc` refuse de rendre un vhost qui l'inclut sans `cf_untrusted_var`.
+   Variable nginx `cf_untrusted_<slug>` : nom court (limite probable ~46 caractères sous la taille de hash par défaut, non vérifiée).
+
    Le partiel perd sa fin de ligne finale au rendu : l'appelant la remet (`{{ '\n\n' -}}`). #}
 # Socket d'une plage Cloudflare (`cloudflare_ips`, la même liste que `set_real_ip_from`) : elle SEULE peut remplacer l'adresse
 # cliente par CF-Connecting-IP. Une telle socket sans certificat client valide (Authenticated Origin Pulls de NOTRE zone) n'est

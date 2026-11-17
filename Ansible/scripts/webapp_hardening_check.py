@@ -69,7 +69,10 @@ Sous-commandes, chacune code 1 avec la liste des écarts :
       `ssl_client_certificate`) ; chaque location sans `deny all;` l'exige (403) ; chaque location PRIVÉE (`deny all;`)
       refuse (403) une socket d'une plage Cloudflare sans certificat vérifié (`geo` + `map` exacts, mêmes plages que
       `set_real_ip_from`, garde `if ($cf_untrusted_…)`) et envoie `Cloudflare-CDN-Cache-Control: no-store`. Un vhost qui
-      ne lit pas CF-Connecting-IP n'a rien à contrôler. Pas de liste blanche de locations publiques ici (c'est `--public`).
+      ne lit pas CF-Connecting-IP n'a rien à contrôler ; une location FERMÉE (`deny all;` sans aucun `allow`) n'exige rien.
+      Pas de liste blanche de locations publiques ici (c'est `--public`). S'ajoute aux autres contrôles de `vhost`
+      (liste nommée, `--public`), ne les remplace pas ; seul, il n'exige pas de location à liste nommée. Rien ne le lance au
+      déploiement : à jouer à la main sur le rendu d'un vhost qui lit CF-Connecting-IP.
 
   dedicated <rendu.conf> --listener PORT=ADRESSE[,ADRESSE]…   (répétable)
       Écouteur DÉDIÉ d'un proxy (`dedicated_listeners`, proxy-security/tasks/dedicated-listeners.yml) dans le vhost
@@ -1292,6 +1295,8 @@ def check_cloudflare_edge(where, text):
     private, open_locations = [], []
     for head, body in _blocks_with_heads(text):
         code = _code(body)
+        if "deny all;" in code and not re.search(r"(^|[\s;{}])allow\s", code):
+            continue  # fermée (mode inconnu, `restricted-linked` sans serveur) : personne n'y entre, ni garde ni no-store à exiger
         if "deny all;" in code:
             private.append((head, body))
         elif "if ($ssl_client_verify != SUCCESS) {" not in code or "return 403;" not in code.split("if ($ssl_client_verify != SUCCESS) {", 1)[1].split("}", 1)[0]:
@@ -1308,15 +1313,15 @@ def check_vhost(path, v6_min_prefix=128, forbidden=(), public=False, cloudflare_
     with open(path, encoding="utf-8") as f:
         text = f.read()
     blocks = named_blocks(text)
-    if cloudflare_edge:
-        return check_cloudflare_edge(path, text)
-    if not blocks and not public:
+    if not blocks and not public and not cloudflare_edge:
         return [f"{path}: aucune location à liste nommée (`{NAMED_MARKER}`)"]
     errors = []
     for head, body in blocks:
         errors += check_named_block(f"{path}: location {head}", body, v6_min_prefix, forbidden)
     if public:
         errors += check_public(path, text)
+    if cloudflare_edge:  # EN PLUS des autres contrôles, jamais à leur place
+        errors += check_cloudflare_edge(path, text)
     return errors
 
 

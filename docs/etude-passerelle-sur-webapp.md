@@ -727,15 +727,24 @@ sémantique documentée, et par `nginx -t` au déploiement).
   $cf_untrusted_<nom>` FERMÉ par défaut (0 seulement pour une socket hors Cloudflare ou `1:SUCCESS`) ; `_access.inc` (branche privée) et
   `_named_access.inc` posent `if ($cf_untrusted_<nom>) { return 403; }` avant tout `allow`. `check_public` exige le `geo` (plages
   = exactement les `set_real_ip_from`), le `map` exact et la garde dans chaque location privée. Noms de variables propres au vhost
-  (deux noms proxifiés ne redéfinissent pas la même). **`cloudflare_front` (agenthub…) : corrigé de la même façon** (même mécanisme, pas un
-  second) : `geo` + `map` extraits dans le partiel `_cloudflare_untrusted.inc`, inclus par `webapp.conf.j2` pour les deux attributs ET par un
+  (deux noms proxifiés ne redéfinissent pas la même). **`cloudflare_front` (agenthub…) : corrigé par le même
+  mécanisme que `cloudflare_named`** (le `geo` + `map` ci-dessus ; `_cloudflare_realip.inc`, utilisé par les vhosts papanglabs
+  `back-prod`/`back-preprod`/`backindicators-prod`, est un AUTRE partiel, un filtre de socket sur les plages Cloudflare, non concerné) : `geo` + `map`
+  extraits dans le partiel `_cloudflare_untrusted.inc`, inclus par `webapp.conf.j2` pour les deux attributs ET par un
   vhost écrit à la main (agenthub.conf : `cf_slug` + `cf_untrusted_var` puis include, avant le `server {}`) ; les locations PRIVÉES
-  (agenthub : `hooks/`, appelant Alertmanager local, socket hors Cloudflare donc non touchée) refusent la socket Cloudflare sans certificat et
-  envoient `no-store`, les publiques gardent leur exigence du certificat. Pour `cloudflare_front`, `_access.inc` et `_named_access.inc` ne
-  posent la garde que si le vhost définit `cf_untrusted_var` (un vhost d'une entrée `cloudflare_front` qui ne lit PAS CF-Connecting-IP,
-  agenthub-preview.conf, reste rendu octet pour octet ; l'oubli de l'include sur un vhost qui le lit est silencieux au rendu et refusé par
-  `webapp_hardening_check.py vhost <rendu> --cloudflare-edge`, qui contrôle tout vhost rendu lisant CF-Connecting-IP : certificat client
-  vérifié au `server {}`, locations sans `deny all;` protégées par le certificat, locations privées gardées + `no-store`, `geo`/`map` exacts).
+  (agenthub : `hooks/`, appelant Alertmanager) refusent la socket Cloudflare sans certificat et envoient `no-store`, les publiques gardent leur
+  exigence du certificat. Hypothèse NON vérifiée sur Alertmanager : on suppose qu'il joint le vhost en boucle locale par le pont Docker (socket
+  hors plage Cloudflare, jamais refusée) ; s'il passait par Cloudflare, il serait admis aussi, tant que le certificat client est présenté.
+  Pour `cloudflare_front`, `_access.inc` et `_named_access.inc` ne posent la garde que si le vhost définit `cf_untrusted_var` (un vhost
+  d'une entrée `cloudflare_front` qui ne lit PAS CF-Connecting-IP, agenthub-preview.conf, reste rendu octet pour octet). Fermé au rendu :
+  `_cloudflare_front.inc` refuse de rendre (variable non définie, dont le nom dit d'inclure `_cloudflare_untrusted.inc`) un vhost qui
+  l'inclut sans avoir posé `cf_untrusted_var` ; si la variable est posée mais le partiel oublié, `nginx -t` refuse la variable inconnue.
+  Contrôle MANUEL en plus : `webapp_hardening_check.py vhost <rendu> --cloudflare-edge`, qui s'ajoute aux autres contrôles de `vhost` sans les
+  remplacer (certificat client vérifié au `server {}`, locations sans `deny all;` protégées par le certificat, locations privées gardées +
+  `no-store`, `geo`/`map` exacts ; une location fermée, sans `allow`, n'exige rien). RIEN ne le lance au déploiement (il refuserait aujourd'hui
+  openclaw.conf, ctdapi.conf et les vhosts papanglabs ci-dessous) : un test de rendu le joue sur le vhost générique et sur un vhost écrit à la
+  main de même forme. Limite nginx, NON vérifiée (aucun nginx ici) : le nom de variable `cf_untrusted_<slug>` doit rester sous la taille par
+  défaut `variables_hash_bucket_size` (64) ; le plafond probable est d'environ 46 caractères (celui d'agenthub fait 35).
   **Non corrigés** (autre mécanisme, décision du propriétaire) : `openclaw.conf` (web3c, papanglabs) et `ctdapi.conf` lisent
   CF-Connecting-IP et filtrent par adresse SANS certificat client : Authenticated Origin Pulls n'est activé que sur les noms de
   `cfopull_hostnames` (entrées `cloudflare_front`/`cloudflare_named`), donc fermer ces vhosts aux sockets Cloudflare sans certificat couperait

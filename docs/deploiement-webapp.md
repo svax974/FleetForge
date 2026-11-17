@@ -22,9 +22,10 @@ Phases côté scripts : `--build`, `--push`, `--deploy --tag=<t>` (README du tem
 
 `ansible_roles: [webapp]` + à la main `app_port`, `proxy_hostname`, `access_mode`, `cloudflare_front` (front sur Cloudflare Pages)
 ou `cloudflare_named` (nom proxifié par Cloudflare, front en conteneur : CNAME proxifié, origin pulls et autorité sur les proxies
-posés par le même `deploy-webapp.yml`). Dans les deux cas les locations PRIVÉES du vhost refusent (403) une socket d'une plage
-Cloudflare sans certificat client vérifié (CF-Connecting-IP serait forgeable) et interdisent le cache de l'edge
-(`_cloudflare_untrusted.inc`), `webapp_db_engine` (sqlite | postgres | selfhosted | supabase | cloud | neon). Tout le reste est dérivé et surchargeable
+posés par le même `deploy-webapp.yml`), `webapp_db_engine` (sqlite | postgres | selfhosted | supabase | cloud | neon). Avec
+`cloudflare_front` comme avec `cloudflare_named`, les locations PRIVÉES du vhost refusent (403) une socket d'une plage Cloudflare sans
+certificat client vérifié (CF-Connecting-IP serait forgeable) et interdisent le cache de l'edge (`_cloudflare_untrusted.inc`).
+Tout le reste est dérivé et surchargeable
 (`roles/webapp-setup/defaults/main.yml`) : `back_port` = app+1, Postgres = app+2, Redis = app+3 (un bloc de 4 ports par app,
 collision refusée sur une même machine), `webapp_machine` (entrée canonique qui porte `host_vars/<machine>.yml`),
 `webapp_env`, `webapp_replicas`, `webapp_worker`, `webapp_db_exposed`, `webapp_registry`, `webapp_proxy: external`,
