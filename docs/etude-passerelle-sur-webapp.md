@@ -723,3 +723,8 @@ sémantique documentée, et par `nginx -t` au déploiement).
   webapp-sites.yml`) et échapperait à la garde comme à `vhost --public`. `gateway-guard.yml` refuse l'entrée de la passerelle si ce
   fichier existe (même chemin et même nom de projet que `webapp-sites.yml`, `webapp_project` sinon le nom de l'entrée ; contrôle par NOM
   de fichier, le contenu n'est jamais lu) ou si `parc_name` manque.
+- **Mode TLS de la zone** : en « Full » (non strict) Cloudflare ne vérifie pas le certificat de l'origine, le segment Cloudflare → proxy n'est
+  pas authentifié. Pour un nom `cloudflare_named`, un mode LISIBLE et non `strict` BLOQUE `cloudflare-origin-pull` (message : `-e
+  cfopull_enforce_tls_strict=true` ou réglage manuel SSL/TLS → Full (strict)) ; échappatoire explicite `cfopull_allow_non_strict_tls: true`
+  (faux par défaut). Mode illisible (jeton sans lecture) : avertissement seulement, comme `cloudflare_front` seul (comportement d'avant).
+  Jamais joué en `--check` (tout le côté Cloudflare y est sauté).

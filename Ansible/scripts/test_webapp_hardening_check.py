@@ -1166,7 +1166,8 @@ class CloudflareNamedPlaybookTests(unittest.TestCase):
         hosts["gw"]["cloudflare_named"] = False
         return inventory
 
-    def test_the_tls_mode_of_the_zone_is_read_warned_about_and_only_set_on_request(self):
+    def fake_zone_tls(self):
+        """Faux API Cloudflare (`settings/ssl`) sur 127.0.0.1 : (état {ssl, calls, deny}, serveur)."""
         import http.server
         import threading
 
@@ -1200,9 +1201,16 @@ class CloudflareNamedPlaybookTests(unittest.TestCase):
         threading.Thread(target=server.serve_forever, daemon=True).start()
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
+        return state, server
+
+    TLS_TASKS = ("Read the TLS mode of the zone", "Set the TLS mode of the zone to Full (strict)",
+                 "Fail when Cloudflare refuses to set the TLS mode that was asked for", "Report the TLS mode of the zone")
+    TLS_BLOCK = "Refuse a Cloudflare-served name while the TLS mode of the zone is readable and not strict"
+
+    def test_the_tls_mode_of_the_zone_is_read_warned_about_and_only_set_on_request(self):
+        state, server = self.fake_zone_tls()
         tasks = [t for t in yaml.safe_load(open(os.path.join(ROLES, "cloudflare-origin-pull", "tasks", "cloudflare.yml"), encoding="utf-8"))
-                 if t.get("name") in ("Read the TLS mode of the zone", "Set the TLS mode of the zone to Full (strict)",
-                                      "Fail when Cloudflare refuses to set the TLS mode that was asked for", "Report the TLS mode of the zone")]
+                 if t.get("name") in self.TLS_TASKS]
         self.assertEqual(len(tasks), 4)
 
         def play(enforce=False):
@@ -1230,6 +1238,61 @@ class CloudflareNamedPlaybookTests(unittest.TestCase):
         code, out = play(enforce=True)
         self.assertEqual(code, 0)
         self.assertEqual([c[0] for c in state["calls"][calls:]], ["GET"], "déjà strict : aucune écriture")
+
+    def test_a_named_entry_blocks_on_a_readable_non_strict_tls_mode_and_nothing_else_does(self):
+        state, server = self.fake_zone_tls()
+        tasks = {t["name"]: t for t in yaml.safe_load(open(os.path.join(ROLES, "cloudflare-origin-pull", "tasks", "cloudflare.yml"),
+                                                           encoding="utf-8")) if t.get("name") in self.TLS_TASKS + (self.TLS_BLOCK,)}
+        self.assertEqual(len(tasks), 5)
+        defaults = yaml.safe_load(open(os.path.join(ROLES, "cloudflare-origin-pull", "defaults", "main.yml"), encoding="utf-8"))
+        self.assertIs(defaults["cfopull_allow_non_strict_tls"], False, "l'échappatoire est fermée par défaut")
+        order = [t["name"] for t in yaml.safe_load(open(os.path.join(ROLES, "cloudflare-origin-pull", "tasks", "cloudflare.yml"), encoding="utf-8"))]
+        self.assertLess(order.index("Report the TLS mode of the zone"), order.index(self.TLS_BLOCK), "l'avertissement est affiché d'abord")
+
+        def play(inventory, mode="flexible", deny=False, **variables):
+            state["ssl"], state["deny"] = mode, deny
+            document = yaml.safe_dump([{
+                "hosts": "proxy1", "gather_facts": False,
+                "vars": dict({"cfopull_api": f"http://127.0.0.1:{server.server_port}", "cfopull_zone_id": "z", "cfopull_token": "FAKE",
+                              "cfopull_zone": "example.test", "cfopull_enforce_tls_strict": False}, **variables),
+                "tasks": [tasks[n] for n in self.TLS_TASKS + (self.TLS_BLOCK,)]}])
+            return run_local_play(document, inventory)
+        named = edge_inventory()
+        front_only = edge_inventory(cloudflare_named=False)
+        for mode in ("flexible", "full", "off"):
+            with self.subTest(mode=mode):
+                code, out = play(named, mode)
+                self.assertNotEqual(code, 0, out[-1500:])
+                self.assertIn("cfopull_enforce_tls_strict=true", out)
+                self.assertIn("cfopull_allow_non_strict_tls=true", out)
+                self.assertIn("ATTENTION", out, "l'avertissement reste affiché avant le refus")
+        code, out = play(named, "strict")
+        self.assertEqual(code, 0, out[-1500:])
+        code, out = play(named, "flexible", cfopull_allow_non_strict_tls=True)
+        self.assertEqual(code, 0, out[-1500:])
+        self.assertIn("ATTENTION", out)
+        code, out = play(named, "flexible", cfopull_allow_non_strict_tls="true")
+        self.assertEqual(code, 0, "valeur passée par -e : une chaîne")
+        code, out = play(named, "flexible", cfopull_allow_non_strict_tls="false")
+        self.assertNotEqual(code, 0, "la chaîne `false` n'ouvre pas l'échappatoire")
+        code, out = play(named, "flexible", cfopull_enforce_tls_strict=True)
+        self.assertEqual(code, 0, "poser `strict` lève le refus : " + out[-1500:])
+        self.assertIn(("PATCH", {"value": "strict"}), state["calls"])
+        # Mode illisible (jeton sans permission de lecture) : l'avertissement d'avant, jamais bloquant.
+        code, out = play(named, deny=True)
+        self.assertEqual(code, 0, out[-1500:])
+        self.assertIn("illisible", out)
+        # `cloudflare_front` seul (ou aucune entrée proxifiée) : comportement d'avant, avertissement seulement.
+        code, out = play(front_only, "flexible")
+        self.assertEqual(code, 0, out[-1500:])
+        self.assertIn("ATTENTION", out)
+        code, out = play(edge_inventory(cloudflare_named="false"), "flexible")
+        self.assertEqual(code, 0, "la chaîne `false` n'est pas une entrée proxifiée")
+        # En `--check` le côté Cloudflare n'est pas joué du tout (main.yml) et la tâche ne lit jamais un résultat sauté.
+        self.assertIn("not ansible_check_mode", tasks[self.TLS_BLOCK]["when"])
+        main = yaml.safe_load(open(os.path.join(ROLES, "cloudflare-origin-pull", "tasks", "main.yml"), encoding="utf-8"))
+        include = next(t for t in main if t.get("name") == "Run the Cloudflare side")
+        self.assertIn("not ansible_check_mode", include["when"])
 
     CNAMES = os.path.join(ROLES, "cloudflare-dns-update", "tasks", "cnames.yml")
 

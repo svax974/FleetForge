@@ -356,6 +356,36 @@
   delegate_to: localhost
   become: false
 
+# Un nom `cloudflare_named` porte `/mcp` et OAuth : en « Full » (non strict) Cloudflare joint l'origine en HTTPS SANS vérifier son
+# certificat, donc le segment Cloudflare → origine n'est pas authentifié (un tiers sur le chemin se fait passer pour l'origine). Mode
+# lisible et non strict : BLOQUANT. Mode illisible (jeton sans « Zone Settings : Read ») : l'avertissement ci-dessus, sans bloquer.
+# `cfopull_allow_non_strict_tls: true` : échappatoire explicite (décision du propriétaire, faux par défaut). Pas pour `cloudflare_front`
+# seul : l'avertissement d'avant, inchangé. Jamais en `--check` : tout le côté Cloudflare y est sauté (tasks/main.yml), ses résultats
+# n'ont ni `status` ni `json`.
+- name: Refuse a Cloudflare-served name while the TLS mode of the zone is readable and not strict
+  vars:
+    _named_entries: >-
+      {{ groups['all'] | map('extract', hostvars) | selectattr('cloudflare_named', 'defined') | map(attribute='cloudflare_named')
+         | map('bool') | select | list | length }}
+  ansible.builtin.assert:
+    that: false
+    fail_msg: >-
+      Mode TLS de {{ cfopull_zone }} : « {{ cfopull_tls.json.result.value | default('?') }} » — « Full (strict) » est EXIGÉ pour un nom
+      `cloudflare_named` : sans lui Cloudflare ne vérifie pas le certificat de l'origine (segment Cloudflare → proxy non authentifié).
+      Rejouer avec `-e cfopull_enforce_tls_strict=true` (pose `strict` pour TOUTE la zone, jeton « Zone Settings : Edit ») ou le poser à
+      la main (SSL/TLS → Overview → Full (strict)). Échappatoire explicite, à assumer : `-e cfopull_allow_non_strict_tls=true`.
+      Les noms sont activés chez Cloudflare mais aucun vhost n'est encore posé sur les proxies.
+    quiet: true
+  delegate_to: localhost
+  become: false
+  when:
+    - not ansible_check_mode
+    - (_named_entries | int) > 0
+    - cfopull_tls_set is skipped
+    - cfopull_tls.status | default(0) == 200
+    - (cfopull_tls.json.result.value | default('')) != 'strict'
+    - not (cfopull_allow_non_strict_tls | default(false) | bool)
+
 - name: Say what is left to do
   ansible.builtin.debug:
     msg: >-

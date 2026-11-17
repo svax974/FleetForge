@@ -35,6 +35,12 @@ cfopull_hostnames: >-
 # mode est posé à `strict` (réglage de TOUTE la zone, jeton « Zone Settings : Edit ») — décision explicite, faux par défaut.
 cfopull_enforce_tls_strict: false
 
+# Un nom `cloudflare_named` (OAuth/MCP publics) EXIGE le mode `strict` quand il est lisible : un autre mode (« Full ») laisse le segment
+# Cloudflare → origine sans authentification et BLOQUE le déploiement (message : `cfopull_enforce_tls_strict` ou réglage manuel).
+# `true` : échappatoire explicite, jamais par défaut. Aucun effet sans entrée `cloudflare_named` (le front Pages garde son avertissement)
+# ni quand le mode est illisible.
+cfopull_allow_non_strict_tls: false
+
 # Autorité et certificat client propres à CE parc, générés une fois sur le poste
 # de contrôle. `keys/*` est gitignoré : la clé privée de l'autorité n'est jamais
 # versionnée (convention : keys/README.md). Le certificat client (+ sa clé) est
