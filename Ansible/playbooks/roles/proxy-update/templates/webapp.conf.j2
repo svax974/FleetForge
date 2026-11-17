@@ -42,6 +42,9 @@
 {% set _server_name = (_project ~ '-back.' ~ domain_name) if _pages else _h.proxy_hostname %}
 {% set _slug = _server_name | regex_replace('[^a-z0-9]', '_') %}
 {% set access_entry = _first %}
+{# Variable nginx PROPRE à ce vhost (deux noms proxifiés ne doivent pas déclarer deux fois la même) : lue par `_access.inc` et
+   `_named_access.inc` pour une entrée `cloudflare_named`, définie par le `geo` + `map` posés avant le `server {}` ci-dessous. #}
+{% set cf_untrusted_var = 'cf_untrusted_' ~ _slug %}
 {% if _hardened and ansible_host in _vpn_addresses %}
 # {{ _server_name }} : aucun vhost sur ce proxy (son adresse est celle d'un serveur VPN ; profil durci).
 {% else %}
@@ -72,6 +75,24 @@ upstream webapp_{{ _slug }}_back {
 }
 {% endif %}
 
+{% if _named and not _pages %}
+# Socket d'une plage Cloudflare (`cloudflare_ips`, la même liste que `set_real_ip_from`) : elle SEULE peut remplacer l'adresse
+# cliente par CF-Connecting-IP. Une telle socket sans certificat client valide (Authenticated Origin Pulls de NOTRE zone) n'est
+# pas Cloudflare : `$cf_untrusted_{{ _slug }}` vaut 1 et les locations PRIVÉES refusent (403) avant tout filtre d'adresse. Fermé par
+# défaut : seule une clé « hors Cloudflare » (0:…) ou « Cloudflare + certificat vérifié » (1:SUCCESS) donne 0.
+geo $realip_remote_addr $cf_socket_{{ _slug }} {
+    default 0;
+{% for _ip in cloudflare_ips | unique %}
+    {{ _ip }} 1;
+{% endfor %}
+}
+map "$cf_socket_{{ _slug }}:$ssl_client_verify" $cf_untrusted_{{ _slug }} {
+    default 1;
+    "~^0:" 0;
+    "1:SUCCESS" 0;
+}
+
+{% endif %}
 server {
     listen      80;
     listen      [::]:80;

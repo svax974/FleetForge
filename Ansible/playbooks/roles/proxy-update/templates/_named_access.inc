@@ -24,6 +24,13 @@
 {% set _na_v6_min = named_access.v6_min_prefix | default(128) | int %}
 {% set _na_ipv4 = '^(0|[1-9][0-9]{0,2})([.](0|[1-9][0-9]{0,2})){3}$' %}
         # named-access
+{% if (hostvars[access_entry].cloudflare_named | default(false) | bool) and not (hostvars[access_entry].cloudflare_front | default(false) | bool) %}
+        # Nom servi par Cloudflare : socket Cloudflare sans certificat client valide refusée avant tout filtre d'adresse
+        # (voir `_access.inc`).
+        if (${{ cf_untrusted_var }}) {
+            return 403;
+        }
+{% endif %}
         # 1. Serveurs nommés
 {% for h in named_access.hosts | default([]) %}
 {% set _na_name = h | string | regex_replace('[^A-Za-z0-9_.-]', '?') %}

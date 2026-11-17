@@ -1216,11 +1216,45 @@ def check_public(where, text):
                 errors.append(f"{where} : `{directive}` absent du server {{}} (location publique sans certificat client ni IP réelle)")
         if not re.search(r"ssl_client_certificate\s+\S+;", outside):
             errors.append(f"{where} : `ssl_client_certificate` absent du server {{}}")
+        errors += _check_untrusted_socket(where, text, outside, [(h, b) for h, b in blocks if private_marker in _code(b)])
     if any(head == "~* " + PUBLIC_MCP_PATH for head, _ in public):
         front = next((body for head, body in blocks if head == FRONT_CONNECTIONS_HEAD), None)
         pass_ = re.search(r"proxy_pass\s+(\S+);", front or "")
         if front is None or private_marker not in _code(front) or not pass_ or not root_pass or pass_.group(1) != root_pass.group(1):
             errors.append(f"{where} : `{FRONT_CONNECTIONS_HEAD}` doit rester une location privée relayée au front tant que /mcp est public")
+    return errors
+
+
+# `geo` + `map` d'un nom servi par Cloudflare (webapp.conf.j2) : `$cf_untrusted_<nom>` vaut 1 pour une socket d'une plage Cloudflare
+# (celles de `set_real_ip_from`, seules à pouvoir remplacer l'adresse cliente) SANS certificat client vérifié, et 0 sinon ; fermé par
+# défaut. Chaque location PRIVÉE le refuse (403) avant tout `allow`.
+CF_MAP_BODY = 'default 1; "~^0:" 0; "1:SUCCESS" 0;'
+
+
+def _check_untrusted_socket(where, text, outside, private_blocks):
+    errors = []
+    geo = re.search(r"\bgeo\s+\$realip_remote_addr\s+\$(cf_socket_[A-Za-z0-9_]+)\s*\{([^{}]*)\}", text)
+    mapping = re.search(r'\bmap\s+"\$(cf_socket_[A-Za-z0-9_]+):\$ssl_client_verify"\s+\$(cf_untrusted_[A-Za-z0-9_]+)\s*\{([^{}]*)\}', text)
+    if geo is None or mapping is None:
+        return [f"{where} : `geo $realip_remote_addr` et `map $ssl_client_verify` ($cf_untrusted_…) absents : une socket Cloudflare sans "
+                "certificat client pourrait forger CF-Connecting-IP et passer le filtre d'adresse des locations privées"]
+    if geo.group(1) != mapping.group(1):
+        errors.append(f"{where} : le `map` ne lit pas la variable du `geo` (${geo.group(1)})")
+    entries = [e.strip() for e in _code(geo.group(2)).split(";") if e.strip()]
+    ranges = {e.split()[0] for e in entries if e.endswith(" 1") and len(e.split()) == 2}
+    if "default 0" not in entries or len(ranges) != len(entries) - 1:
+        errors.append(f"{where} : le `geo` doit valoir `default 0;` puis `<plage> 1;` seulement")
+    declared = set(re.findall(r"set_real_ip_from\s+(\S+);", outside))
+    if not ranges or ranges != declared:
+        errors.append(f"{where} : les plages du `geo` ne sont pas exactement celles de `set_real_ip_from` (une plage de confiance hors du `geo` échapperait au contrôle)")
+    if _code(mapping.group(3)) != CF_MAP_BODY:
+        errors.append(f"{where} : le `map` doit être exactement `{CF_MAP_BODY}` (fermé par défaut)")
+    guard = f"if (${mapping.group(2)}) {{ return 403; }}"
+    for head, body in private_blocks:
+        code = _code(body)
+        cut = min([i for i in (code.find("allow "), code.find("deny all;")) if i >= 0], default=-1)
+        if guard not in code or code.index(guard) > cut:
+            errors.append(f"{where} : location {head} : `{guard}` doit précéder le filtre d'adresse (socket Cloudflare sans certificat client)")
     return errors
 
 

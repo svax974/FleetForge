@@ -771,7 +771,7 @@ def render_access(entry_attributes, mode=None, proxy="proxy3"):
     """`_access.inc` seul, pour une entrée `x` qui porte `entry_attributes` (mode de la location : `mode`)."""
     hostvars = copy.deepcopy(INVENTORY)
     hostvars["x"] = dict(entry_attributes)
-    source = "{% set access_entry = 'x' %}" + ("{% set access_mode_local = '" + mode + "' %}" if mode else "") + "{% include '_access.inc' %}"
+    source = "{% set access_entry = 'x' %}{% set cf_untrusted_var = 'cf_untrusted_x' %}" + ("{% set access_mode_local = '" + mode + "' %}" if mode else "") + "{% include '_access.inc' %}"
     return _env().from_string(source).render(hostvars=hostvars, ansible_host=hostvars[proxy]["ansible_host"], whitelist=WHITELIST,
                                              groups={"vpns": ["vpn1"]}, prometheus_host="monitor")
 
@@ -3244,6 +3244,136 @@ class PublicVhostTests(unittest.TestCase):
 
 
 @unittest.skipUnless(shutil.which("ansible-playbook"), "ansible-playbook absent")
+def nginx_untrusted(text, socket_address, client_verify):
+    """Valeur de `$cf_untrusted_*` du vhost RENDU pour une socket et un `$ssl_client_verify`, lue comme nginx lit le `geo` (adresse de
+    la SOCKET, `$realip_remote_addr`, plus petite plage) et le `map` (clé exacte sans casse, puis regex dans l'ordre, puis `default`)."""
+    import ipaddress
+    geo = re.search(r"geo \$realip_remote_addr \$(cf_socket_\w+) \{(.*?)\n\}", text, re.S)
+    mapping = re.search(r'map "\$(cf_socket_\w+):\$ssl_client_verify" \$(cf_untrusted_\w+) \{(.*?)\n\}', text, re.S)
+    assert geo and mapping and geo.group(1) == mapping.group(1), "geo/map absents ou non reliés"
+    socket_value = "0"
+    for line in geo.group(2).splitlines():
+        words = line.strip().rstrip(";").split()
+        if len(words) == 2 and words[0] != "default" and ipaddress.ip_address(socket_address) in ipaddress.ip_network(words[0]):
+            socket_value = words[1]
+    key = f"{socket_value}:{client_verify}"
+    exact, regexes, default = {}, [], None
+    for line in mapping.group(3).splitlines():
+        words = line.strip().rstrip(";").split()
+        if len(words) != 2:
+            continue
+        name, value = words[0].strip('"'), words[1]
+        if name == "default":
+            default = value
+        elif name.startswith("~"):
+            regexes.append((name[1:], value))
+        else:
+            exact[name.lower()] = value
+    if key.lower() in exact:
+        return exact[key.lower()]
+    for pattern, value in regexes:
+        if re.search(pattern, key):
+            return value
+    return default
+
+
+class CloudflareNamedForgedAddressTests(unittest.TestCase):
+    """H2b : sur un nom `cloudflare_named`, `set_real_ip_from` fait confiance à CF-Connecting-IP de TOUTE socket d'une plage Cloudflare ;
+    sans certificat client (Authenticated Origin Pulls), un tiers qui ouvre une socket depuis une plage Cloudflare forge une adresse
+    de la whitelist ou du VPN et passe le filtre d'adresse des locations privées. Le vhost refuse (403) une telle socket AVANT le filtre."""
+
+    def named(self, **more):
+        return public_vhost(**more)
+
+    def test_a_socket_in_a_cloudflare_range_needs_the_verified_client_certificate_and_nothing_else_is_affected(self):
+        text = self.named()
+        for address, verify, expected in (
+                ("198.51.100.130", "NONE", "1"), ("198.51.100.130", "SUCCESS", "0"), ("198.51.100.130", "FAILED:certificate has expired", "1"),
+                ("198.51.100.130", "", "1"), ("2001:db8:cf::7", "NONE", "1"), ("2001:db8:cf::7", "SUCCESS", "0"),
+                ("198.51.100.255", "NONE", "1"), ("198.51.100.127", "NONE", "0"), ("203.0.113.9", "NONE", "0"),
+                ("203.0.113.9", "SUCCESS", "0"), ("2001:db8:ce::1", "NONE", "0"), ("198.51.100.130", "success", "0")):
+            with self.subTest(address=address, verify=verify):
+                self.assertEqual(nginx_untrusted(text, address, verify), expected)
+
+    def test_every_private_location_refuses_before_the_address_filter_and_the_public_ones_keep_their_certificate_rule(self):
+        text = self.named()
+        guard = "if ($cf_untrusted_ffg_example_test) {"
+        for head in ("/", "^~ /mcp/connections", "/.well-known/"):
+            with self.subTest(head):
+                body = location_body(text, head)
+                self.assertIn(guard, body)
+                self.assertIn("return 403;", body.split(guard, 1)[1].split("}", 1)[0])
+                first_filter = min(i for i in (body.find("allow "), body.find("deny all;")) if i >= 0)
+                self.assertLess(body.index(guard), first_filter, "avant tout allow / deny")
+        for location in (PUBLIC_MCP, PUBLIC_OAUTH):
+            self.assertNotIn("cf_untrusted", location_body(text, "~* " + location["path"]))
+            self.assertIn("if ($ssl_client_verify != SUCCESS) {", location_body(text, "~* " + location["path"]))
+        self.assertEqual(vhost_errors(text, public=True), [])
+
+    def test_the_geo_covers_exactly_the_ranges_trusted_for_the_real_address(self):
+        text = self.named()
+        geo = re.search(r"geo \$realip_remote_addr \$cf_socket_ffg_example_test \{\n(.*?)\n\}", text, re.S).group(1)
+        self.assertEqual(set(re.findall(r"^\s+(\S+) 1;$", geo, re.M)), set(re.findall(r"set_real_ip_from (\S+);", text)))
+        self.assertEqual(set(re.findall(r"set_real_ip_from (\S+);", text)), set(CLOUDFLARE_IPS))
+        self.assertLess(text.index("geo $realip_remote_addr"), text.index("server {"), "au niveau http, avant le server {}")
+
+    def test_each_named_vhost_has_its_own_variables_and_nothing_is_rendered_for_the_others(self):
+        other = render_vhost(entry="plain", cloudflare_named=True)
+        self.assertIn("$cf_untrusted_plain_example_test", other)
+        self.assertNotIn("cf_untrusted_ffg", other)
+        for entry, attributes in (("plain", {}), ("fleetforge-gateway", {}), ("plain", {"cloudflare_front": True})):
+            text = render_vhost(entry=entry, **attributes)
+            for marker in ("geo ", "cf_untrusted", "cf_socket", "Cloudflare-CDN-Cache-Control", "realip_remote_addr"):
+                self.assertNotIn(marker, text, f"{entry} {attributes}")
+
+    def test_the_partials_add_the_guard_for_a_named_entry_only(self):
+        for attributes, expected in (({"cloudflare_named": True}, True), ({"cloudflare_named": "false"}, False), ({}, False),
+                                     ({"cloudflare_front": True}, False), ({"cloudflare_front": True, "cloudflare_named": True}, False)):
+            with self.subTest(attributes):
+                private = render_access(dict(attributes, access_mode="private"))
+                self.assertEqual("if ($cf_untrusted_x) {" in private, expected, private)
+                if expected:
+                    self.assertLess(private.index("if ($cf_untrusted_x)"), private.index("allow "))
+                    self.assertLess(private.index("return 403;"), private.index("deny all;"))
+
+    def test_a_named_list_location_of_a_named_entry_is_guarded_too(self):
+        text = self.named()
+        mcp_named = render_vhost(cloudflare_named=True)
+        self.assertIn("if ($cf_untrusted_ffg_example_test) {", location_body(mcp_named, "~* ^/mcp(/.*)?$"))
+        self.assertNotIn("cf_untrusted", location_body(render_vhost(), "~* ^/mcp(/.*)?$"))
+        self.assertIn("named-access", location_body(text, "/.well-known/"))
+
+    def test_the_public_check_demands_the_geo_the_map_and_the_guard_of_every_private_location(self):
+        text = self.named()
+        geo_start = text.index("geo $realip_remote_addr")
+        geo_end = text.index("}\n", geo_start) + 2
+        map_start = text.index('map "$cf_socket')
+        map_end = text.index("}\n", map_start) + 2
+        guard = "        if ($cf_untrusted_ffg_example_test) {\n            return 403;\n        }\n"
+        mutations = {
+            "no geo and map": text[:geo_start] + text[map_end:],
+            "no map": text[:map_start] + text[map_end:],
+            "no geo": text[:geo_start] + text[geo_end:],
+            "map open by default": text.replace("    default 1;\n", "    default 0;\n", 1),
+            "map trusts a failed certificate": text.replace('    "1:SUCCESS" 0;', '    "1:FAILED" 0;\n    "1:SUCCESS" 0;', 1),
+            "map without the success rule": text.replace('    "1:SUCCESS" 0;\n', "", 1),
+            "map reads another variable": text.replace('map "$cf_socket_ffg_example_test:', 'map "$cf_socket_other:', 1),
+            "geo misses a range": text.replace("    2001:db8:cf::/48 1;\n", "", 1),
+            "geo has an extra range": text.replace("    default 0;\n", "    default 0;\n    203.0.113.0/24 1;\n", 1),
+            "geo default trusts": text.replace("    default 0;\n", "    default 1;\n", 1),
+            "root without the guard": text.replace(guard, "", 1),
+            "guard after the allow list": mutate(text, "/", guard.strip(), "").replace("        deny all;", guard + "        deny all;", 1),
+            "front pages without the guard": mutate(text, "^~ /mcp/connections", "if ($cf_untrusted_ffg_example_test) {", "if (0) {"),
+            "named list without the guard": mutate(text, "/.well-known/", "if ($cf_untrusted_ffg_example_test) {", "if (0) {"),
+            "guard on another variable": mutate(text, "/", "if ($cf_untrusted_ffg_example_test) {", "if ($cf_untrusted_ffg) {"),
+            "guard answers 200": mutate(text, "/", "return 403;", "return 200;"),
+        }
+        for label, mutated in mutations.items():
+            with self.subTest(label):
+                self.assertNotEqual(mutated, text, label)
+                self.assertTrue(vhost_errors(mutated, public=True), label)
+
+
 class PublicEdgeProbeTests(unittest.TestCase):
     """A3 : `webapp_public_checks` → sondes svcprobe `public_edge` (401 par le nom) et `public_edge_origin` (403 à
     l'origine sans certificat client), jouées depuis la machine de la passerelle."""

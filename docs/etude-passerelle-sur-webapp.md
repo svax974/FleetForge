@@ -695,3 +695,19 @@ certificat client (403) et la `raw_uri` attendue (400), relayer au back-lb (jama
 `origin_status` — qui alimentent `ServiceCheckFailing` (groupe `services`, `for: 15m`, avertissement). Un 200 direct = vhost ouvert
 à qui contourne Cloudflare ; un 403 ou un défi sur la première = règle WAF qui bloque les appels serveur. Non éprouvé : `curl`
 présent sur la machine de la passerelle ; méthode (`POST`) qui donne bien 401 sans identifiant ; comportement réel de Cloudflare.
+
+### Corrections après la revue indépendante (lot 6.8, 16/11/2026)
+
+Hors ligne uniquement : aucun nginx réel n'a lu ces directives (`geo`/`map`/`if`/`add_header` sont lues par tests Python qui émulent la
+sémantique documentée, et par `nginx -t` au déploiement).
+
+- **H2b, socket Cloudflare sans certificat client** : `set_real_ip_from` fait confiance à `CF-Connecting-IP` de TOUTE socket d'une plage
+  Cloudflare ; sans certificat client un tiers qui y ouvre une socket (Worker `connect()`…) forge une adresse de la whitelist ou du VPN
+  et passe le filtre d'adresse des locations privées. Pour `cloudflare_named` seulement, le vhost pose avant le `server {}` un `geo
+  $realip_remote_addr $cf_socket_<nom>` (les plages de `cloudflare_ips`) et un `map "$cf_socket_<nom>:$ssl_client_verify"
+  $cf_untrusted_<nom>` FERMÉ par défaut (0 seulement pour une socket hors Cloudflare ou `1:SUCCESS`) ; `_access.inc` (branche privée) et
+  `_named_access.inc` posent `if ($cf_untrusted_<nom>) { return 403; }` avant tout `allow`. `check_public` exige le `geo` (plages
+  = exactement les `set_real_ip_from`), le `map` exact et la garde dans chaque location privée. Noms de variables propres au vhost
+  (deux noms proxifiés ne redéfinissent pas la même). **Non corrigé pour `cloudflare_front`** (agenthub…) : même faiblesse, rendu laissé
+  octet pour octet ; à voir avec le propriétaire (l'agenthub n'a pas de location privée filtrée par adresse sur le nom public, mais
+  ses `/admin` éventuels le seraient).
