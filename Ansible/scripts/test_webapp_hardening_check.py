@@ -1188,12 +1188,16 @@ class CloudflareNamedPlaybookTests(unittest.TestCase):
             def do_GET(self):
                 state["calls"].append(("GET", self.path))
                 if state.get("deny"):
-                    return self.respond(403, {"success": False, "errors": [{"code": 9109}]})
+                    # `deny` : True (403) ou le code HTTP voulu (401, 404 : jeton sans « Zone Settings : Read »).
+                    return self.respond(403 if state["deny"] is True else state["deny"],
+                                        {"success": False, "errors": [{"code": 9109}]})
                 self.respond(200, {"result": {"id": "ssl", "value": state["ssl"]}})
 
             def do_PATCH(self):
                 length = int(self.headers.get("Content-Length", 0))
                 state["calls"].append(("PATCH", json.loads(self.rfile.read(length))))
+                if state.get("deny_patch"):
+                    return self.respond(403, {"success": False, "errors": [{"code": 9109}]})
                 state["ssl"] = state["calls"][-1][1]["value"]
                 self.respond(200, {"result": {"id": "ssl", "value": state["ssl"]}})
 
@@ -1206,6 +1210,7 @@ class CloudflareNamedPlaybookTests(unittest.TestCase):
     TLS_TASKS = ("Read the TLS mode of the zone", "Set the TLS mode of the zone to Full (strict)",
                  "Fail when Cloudflare refuses to set the TLS mode that was asked for", "Report the TLS mode of the zone")
     TLS_BLOCK = "Refuse a Cloudflare-served name while the TLS mode of the zone is readable and not strict"
+    TLS_UNREADABLE = "Refuse a Cloudflare-served name while the TLS mode of the zone cannot be read"
 
     def test_the_tls_mode_of_the_zone_is_read_warned_about_and_only_set_on_request(self):
         state, server = self.fake_zone_tls()
@@ -1239,15 +1244,17 @@ class CloudflareNamedPlaybookTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual([c[0] for c in state["calls"][calls:]], ["GET"], "déjà strict : aucune écriture")
 
-    def test_a_named_entry_blocks_on_a_readable_non_strict_tls_mode_and_nothing_else_does(self):
+    def test_a_named_entry_blocks_on_a_non_strict_or_unreadable_tls_mode_and_nothing_else_does(self):
         state, server = self.fake_zone_tls()
+        blocks = (self.TLS_BLOCK, self.TLS_UNREADABLE)
         tasks = {t["name"]: t for t in yaml.safe_load(open(os.path.join(ROLES, "cloudflare-origin-pull", "tasks", "cloudflare.yml"),
-                                                           encoding="utf-8")) if t.get("name") in self.TLS_TASKS + (self.TLS_BLOCK,)}
-        self.assertEqual(len(tasks), 5)
+                                                           encoding="utf-8")) if t.get("name") in self.TLS_TASKS + blocks}
+        self.assertEqual(len(tasks), 6)
         defaults = yaml.safe_load(open(os.path.join(ROLES, "cloudflare-origin-pull", "defaults", "main.yml"), encoding="utf-8"))
         self.assertIs(defaults["cfopull_allow_non_strict_tls"], False, "l'échappatoire est fermée par défaut")
         order = [t["name"] for t in yaml.safe_load(open(os.path.join(ROLES, "cloudflare-origin-pull", "tasks", "cloudflare.yml"), encoding="utf-8"))]
-        self.assertLess(order.index("Report the TLS mode of the zone"), order.index(self.TLS_BLOCK), "l'avertissement est affiché d'abord")
+        for block in blocks:
+            self.assertLess(order.index("Report the TLS mode of the zone"), order.index(block), "l'avertissement est affiché d'abord")
 
         def play(inventory, mode="flexible", deny=False, **variables):
             state["ssl"], state["deny"] = mode, deny
@@ -1255,7 +1262,7 @@ class CloudflareNamedPlaybookTests(unittest.TestCase):
                 "hosts": "proxy1", "gather_facts": False,
                 "vars": dict({"cfopull_api": f"http://127.0.0.1:{server.server_port}", "cfopull_zone_id": "z", "cfopull_token": "FAKE",
                               "cfopull_zone": "example.test", "cfopull_enforce_tls_strict": False}, **variables),
-                "tasks": [tasks[n] for n in self.TLS_TASKS + (self.TLS_BLOCK,)]}])
+                "tasks": [tasks[n] for n in self.TLS_TASKS + blocks]}])
             return run_local_play(document, inventory)
         named = edge_inventory()
         front_only = edge_inventory(cloudflare_named=False)
@@ -1278,19 +1285,56 @@ class CloudflareNamedPlaybookTests(unittest.TestCase):
         code, out = play(named, "flexible", cfopull_enforce_tls_strict=True)
         self.assertEqual(code, 0, "poser `strict` lève le refus : " + out[-1500:])
         self.assertIn(("PATCH", {"value": "strict"}), state["calls"])
-        # Mode illisible (jeton sans permission de lecture) : l'avertissement d'avant, jamais bloquant.
-        code, out = play(named, deny=True)
+        # Mode ILLISIBLE (jeton sans « Zone Settings : Read », 401/403/404) : bloquant pour un nom `cloudflare_named`, avec la permission
+        # manquante et les deux remèdes ; l'avertissement reste affiché d'abord.
+        for denied in (True, 401, 403, 404):
+            with self.subTest(denied=denied):
+                code, out = play(named, deny=denied)
+                self.assertNotEqual(code, 0, out[-1500:])
+                self.assertIn("Zone → Zone Settings → Read/Edit", out)
+                self.assertIn("cfopull_enforce_tls_strict=true", out)
+                self.assertIn("cfopull_allow_non_strict_tls=true", out)
+                self.assertIn("ILLISIBLE", out)
+                self.assertIn("illisible", out, "l'avertissement d'avant reste affiché")
+        # Échappatoire explicite : booléen, chaîne `true` (passée par -e), jamais la chaîne `false` ni une valeur quelconque.
+        for value, blocked in ((True, False), ("true", False), ("True", False), (False, True), ("false", True), ("no", True), ("", True)):
+            with self.subTest(escape=value):
+                code, out = play(named, deny=True, cfopull_allow_non_strict_tls=value)
+                self.assertEqual(code != 0, blocked, out[-1500:])
+        # Lecture refusée mais `cfopull_enforce_tls_strict` : l'écriture est tentée. Acceptée (jeton « Edit » seul) : `strict` est posé,
+        # plus rien à refuser ; refusée : la tâche d'écriture échoue, jamais de pose silencieuse ni de passage.
+        code, out = play(named, deny=True, cfopull_enforce_tls_strict=True)
         self.assertEqual(code, 0, out[-1500:])
-        self.assertIn("illisible", out)
+        self.assertIn(("PATCH", {"value": "strict"}), state["calls"])
+        state["deny_patch"] = True
+        try:
+            code, out = play(named, deny=True, cfopull_enforce_tls_strict=True)
+            self.assertNotEqual(code, 0, out[-1500:])
+        finally:
+            state["deny_patch"] = False
+        # Mode lisible et strict : aucun des deux refus.
+        code, out = play(named, "strict", deny=False)
+        self.assertEqual(code, 0, out[-1500:])
         # `cloudflare_front` seul (ou aucune entrée proxifiée) : comportement d'avant, avertissement seulement.
         code, out = play(front_only, "flexible")
         self.assertEqual(code, 0, out[-1500:])
         self.assertIn("ATTENTION", out)
+        for denied in (True, 401, 404):
+            code, out = play(front_only, deny=denied)
+            self.assertEqual(code, 0, "cloudflare_front seul : mode illisible = avertissement seulement, " + out[-1500:])
+            self.assertIn("illisible", out)
+            self.assertNotIn("ILLISIBLE", out)
+        code, out = play(edge_inventory(cloudflare_named="false"), deny=True)
+        self.assertEqual(code, 0, "la chaîne `false` n'est pas une entrée proxifiée")
         code, out = play(edge_inventory(cloudflare_named="false"), "flexible")
         self.assertEqual(code, 0, "la chaîne `false` n'est pas une entrée proxifiée")
         # En `--check` le côté Cloudflare n'est pas joué du tout (main.yml) et la tâche ne lit jamais un résultat sauté.
-        self.assertIn("not ansible_check_mode", tasks[self.TLS_BLOCK]["when"])
-        main = yaml.safe_load(open(os.path.join(ROLES, "cloudflare-origin-pull", "tasks", "main.yml"), encoding="utf-8"))
+        for block in blocks:
+            self.assertIn("not ansible_check_mode", tasks[block]["when"])
+        # Jamais de lecture du résultat d'une tâche sautée : `cfopull_tls_set is skipped` est testé AVANT `cfopull_tls.status`.
+        when = tasks[self.TLS_UNREADABLE]["when"]
+        self.assertLess(when.index("cfopull_tls_set is skipped"), min(i for i, c in enumerate(when) if "cfopull_tls.status" in c))
+        main =yaml.safe_load(open(os.path.join(ROLES, "cloudflare-origin-pull", "tasks", "main.yml"), encoding="utf-8"))
         include = next(t for t in main if t.get("name") == "Run the Cloudflare side")
         self.assertIn("not ansible_check_mode", include["when"])
 

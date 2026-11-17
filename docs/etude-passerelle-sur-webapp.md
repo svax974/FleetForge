@@ -726,7 +726,9 @@ sémantique documentée, et par `nginx -t` au déploiement).
 - **Mode TLS de la zone** : en « Full » (non strict) Cloudflare ne vérifie pas le certificat de l'origine, le segment Cloudflare → proxy n'est
   pas authentifié. Pour un nom `cloudflare_named`, un mode LISIBLE et non `strict` BLOQUE `cloudflare-origin-pull` (message : `-e
   cfopull_enforce_tls_strict=true` ou réglage manuel SSL/TLS → Full (strict)) ; échappatoire explicite `cfopull_allow_non_strict_tls: true`
-  (faux par défaut). Mode illisible (jeton sans lecture) : avertissement seulement, comme `cloudflare_front` seul (comportement d'avant).
+  (faux par défaut). Mode ILLISIBLE (jeton sans « Zone → Zone Settings → Read ») : BLOQUE aussi pour un nom `cloudflare_named` (on ne
+  pose pas un vhost OAuth/MCP public sur une hypothèse ; message : permission manquante, ajouter Read/Edit au jeton ou assumer
+  `cfopull_allow_non_strict_tls: true`) ; `cloudflare_front` seul garde l'avertissement d'avant.
   Jamais joué en `--check` (tout le côté Cloudflare y est sauté).
 - **Sonde d'origine attribuable** : `<name>_origin` n'acceptait qu'un 403, or le serveur par défaut d'un proxy où le vhost est ABSENT répond
   aussi 403. Le `if ($ssl_client_verify != SUCCESS)` des locations publiques d'une entrée `cloudflare_named` ajoute `add_header X-FFG-Origin

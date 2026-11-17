@@ -358,7 +358,7 @@
 
 # Un nom `cloudflare_named` porte `/mcp` et OAuth : en « Full » (non strict) Cloudflare joint l'origine en HTTPS SANS vérifier son
 # certificat, donc le segment Cloudflare → origine n'est pas authentifié (un tiers sur le chemin se fait passer pour l'origine). Mode
-# lisible et non strict : BLOQUANT. Mode illisible (jeton sans « Zone Settings : Read ») : l'avertissement ci-dessus, sans bloquer.
+# lisible et non strict : BLOQUANT. Mode illisible (jeton sans « Zone Settings : Read ») : BLOQUANT aussi, tâche suivante.
 # `cfopull_allow_non_strict_tls: true` : échappatoire explicite (décision du propriétaire, faux par défaut). Pas pour `cloudflare_front`
 # seul : l'avertissement d'avant, inchangé. Jamais en `--check` : tout le côté Cloudflare y est sauté (tasks/main.yml), ses résultats
 # n'ont ni `status` ni `json`.
@@ -384,6 +384,35 @@
     - cfopull_tls_set is skipped
     - cfopull_tls.status | default(0) == 200
     - (cfopull_tls.json.result.value | default('')) != 'strict'
+    - not (cfopull_allow_non_strict_tls | default(false) | bool)
+
+# Mode ILLISIBLE (jeton sans « Zone → Zone Settings → Read », HTTP 401/403/404) : même refus pour un nom `cloudflare_named`. Ne pas
+# pouvoir lire le mode n'est pas la preuve qu'il est `strict` : le déploiement ne doit pas poser un vhost OAuth/MCP public sur une
+# hypothèse. Mêmes règles que le refus ci-dessus (échappatoire `cfopull_allow_non_strict_tls`, jamais en `--check`, jamais de lecture
+# du `.json` d'une tâche sautée : `cfopull_tls_set is skipped` est testé AVANT d'aller lire `cfopull_tls.status`). `cloudflare_front`
+# seul : l'avertissement d'avant, octet pour octet.
+- name: Refuse a Cloudflare-served name while the TLS mode of the zone cannot be read
+  vars:
+    _named_entries: >-
+      {{ groups['all'] | map('extract', hostvars) | selectattr('cloudflare_named', 'defined') | map(attribute='cloudflare_named')
+         | map('bool') | select | list | length }}
+  ansible.builtin.assert:
+    that: false
+    fail_msg: >-
+      Mode TLS de {{ cfopull_zone }} ILLISIBLE (HTTP {{ cfopull_tls.status | default('?') }}) : le jeton `cloudflare_token` n'a pas la
+      permission « Zone → Zone Settings → Read/Edit » sur {{ cfopull_zone }}. « Full (strict) » est EXIGÉ pour un nom `cloudflare_named` et
+      ne peut pas être vérifié. Deux remèdes : (1) ajouter « Zone → Zone Settings → Read » (ou « Edit », pour que
+      `-e cfopull_enforce_tls_strict=true` pose `strict`) au jeton, puis rejouer ; (2) assumer explicitement l'absence de contrôle avec
+      `-e cfopull_allow_non_strict_tls=true` (après avoir vérifié à la main SSL/TLS → Overview → Full (strict)).
+      Les noms sont activés chez Cloudflare mais aucun vhost n'est encore posé sur les proxies.
+    quiet: true
+  delegate_to: localhost
+  become: false
+  when:
+    - not ansible_check_mode
+    - (_named_entries | int) > 0
+    - cfopull_tls_set is skipped
+    - cfopull_tls.status | default(0) != 200
     - not (cfopull_allow_non_strict_tls | default(false) | bool)
 
 - name: Say what is left to do
