@@ -55,7 +55,7 @@ Sous-commandes, chacune code 1 avec la liste des écarts :
       `--docker` : refait l'interpolation par `docker compose config` (aucun hôte contacté) et compare le résultat —
       sans Docker, ou en cas d'écart, le contrôle échoue (fermé).
 
-  vhost <rendu.conf> [--v6-min-prefix N] [--forbid <adresse>]… [--public]
+  vhost <rendu.conf> [--v6-min-prefix N] [--forbid <adresse>]… [--public] [--cloudflare-edge]
       Vhost RENDU : chaque bloc à liste NOMMÉE (marqueur `# named-access`, proxy-update/_named_access.inc) n'a que des
       `allow` d'IPv4 seules (ou /32) ou d'IPv6 de préfixe ≥ N (128 par défaut), aucune des adresses `--forbid` (VPN),
       puis `deny all` en dernier. Aucun bloc nommé : écart (sauf avec `--public`).
@@ -64,6 +64,12 @@ Sous-commandes, chacune code 1 avec la liste des écarts :
       brute attendue (400), relayer au back-lb, borner corps et délai (≤ 90 s), sans `allow` ni websocket ; le `server {}`
       lit le certificat client et CF-Connecting-IP ; `/` et `^~ /mcp/connections` restent privés ; aucun `^~` ne masque
       une regex publique.
+      `--cloudflare-edge` (tout vhost RENDU qui lit CF-Connecting-IP : `cloudflare_front` ou `cloudflare_named`, généré
+      OU écrit à la main) : le `server {}` vérifie le certificat client (`ssl_verify_client optional` +
+      `ssl_client_certificate`) ; chaque location sans `deny all;` l'exige (403) ; chaque location PRIVÉE (`deny all;`)
+      refuse (403) une socket d'une plage Cloudflare sans certificat vérifié (`geo` + `map` exacts, mêmes plages que
+      `set_real_ip_from`, garde `if ($cf_untrusted_…)`) et envoie `Cloudflare-CDN-Cache-Control: no-store`. Un vhost qui
+      ne lit pas CF-Connecting-IP n'a rien à contrôler. Pas de liste blanche de locations publiques ici (c'est `--public`).
 
   dedicated <rendu.conf> --listener PORT=ADRESSE[,ADRESSE]…   (répétable)
       Écouteur DÉDIÉ d'un proxy (`dedicated_listeners`, proxy-security/tasks/dedicated-listeners.yml) dans le vhost
@@ -1236,7 +1242,10 @@ CF_MAP_BODY = 'default 1; "~^0:" 0; "1:SUCCESS" 0;'
 CF_NO_STORE = 'add_header Cloudflare-CDN-Cache-Control "no-store" always;'
 
 
-def _check_untrusted_socket(where, text, outside, private_blocks):
+def _check_untrusted_socket(where, text, outside, private_blocks, ordered=True):
+    """`ordered=False` (`--cloudflare-edge`) : la garde n'a pas à PRÉCÉDER le premier `allow` du texte, seulement à exister dans la
+    location — le `return` d'un `if` est lu en phase rewrite, avant la phase d'accès (`allow`/`deny`), quel que soit l'ordre
+    du texte (agenthub.conf pose un `allow` du pont Docker avant l'include de `_access.inc`)."""
     errors = []
     geo = re.search(r"\bgeo\s+\$realip_remote_addr\s+\$(cf_socket_[A-Za-z0-9_]+)\s*\{([^{}]*)\}", text)
     mapping = re.search(r'\bmap\s+"\$(cf_socket_[A-Za-z0-9_]+):\$ssl_client_verify"\s+\$(cf_untrusted_[A-Za-z0-9_]+)\s*\{([^{}]*)\}', text)
@@ -1260,15 +1269,47 @@ def _check_untrusted_socket(where, text, outside, private_blocks):
         if CF_NO_STORE not in code:
             errors.append(f"{where} : location {head} : `{CF_NO_STORE}` absent (l'edge pourrait mettre en cache un objet privé)")
         cut = min([i for i in (code.find("allow "), code.find("deny all;")) if i >= 0], default=-1)
-        if guard not in code or code.index(guard) > cut:
+        if guard not in code or (ordered and code.index(guard) > cut):
             errors.append(f"{where} : location {head} : `{guard}` doit précéder le filtre d'adresse (socket Cloudflare sans certificat client)")
     return errors
 
 
-def check_vhost(path, v6_min_prefix=128, forbidden=(), public=False):
+def check_cloudflare_edge(where, text):
+    """Vhost RENDU qui lit l'adresse cliente dans CF-Connecting-IP (`cloudflare_front` ou `cloudflare_named`, vhost générique OU
+    écrit à la main : agenthub.conf). N'importe quel client Cloudflare peut ouvrir une socket depuis une plage Cloudflare et forger cet
+    en-tête : seul le certificat client de NOTRE zone (Authenticated Origin Pulls) prouve que la requête vient d'elle. Donc : le
+    `server {}` le vérifie ; toute location SANS `deny all;` l'exige (403) ; toute location PRIVÉE refuse la socket Cloudflare sans
+    certificat (`geo` + `map` exacts, garde) et interdit le cache de l'edge. Sans `real_ip_header CF-Connecting-IP;`, rien à contrôler."""
+    outside = _code(_without_locations(text))
+    if "real_ip_header CF-Connecting-IP;" not in outside:
+        return []
+    errors = []
+    for directive in ("ssl_verify_client optional;",):
+        if directive not in outside:
+            errors.append(f"{where} : `{directive}` absent du server {{}} (le certificat client de Cloudflare n'est pas vérifié)")
+    if not re.search(r"ssl_client_certificate\s+\S+;", outside):
+        errors.append(f"{where} : `ssl_client_certificate` absent du server {{}}")
+    private, open_locations = [], []
+    for head, body in _blocks_with_heads(text):
+        code = _code(body)
+        if "deny all;" in code:
+            private.append((head, body))
+        elif "if ($ssl_client_verify != SUCCESS) {" not in code or "return 403;" not in code.split("if ($ssl_client_verify != SUCCESS) {", 1)[1].split("}", 1)[0]:
+            open_locations.append(head)
+    for head in open_locations:
+        errors.append(f"{where} : location {head} : ni privée (`deny all;`) ni protégée par le certificat client (`if ($ssl_client_verify != SUCCESS) {{ return 403; }}`) : "
+                      "n'importe quel client Cloudflare l'atteint")
+    if private:
+        errors += _check_untrusted_socket(where, text, outside, private, ordered=False)
+    return errors
+
+
+def check_vhost(path, v6_min_prefix=128, forbidden=(), public=False, cloudflare_edge=False):
     with open(path, encoding="utf-8") as f:
         text = f.read()
     blocks = named_blocks(text)
+    if cloudflare_edge:
+        return check_cloudflare_edge(path, text)
     if not blocks and not public:
         return [f"{path}: aucune location à liste nommée (`{NAMED_MARKER}`)"]
     errors = []
@@ -1426,7 +1467,8 @@ def main(argv):
         errors = check_compose(argv[1], hardened, _option_values(argv, "--allow-bind"), use_docker="--docker" in argv)
     elif len(argv) >= 2 and argv[0] == "vhost":
         v6 = int(argv[argv.index("--v6-min-prefix") + 1]) if "--v6-min-prefix" in argv else 128
-        errors = check_vhost(argv[1], v6, _option_values(argv, "--forbid"), public="--public" in argv)
+        errors = check_vhost(argv[1], v6, _option_values(argv, "--forbid"), public="--public" in argv,
+                             cloudflare_edge="--cloudflare-edge" in argv)
     elif len(argv) >= 2 and argv[0] == "dedicated":
         errors = check_dedicated(argv[1], _listener_options(argv))
     else:

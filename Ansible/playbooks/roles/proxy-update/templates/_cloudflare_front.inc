@@ -30,14 +30,21 @@
    APRÈS remplacement — il ne faut donc PAS y admettre les plages Cloudflare.
 
    Plages : `cloudflare_ips` (group_vars/all.yml), seule liste du parc.
-   Modèle écrit à la main : openclaw.conf, ctdapi.conf (à migrer).
+   Modèle écrit à la main : openclaw.conf, ctdapi.conf (à migrer). ATTENTION : ces deux-là lisent
+   CF-Connecting-IP SANS ce partiel ni certificat client (Authenticated Origin Pulls n'est activé
+   que sur les noms d'entrées `cloudflare_front`/`cloudflare_named`, `cfopull_hostnames`) : leur
+   filtre d'adresse a la faiblesse décrite ci-dessus, non corrigée tant que le nom n'est pas migré.
 
    Authenticated Origin Pulls : ce partiel pose AUSSI la vérification du
    certificat client que Cloudflare présente (autorité PROPRE au parc,
    deploy-cloudflare-origin-pull.yml), en `optional` : rien n'est exigé ici.
    C'est `_access.inc` qui l'exige, dans chaque location en mode `public` d'une
    entrée `cloudflare_front` — une location privée garde son filtre d'adresse et
-   reste joignable par ses appelants directs (Alertmanager local…).
+   reste joignable par ses appelants directs (Alertmanager local…), mais refuse (403)
+   une socket d'une plage Cloudflare SANS certificat client vérifié : n'importe quel
+   client Cloudflare peut y forger CF-Connecting-IP et passer le filtre d'adresse
+   (`geo` + `map` d'`_cloudflare_untrusted.inc`, à inclure AVANT le `server {}` par un
+   vhost écrit à la main ; `webapp.conf.j2` le fait pour les deux attributs).
    Pourquoi pas un filtre sur `cloudflare_ips` : ces plages sont communes à TOUS
    les clients Cloudflare (n'importe quel compte peut pointer un nom vers nos
    proxies) ; le certificat client, lui, n'est présenté que pour NOTRE zone.

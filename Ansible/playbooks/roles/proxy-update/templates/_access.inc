@@ -17,11 +17,17 @@
                  réels ; plus, sur un proxy de la MÊME machine qu'un serveur
                  lié, les sous-réseaux Docker privés déclarés par son
                  `access_local_cidrs`), puis `deny all` ; entrée
-                 `cloudflare_named: true` : d'abord `if ($<cf_untrusted_var>) { return 403; }`
-                 (`cf_untrusted_var` posée par `webapp.conf.j2` : variable du `geo` + `map` du
-                 vhost, 1 pour une socket d'une plage Cloudflare SANS certificat client vérifié —
-                 sans cela un tiers qui ouvre une socket depuis une plage Cloudflare forge
-                 CF-Connecting-IP et passe le filtre d'adresse) ;
+                 `cloudflare_named: true` OU `cloudflare_front: true` : d'abord
+                 `if ($<cf_untrusted_var>) { return 403; }` et `Cloudflare-CDN-Cache-Control: no-store`
+                 (`cf_untrusted_var` posée par le vhost, `geo` + `map` de `_cloudflare_untrusted.inc` :
+                 1 pour une socket d'une plage Cloudflare SANS certificat client vérifié — sans cela
+                 un tiers qui ouvre une socket depuis une plage Cloudflare forge CF-Connecting-IP
+                 et passe le filtre d'adresse). `cloudflare_named` : toujours (`webapp.conf.j2` ;
+                 variable absente = erreur de rendu, fermé). `cloudflare_front` : seulement si le
+                 vhost pose `cf_untrusted_var` (`webapp.conf.j2` toujours ; un vhost écrit à la
+                 main l'opte avec `_cloudflare_untrusted.inc`, voir agenthub.conf) — un vhost
+                 d'une entrée `cloudflare_front` qui ne lit PAS CF-Connecting-IP (agenthub-preview.conf,
+                 DNS seul) ne la pose pas et reste rendu comme avant ;
      • public  → aucun filtre d'adresse : l'authentification est celle du
                  service (signatures d'appareil, jeton…), et elle doit exister.
                  Entrée `cloudflare_front: true` OU `cloudflare_named: true`
@@ -71,7 +77,8 @@
         deny all;
 {% elif _access_mode == 'private' %}
         # Mode privé ({{ access_entry }}) : vpns + supervision + whitelist.
-{% if (hostvars[access_entry].cloudflare_named | default(false) | bool) and not (hostvars[access_entry].cloudflare_front | default(false) | bool) %}
+{% if ((hostvars[access_entry].cloudflare_named | default(false) | bool) and not (hostvars[access_entry].cloudflare_front | default(false) | bool))
+      or ((hostvars[access_entry].cloudflare_front | default(false) | bool) and cf_untrusted_var is defined) %}
         # Nom servi par Cloudflare : une socket d'une plage Cloudflare sans certificat client valide ne fixe pas l'adresse cliente
         # (CF-Connecting-IP forgeable par un tiers) : refusée AVANT le filtre d'adresse. Jamais mis en cache par l'edge : le front
         # sert ses fichiers statiques `public, immutable`, et un objet chargé ici par le propriétaire serait ensuite servi à tout le

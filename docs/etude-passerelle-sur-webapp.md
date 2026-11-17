@@ -722,16 +722,28 @@ sémantique documentée, et par `nginx -t` au déploiement).
 
 - **H2b, socket Cloudflare sans certificat client** : `set_real_ip_from` fait confiance à `CF-Connecting-IP` de TOUTE socket d'une plage
   Cloudflare ; sans certificat client un tiers qui y ouvre une socket (Worker `connect()`…) forge une adresse de la whitelist ou du VPN
-  et passe le filtre d'adresse des locations privées. Pour `cloudflare_named` seulement, le vhost pose avant le `server {}` un `geo
+  et passe le filtre d'adresse des locations privées. Pour `cloudflare_named` ET `cloudflare_front`, le vhost pose avant le `server {}` un `geo
   $realip_remote_addr $cf_socket_<nom>` (les plages de `cloudflare_ips`) et un `map "$cf_socket_<nom>:$ssl_client_verify"
   $cf_untrusted_<nom>` FERMÉ par défaut (0 seulement pour une socket hors Cloudflare ou `1:SUCCESS`) ; `_access.inc` (branche privée) et
   `_named_access.inc` posent `if ($cf_untrusted_<nom>) { return 403; }` avant tout `allow`. `check_public` exige le `geo` (plages
   = exactement les `set_real_ip_from`), le `map` exact et la garde dans chaque location privée. Noms de variables propres au vhost
-  (deux noms proxifiés ne redéfinissent pas la même). **Non corrigé pour `cloudflare_front`** (agenthub…) : même faiblesse, rendu laissé
-  octet pour octet ; à voir avec le propriétaire (l'agenthub n'a pas de location privée filtrée par adresse sur le nom public, mais
-  ses `/admin` éventuels le seraient).
+  (deux noms proxifiés ne redéfinissent pas la même). **`cloudflare_front` (agenthub…) : corrigé de la même façon** (même mécanisme, pas un
+  second) : `geo` + `map` extraits dans le partiel `_cloudflare_untrusted.inc`, inclus par `webapp.conf.j2` pour les deux attributs ET par un
+  vhost écrit à la main (agenthub.conf : `cf_slug` + `cf_untrusted_var` puis include, avant le `server {}`) ; les locations PRIVÉES
+  (agenthub : `hooks/`, appelant Alertmanager local, socket hors Cloudflare donc non touchée) refusent la socket Cloudflare sans certificat et
+  envoient `no-store`, les publiques gardent leur exigence du certificat. Pour `cloudflare_front`, `_access.inc` et `_named_access.inc` ne
+  posent la garde que si le vhost définit `cf_untrusted_var` (un vhost d'une entrée `cloudflare_front` qui ne lit PAS CF-Connecting-IP,
+  agenthub-preview.conf, reste rendu octet pour octet ; l'oubli de l'include sur un vhost qui le lit est silencieux au rendu et refusé par
+  `webapp_hardening_check.py vhost <rendu> --cloudflare-edge`, qui contrôle tout vhost rendu lisant CF-Connecting-IP : certificat client
+  vérifié au `server {}`, locations sans `deny all;` protégées par le certificat, locations privées gardées + `no-store`, `geo`/`map` exacts).
+  **Non corrigés** (autre mécanisme, décision du propriétaire) : `openclaw.conf` (web3c, papanglabs) et `ctdapi.conf` lisent
+  CF-Connecting-IP et filtrent par adresse SANS certificat client : Authenticated Origin Pulls n'est activé que sur les noms de
+  `cfopull_hostnames` (entrées `cloudflare_front`/`cloudflare_named`), donc fermer ces vhosts aux sockets Cloudflare sans certificat couperait
+  tout le trafic navigateur. Les corriger suppose d'abord de déclarer `cloudflare_named: true` sur ces entrées (CNAME proxifié géré par
+  Ansible, origin pull activé sur le nom, mode TLS de la zone `strict` exigé) puis de migrer le vhost vers le gabarit générique ou le partiel.
 - **Cache de l'edge** : le nom proxifié est mis en cache par Cloudflare et le front sert ses statiques `public, immutable` ; un objet chargé
-  par le propriétaire sur la location privée aurait pu être servi à tous. Les locations PRIVÉES d'une entrée `cloudflare_named`
+  par le propriétaire sur la location privée aurait pu être servi à tous. Les locations PRIVÉES d'une entrée `cloudflare_named` (et, depuis
+  le correctif de H2b, `cloudflare_front`)
   (`_access.inc`, `_named_access.inc`) posent `add_header Cloudflare-CDN-Cache-Control "no-store" always;` (prioritaire sur
   `Cache-Control` pour l'edge ; le navigateur garde `Cache-Control`). Un `add_header` de location remplace ceux du `server`/`http` :
   le vhost généré n'en pose aucun au-dessus (test), mais un `add_header` ajouté un jour dans `nginx.conf` ou le `server {}` serait perdu

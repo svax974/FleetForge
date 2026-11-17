@@ -767,11 +767,13 @@ def render_vhost(proxy="proxy3", entry="fleetforge-gateway", whitelist=None, mcp
                            nginx_version="1.26.0", cloudflare_ips=CLOUDFLARE_IPS)
 
 
-def render_access(entry_attributes, mode=None, proxy="proxy3"):
-    """`_access.inc` seul, pour une entrée `x` qui porte `entry_attributes` (mode de la location : `mode`)."""
+def render_access(entry_attributes, mode=None, proxy="proxy3", cf_var=True):
+    """`_access.inc` seul, pour une entrée `x` qui porte `entry_attributes` (mode de la location : `mode`) ;
+    `cf_var=False` : le vhost ne pose pas `cf_untrusted_var` (vhost écrit à la main qui ne lit pas CF-Connecting-IP)."""
     hostvars = copy.deepcopy(INVENTORY)
     hostvars["x"] = dict(entry_attributes)
-    source = "{% set access_entry = 'x' %}{% set cf_untrusted_var = 'cf_untrusted_x' %}" + ("{% set access_mode_local = '" + mode + "' %}" if mode else "") + "{% include '_access.inc' %}"
+    source = ("{% set access_entry = 'x' %}" + ("{% set cf_untrusted_var = 'cf_untrusted_x' %}" if cf_var else "")
+              + ("{% set access_mode_local = '" + mode + "' %}" if mode else "") + "{% include '_access.inc' %}")
     return _env().from_string(source).render(hostvars=hostvars, ansible_host=hostvars[proxy]["ansible_host"], whitelist=WHITELIST,
                                              groups={"vpns": ["vpn1"]}, prometheus_host="monitor")
 
@@ -3537,14 +3539,17 @@ class CloudflareNamedForgedAddressTests(unittest.TestCase):
         other = render_vhost(entry="plain", cloudflare_named=True)
         self.assertIn("$cf_untrusted_plain_example_test", other)
         self.assertNotIn("cf_untrusted_ffg", other)
-        for entry, attributes in (("plain", {}), ("fleetforge-gateway", {}), ("plain", {"cloudflare_front": True})):
+        for entry, attributes in (("plain", {}), ("fleetforge-gateway", {})):
             text = render_vhost(entry=entry, **attributes)
             for marker in ("geo ", "cf_untrusted", "cf_socket", "Cloudflare-CDN-Cache-Control", "realip_remote_addr"):
                 self.assertNotIn(marker, text, f"{entry} {attributes}")
 
-    def test_the_partials_add_the_guard_for_a_named_entry_only(self):
+    def test_the_partials_add_the_guard_for_a_cloudflare_entry_only(self):
+        # `render_access` pose `cf_untrusted_var` (le vhost générique la pose toujours) : `cloudflare_front` reçoit la garde comme
+        # `cloudflare_named`. Sans la variable (vhost écrit à la main qui ne lit pas CF-Connecting-IP) : voir CloudflareFrontGuardTests.
         for attributes, expected in (({"cloudflare_named": True}, True), ({"cloudflare_named": "false"}, False), ({}, False),
-                                     ({"cloudflare_front": True}, False), ({"cloudflare_front": True, "cloudflare_named": True}, False)):
+                                     ({"cloudflare_front": "false"}, False), ({"cloudflare_front": True}, True),
+                                     ({"cloudflare_front": True, "cloudflare_named": True}, True)):
             with self.subTest(attributes):
                 private = render_access(dict(attributes, access_mode="private"))
                 self.assertEqual("if ($cf_untrusted_x) {" in private, expected, private)
@@ -3614,8 +3619,9 @@ class CloudflareNamedNoStoreTests(unittest.TestCase):
             self.assertEqual([d for d in directives(location_body(text, head)) if d.startswith("add_header")], [self.HEADER], head)
 
     def test_the_other_entries_render_without_it(self):
-        for entry, attributes in (("plain", {}), ("fleetforge-gateway", {}), ("plain", {"cloudflare_front": True})):
+        for entry, attributes in (("plain", {}), ("fleetforge-gateway", {})):
             self.assertNotIn("Cloudflare-CDN-Cache-Control", render_vhost(entry=entry, **attributes), f"{entry} {attributes}")
+        self.assertIn(self.HEADER, render_vhost(entry="plain", cloudflare_front=True), "cloudflare_front : même en-tête (CloudflareFrontGuardTests)")
         self.assertNotIn("add_header", render_access({"access_mode": "private"}).replace("`add_header`", ""))
         self.assertIn(self.HEADER, render_access({"access_mode": "private", "cloudflare_named": True}))
         self.assertNotIn("Cloudflare-CDN-Cache-Control", render_access({"access_mode": "public", "cloudflare_named": True}),
@@ -3630,6 +3636,201 @@ class CloudflareNamedNoStoreTests(unittest.TestCase):
                 self.assertTrue(any("no-store" in e for e in vhost_errors(mutated, public=True)), head)
         wrong = text.replace('"no-store"', '"public"', 1)
         self.assertTrue(vhost_errors(wrong, public=True))
+
+
+# Vhost écrit à la main sur le modèle d'agenthub.conf (`cloudflare_front`, API sous `-back`) : le `geo` + `map` partagés
+# (`_cloudflare_untrusted.inc`) sont inclus avant le `server {}`, `cf_untrusted_var` les relie à `_access.inc`. Une location
+# publique (certificat client exigé) et une PRIVÉE (hooks Alertmanager : `allow` du pont Docker avant l'include).
+HAND_WRITTEN_SERVER = """\
+server {
+    listen      443 ssl;
+    server_name hand-back.example.test;
+
+    {% include '_cloudflare_front.inc' %}
+
+    location /api/v1/ws/ {
+        {% set access_mode_local = 'public' %}
+        {% include '_access.inc' %}
+        proxy_pass         http://203.0.113.60:4701;
+    }
+
+    location ~* ^/api/v1/hooks/ {
+        allow 172.17.0.0/16;  # Alertmanager en conteneur
+        {% set access_mode_local = 'private' %}
+        {% include '_access.inc' %}
+        proxy_pass         http://203.0.113.60:4701;
+    }
+}
+"""
+HAND_WRITTEN_GUARD = """\
+{% set cf_slug = 'hand-back.example.test' | regex_replace('[^a-z0-9]', '_') %}
+{% set cf_untrusted_var = 'cf_untrusted_' ~ cf_slug %}
+{% include '_cloudflare_untrusted.inc' %}{{ '\\n' -}}
+"""
+
+
+def render_hand_written(guard=True, source=None, **attributes):
+    hostvars = copy.deepcopy(INVENTORY)
+    hostvars["hand"] = {"ansible_host": "203.0.113.60", "access_mode": "private", "cloudflare_front": True}
+    hostvars["hand"].update(attributes)
+    template = "{% set access_entry = 'hand' %}\n" + (HAND_WRITTEN_GUARD if guard else "") + "\n" + (source or HAND_WRITTEN_SERVER)
+    return _env().from_string(template).render(hostvars=hostvars, ansible_host=hostvars["proxy3"]["ansible_host"], whitelist=WHITELIST,
+                                               groups={"vpns": ["vpn1"]}, prometheus_host="monitor", cloudflare_ips=CLOUDFLARE_IPS)
+
+
+def edge_errors(text):
+    return vhost_errors(text, cloudflare_edge=True)
+
+
+class CloudflareFrontGuardTests(unittest.TestCase):
+    """`cloudflare_front` (agenthub…) avait la même faiblesse que `cloudflare_named` : `set_real_ip_from` fait confiance à
+    CF-Connecting-IP de TOUTE socket d'une plage Cloudflare, et sans certificat client (Authenticated Origin Pulls) un tiers qui y
+    ouvre une socket forge une adresse de la whitelist ou du VPN et passe le filtre d'adresse des locations privées. Même mécanisme
+    que `cloudflare_named` (`_cloudflare_untrusted.inc`, `_access.inc`, `_named_access.inc`), vhost générique ET écrit à la main."""
+
+    LOCATIONS = [{"path": "/pub", "mode": "public"}, {"path": "/admin/", "access": {"hosts": ["agenthub"]}},
+                 {"path": "/api/", "ws": True}]
+    GUARD = "if ($cf_untrusted_plain_back_example_test) {"
+    HEADER = CloudflareNamedNoStoreTests.HEADER
+
+    def front(self, **more):
+        return render_vhost(entry="plain", cloudflare_front=True, webapp_vhost_locations=self.LOCATIONS, **more)
+
+    def test_every_private_location_of_a_front_entry_refuses_before_the_address_filter_and_forbids_the_edge_cache(self):
+        text = self.front()
+        for head in ("/", "/admin/", "/api/"):  # `/` repli, `/admin/` liste NOMMÉE, `/api/` mode de l'entrée
+            with self.subTest(head):
+                body = location_body(text, head)
+                self.assertIn(self.GUARD, body)
+                self.assertIn("return 403;", body.split(self.GUARD, 1)[1].split("}", 1)[0])
+                self.assertIn(self.HEADER, body)
+                first_filter = min(i for i in (body.find("allow "), body.find("deny all;")) if i >= 0)
+                self.assertLess(body.index(self.GUARD), first_filter, "avant tout allow / deny")
+                self.assertNotIn("198.51.100.128", body, "jamais les plages Cloudflare dans un allow")
+        public = location_body(text, "/pub")
+        self.assertIn("if ($ssl_client_verify != SUCCESS) {", public, "la location publique garde le certificat client")
+        self.assertNotIn("cf_untrusted", public)
+        self.assertNotIn("Cloudflare-CDN-Cache-Control", public, "pas de no-store sur une location publique")
+        self.assertNotIn("X-FFG-Origin", text, "le marqueur de la sonde d'origine reste propre à cloudflare_named")
+        self.assertEqual(edge_errors(text), [])
+
+    def test_a_socket_in_a_cloudflare_range_needs_the_verified_client_certificate(self):
+        text = self.front()
+        for address, verify, expected in (
+                ("198.51.100.130", "NONE", "1"), ("198.51.100.130", "SUCCESS", "0"), ("198.51.100.130", "FAILED:certificate has expired", "1"),
+                ("198.51.100.130", "", "1"), ("2001:db8:cf::7", "NONE", "1"), ("2001:db8:cf::7", "SUCCESS", "0"),
+                ("198.51.100.127", "NONE", "0"), ("203.0.113.9", "NONE", "0"), ("203.0.113.9", "SUCCESS", "0"),
+                ("172.17.0.4", "NONE", "0"), ("192.0.2.10", "NONE", "0")):
+            with self.subTest(address=address, verify=verify):
+                self.assertEqual(nginx_untrusted(text, address, verify), expected)
+        self.assertLess(text.index("geo $realip_remote_addr"), text.index("server {"), "au niveau http, avant le server {}")
+
+    def test_front_and_named_share_one_mechanism_and_the_named_text_is_the_one_of_before(self):
+        front = render_vhost(entry="plain", cloudflare_front=True)
+        named = render_vhost(entry="plain", cloudflare_named=True)
+        edge = "geo $realip_remote_addr"
+
+        def block(text, slug):
+            start = text.index(edge)
+            return text[start:text.index("}\n", text.index("map ", start)) + 2].replace(slug, "SLUG")
+        self.assertEqual(block(front, "plain_back_example_test"), block(named, "plain_example_test"))
+        # Le rendu `cloudflare_named` d'avant l'extraction du partiel, octet pour octet (réécriture : un test, pas un instantané du parc).
+        legacy = ("# Socket d'une plage Cloudflare (`cloudflare_ips`, la même liste que `set_real_ip_from`) : elle SEULE peut remplacer l'adresse\n"
+                  "# cliente par CF-Connecting-IP. Une telle socket sans certificat client valide (Authenticated Origin Pulls de NOTRE zone) n'est\n"
+                  "# pas Cloudflare : `$cf_untrusted_plain_example_test` vaut 1 et les locations PRIVÉES refusent (403) avant tout filtre d'adresse. Fermé par\n"
+                  "# défaut : seule une clé « hors Cloudflare » (0:…) ou « Cloudflare + certificat vérifié » (1:SUCCESS) donne 0.\n"
+                  "geo $realip_remote_addr $cf_socket_plain_example_test {\n    default 0;\n    198.51.100.128/25 1;\n    2001:db8:cf::/48 1;\n}\n"
+                  'map "$cf_socket_plain_example_test:$ssl_client_verify" $cf_untrusted_plain_example_test {\n    default 1;\n    "~^0:" 0;\n'
+                  '    "1:SUCCESS" 0;\n}\n\nserver {\n    listen      80;\n')
+        self.assertIn(legacy, named)
+        self.assertIn(legacy.replace("plain_example_test", "plain_back_example_test"), front)
+
+    def test_without_the_attribute_nothing_of_it_is_rendered_and_the_bytes_do_not_change(self):
+        for entry in ("fleetforge-gateway", "plain"):
+            reference = render_vhost(entry=entry, webapp_vhost_locations=self.LOCATIONS)
+            for label, value in (("false", False), ("string", "false"), ("no", "no")):
+                with self.subTest(entry=entry, value=label):
+                    self.assertEqual(render_vhost(entry=entry, webapp_vhost_locations=self.LOCATIONS, cloudflare_front=value), reference)
+            for marker in ("ssl_verify_client", "real_ip_header", "geo ", "cf_untrusted", "Cloudflare"):
+                self.assertNotIn(marker, reference, f"{entry} : {marker}")
+        for attribute in ("cloudflare_front", "cloudflare_named"):
+            self.assertEqual(render_access({"access_mode": "private", attribute: False}), render_access({"access_mode": "private"}))
+
+    def test_a_hand_written_vhost_includes_the_partial_and_every_private_location_is_guarded(self):
+        text = render_hand_written()
+        guard = "if ($cf_untrusted_hand_back_example_test) {"
+        hooks = location_body(text, "~* ^/api/v1/hooks/")
+        self.assertIn(guard, hooks)
+        self.assertIn(self.HEADER, hooks)
+        self.assertIn("allow 172.17.0.0/16;", hooks, "le pont Docker d'Alertmanager reste admis (socket hors Cloudflare)")
+        ws = location_body(text, "/api/v1/ws/")
+        self.assertIn("if ($ssl_client_verify != SUCCESS) {", ws)
+        self.assertNotIn("cf_untrusted", ws)
+        for address, verify, expected in (("198.51.100.130", "NONE", "1"), ("198.51.100.130", "SUCCESS", "0"), ("172.17.0.4", "NONE", "0"),
+                                          ("203.0.113.9", "NONE", "0")):
+            self.assertEqual(nginx_untrusted(text, address, verify), expected, (address, verify))
+        self.assertEqual(edge_errors(text), [])
+
+    def test_a_hand_written_vhost_that_forgets_the_partial_is_unguarded_and_the_check_says_so(self):
+        # `cf_untrusted_var` absente : `_access.inc` ne pose rien (c'est ce qui laisse agenthub-preview.conf, qui ne lit pas
+        # CF-Connecting-IP, rendu comme avant). L'oubli sur un vhost qui LIT CF-Connecting-IP est donc silencieux au rendu :
+        # `vhost --cloudflare-edge` le refuse.
+        text = render_hand_written(guard=False)
+        self.assertNotIn("cf_untrusted", text)
+        errors = edge_errors(text)
+        self.assertTrue(any("`geo $realip_remote_addr` et `map $ssl_client_verify`" in e for e in errors), errors)
+
+    def test_a_vhost_of_a_front_entry_that_does_not_read_cloudflare_keeps_its_bytes(self):
+        preview = "{% set access_entry = 'hand' %}server {\n    location / {\n        {% include '_access.inc' %}\n        proxy_pass http://203.0.113.60:4701;\n    }\n}\n"
+        reference = render_hand_written(guard=False, source=preview, cloudflare_front=False)
+        self.assertEqual(render_hand_written(guard=False, source=preview), reference)
+        self.assertNotIn("cf_untrusted", reference)
+        self.assertEqual(render_access({"access_mode": "private", "cloudflare_front": True}, cf_var=False),
+                         render_access({"access_mode": "private"}, cf_var=False))
+        self.assertEqual(edge_errors(reference), [], "sans real_ip_header CF-Connecting-IP : rien à contrôler")
+
+    def test_the_check_catches_each_way_the_guard_could_be_lost(self):
+        text = render_hand_written()
+        self.assertEqual(edge_errors(text), [])
+        geo_start = text.index("geo $realip_remote_addr")
+        map_start = text.index('map "$cf_socket')
+        map_end = text.index("}\n", map_start) + 2
+        hooks = location_body(text, "~* ^/api/v1/hooks/")
+        guard = "        if ($cf_untrusted_hand_back_example_test) {\n            return 403;\n        }\n"
+        mutations = {
+            "partial not included": text[:geo_start] + text[map_end:],
+            "no map": text[:map_start] + text[map_end:],
+            "map open by default": text.replace("    default 1;\n", "    default 0;\n", 1),
+            "map trusts a failed certificate": text.replace('    "1:SUCCESS" 0;', '    "1:FAILED" 0;\n    "1:SUCCESS" 0;', 1),
+            "geo misses a range": text.replace("    2001:db8:cf::/48 1;\n", "", 1),
+            "geo default trusts": text.replace("    default 0;\n", "    default 1;\n", 1),
+            "private location without the guard": text.replace(hooks, hooks.replace(guard, "", 1), 1),
+            "guard answers 200": text.replace(hooks, hooks.replace("return 403;", "return 200;", 1), 1),
+            "guard on another variable": text.replace(hooks, hooks.replace("$cf_untrusted_hand_back_example_test", "$cf_untrusted_other", 1), 1),
+            "private location without no-store": text.replace(hooks, hooks.replace(self.HEADER, "", 1), 1),
+            "public location without the certificate": text.replace("        if ($ssl_client_verify != SUCCESS) {\n            return 403;\n        }\n", "", 1),
+            "certificate not verified": text.replace("ssl_verify_client optional;", "", 1),
+            "no client certificate authority": text.replace("ssl_client_certificate /etc/nginx/cloudflare-origin-pull-ca.pem;", "", 1),
+        }
+        for label, mutated in mutations.items():
+            with self.subTest(label):
+                self.assertNotEqual(mutated, text, label)
+                self.assertTrue(edge_errors(mutated), label)
+
+    def test_the_check_reads_the_generic_front_vhost_and_the_command_line_agrees(self):
+        text = self.front()
+        self.assertEqual(edge_errors(text), [])
+        self.assertTrue(edge_errors(text.replace("if ($cf_untrusted_plain_back_example_test) {", "if (0) {", 1)))
+        fd, path = tempfile.mkstemp(suffix=".conf")
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        try:
+            self.assertEqual(check.main(["vhost", path, "--cloudflare-edge"]), 0)
+            with open(path, "w") as f:
+                f.write(text.replace("ssl_verify_client optional;", "", 1))
+            self.assertEqual(check.main(["vhost", path, "--cloudflare-edge"]), 1)
+        finally:
+            os.unlink(path)
 
 
 @unittest.skipUnless(shutil.which("ansible-playbook"), "ansible-playbook absent")
