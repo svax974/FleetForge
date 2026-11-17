@@ -3571,8 +3571,8 @@ class CloudflareNamedNoStoreTests(unittest.TestCase):
             self.assertNotIn("Cloudflare-CDN-Cache-Control", render_vhost(entry=entry, **attributes), f"{entry} {attributes}")
         self.assertNotIn("add_header", render_access({"access_mode": "private"}).replace("`add_header`", ""))
         self.assertIn(self.HEADER, render_access({"access_mode": "private", "cloudflare_named": True}))
-        self.assertEqual([d for d in directives(render_access({"access_mode": "public", "cloudflare_named": True}))
-                          if d.startswith("add_header")], [])
+        self.assertNotIn("Cloudflare-CDN-Cache-Control", render_access({"access_mode": "public", "cloudflare_named": True}),
+                         "une location publique n'est pas privée : seul le marqueur d'origine de son 403")
 
     def test_the_public_check_demands_it_on_every_private_location(self):
         text = public_vhost()
