@@ -186,6 +186,8 @@
   become: true
   when: wa_app.wa_h_local_proxy | default(false) | bool
 
+# En `--check`, une unité NOUVELLE n'est pas écrite (le dépôt est simulé) : le module `systemd` ne la trouve pas
+# (« Could not find the requested service »). Premier déploiement simulé : on n'essaie pas de la démarrer.
 - name: Enable and start the firewall unit of the application
   ansible.builtin.systemd:
     name: "{{ wa_app.wa_h_firewall_unit }}"
@@ -193,6 +195,7 @@
     enabled: true
     daemon_reload: true
   become: true
+  when: not (ansible_check_mode and (wa_fw_unit is changed))
 
 # Une règle ufw sur un port de l'app n'est jamais la sienne (`ufw_app_ports: false`) : SIGNALÉE et REFUSÉE, pas
 # supprimée (CLAUDE.md, « Règles ufw » : une ouverture qui n'est pas la sienne est signalée). Elle rouvrirait le port
