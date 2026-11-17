@@ -37,8 +37,8 @@ backup_floor_gb: 5
 
 # Adresse d'une source pour `from=` et pour la règle ufw de la destination (`ansible_host` de la source) : IPv4 ou
 # IPv6 LITTÉRALE, jamais un nom DNS (`from=` le comparerait au DNS inverse ; `cafe.de` n'est pas une adresse).
-backup_ipv4_pattern: '^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])[.]){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])$'
-backup_ipv6_pattern: '^(?=.*:.*:)(?!.*:::)([0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4}$'
+backup_ipv4_pattern: '^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])[.]){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])(?!(?s:.))'
+backup_ipv6_pattern: '^(?=.*:.*:)(?!.*:::)([0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4}(?!(?s:.))'
 
 # Ancien schéma (avant le compte dédié) : sauvegardes de `<backup_root>/<nom>` sous `remote_username`. `yes` (chaîne,
 # passée par `-e`) les supprime après la migration décrite dans Ansible/README.md ; tout autre valeur les garde.

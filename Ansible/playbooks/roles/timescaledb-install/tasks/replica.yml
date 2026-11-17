@@ -19,7 +19,7 @@
 # Le nom du slot est celui du réplica ; PostgreSQL n'accepte que minuscules, chiffres et `_`.
 - name: Check the slot name
   ansible.builtin.assert:
-    that: inventory_hostname is match('^[a-z0-9_]+$')
+    that: inventory_hostname is match('^[a-z0-9_]+(?!(?s:.))')
     fail_msg: "{{ inventory_hostname }} ne peut pas nommer un slot de réplication (minuscules, chiffres, _)."
     quiet: true
 
@@ -27,7 +27,7 @@
 # primary_conninfo : un espace y ajouterait une clé (`host=x sslmode=disable`).
 - name: Check the primary address (it is written into a connection string)
   ansible.builtin.assert:
-    that: tsdb_primary_fqdn is match('^[A-Za-z0-9][A-Za-z0-9.:-]*$')
+    that: tsdb_primary_fqdn is match('^[A-Za-z0-9][A-Za-z0-9.:-]*(?!(?s:.))')
     fail_msg: "tsdb_primary_fqdn : nom d'hôte ou adresse attendu ({{ tsdb_primary_fqdn }})"
     quiet: true
 

@@ -58,9 +58,9 @@
     - name: Compte et noms de base simples
       ansible.builtin.assert:
         that:
-          - remote_username is match('^[a-z_][a-z0-9_-]*$')
-          - papangmetrics_db | default('papangmetrics') is match('^[A-Za-z0-9_][A-Za-z0-9_.-]*$')
-          - papangmetrics_user | default('papangmetrics') is match('^[A-Za-z0-9_][A-Za-z0-9_.-]*$')
+          - remote_username is match('^[a-z_][a-z0-9_-]*(?!(?s:.))')
+          - papangmetrics_db | default('papangmetrics') is match('^[A-Za-z0-9_][A-Za-z0-9_.-]*(?!(?s:.))')
+          - papangmetrics_user | default('papangmetrics') is match('^[A-Za-z0-9_][A-Za-z0-9_.-]*(?!(?s:.))')
         fail_msg: "remote_username, papangmetrics_db, papangmetrics_user : noms simples attendus."
         quiet: true
 

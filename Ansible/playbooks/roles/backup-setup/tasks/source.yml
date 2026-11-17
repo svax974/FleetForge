@@ -13,11 +13,11 @@
   ansible.builtin.assert:
     that:
       - bk_dest_host in groups['all']
-      - bk_name is match('^[a-z0-9][a-z0-9-]{0,62}$')
-      - bk_keep | string is match('^[0-9]{1,4}$')
+      - bk_name is match('^[a-z0-9][a-z0-9-]{0,62}(?!(?s:.))')
+      - bk_keep | string is match('^[0-9]{1,4}(?!(?s:.))')
       # Les bornes de la passerelle (1 à 1000) : au-delà, elle refuserait TOUS les appels de la clé.
       - bk_keep | int >= 1 and bk_keep | int <= 1000
-      - bk_dest_port | string is match('^[0-9]{1,5}$')
+      - bk_dest_port | string is match('^[0-9]{1,5}(?!(?s:.))')
       # `from=` et la règle ufw de la destination : l'adresse de la source, littérale.
       - ansible_host is match(backup_ipv4_pattern) or ansible_host is match(backup_ipv6_pattern)
     fail_msg: >-
@@ -40,7 +40,7 @@
 
 - name: Check the free-space floor of the destination
   ansible.builtin.assert:
-    that: bk_floor_gb | string is match('^[0-9]{1,6}$')
+    that: bk_floor_gb | string is match('^[0-9]{1,6}(?!(?s:.))')
     fail_msg: "backup_floor_gb de {{ bk_dest_host }} : entier de Go attendu ({{ bk_floor_gb }})."
     quiet: true
 
@@ -109,6 +109,6 @@
 
 - name: Check the host key of the destination
   ansible.builtin.assert:
-    that: bk_dest_hostkey is match('^ssh-ed25519 [A-Za-z0-9+/=]{40,}$')
+    that: bk_dest_hostkey is match('^ssh-ed25519 [A-Za-z0-9+/=]{40,}(?!(?s:.))')
     fail_msg: "{{ bk_dest_host }} : clé d'hôte ed25519 illisible (/etc/ssh/ssh_host_ed25519_key.pub)."
     quiet: true
