@@ -4665,6 +4665,121 @@ class DedicatedListenerGuardTests(unittest.TestCase):
             self.assertNotEqual(code, 0, hostile)
 
 
+class EndOfStringGrammarTests(unittest.TestCase):
+    """Fin de chaîne des grammaires `match` de la passerelle : AUCUN antislash (`\\Z` dans un littéral Jinja lève un
+    DeprecationWarning « invalid escape sequence », une erreur à terme), et le MÊME comportement que `\\Z` : un saut de
+    ligne final est refusé là où `$` l'accepterait. Forme retenue : `(?!(?s:.))` (rien, pas même un saut de ligne, ne suit)."""
+
+    END = "(?!(?s:.))"
+    SITES = {("fleetforge-install", "gateway-guard.yml"): 3, ("webapp-monitoring", "extra-checks.yml"): 7,
+             ("webapp-setup", "facts.yml"): 6}
+    GATEWAY = ("all", "children", "fleetforge_gateways", "hosts", "fleetforge-gateway")
+
+    @staticmethod
+    def _text(role, name):
+        with open(os.path.join(ROLES, role, "tasks", name), encoding="utf-8") as f:
+            return f.read()
+
+    def test_no_template_of_these_roles_triggers_an_invalid_escape_warning(self):
+        import warnings
+
+        env = jinja2.Environment()
+
+        def parse(source, where):
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")
+                try:
+                    env.parse(source)
+                except Exception as error:  # noqa : le test nomme le fichier fautif
+                    self.fail(f"{where} : {type(error).__name__} {error}")
+
+        def walk(node, where):
+            if isinstance(node, str):
+                if "{{" in node or "{%" in node:
+                    scanned.append(where)
+                    parse(node, where)
+            elif isinstance(node, dict):
+                for value in node.values():
+                    walk(value, where)
+            elif isinstance(node, list):
+                for value in node:
+                    walk(value, where)
+        scanned = []
+        for role in ("webapp-setup", "webapp-monitoring", "fleetforge-install", "proxy-update"):
+            for path in sorted(glob.glob(os.path.join(ROLES, role, "tasks", "*.yml"))):
+                with open(path, encoding="utf-8") as f:
+                    walk(list(yaml.safe_load_all(f)), os.path.relpath(path, ROLES))
+        for path in sorted(glob.glob(os.path.join(TEMPLATES, "*"))):
+            with open(path, encoding="utf-8") as f:
+                parse(f.read(), os.path.relpath(path, ROLES))
+        self.assertGreater(len(scanned), 100, "le balayage doit voir les gabarits")
+        # Témoin : la forme d'avant, elle, est bien signalée (sinon le test ne prouverait rien sur cet interpréteur).
+        with self.subTest("control"):
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")
+                try:
+                    env.parse("{{ 'a' is match('^a\\Z') }}")
+                except Exception:
+                    pass
+                else:
+                    self.skipTest("cet interpréteur ne signale pas `\\Z`")
+
+    def test_every_end_anchor_is_the_backslash_free_form_and_behaves_like_backslash_Z(self):
+        import itertools
+
+        alphabet = list("a1/_.-~()|^$[]*+?kmsAZ ;\n\r")
+        strings = ["".join(chars) for size in range(4) for chars in itertools.product(alphabet, repeat=size)]
+        strings += ["a" * 253, "a" * 254, "a.b-c\n", "/api/\n", "/api/\r\n", "5k\n", "30s\n", "401\n", "POST\n", "main\n", "443\n",
+                    "^/mcp(/|[?]|$)\n", "^/mcp(/.*)?$\n", "ffg.example.test\n", "ffg.example.test \n", "\nffg", "a\n\n"]
+        for (role, name), expected in self.SITES.items():
+            text = self._text(role, name)
+            self.assertNotIn("\\Z", text, name)
+            patterns = re.findall(r"'(\^[^']*?)" + re.escape(self.END) + "'", text)
+            self.assertEqual(len(patterns), expected, f"{name} : nombre de grammaires à fin ancrée")
+            for pattern in patterns:
+                self.assertNotIn("\\", pattern, f"{name} : {pattern}")
+                old, new = re.compile(pattern + r"\Z"), re.compile(pattern + self.END)
+                dollar = re.compile(pattern + "$")
+                differ = [s for s in strings if bool(old.match(s)) != bool(new.match(s))]
+                self.assertEqual(differ, [], f"{name} : {pattern} ne se comporte pas comme \\Z")
+                # Le piège est réel pour chacune : `$` accepte un saut de ligne final que la forme retenue refuse.
+                self.assertTrue([s for s in strings if s.endswith("\n") and dollar.match(s) and not new.match(s)], f"{name} : {pattern}")
+
+    @unittest.skipUnless(shutil.which("ansible-playbook"), "ansible-playbook absent")
+    def test_a_trailing_newline_is_refused_by_the_gateway_guard_and_valid_values_still_pass(self):
+        infra = ("all", "children", "infras", "hosts", "infra1")
+        egress = self.GATEWAY + ("webapp_hardening", "egress_allow", 0)
+
+        def run(change=None):
+            inventory = guard_inventory()
+            if change:
+                path, key, value = change
+                holder = inventory
+                for step in path:
+                    holder = holder[step]
+                holder[key] = value
+            return run_local_play(GUARD_PLAY, inventory, {"apps.yml": "fleetforge-gateway: /nonexistent/app/\n"})
+        code, out = run()
+        self.assertEqual(code, 0, out[-2000:])
+        for label, change in (("port", (egress, "port", "443\n")), ("infra proxy_hostname", (infra, "proxy_hostname", "infra.example.test\n")),
+                              ("infra hostname", (infra, "hostname", "infra-priv.example.test\n"))):
+            with self.subTest(label):
+                code, out = run(change)
+                self.assertNotEqual(code, 0, out[-1500:])
+        # Valeurs valides passées sous forme de chaîne (comme par `-e`) : toujours acceptées.
+        code, out = run((egress, "port", "443"))
+        self.assertEqual(code, 0, out[-2000:])
+
+    @unittest.skipUnless(shutil.which("ansible-playbook"), "ansible-playbook absent")
+    def test_a_trailing_newline_is_refused_by_the_probe_grammar_and_valid_values_still_pass(self):
+        self.assertEqual(run_local_play(MONITORING_PLAY)[0], 0)
+        code, out = run_local_play(MONITORING_PLAY.replace("{id: main,", '{id: "main\\n",'))
+        self.assertNotEqual(code, 0, out[-1500:])
+        self.assertIn("hors grammaire", out)
+        code, out = run_local_play(MONITORING_PLAY.replace("{id: main,", '{id: "main_2",'))
+        self.assertEqual(code, 0, out[-1500:])
+
+
 @unittest.skipUnless(shutil.which("ansible-playbook"), "ansible-playbook absent")
 class DbMigrationTests(unittest.TestCase):
     """Bascule vers le compose durci : jamais sur une base VIDE sans migration déclarée."""

@@ -65,7 +65,7 @@
         hostvars[_upstream_egress[0].inventory_host | default('')].ansible_host | default('') == ansible_host
         or (_upstream_egress[0].masquerade_ack | default(false) | bool)
       # 443 (vhost partagé du proxy) OU le port d'un écouteur DÉDIÉ de l'amont (contrôlé par amont, plus bas).
-      - (_upstream_egress[0].port | string) is match('^[1-9][0-9]{0,4}\Z')
+      - (_upstream_egress[0].port | string) is match('^[1-9][0-9]{0,4}(?!(?s:.))')
       - webapp_hardening.egress_allow | default([]) | selectattr('name', 'defined') | selectattr('name', 'equalto', 'smtp') | list | length == 1
     fail_msg: >-
       Entrée {{ inventory_hostname }} invalide pour la passerelle : entrée dédiée hors du groupe `infras`, famille
@@ -229,12 +229,12 @@
       - item.id is match('^[a-z][a-z0-9_]{0,31}$')
       - _e in (groups['infras'] | default([]))
       - _ev.proxy_hostname is defined
-      - _ev.proxy_hostname is match('^[a-z0-9][a-z0-9.-]{0,252}\Z')
+      - _ev.proxy_hostname is match('^[a-z0-9][a-z0-9.-]{0,252}(?!(?s:.))')
       # L'amont est joint par le nom PRIVÉ de sa machine (`hostname`, enregistrement A), servi par le seul proxy de la
       # même machine (server_name du vhost FleetForge du parc) : la sortie `upstream` de la passerelle vise donc CE proxy
       # (la machine de l'amont), que la passerelle soit sur cette machine ou non.
       - _ev.hostname is defined
-      - _ev.hostname is match('^[a-z0-9][a-z0-9.-]{0,252}\Z')
+      - _ev.hostname is match('^[a-z0-9][a-z0-9.-]{0,252}(?!(?s:.))')
       - _ev.hostname is search('[.]' ~ (domain_name | regex_escape) ~ '$')
       - hostvars[_upstream_egress[0].inventory_host | default('')].ansible_host | default('') == _ev.ansible_host | default('')
       # Hors 443 : l'amont déclare CET écouteur dédié (`dedicated_listeners`), dont le seul client est cette passerelle.

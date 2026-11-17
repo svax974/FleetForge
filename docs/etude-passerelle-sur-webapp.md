@@ -734,5 +734,10 @@ sémantique documentée, et par `nginx -t` au déploiement).
   aussi 403. Le `if ($ssl_client_verify != SUCCESS)` des locations publiques d'une entrée `cloudflare_named` ajoute `add_header X-FFG-Origin
   cert-required always;` (pas pour `cloudflare_front`, rendu inchangé) ; la sonde lit les en-têtes (`curl -D -`) et exige code ET en-tête
   sur CHAQUE proxy admis ; `vhost --public` exige la forme exacte. Les fins de grammaire `$` des `match` de `facts.yml`, de la garde et des
-  sondes (`name`, `path`, `method`, statuts, noms d'hôte) deviennent `\Z` : `$` accepte un saut de ligne final. Piège vérifié : dans un
-  scalaire `>-` le `\Z` s'écrit avec UN antislash (`\\Z` n'y matche rien) ; dans un `that:` les deux marchent.
+  sondes (`name`, `path`, `method`, statuts, noms d'hôte) se terminent par `(?!(?s:.))` (rien, pas même un saut de ligne, ne suit) : `$`
+  accepte un saut de ligne final. Cette forme remplace `\Z` (16 sites : `facts.yml` 6, `gateway-guard.yml` 3, `extra-checks.yml` 7) : un `\Z`
+  dans un littéral de chaîne Jinja lève un DeprecationWarning « invalid escape sequence » (une erreur à terme), et son nombre d'antislashs
+  dépend du style YAML (dans un scalaire `>-` il s'écrit avec UN antislash, `\\Z` n'y matche rien ; dans un `that:` les deux marchent).
+  Sans antislash la question ne se pose plus. Prouvé pour chaque site : équivalence exhaustive avec `\Z` (chaînes jusqu'à 3 caractères
+  et valeurs réalistes, dont `x\n`), balayage Jinja sous `-W error` de tous les gabarits de ces rôles, refus de `x\n` joué par Ansible dans le contexte réel,
+  mutation `(?!(?s:.))` → `$` site par site tuée (`EndOfStringGrammarTests`).
