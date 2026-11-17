@@ -15,8 +15,8 @@
   ansible.builtin.assert:
     that:
       - mailserver_domains | length > 0
-      - addresses | reject('match', '^[^@ \t\n\r\f\v\x27]+@[^@ \t\n\r\f\v\x27]+$') | list | length == 0
-      - mailserver_aliases | map(attribute='source') | reject('match', '^[^@ \t\n\r\f\v\x27]*@[^@ \t\n\r\f\v\x27]+$') | list | length == 0
+      - addresses | reject('match', '^[^@ \t\n\r\f\v\x27]+@[^@ \t\n\r\f\v\x27]+(?!(?s:.))') | list | length == 0
+      - mailserver_aliases | map(attribute='source') | reject('match', '^[^@ \t\n\r\f\v\x27]*@[^@ \t\n\r\f\v\x27]+(?!(?s:.))') | list | length == 0
       - mailserver_users | map(attribute='address') | map('lower') | map('regex_replace', '^.*@', '') | reject('in', domains) | list | length == 0
       - mailserver_users | selectattr('password', 'undefined') | list | length == 0
     fail_msg: >-

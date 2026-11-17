@@ -13,7 +13,7 @@
       - bindings | selectattr('login', 'undefined') | list | length == 0
       - bindings | selectattr('senders', 'undefined') | list | length == 0
       - bindings | map(attribute='login') | reject('string') | list | length == 0
-      - bindings | map(attribute='login') | reject('match', '^[A-Za-z0-9._+-]+(@[A-Za-z0-9.-]+)?$') | list | length == 0
+      - bindings | map(attribute='login') | reject('match', '^[A-Za-z0-9._+-]+(@[A-Za-z0-9.-]+)?(?!(?s:.))') | list | length == 0
       - bindings | selectattr('senders', 'mapping') | list | length == 0
     fail_msg: >-
       `mailrelay_sender_bindings` invalide : une liste d'entrées `login` (nom SASL, sans espace ni
@@ -35,7 +35,7 @@
       - flat_senders | length > 0
       - bindings | map(attribute='senders') | select('sequence') | reject('string') | map('length') | select('equalto', 0) | list | length == 0
       - flat_senders | reject('string') | list | length == 0
-      - flat_senders | reject('match', '^[A-Za-z0-9._+-]+@[A-Za-z0-9.-]+$') | list | length == 0
+      - flat_senders | reject('match', '^[A-Za-z0-9._+-]+@[A-Za-z0-9.-]+(?!(?s:.))') | list | length == 0
       - flat_senders | map('regex_replace', '^.*@', '') | map('lower') | reject('in', mail_domains | map(attribute='name') | map('lower') | list) | list | length == 0
     fail_msg: >-
       `mailrelay_sender_bindings` : `senders` doit contenir des adresses COMPLÈTES (pas de `@domaine`),
