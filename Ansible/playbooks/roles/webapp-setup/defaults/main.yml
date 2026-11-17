@@ -46,6 +46,12 @@
 #   webapp_env_from_vault { CLÉ_DU_ENV: <variable du coffre> } : secrets non tirés par l'app (mots de passe d'un amont),
 #                         écrits dans back/.env (no_log) ; absent ou malformé = échec, par NOM
 #   webapp_env_required   clés que back/.env doit porter NON VIDES après le rendu (noms seulement)
+#   webapp_back_env_fixed { CLÉ: valeur } : clés de back/.env que l'inventaire FIXE à chaque rendu (une ligne `CLÉ="valeur"` remplacée
+#                         ou ajoutée ; ex. `DB_SCHEMA_MODE: migrate` : vide en production, le gabarit ne fait rien au démarrage et
+#                         l'app plante sur une base vide). Clé `[A-Z_][A-Z0-9_]*` hors `webapp_back_env_forbidden` et hors clés déjà
+#                         rendues par Ansible (webapp_env_from_vault, wa_env_injected, clés possédées) : UNE source par clé ; valeur
+#                         scalaire non vide (texte ou entier), ASCII imprimable sans `"` `$` `` ` `` `\` ni `{{` `{%` `{#` ; une clé déjà
+#                         présente DEUX fois dans le fichier est refusée, jamais laissée en double. Échec fermé, NOMS seulement.
 #   webapp_monitor_redis  false : pas de sonde du conteneur `<projet>_redis` (défaut : vrai sauf `webapp_db_engine: sqlite`, dont le compose n'en lance pas)
 #   cloudflare_named      true : le nom public `proxy_hostname` est servi par l'edge Cloudflare (enregistrement PROXIFIÉ vers le front
 #                         privé des proxies, IP réelle par CF-Connecting-IP, Authenticated Origin Pulls activés sur ce nom, certificat
@@ -88,5 +94,17 @@ webapp_hardening_defaults:
   allowed_bind_sources: []
   protected_paths: []
   compose_file: scripts/docker-compose-hardened.yml
+# Clés de back/.env que `webapp_back_env_fixed` ne peut PAS fixer : SEULE liste, lue par le fait `wa_back_env_forbidden` (facts.yml)
+# — le rendu des .env (webapp-env-update) la refuse, et le refus du profil durci (webapp-deploy/hardened.yml) en tire les clés
+# qui doivent rester vides ou absentes. scripts/test_webapp_hardening_check.py vérifie que toute clé que hardened.yml nomme est
+# couverte. S'y ajoutent, au rendu, les clés que le rôle pose lui-même (possédées, « si absentes », retirées, injectées, coffre).
+webapp_back_env_forbidden:
+  # Jamais non vides en profil durci (deploy-full.sh en ferait des règles ufw).
+  empty_only: [WHITELIST, PROXY_HOSTS, BACK_WHITELIST]
+  # Cibles du déploiement, relais de confiance, secret Redis, liaison de l'infrastructure.
+  names: [BACK_HOSTS, FRONT_HOSTS, TRUST_PROXY, REDIS_PASSWORD, INFRA_BIND]
+  # Fichier compose (COMPOSE_FILE*), déploiement (DEPLOY_*, dont DEPLOY_FROM_MAIN), cible distante (REMOTE_*), vmagent
+  # (PROMETHEUS_REMOTE_WRITE_URL[S]), calculs du profil durci (HARDEN_*).
+  prefixes: [COMPOSE_FILE, DEPLOY_, REMOTE_, PROMETHEUS_REMOTE_WRITE, HARDEN_]
 # Groupes interdits au compte dédié : chacun vaut root, ou l'accès aux fichiers de `remote_username` (clés, vault).
 webapp_forbidden_groups: [docker, sudo, adm, lxd, root, "{{ remote_username }}"]

@@ -11,6 +11,8 @@
 #   5. front Cloudflare Pages : projet, domaine, DNS (cloudflare-pages-setup) ;
 #   6. rendu des clés POSSÉDÉES par Ansible (toujours réécrites) et des clés « si absentes » (jamais écrasées) ;
 #   7. sauvegarde dans le coffre (`app-env.sh save`) — le dépôt privé du parc est à committer.
+# Attribut d'hôte optionnel `webapp_back_env_fixed` { CLÉ: valeur } : clés de back/.env que l'inventaire fixe à chaque rendu
+# (section 0, puis écriture après les clés injectées) ; absent, rien ne change.
 #
 # Clés POSSÉDÉES : cibles du déploiement, ports, mode, registre, secrets. Clés « SI ABSENTES » : identité et choix
 # d'exploitation qu'une app déjà en production porte (PROJECT_NAME fixe les noms de projet compose, donc les VOLUMES ;
@@ -26,6 +28,50 @@
   ansible.builtin.assert:
     that: wa_src is defined and wa_project is defined
     fail_msg: "webapp-setup (tasks_from: facts) doit précéder ce rendu."
+    quiet: true
+
+# ── 0. Clés fixées par l'inventaire (`webapp_back_env_fixed`) : refus AVANT tout effet ─────────────────────────────
+# Attribut d'hôte OPTIONNEL { CLÉ: valeur } : ces clés de back/.env sont réécrites à CHAQUE rendu, comme BACK_HOSTS ou
+# TRUST_PROXY (une ligne `CLÉ="valeur"` remplacée, ou ajoutée). Cas d'origine (17/11/2026) : `DB_SCHEMA_MODE=` vide dans le
+# .env de la passerelle ; en production le gabarit ne fait alors rien au démarrage et l'app plante sur une base vide.
+# Absent : rien de ce qui suit ne change (listes vides). Refus, par NOM seulement — jamais une valeur — pour : un attribut qui
+# n'est pas un dictionnaire, un nom hors `[A-Z_][A-Z0-9_]*`, une clé de `wa_back_env_forbidden` (liste unique de
+# webapp-setup/defaults : cibles, relais, secret Redis, compose, déploiement… que le profil durci refuse aussi), une valeur
+# qui n'est pas un texte ou un entier, vide, hors grammaire de back/.env durci (ASCII imprimable sans `"` `$` `` ` `` `\`, ni
+# `{{` `{%` `{#` que `lineinfile` évaluerait). Les clés que ce rôle pose lui-même sont refusées plus bas (une source par clé).
+- name: Check the back keys fixed by the inventory (names only)
+  ansible.builtin.set_fact:
+    wa_back_fixed_bad: >-
+      {%- set out = [] -%}
+      {%- if webapp_back_env_fixed is defined and webapp_back_env_fixed is not mapping -%}
+      {%- set _ = out.append('webapp_back_env_fixed (un dictionnaire CLÉ: valeur est attendu)') -%}
+      {%- else -%}
+      {%- for k, v in (webapp_back_env_fixed | default({})).items() -%}
+      {%- set s = v | string -%}
+      {%- set label = k | string | regex_replace('[^ -~]', '?') | truncate(64, true, '...') -%}
+      {%- set ns = namespace(prefixed=false) -%}
+      {%- if k is string -%}{%- for p in wa_back_env_forbidden.prefixes if k.startswith(p) -%}{%- set ns.prefixed = true -%}{%- endfor -%}{%- endif -%}
+      {%- if not (k is string and k is match('^[A-Z_][A-Z0-9_]{0,63}(?!(?s:.))')) -%}
+      {%- set _ = out.append(label ~ ' (nom hors grammaire)') -%}
+      {%- elif ns.prefixed or k in wa_back_env_forbidden.names or k in wa_back_env_forbidden.empty_only -%}
+      {%- set _ = out.append(label ~ ' (clé interdite : posée ailleurs ou refusée par le déploiement)') -%}
+      {%- elif not (v is string or (v is integer and v is not boolean)) -%}
+      {%- set _ = out.append(label ~ ' (valeur non scalaire : un texte ou un entier est attendu)') -%}
+      {%- elif not (s is match('^[ -~]+(?!(?s:.))')) or s is search('["$`]') or ('\\' in s) or s is search('[{][{%#]') -%}
+      {%- set _ = out.append(label ~ ' (valeur vide ou hors grammaire)') -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {%- endif -%}
+      {{ out }}
+  no_log: true
+
+- name: Fail on a back key the inventory cannot fix
+  ansible.builtin.assert:
+    that: wa_back_fixed_bad | length == 0
+    fail_msg: >-
+      `webapp_back_env_fixed` de {{ inventory_hostname }} refusé : {{ wa_back_fixed_bad | join(' ; ') }}. Attendu :
+      { CLÉ: valeur } — nom [A-Z_][A-Z0-9_]*, hors cibles du déploiement, relais de confiance, secrets et clés déjà rendues ;
+      valeur texte ou entier, non vide, ASCII imprimable sans guillemet double, `$`, accent grave ni antislash.
     quiet: true
 
 # ── 1-2. Coffre ────────────────────────────────────────────────────────────
@@ -242,6 +288,41 @@
     wa_env_back_removed: "{{ ['REMOTE_HOST', 'BACK_REMOTE_HOST', 'FRONT_REMOTE_HOST'] + ([] if wa_registry_on | bool else ['DEPLOY_REGISTRY', 'DEPLOY_REGISTRY_PUSH', 'DEPLOY_BUILDER', 'DEPLOY_BUILDER_HOST', 'DEPLOY_BUILDER_SSH_PORT']) + (['FRONT_HOSTS'] if wa_front_mode == 'pages' else []) }}"
   no_log: true
 
+# Clés fixées par l'inventaire : refus d'une clé que ce rôle écrit ou retire déjà (possédées, « si absentes », retirées,
+# injectées par le play appelant, secrets du coffre : UNE source par clé) et d'une clé présente PLUSIEURS fois dans le fichier
+# (`lineinfile` n'en remplacerait qu'une et le back/.env durci refuse les doublons) ; puis, par clé, la ligne `CLÉ="valeur"`
+# est à écrire si le fichier ne la porte pas EXACTEMENT (absente, vide, autre valeur, apostrophes, `export`). Noms seulement.
+- name: Work out the fixed back keys to write
+  ansible.builtin.set_fact:
+    wa_back_fixed_problems: >-
+      {%- set out = [] -%}
+      {%- set managed = wa_env_back_owned.keys() | list + wa_env_back_absent.keys() | list + wa_env_back_removed + (wa_env_injected | default({})).keys() | list + (webapp_env_from_vault | default({})).keys() | list -%}
+      {%- for k in (webapp_back_env_fixed | default({})).keys() -%}
+      {%- if k in managed -%}
+      {%- set _ = out.append(k ~ ' (déjà rendue par Ansible : une seule source par clé)') -%}
+      {%- elif (wa_env_back_text | regex_findall('(?m)^[ ]*(?:export[ ]+)?' ~ (k | regex_escape) ~ '=') | length) > 1 -%}
+      {%- set _ = out.append(k ~ ' (présente plusieurs fois dans le fichier)') -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+    wa_back_fixed_todo: >-
+      {%- set out = {} -%}
+      {%- for k, v in (webapp_back_env_fixed | default({})).items() -%}
+      {%- set lines = wa_env_back_text | regex_findall('(?m)^([ ]*(?:export[ ]+)?' ~ (k | regex_escape) ~ '=.*)$') -%}
+      {%- if (lines | length) == 0 or (lines | last) != (k ~ '="' ~ (v | string) ~ '"') -%}{%- set _ = out.update({k: v | string}) -%}{%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+  no_log: true
+
+- name: Fail on a fixed back key written elsewhere or present twice in the file
+  ansible.builtin.assert:
+    that: wa_back_fixed_problems | length == 0
+    fail_msg: >-
+      `webapp_back_env_fixed` de {{ inventory_hostname }} : {{ wa_back_fixed_problems | join(' ; ') }} ({{ wa_src }}{{ wa_back_env_file }}).
+      Une clé a UNE source : retirer la clé de `webapp_back_env_fixed`, ou ne garder qu'une ligne dans le fichier
+      (rien n'a été écrit).
+    quiet: true
+
 - name: Keep only the keys that change
   vars:
     wa_read_tpl: "(?m)^[ ]*{key}=[\"']?([^\"'\\n#]*)"
@@ -333,6 +414,24 @@
   register: wa_back_injected
   when: wa_env_injected is defined
 
+# Clés fixées par l'inventaire (`webapp_back_env_fixed`) : `CLÉ="valeur"` (grammaire stricte de hardened.yml), la ligne unique de
+# la clé remplacée ou ajoutée ; seules les clés dont la ligne diffère sont écrites (second passage : rien). Valeurs masquées.
+- name: Write the back keys fixed by the inventory
+  ansible.builtin.lineinfile:
+    path: "{{ wa_src }}{{ wa_back_env_file }}"
+    regexp: '^[ ]*(export[ ]+)?{{ item.key }}='
+    line: '{{ item.key }}="{{ item.value }}"'
+    # En `--check`, un .env neuf n'existe pas encore (l'amorçage est une commande) : simuler la création.
+    create: "{{ ansible_check_mode }}"
+  loop: "{{ wa_back_fixed_todo | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  delegate_to: localhost
+  become: false
+  diff: false
+  register: wa_back_fixed_written
+  no_log: true
+
 - name: Remove the deployment keys that no longer apply
   ansible.builtin.lineinfile:
     path: "{{ wa_src }}{{ wa_back_env_file }}"
@@ -410,6 +509,22 @@
     - webapp_env_required is defined
     - not ansible_check_mode
 
+# Clés fixées par l'inventaire : relues APRÈS l'écriture, chacune doit figurer UNE fois, telle que voulue (noms seulement).
+- name: Read back the fixed back keys (names only)
+  ansible.builtin.set_fact:
+    wa_back_fixed_unmet: >-
+      {%- set out = [] -%}
+      {%- set text = lookup('ansible.builtin.file', wa_src ~ wa_back_env_file, errors='ignore') | default('', true) -%}
+      {%- for k, v in (webapp_back_env_fixed | default({})).items() -%}
+      {%- set lines = text | regex_findall('(?m)^([ ]*(?:export[ ]+)?' ~ (k | regex_escape) ~ '=.*)$') -%}
+      {%- if lines != [k ~ '="' ~ (v | string) ~ '"'] -%}{%- set _ = out.append(k) -%}{%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+  delegate_to: localhost
+  become: false
+  no_log: true
+  when: not ansible_check_mode
+
 # ── 7. Coffre ──────────────────────────────────────────────────────────────
 - name: Save the env files into the vault
   ansible.builtin.command:
@@ -422,7 +537,7 @@
   # Même sans copie préalable dans le coffre : c'est cette sauvegarde qui la crée (app neuve ou migrée).
   when:
     - not ansible_check_mode
-    - (wa_back_written is changed) or (wa_front_written is changed) or (wa_back_removed is changed) or (wa_back_injected | default({}) is changed) or not (wa_env_vault_dir.stat.isdir | default(false))
+    - (wa_back_written is changed) or (wa_front_written is changed) or (wa_back_removed is changed) or (wa_back_injected | default({}) is changed) or (wa_back_fixed_written is changed) or not (wa_env_vault_dir.stat.isdir | default(false))
 
 # Noms seulement : jamais une valeur.
 - name: Report what was rendered
@@ -431,6 +546,14 @@
       .env de {{ wa_app_id }} ({{ wa_env }}) : {{ wa_back_todo | length }} clé(s) back et {{ wa_front_todo | length }}
       clé(s) front à jour ({{ (wa_back_todo.keys() | list + wa_front_todo.keys() | list) | join(', ') or '—' }}).
       {{ 'Coffre mis à jour : à committer dans le dépôt privé du parc.' if wa_env_saved is changed else '' }}
+
+# Noms seulement : jamais une valeur. Rien si l'inventaire ne fixe aucune clé, ou si le fichier les porte déjà.
+- name: Report the back keys fixed by the inventory
+  ansible.builtin.debug:
+    msg: >-
+      {{ wa_src }}{{ wa_back_env_file }} : {{ wa_back_fixed_todo | length }} clé(s) fixée(s) par l'inventaire
+      ({{ wa_back_fixed_todo.keys() | list | join(', ') }}){{ ' — simulation (--check), rien n est écrit' if ansible_check_mode else '' }}.
+  when: wa_back_fixed_todo | length > 0
 
 # ── 8. Refus, APRÈS la sauvegarde ──────────────────────────────────────────
 # Les `.env` rendus sont déjà dans le coffre : un refus ici ne laisse plus le fichier local et le coffre divergents, ce qui
@@ -445,6 +568,15 @@
     - wa_missing_manual | length > 0
     - not (webapp_allow_missing_manual | default(false) | bool)
     - not ansible_check_mode
+
+- name: Fail when a fixed back key is not in the file exactly as wanted
+  ansible.builtin.assert:
+    that: wa_back_fixed_unmet | default([]) | length == 0
+    fail_msg: >-
+      {{ wa_src }}{{ wa_back_env_file }} : {{ wa_back_fixed_unmet | default([]) | join(', ') }} absente(s), en double ou
+      différente(s) après l'écriture (`webapp_back_env_fixed` de {{ inventory_hostname }}).
+    quiet: true
+  when: not ansible_check_mode
 
 - name: Fail when a required back key is empty
   ansible.builtin.assert:

@@ -5311,6 +5311,307 @@ class EnvGrammarTests(unittest.TestCase):
                 self.assertFalse([l for l in lines if "evil" in l or "0.0.0.0" in l or "id" in l.split()])
 
 
+def _render_tasks():
+    return check._load(os.path.join(ROLES, "webapp-env-update", "tasks", "render.yml"))
+
+
+def _render_task(name):
+    return next(t for t in _render_tasks() if t.get("name") == name)
+
+
+def _forbidden_keys():
+    with open(os.path.join(ROLES, "webapp-setup", "defaults", "main.yml"), encoding="utf-8") as f:
+        return yaml.safe_load(f).get("webapp_back_env_forbidden", {"empty_only": [], "names": [], "prefixes": []})
+
+
+def _template(expression, variables):
+    from ansible.parsing.dataloader import DataLoader
+    from ansible.template import Templar, trust_as_template
+    return Templar(loader=DataLoader(), variables=variables).template(trust_as_template(expression))
+
+
+FIXED_CHECK = "Check the back keys fixed by the inventory (names only)"
+FIXED_TODO = "Work out the fixed back keys to write"
+FIXED_VALUE = "zz-fixed-value-7"  # a value no other line of a rendered file or of a report can contain
+
+
+class BackEnvFixedGrammarTests(unittest.TestCase):
+    """`webapp_back_env_fixed` : validation de l'attribut (expression du rôle, rendue telle quelle), noms seulement."""
+
+    def bad(self, fixed):
+        task = _render_task(FIXED_CHECK)["ansible.builtin.set_fact"]["wa_back_fixed_bad"]
+        return _template(task, {"webapp_back_env_fixed": fixed, "wa_back_env_forbidden": _forbidden_keys()})
+
+    def test_a_conforming_attribute_or_none_is_accepted(self):
+        self.assertEqual(self.bad({}), [])
+        self.assertEqual(self.bad({"DB_SCHEMA_MODE": "migrate", "_X1": 3, "MAX_ROWS": "a b/c:d@e%f+g=h,i.j-k_l",
+                                   "SPACED": "two words", "URL": "https://h.example.test:8443/p?q=1&r=2"}), [])
+
+    def test_each_refusal_names_the_key_and_never_the_value(self):
+        secret = "S3cretValue"
+        cases = {
+            "lower_case": secret, "1ST": secret, "WITH-DASH": secret, "A" * 65: secret, "": secret,   # name grammar
+            "TRUST_PROXY": secret, "BACK_HOSTS": secret, "FRONT_HOSTS": secret, "REDIS_PASSWORD": secret,
+            "INFRA_BIND": secret, "WHITELIST": secret, "PROXY_HOSTS": secret, "BACK_WHITELIST": secret,
+            "COMPOSE_FILE": secret, "COMPOSE_FILE_NAME": secret, "DEPLOY_FROM_MAIN": secret, "DEPLOY_REGISTRY": secret,
+            "REMOTE_USER": secret, "REMOTE_HOST": secret, "PROMETHEUS_REMOTE_WRITE_URLS": secret, "HARDEN_SUBNET": secret,
+            "LISTVAL": [secret], "MAPVAL": {"a": secret}, "NONEVAL": None, "BOOLVAL": True, "FLOATVAL": 1.5,
+            "EMPTY": "", "QUOTE": secret + '"', "DOLLAR": secret + "$X", "TICK": secret + "`id`",
+            "BACKSLASH": secret + "\\x", "NEWLINE": secret + "\nINJECTED=1", "CR": secret + "\r", "TAB": secret + "\t",
+            "JINJA": secret + "{{ 1 }}", "JINJA2": secret + "{% x %}", "JINJA3": secret + "{# x #}", "ACCENT": secret + "é",
+        }
+        for key, value in cases.items():
+            with self.subTest(key=key[:12]):
+                out = self.bad({key: value})
+                self.assertEqual(len(out), 1, out)
+                self.assertNotIn(secret, " ".join(out))
+                self.assertNotIn("INJECTED", " ".join(out))
+
+    def test_only_a_mapping_is_accepted(self):
+        for value in ("DB_SCHEMA_MODE=migrate", ["DB_SCHEMA_MODE"], 3, True):
+            with self.subTest(value=str(value)):
+                self.assertEqual(len(self.bad(value)), 1)
+
+    def test_every_key_the_hardened_deployment_names_is_refused_by_the_single_list(self):
+        # webapp-deploy/hardened.yml nomme ses clés interdites dans un programme shell : aucune ne doit échapper à la liste
+        # unique (`webapp_back_env_forbidden`), sans quoi `webapp_back_env_fixed` pourrait les poser.
+        tasks = check._load(os.path.join(ROLES, "webapp-deploy", "tasks", "hardened.yml"))
+        shell = next(t for t in tasks if t.get("name", "").startswith("Look for forbidden settings"))
+        script = shell["ansible.builtin.shell"]
+        names = set(re.findall(r"(?<![A-Za-z0-9_])([A-Z][A-Z0-9_]{3,})(?![A-Za-z0-9_])", re.sub(r"\{\{.*?\}\}", "", script)))
+        names.discard("PIPEFAIL")
+        self.assertTrue({"INFRA_BIND", "REDIS_PASSWORD", "COMPOSE_FILE", "DEPLOY_FROM_MAIN", "COMPOSE_FILE_NAME"} <= names, names)
+        for name in sorted(names):
+            with self.subTest(name=name):
+                self.assertEqual(len(self.bad({name: "x"})), 1, f"{name} nommée par hardened.yml mais pas refusée")
+        # …et la boucle « jamais non vide » de hardened.yml lit la MÊME liste, au lieu d'en recopier les noms.
+        self.assertIn("wa_back_env_forbidden.empty_only", script)
+        self.assertNotIn("WHITELIST PROXY_HOSTS BACK_WHITELIST", script)
+
+    def test_the_values_touching_tasks_hide_their_output(self):
+        for name in (FIXED_CHECK, FIXED_TODO, "Write the back keys fixed by the inventory",
+                     "Read back the fixed back keys (names only)"):
+            self.assertIs(_render_task(name).get("no_log"), True, name)
+
+
+def _grammar_report(text):
+    """Programme de grammaire de hardened.yml, joué tel quel sur `text` (lignes en défaut, vide si le fichier passe)."""
+    tasks = check._load(os.path.join(ROLES, "webapp-deploy", "tasks", "hardened.yml"))
+    task = next(t for t in tasks if t.get("name", "").startswith("Check the grammar of the back env file"))
+    with tempfile.NamedTemporaryFile("w", suffix=".env", delete=False) as f:
+        f.write(text)
+    try:
+        return subprocess.run([shutil.which("python3") or "python3", "-I", "-c", task["ansible.builtin.command"]["argv"][3], f.name],
+                              capture_output=True, text=True).stdout.split("\n")[:-1] or [""]
+    finally:
+        os.unlink(f.name)
+
+
+@unittest.skipUnless(shutil.which("ansible-playbook"), "ansible-playbook absent")
+class BackEnvFixedRenderTests(unittest.TestCase):
+    """Le VRAI `render.yml` joué en local sur un dépôt applicatif factice (aucun hôte, aucun coffre : `app-env.sh` est un
+    bouchon, `webapp-secrets-setup` un rôle vide) — un `.env` neuf, une clé vide, une clé en double, une clé interdite,
+    une valeur hors grammaire, l'idempotence, `--check` et les phases."""
+
+    EXAMPLE = "NODE_ENV=production\nDB_SCHEMA_MODE=\nREDIS_PASSWORD=\n"
+    EXAMPLE_WITHOUT = "NODE_ENV=production\nREDIS_PASSWORD=\n"
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.app = os.path.join(self.tmp, "app")
+        for stack in ("back", "front"):
+            os.makedirs(os.path.join(self.app, stack))
+        with open(os.path.join(self.tmp, "app-env.sh"), "w", encoding="utf-8") as f:
+            f.write("#!/bin/sh\nexit 0\n")
+        os.chmod(os.path.join(self.tmp, "app-env.sh"), 0o755)
+        os.makedirs(os.path.join(self.tmp, "stubs", "webapp-secrets-setup", "tasks"))
+        with open(os.path.join(self.tmp, "stubs", "webapp-secrets-setup", "tasks", "main.yml"), "w", encoding="utf-8") as f:
+            f.write("- ansible.builtin.meta: noop\n")
+        os.makedirs(os.path.join(self.tmp, "pb"))
+        with open(os.path.join(self.tmp, "ansible.cfg"), "w", encoding="utf-8") as f:
+            f.write(f"[defaults]\nroles_path={os.path.join(self.tmp, 'stubs')}:{ROLES}\nstdout_callback=default\n")
+        self.write_text("front/.env.example", "VITE_API_URL=/api/v1\n")
+
+    def write_text(self, relative, text):
+        with open(os.path.join(self.app, relative), "w", encoding="utf-8") as f:
+            f.write(text)
+
+    def read_text(self, relative="back/.env"):
+        path = os.path.join(self.app, relative)
+        if not os.path.exists(path):
+            return None
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+
+    def render(self, fixed=None, check_mode=False, args=(), **play_vars):
+        variables = {
+            "wa_project": "demo-app", "wa_app_id": "demo-app", "wa_src": self.app + "/", "wa_env": "prod",
+            "wa_back_env_file": "back/.env", "wa_front_env_file": "front/.env", "wa_front_mode": "container",
+            "wa_front_port": 4730, "wa_back_port": 4731, "wa_db_port": 4732, "wa_redis_port": 4733, "wa_replicas": 1,
+            "wa_worker": "off", "wa_db_selfhosted": True, "wa_db_exposed": False, "wa_registry_on": False,
+            "wa_back_env_forbidden": _forbidden_keys(), "ansible_host": "192.0.2.10", "remote_username": "srvc",
+            "proxy_hostname": "demo.example.test", "domain_name": "example.test", "webapp_db_engine": "postgres",
+            "webapp_env_trust_proxy": "loopback",
+        }
+        if fixed is not None:
+            variables["webapp_back_env_fixed"] = fixed
+        variables.update(play_vars)
+        play = {"hosts": "localhost", "gather_facts": False, "vars": variables,
+                "tasks": [{"ansible.builtin.include_role": {"name": "webapp-env-update", "tasks_from": "render"}}]}
+        with open(os.path.join(self.tmp, "pb", "play.yml"), "w", encoding="utf-8") as f:
+            yaml.safe_dump([play], f)
+        env = dict(os.environ, ANSIBLE_CONFIG=os.path.join(self.tmp, "ansible.cfg"))
+        out = subprocess.run(["ansible-playbook", "-i", "localhost,", "-c", "local", os.path.join(self.tmp, "pb", "play.yml"),
+                              *(["--check"] if check_mode else []), *args],
+                             capture_output=True, text=True, env=env, timeout=300)
+        return out.returncode, out.stdout + out.stderr
+
+    def assertNoValue(self, output):
+        self.assertNotIn(FIXED_VALUE, output, "une valeur fixée sort dans le rapport")
+
+    def test_a_fresh_env_gets_the_key_appended_once_in_the_strict_grammar(self):
+        self.write_text("back/.env.example", self.EXAMPLE_WITHOUT)
+        code, out = self.render({"DB_SCHEMA_MODE": FIXED_VALUE, "MAX_ROWS": 250})
+        self.assertEqual(code, 0, out[-3000:])
+        text = self.read_text()
+        self.assertEqual(text.count("DB_SCHEMA_MODE="), 1)
+        self.assertIn(f'DB_SCHEMA_MODE="{FIXED_VALUE}"\n', text)
+        self.assertIn('MAX_ROWS="250"\n', text)
+        self.assertIn("NODE_ENV=production\n", text)
+        self.assertIn("DB_SCHEMA_MODE, MAX_ROWS", out)
+        self.assertNoValue(out)
+        self.assertEqual(_grammar_report(text), [""], "le fichier rendu passe la grammaire de hardened.yml")
+
+    def test_an_empty_key_is_replaced_in_place_and_the_other_lines_are_kept(self):
+        self.write_text("back/.env.example", self.EXAMPLE)
+        code, out = self.render({"DB_SCHEMA_MODE": FIXED_VALUE})
+        self.assertEqual(code, 0, out[-3000:])
+        text = self.read_text()
+        self.assertEqual(text.count("DB_SCHEMA_MODE="), 1)
+        self.assertTrue(text.startswith(f'NODE_ENV=production\nDB_SCHEMA_MODE="{FIXED_VALUE}"\nREDIS_PASSWORD=\n'), text[:200])
+        self.assertNoValue(out)
+        self.assertEqual(_grammar_report(text), [""])
+
+    def test_the_other_forms_of_the_same_key_are_replaced_not_duplicated(self):
+        for existing in ("DB_SCHEMA_MODE=validate", "DB_SCHEMA_MODE='validate'", '  DB_SCHEMA_MODE="validate"',
+                         "export DB_SCHEMA_MODE=validate", "DB_SCHEMA_MODE=validate # comment"):
+            with self.subTest(existing):
+                self.write_text("back/.env", f"NODE_ENV=production\n{existing}\n")
+                code, out = self.render({"DB_SCHEMA_MODE": FIXED_VALUE})
+                self.assertEqual(code, 0, out[-3000:])
+                text = self.read_text()
+                self.assertEqual(text.count("DB_SCHEMA_MODE"), 1, text)
+                self.assertIn(f'\nDB_SCHEMA_MODE="{FIXED_VALUE}"\n', text)
+
+    def test_a_key_present_twice_is_refused_and_nothing_is_written(self):
+        original = f"NODE_ENV=production\nDB_SCHEMA_MODE=\nDB_SCHEMA_MODE=validate\n"
+        for twice in (original, "DB_SCHEMA_MODE=a\nexport DB_SCHEMA_MODE=b\n", "DB_SCHEMA_MODE=a\n  DB_SCHEMA_MODE=b\n"):
+            with self.subTest(twice):
+                self.write_text("back/.env", twice)
+                code, out = self.render({"DB_SCHEMA_MODE": FIXED_VALUE})
+                self.assertNotEqual(code, 0)
+                self.assertIn("DB_SCHEMA_MODE (présente plusieurs fois dans le fichier)", out)
+                self.assertEqual(self.read_text(), twice, "le fichier est resté tel quel")
+                self.assertNoValue(out)
+
+    def test_a_forbidden_or_already_rendered_key_is_refused_before_any_write(self):
+        self.write_text("back/.env.example", self.EXAMPLE)
+        refused = ["TRUST_PROXY", "BACK_HOSTS", "REDIS_PASSWORD", "DEPLOY_FROM_MAIN", "COMPOSE_FILE_NAME", "WHITELIST",
+                   "REMOTE_USER", "NODE_PORT", "BACK_WORKER", "PROJECT_NAME", "DB_ENGINE", "INFRA_BIND"]
+        for key in refused:
+            with self.subTest(key=key):
+                code, out = self.render({key: FIXED_VALUE})
+                self.assertNotEqual(code, 0)
+                self.assertIn(key, out)
+                self.assertNoValue(out)
+                text = self.read_text()
+                self.assertTrue(text is None or text == self.EXAMPLE, "rien écrit au-delà de l'amorçage")
+        # Une clé rendue par le vault ou injectée par le play appelant : une seule source par clé.
+        for extra, key in (({"wa_env_injected": {"FFG_UPSTREAMS": "[]"}}, "FFG_UPSTREAMS"),
+                           ({"webapp_env_from_vault": {"DOWNSTREAM_PW": "demo_pw"}, "demo_pw": "A" * 24}, "DOWNSTREAM_PW")):
+            with self.subTest(key=key):
+                code, out = self.render({key: FIXED_VALUE}, **extra)
+                self.assertNotEqual(code, 0)
+                self.assertIn(f"{key} (déjà rendue par Ansible", out)
+                self.assertNoValue(out)
+        # Sans cette clé, les mêmes sources passent : la liste ne refuse que le recouvrement.
+        code, out = self.render({"OTHER": FIXED_VALUE}, wa_env_injected={"FFG_UPSTREAMS": "[]"})
+        self.assertEqual(code, 0, out[-3000:])
+
+    def test_a_value_outside_the_grammar_is_refused_by_name_and_nothing_is_written(self):
+        self.write_text("back/.env.example", self.EXAMPLE)
+        # (`{{` n'est pas rejoué ici : une valeur de jeu est évaluée AVANT le rôle ; la grammaire le refuse dans la classe
+        # BackEnvFixedGrammarTests, où la valeur arrive telle quelle.)
+        for value in ("a$b", 'a"b', "a`b", "a\\b", "a\nb", "", ["x"], {"x": "y"}, True):
+            with self.subTest(value=repr(value)):
+                code, out = self.render({"DB_SCHEMA_MODE": value})
+                self.assertNotEqual(code, 0)
+                self.assertIn("DB_SCHEMA_MODE (valeur", out)
+                self.assertNotIn("INJECT", out)
+                self.assertIn(self.read_text(), (None, self.EXAMPLE))
+
+    def test_the_second_pass_changes_nothing(self):
+        self.write_text("back/.env.example", self.EXAMPLE_WITHOUT)
+        fixed = {"DB_SCHEMA_MODE": FIXED_VALUE, "MAX_ROWS": 250}
+        code, out = self.render(fixed)
+        self.assertEqual(code, 0, out[-3000:])
+        self.assertIn("2 clé(s) fixée(s) par l'inventaire", out)
+        first = self.read_text()
+        code, out = self.render(fixed)
+        self.assertEqual(code, 0, out[-3000:])
+        self.assertEqual(self.read_text(), first)
+        self.assertNotIn("fixée(s) par l'inventaire", out, "rien à écrire : aucun rapport")
+        recap = out.rsplit("PLAY RECAP", 1)[1]
+        self.assertIn("changed=0", recap, recap)
+        # Une valeur changée dans l'inventaire n'écrit QUE cette clé.
+        code, out = self.render({"DB_SCHEMA_MODE": FIXED_VALUE, "MAX_ROWS": 300})
+        self.assertEqual(code, 0, out[-3000:])
+        self.assertIn("1 clé(s) fixée(s) par l'inventaire (MAX_ROWS)", out)
+        self.assertEqual(self.read_text().replace('MAX_ROWS="300"', 'MAX_ROWS="250"'), first)
+
+    def test_check_mode_writes_nothing_and_reports_names(self):
+        # Dépôt neuf (aucun .env : l'amorçage est une commande, sautée en --check) : rien n'est créé.
+        self.write_text("back/.env.example", self.EXAMPLE)
+        code, out = self.render({"DB_SCHEMA_MODE": FIXED_VALUE}, check_mode=True)
+        self.assertEqual(code, 0, out[-3000:])
+        self.assertIsNone(self.read_text(), "aucun .env créé en --check")
+        self.assertIn("DB_SCHEMA_MODE", out)
+        self.assertIn("simulation (--check)", out)
+        self.assertNoValue(out)
+        # Un .env existant dont la clé est vide : octets inchangés.
+        self.write_text("back/.env", self.EXAMPLE)
+        code, out = self.render({"DB_SCHEMA_MODE": FIXED_VALUE}, check_mode=True)
+        self.assertEqual(code, 0, out[-3000:])
+        self.assertEqual(self.read_text(), self.EXAMPLE)
+        self.assertNoValue(out)
+        # Les refus valent aussi en --check.
+        self.write_text("back/.env", "DB_SCHEMA_MODE=a\nDB_SCHEMA_MODE=b\n")
+        code, out = self.render({"DB_SCHEMA_MODE": FIXED_VALUE}, check_mode=True)
+        self.assertNotEqual(code, 0)
+        code, out = self.render({"TRUST_PROXY": FIXED_VALUE}, check_mode=True)
+        self.assertNotEqual(code, 0)
+
+    def test_every_phase_renders_the_same_file(self):
+        results = []
+        for phase in ("all", "build", "push", "deploy"):
+            with self.subTest(phase=phase):
+                self.write_text("back/.env.example", self.EXAMPLE)
+                if os.path.exists(os.path.join(self.app, "back", ".env")):
+                    os.unlink(os.path.join(self.app, "back", ".env"))
+                code, out = self.render({"DB_SCHEMA_MODE": FIXED_VALUE}, args=("-e", f"webapp_phase={phase}", "-e", "webapp_tag=t1"))
+                self.assertEqual(code, 0, out[-3000:])
+                results.append(self.read_text())
+        self.assertEqual(len(set(results)), 1)
+
+    def test_without_the_attribute_the_render_is_what_it_was(self):
+        self.write_text("back/.env.example", self.EXAMPLE)
+        code, out = self.render()
+        self.assertEqual(code, 0, out[-3000:])
+        self.assertIn("DB_SCHEMA_MODE=\n", self.read_text(), "une clé que l'inventaire ne fixe pas n'est jamais touchée")
+        self.assertNotIn("fixée(s) par l'inventaire", out)
+
+
 class AccountMarkerTests(unittest.TestCase):
     """Le compte dédié n'est créé que s'il n'existe pas sans marqueur, et n'est supprimé que s'il porte le marqueur."""
 

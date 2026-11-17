@@ -68,7 +68,7 @@
     if grep -E -- '^[[:space:]]*(export[[:space:]]+)?INFRA_BIND=' "$f" | grep -Evq -- '^[[:space:]]*INFRA_BIND=["'"'"']?(127[.]0[.]0[.]1)?["'"'"']?[[:space:]]*$'; then echo INFRA_BIND; fi;
     if grep -Eqi -- '^[[:space:]]*(export[[:space:]]+)?DEPLOY_FROM_MAIN=["'"'"']?(1|true|yes|on)' "$f"; then echo DEPLOY_FROM_MAIN; fi;
     if ! grep -Eq -- '^[[:space:]]*REDIS_PASSWORD=["'"'"']?[^"'"'"'[:space:]]' "$f"; then echo REDIS_PASSWORD; fi;
-    for k in WHITELIST PROXY_HOSTS BACK_WHITELIST; do
+    for k in {{ wa_back_env_forbidden.empty_only | map('quote') | join(' ') }}; do
       if [ "$(grep -Ec -- '^[[:space:]]*(export[[:space:]]+)?'"$k"'=["'"'"']?[^"'"'"'[:space:]]' "$f")" != 0 ]; then echo "$k"; fi;
     done;
     if grep -Eq -- '^[[:space:]]*(export[[:space:]]+)?COMPOSE_FILE=' "$f"; then echo COMPOSE_FILE; fi;

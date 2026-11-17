@@ -11,7 +11,8 @@
 # Noms LITTÉRAUX, sans boucle (une variable de liste se surchargerait elle-même par `-e` ; une boucle sur des noms de
 # faits secrets serait signalée par le contrôle des boucles) : tous les `set_fact`/`register` des rôles webapp-*, de
 # gateway-guard.yml et api-accounts-gateway.yml, TOUTES leurs `vars:` de tâche, d'inclusion et de bloc (variables de
-# travail des contrôles : `-e _families=[]` effaçait le contrôle DOCKER-USER), plus `webapp_target`. Renommer ces
+# travail des contrôles : `-e _families=[]` effaçait le contrôle DOCKER-USER), plus `webapp_target` et l'attribut d'inventaire `webapp_back_env_fixed`
+# (les clés de back/.env ne se fixent QUE par l'inventaire, jamais par `-e`). Renommer ces
 # variables ne protégerait de rien : `-e` accepte n'importe quel nom ; seule la sonde DÉTECTE l'extra-var. Une assertion par nom : celle qui échoue NOMME
 # le fait. scripts/test_webapp_hardening_check.py vérifie que les deux listes sont identiques et couvrent tous ces
 # faits, et qu'un `-e` de l'un d'eux fait échouer deploy-webapp, remove-webapp et purge-webapp.
@@ -23,6 +24,12 @@
     wa_app_id: __wa_internal_probe__
     wa_apps_text: __wa_internal_probe__
     wa_back_env_file: __wa_internal_probe__
+    wa_back_env_forbidden: __wa_internal_probe__
+    wa_back_fixed_bad: __wa_internal_probe__
+    wa_back_fixed_problems: __wa_internal_probe__
+    wa_back_fixed_todo: __wa_internal_probe__
+    wa_back_fixed_unmet: __wa_internal_probe__
+    wa_back_fixed_written: __wa_internal_probe__
     wa_back_injected: __wa_internal_probe__
     wa_back_port: __wa_internal_probe__
     wa_back_ready: __wa_internal_probe__
@@ -176,6 +183,7 @@
     webapp_env_saved: __wa_internal_probe__
     webapp_env_values: __wa_internal_probe__
     webapp_env_vite_api_url: __wa_internal_probe__
+    webapp_back_env_fixed: __wa_internal_probe__
     webapp_target: __wa_internal_probe__
     # `vars:` de niveau tâche, inclusion ou bloc (variables de travail des contrôles : `_families`, `_reasons`…).
     _accounts: __wa_internal_probe__
@@ -318,6 +326,12 @@
       - lookup('ansible.builtin.vars', 'wa_app_id') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', 'wa_apps_text') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', 'wa_back_env_file') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'wa_back_env_forbidden') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'wa_back_fixed_bad') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'wa_back_fixed_problems') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'wa_back_fixed_todo') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'wa_back_fixed_unmet') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'wa_back_fixed_written') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', 'wa_back_injected') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', 'wa_back_port') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', 'wa_back_ready') | string == '__wa_internal_probe__'
@@ -471,6 +485,7 @@
       - lookup('ansible.builtin.vars', 'webapp_env_saved') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', 'webapp_env_values') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', 'webapp_env_vite_api_url') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'webapp_back_env_fixed') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', 'webapp_target') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_accounts') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_addr') | string == '__wa_internal_probe__'

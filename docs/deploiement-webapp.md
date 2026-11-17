@@ -61,6 +61,22 @@ donc les volumes), `REMOTE_USER`, `REMOTE_SSH_PORT`, `NODE_PORT`, `VITE_PORT`, `
 secrets. Clés « SI ABSENTES » (jamais modifiées ensuite) : `PROJECT_NAME`, `REMOTE_CONTEXT_NAME`, `DB_ENGINE`,
 `CLIENT_ORIGINS`, `DB_USER`, `DB_NAME`, `SSH_KEY_FILE`. Les clés propres à l'app ne sont jamais touchées.
 
+**Clés fixées par l'inventaire** (`webapp_back_env_fixed: { CLÉ: valeur }`, attribut d'hôte OPTIONNEL, absent = rien ne change) :
+ces clés de `back/.env` sont réécrites à chaque rendu, comme `BACK_HOSTS` ou `TRUST_PROXY` — la ligne unique de la clé est
+remplacée, ou ajoutée, sous la forme `CLÉ="valeur"` (grammaire stricte du back/.env durci, `webapp-deploy/tasks/hardened.yml`).
+Cas d'origine (17/11/2026) : `DB_SCHEMA_MODE=` vide dans le `.env` de la passerelle ; en production le gabarit ne fait alors rien
+au démarrage et l'app plante sur une base vide. Le rendu refuse, AVANT tout effet (rien n'est écrit, aucune valeur affichée,
+seulement des NOMS) : un attribut qui n'est pas un dictionnaire ; un nom hors `[A-Z_][A-Z0-9_]*` ; une clé interdite
+(`webapp_back_env_forbidden`, `roles/webapp-setup/defaults/main.yml`, liste UNIQUE que le refus du profil durci réutilise :
+`BACK_HOSTS`, `FRONT_HOSTS`, `TRUST_PROXY`, `REDIS_PASSWORD`, `INFRA_BIND`, `WHITELIST`, `PROXY_HOSTS`, `BACK_WHITELIST`,
+`COMPOSE_FILE*`, `DEPLOY_*`, `REMOTE_*`, `PROMETHEUS_REMOTE_WRITE*`, `HARDEN_*`) ; une clé que le rôle rend déjà (possédée,
+« si absente », retirée, injectée par le play appelant, ou `webapp_env_from_vault`) — UNE source par clé ; une clé déjà présente
+DEUX fois dans le fichier (jamais laissée en double) ; une valeur non scalaire (texte ou entier seulement, pas de booléen : le
+mettre entre guillemets), vide, ou hors grammaire (ASCII imprimable sans `"`, `$`, accent grave, antislash, ni `{{` `{%` `{#`).
+Seules les clés dont la ligne diffère sont écrites (second passage : rien) ; le rapport donne leurs noms, `--check` n'écrit rien.
+Le fichier est relu après l'écriture. L'attribut ne se donne pas en `-e` (sonde `webapp-setup/tasks/no-overrides.yml`). Exemple :
+`webapp_back_env_fixed: { DB_SCHEMA_MODE: migrate }`.
+
 **Secrets** (`CRYPT_DB_MASTER_KEY`, `CRYPT_SESSION_PRIVATE_KEY`, `CRYPT_DB_DERIVATION_SALT`, `JWT_SECRET`, `METRICS_TOKEN`,
 `DB_PASSWORD` d'un Postgres de conteneur) : ADOPTÉS du `.env` existant puis mis au coffre (`group_vars/<parc>.yml`,
 `<projet>_<clé>`, `<projet>_<env>_<clé>` hors prod), TIRÉS seulement s'ils n'existent nulle part. Jamais régénérés : une
@@ -111,7 +127,8 @@ du parc**, et les clés de chiffrement à sauvegarder hors du serveur. Restent m
   - `webapp_vhost_locations[].access: { hosts, whitelist?, vpn_addresses?, v6_min_prefix? }` (+ `upstream: back`,
     `priority: true`, `raw_uri` : URI brute exigée) — liste NOMMÉE par chemin (`proxy-update/templates/_named_access.inc`),
     contrôlée par `webapp_hardening_check.py vhost` avant chaque pose ; valeurs des locations sous grammaire ;
-  - `webapp_env_from_vault: { CLÉ: variable du coffre }`, `webapp_env_required: [CLÉS]`, `webapp_upstream_checks: [{ id, url }]`.
+  - `webapp_env_from_vault: { CLÉ: variable du coffre }`, `webapp_env_required: [CLÉS]`, `webapp_back_env_fixed: { CLÉ: valeur }` (clés de back/.env fixées à chaque
+    rendu, voir plus bas), `webapp_upstream_checks: [{ id, url }]`.
 - `deploy-webapp.yml` s'importe dans un autre playbook avec `webapp_optional: true` (sans `webapp` : rien n'est visé,
   aucune connexion) — c'est ainsi que `deploy-fleetforge.yml` déploie sa passerelle.
 

@@ -42,6 +42,8 @@
     wa_external: "{{ (webapp_proxy | default('internal')) == 'external' }}"
     wa_migrate: "{{ webapp_migrate | default(false) | bool }}"
     wa_update_common: "{{ webapp_update_common | default(true) | bool }}"
+    # Clés de back/.env que l'inventaire ne peut pas fixer (webapp_back_env_fixed) : une seule liste, voir defaults/main.yml.
+    wa_back_env_forbidden: "{{ webapp_back_env_forbidden }}"
   tags: [always]
 
 # Env files : `.env` (prod) ou `.env.<env>` ; le front retombe sur `front/.env` s'il n'a pas de variante.
