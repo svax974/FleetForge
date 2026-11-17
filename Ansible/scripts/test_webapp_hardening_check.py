@@ -4878,6 +4878,118 @@ class EndOfStringGapsTests(unittest.TestCase):
                 self.assertIn("hors grammaire", out)
 
 
+class JinjaEscapeWarningTests(unittest.TestCase):
+    """Aucun littéral de chaîne Jinja des playbooks ne contient d'antislash invalide (`\\.`, `\\s`, `\\[`, `\\{`, `\\Z`...) :
+    Jinja 3.1 lève alors un DeprecationWarning « invalid escape sequence », une erreur à terme, et le nombre d'antislash
+    qu'il faut dépend du style du scalaire YAML (`>-`, simple, entre guillemets). Formes sans antislash : `[.]`, `[{]`,
+    `[$]`, `[ \\t\\n\\r\\f\\v]`, `(?!(?s:.))` ; un `[` littéral s'écrit `(?![]])[][]` (`[[]` lève un FutureWarning de `re`).
+    Balayage de TOUT `Ansible/playbooks` : valeurs YAML contenant `{{` / `{%`, expressions nues (`when`, `failed_when`,
+    `changed_when`, `until`, `that`) et gabarits (`*.j2`, dossiers `templates/`), analysés sous
+    `-W error::DeprecationWarning`."""
+
+    BARE_KEYS = {"when", "failed_when", "changed_when", "until", "that"}
+
+    @staticmethod
+    def _environment():
+        return jinja2.Environment(extensions=["jinja2.ext.do", "jinja2.ext.loopcontrols"])
+
+    def _warnings(self, env, source):
+        import warnings
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            try:
+                env.parse(source)
+            except jinja2.TemplateSyntaxError:
+                return None
+        return [str(w.message) for w in caught if issubclass(w.category, DeprecationWarning)]
+
+    def _scan(self):
+        env = self._environment()
+        found, scanned = [], 0
+
+        def check(source, where):
+            nonlocal scanned
+            problems = self._warnings(env, source)
+            if problems is None:
+                return
+            scanned += 1
+            for message in problems:
+                found.append(f"{where} : {message.split('. Such')[0]}")
+
+        def walk(node, where, bare=False):
+            if isinstance(node, yaml.ScalarNode):
+                value = node.value
+                at = f"{where}:{node.start_mark.line + 1}"
+                if "{{" in value or "{%" in value or "{#" in value:
+                    check(value, at)
+                elif bare and "\\" in value:
+                    check("{{ " + value + " }}", at)
+            elif isinstance(node, yaml.SequenceNode):
+                for child in node.value:
+                    walk(child, where, bare)
+            elif isinstance(node, yaml.MappingNode):
+                for key, value in node.value:
+                    walk(value, where, key.value in self.BARE_KEYS)
+
+        for directory, subdirectories, names in os.walk(PLAYBOOKS):
+            subdirectories[:] = sorted(d for d in subdirectories if d not in (".git", "__pycache__"))
+            for name in sorted(names):
+                path = os.path.join(directory, name)
+                relative = os.path.relpath(path, ANSIBLE)
+                if name.endswith((".yml", ".yaml")):
+                    with open(path, encoding="utf-8") as f:
+                        text = f.read()
+                    try:
+                        for document in yaml.compose_all(text, Loader=yaml.SafeLoader):
+                            if document is not None:
+                                walk(document, relative)
+                    except yaml.YAMLError:
+                        check(text, relative)
+                elif name.endswith(".j2") or os.sep + "templates" + os.sep in path:
+                    try:
+                        with open(path, encoding="utf-8") as f:
+                            check(f.read(), relative)
+                    except UnicodeDecodeError:
+                        continue
+        return found, scanned
+
+    def test_no_jinja_expression_of_the_playbooks_triggers_an_invalid_escape_warning(self):
+        found, scanned = self._scan()
+        self.assertGreater(scanned, 1000, "le balayage doit voir les playbooks, rôles et gabarits")
+        self.assertEqual(found, [], "antislash invalide dans un littéral Jinja (utiliser `[.]`, `[{]`, `[ \\t]`, `(?!(?s:.))`...)")
+
+    def test_the_scan_does_flag_the_old_forms(self):
+        env = self._environment()
+        for old in ("{{ x is match('^a\\.b') }}", "{{ x is match('\\s') }}", "{{ x is match('\\[a') }}", "{{ x is match('a\\Z') }}",
+                    "{{ x is search('a\\{') }}"):
+            with self.subTest(old):
+                problems = self._warnings(env, old)
+                if problems == []:
+                    self.skipTest("cet interpréteur ne signale pas les échappements invalides")
+                self.assertTrue(problems, old)
+        for new in ("{{ x is match('^a[.]b') }}", "{{ x is match('[ \\t\\n\\r\\f\\v]') }}", "{{ x is match('(?![]])[][]a') }}",
+                    "{{ x is match('a(?!(?s:.))') }}", "{{ x is search('a[{]') }}", "{{ x | regex_replace('\\x1b[0-9]', '') }}"):
+            with self.subTest(new):
+                self.assertEqual(self._warnings(env, new), [], new)
+
+    def test_the_literal_bracket_form_is_a_plain_literal_bracket_without_regex_warnings(self):
+        import itertools
+        import warnings
+
+        literal = r"(?![]])[][]"
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            compiled = re.compile(literal)
+            # Pourquoi pas `[[]` : `re` signale un ensemble imbriqué possible (FutureWarning, syntaxe appelée à changer).
+            with self.assertRaises(FutureWarning):
+                re.compile("[[]")
+        for size in range(4):
+            for chars in itertools.product("[]a ", repeat=size):
+                text = "".join(chars)
+                self.assertEqual([m.start() for m in compiled.finditer(text)], [i for i, c in enumerate(text) if c == "["], text)
+
+
 DEPLOY_FLEETFORGE = os.path.join(PLAYBOOKS, "deploy-fleetforge.yml")
 GATEWAY_BACKUP_LIB = os.path.join(PLAYBOOKS, "lib")
 
