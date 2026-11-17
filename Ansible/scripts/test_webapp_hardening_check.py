@@ -3655,6 +3655,9 @@ class PublicEdgeProbeTests(unittest.TestCase):
         edge = checks["public_edge"]
         self.assertEqual((edge["kind"], edge["method"], edge["url"], edge["status"]),
                          ("http", "POST", "https://ffg.example.test/mcp", [401]))
+        # Constat du 17/11/2026 : sans agent explicite, urllib envoie `Python-urllib/3.x`, que Cloudflare refuse (403, erreur
+        # 1010) : la sonde restait à 0 alors que le point d'accès répondait 401 à tout autre client.
+        self.assertEqual(edge["headers"], {"User-Agent": "fleetforge-svcprobe/1.0"})
         origin = checks["public_edge_origin"]
         self.assertEqual(origin["kind"], "command")
         script = origin["argv"][2]

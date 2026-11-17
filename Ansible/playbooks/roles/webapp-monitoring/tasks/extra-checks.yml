@@ -100,7 +100,7 @@
     _public: >-
       {%- set out = [] -%}
       {%- for p in webapp_public_checks | default([]) -%}
-      {%- set _ = out.append({'name': p.name, 'kind': 'http', 'method': p.method | default('GET'), 'url': 'https://' ~ proxy_hostname ~ p.path, 'status': [p.edge_status | int], 'timeout': 15}) -%}
+      {%- set _ = out.append({'name': p.name, 'kind': 'http', 'method': p.method | default('GET'), 'url': 'https://' ~ proxy_hostname ~ p.path, 'status': [p.edge_status | int], 'timeout': 15, 'headers': {'User-Agent': 'fleetforge-svcprobe/1.0'}}) -%}
       {%- if p.origin_status is defined -%}
       {%- set _ = out.append({'name': p.name ~ '_origin', 'kind': 'command', 'timeout': 40,
             'argv': ['/bin/sh', '-c', 'for ip in ' ~ (_origins | join(' ')) ~ '; do o=$(curl -s -o /dev/null -D - -X ' ~ (p.method | default('GET')) ~ ' -w "%{http_code}" --max-time 10 --resolve '
