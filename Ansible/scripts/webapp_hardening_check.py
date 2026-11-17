@@ -1229,6 +1229,8 @@ def check_public(where, text):
 # (celles de `set_real_ip_from`, seules à pouvoir remplacer l'adresse cliente) SANS certificat client vérifié, et 0 sinon ; fermé par
 # défaut. Chaque location PRIVÉE le refuse (403) avant tout `allow`.
 CF_MAP_BODY = 'default 1; "~^0:" 0; "1:SUCCESS" 0;'
+# Et rien d'une location privée ne doit être mis en cache par l'edge (le front sert ses statiques `public, immutable`).
+CF_NO_STORE = 'add_header Cloudflare-CDN-Cache-Control "no-store" always;'
 
 
 def _check_untrusted_socket(where, text, outside, private_blocks):
@@ -1252,6 +1254,8 @@ def _check_untrusted_socket(where, text, outside, private_blocks):
     guard = f"if (${mapping.group(2)}) {{ return 403; }}"
     for head, body in private_blocks:
         code = _code(body)
+        if CF_NO_STORE not in code:
+            errors.append(f"{where} : location {head} : `{CF_NO_STORE}` absent (l'edge pourrait mettre en cache un objet privé)")
         cut = min([i for i in (code.find("allow "), code.find("deny all;")) if i >= 0], default=-1)
         if guard not in code or code.index(guard) > cut:
             errors.append(f"{where} : location {head} : `{guard}` doit précéder le filtre d'adresse (socket Cloudflare sans certificat client)")

@@ -711,3 +711,9 @@ sémantique documentée, et par `nginx -t` au déploiement).
   (deux noms proxifiés ne redéfinissent pas la même). **Non corrigé pour `cloudflare_front`** (agenthub…) : même faiblesse, rendu laissé
   octet pour octet ; à voir avec le propriétaire (l'agenthub n'a pas de location privée filtrée par adresse sur le nom public, mais
   ses `/admin` éventuels le seraient).
+- **Cache de l'edge** : le nom proxifié est mis en cache par Cloudflare et le front sert ses statiques `public, immutable` ; un objet chargé
+  par le propriétaire sur la location privée aurait pu être servi à tous. Les locations PRIVÉES d'une entrée `cloudflare_named`
+  (`_access.inc`, `_named_access.inc`) posent `add_header Cloudflare-CDN-Cache-Control "no-store" always;` (prioritaire sur
+  `Cache-Control` pour l'edge ; le navigateur garde `Cache-Control`). Un `add_header` de location remplace ceux du `server`/`http` :
+  le vhost généré n'en pose aucun au-dessus (test), mais un `add_header` ajouté un jour dans `nginx.conf` ou le `server {}` serait perdu
+  dans ces locations. Exigé par `vhost --public`.

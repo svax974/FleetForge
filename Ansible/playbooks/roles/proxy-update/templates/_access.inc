@@ -73,7 +73,10 @@
         # Mode privé ({{ access_entry }}) : vpns + supervision + whitelist.
 {% if (hostvars[access_entry].cloudflare_named | default(false) | bool) and not (hostvars[access_entry].cloudflare_front | default(false) | bool) %}
         # Nom servi par Cloudflare : une socket d'une plage Cloudflare sans certificat client valide ne fixe pas l'adresse cliente
-        # (CF-Connecting-IP forgeable par un tiers) : refusée AVANT le filtre d'adresse.
+        # (CF-Connecting-IP forgeable par un tiers) : refusée AVANT le filtre d'adresse. Jamais mis en cache par l'edge : le front
+        # sert ses fichiers statiques `public, immutable`, et un objet chargé ici par le propriétaire serait ensuite servi à tout le
+        # monde sans filtre. `add_header` REMPLACE ceux des niveaux supérieurs : aucun n'est posé sur le vhost générique.
+        add_header Cloudflare-CDN-Cache-Control "no-store" always;
         if (${{ cf_untrusted_var }}) {
             return 403;
         }

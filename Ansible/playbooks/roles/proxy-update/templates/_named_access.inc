@@ -26,7 +26,8 @@
         # named-access
 {% if (hostvars[access_entry].cloudflare_named | default(false) | bool) and not (hostvars[access_entry].cloudflare_front | default(false) | bool) %}
         # Nom servi par Cloudflare : socket Cloudflare sans certificat client valide refusée avant tout filtre d'adresse
-        # (voir `_access.inc`).
+        # (voir `_access.inc`), et jamais de mise en cache par l'edge.
+        add_header Cloudflare-CDN-Cache-Control "no-store" always;
         if (${{ cf_untrusted_var }}) {
             return 403;
         }

@@ -3374,6 +3374,48 @@ class CloudflareNamedForgedAddressTests(unittest.TestCase):
                 self.assertTrue(vhost_errors(mutated, public=True), label)
 
 
+class CloudflareNamedNoStoreTests(unittest.TestCase):
+    """Le nom est mis en cache par l'edge Cloudflare et le front sert ses statiques `public, immutable` : un objet chargé par le
+    propriétaire sur une location PRIVÉE ne doit jamais y être conservé (il serait servi à tous sans filtre d'adresse)."""
+
+    HEADER = 'add_header Cloudflare-CDN-Cache-Control "no-store" always;'
+
+    def test_every_private_location_of_a_named_entry_forbids_the_edge_cache_and_no_other_does(self):
+        text = public_vhost()
+        for head in ("/", "^~ /mcp/connections", "/.well-known/"):
+            with self.subTest(head):
+                self.assertIn(self.HEADER, location_body(text, head))
+        for location in (PUBLIC_MCP, PUBLIC_PRM, PUBLIC_AS, PUBLIC_OAUTH, PUBLIC_REGISTER):
+            self.assertNotIn("Cloudflare-CDN-Cache-Control", location_body(text, "~* " + location["path"]))
+        self.assertIn(self.HEADER, location_body(render_vhost(cloudflare_named=True), "~* ^/mcp(/.*)?$"), "liste nommée")
+
+    def test_no_header_is_inherited_so_replacing_them_in_the_locations_drops_nothing(self):
+        # `add_header` d'une location REMPLACE ceux du server et de http : le vhost généré n'en pose aucun au-dessus.
+        text = public_vhost()
+        outside = check._without_locations(text)
+        self.assertEqual([d for d in directives(outside) if d.startswith("add_header")], [])
+        for head in ("/", "^~ /mcp/connections", "/.well-known/"):
+            self.assertEqual([d for d in directives(location_body(text, head)) if d.startswith("add_header")], [self.HEADER], head)
+
+    def test_the_other_entries_render_without_it(self):
+        for entry, attributes in (("plain", {}), ("fleetforge-gateway", {}), ("plain", {"cloudflare_front": True})):
+            self.assertNotIn("Cloudflare-CDN-Cache-Control", render_vhost(entry=entry, **attributes), f"{entry} {attributes}")
+        self.assertNotIn("add_header", render_access({"access_mode": "private"}).replace("`add_header`", ""))
+        self.assertIn(self.HEADER, render_access({"access_mode": "private", "cloudflare_named": True}))
+        self.assertEqual([d for d in directives(render_access({"access_mode": "public", "cloudflare_named": True}))
+                          if d.startswith("add_header")], [])
+
+    def test_the_public_check_demands_it_on_every_private_location(self):
+        text = public_vhost()
+        self.assertEqual(vhost_errors(text, public=True), [])
+        for head in ("/", "^~ /mcp/connections", "/.well-known/"):
+            with self.subTest(head):
+                mutated = mutate(text, head, self.HEADER, "")
+                self.assertTrue(any("no-store" in e for e in vhost_errors(mutated, public=True)), head)
+        wrong = text.replace('"no-store"', '"public"', 1)
+        self.assertTrue(vhost_errors(wrong, public=True))
+
+
 class PublicEdgeProbeTests(unittest.TestCase):
     """A3 : `webapp_public_checks` → sondes svcprobe `public_edge` (401 par le nom) et `public_edge_origin` (403 à
     l'origine sans certificat client), jouées depuis la machine de la passerelle."""
