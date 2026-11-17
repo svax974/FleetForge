@@ -297,6 +297,9 @@
       when:
         - webapp_hardening is defined
         - webapp_phase | default('all') in ['all', 'deploy']
+        # En `--check` rien n'est déployé : le contrôle lirait la machine telle qu'elle est (premier déploiement : aucun
+        # compte, aucune règle, aucun conteneur) et ferait échouer le run à tort.
+        - not ansible_check_mode
 
 # ── Supervision (OBLIGATOIRE, voir CLAUDE.md) ──────────────────────────────
 - name: Supervision du service
