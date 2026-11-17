@@ -311,6 +311,7 @@
         msg: >-
           Déploiement ou vérification de {{ wa_project }} en échec ({{ ansible_failed_task.name | default('?') }}) :
           conteneurs de l'app ARRÊTÉS. Corriger puis rejouer le déploiement.
+          Cause : {{ (ansible_failed_result | default({})).msg | default('(sortie masquée : relire la tâche en échec plus haut)') | string | truncate(3000) }}
 
 - name: Report how the hardened application is exposed
   ansible.builtin.debug:
