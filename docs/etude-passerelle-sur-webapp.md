@@ -85,7 +85,7 @@ webapp_hardening:                    # absent = AUCUN changement
   front_ip: 10.73.231.10             # .2–.254, ≠ back_lb_ip
   back_lb_ip: 10.73.231.11
   protected_paths: [/run/fleetforge] # + /home/<remote_username>, toujours
-  services: [back, back-worker]      # défaut : services de CODE, durcissement complet
+  # services: [back, back-worker]    # défaut DÉRIVÉ : [back], plus back-worker si `webapp_worker` vaut on|true (BACK_WORKER=off : pas de conteneur) ; une liste explicite l'emporte
   allowed_bind_sources: []           # défaut : aucun montage de l'hôte
   compose_file: scripts/docker-compose-hardened.yml   # défaut
 webapp_vhost_locations:

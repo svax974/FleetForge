@@ -17,7 +17,8 @@
 #   webapp_machine        entrée CANONIQUE de la machine (celle qui porte host_vars/<machine>.yml) ;
 #                         défaut : l'entrée elle-même (machine dédiée)
 #   webapp_replicas       BACK_REPLICAS (défaut 1)
-#   webapp_worker         on | off (BACK_WORKER, défaut off)
+#   webapp_worker         on | off (BACK_WORKER, défaut off) ; profil durci : le service `back-worker` n'est contrôlé (compose,
+#                         exécution) que s'il est `on` ou `true`
 #   webapp_db_exposed     true : Postgres/Redis ouverts (INFRA_BIND=0.0.0.0) au profil « non exposé »
 #   webapp_registry       false : l'app reste en mode historique (build sur la cible)
 #   webapp_proxy          internal (défaut) | external (VPS tiers : ni DNS, ni vhost, ni DOCKER-USER)
@@ -42,6 +43,8 @@
 #                         protected_paths?, services?, allowed_bind_sources?, compose_file? } — compose durci contrôlé avant
 #                         run.sh, pare-feu DOCKER-USER propre (proxies admis seulement), compte Unix dédié, contrôle à
 #                         l'exécution, conteneurs ARRÊTÉS au moindre écart, vhost qui réécrit X-Forwarded-For.
+#                         `services` (défaut DÉRIVÉ : [back], plus back-worker quand `webapp_worker` vaut on|true) ne se
+#                         donne que pour imposer une autre liste.
 #                         docs/etude-passerelle-sur-webapp.md
 #   webapp_env_from_vault { CLÉ_DU_ENV: <variable du coffre> } : secrets non tirés par l'app (mots de passe d'un amont),
 #                         écrits dans back/.env (no_log) ; absent ou malformé = échec, par NOM
@@ -88,9 +91,10 @@ webapp_eligible_proxies: >-
      | map(attribute='inventory_hostname') | list }}
 # Sous-réseau privé /16 à /32 (grammaire de `_access.inc`), sans zéro en tête d'un octet.
 webapp_private_cidr_regex: '^(10[.](0|[1-9][0-9]{0,2})[.](0|[1-9][0-9]{0,2})|172[.](1[6-9]|2[0-9]|3[01])[.](0|[1-9][0-9]{0,2})|192[.]168[.](0|[1-9][0-9]{0,2}))[.](0|[1-9][0-9]{0,2})/(1[6-9]|2[0-9]|3[0-2])$'
-# Défauts du profil.
+# Défauts du profil. `services` (services de CODE contrôlés et vérifiés à l'exécution) n'a PAS de défaut fixe : il est DÉRIVÉ du
+# drapeau worker par hardening.yml (`[back]`, plus `back-worker` seulement si `webapp_worker` vaut on|true — BACK_WORKER=off ne
+# lance aucun conteneur back-worker) ; un `webapp_hardening.services` explicite l'emporte.
 webapp_hardening_defaults:
-  services: [back, back-worker]
   allowed_bind_sources: []
   protected_paths: []
   compose_file: scripts/docker-compose-hardened.yml

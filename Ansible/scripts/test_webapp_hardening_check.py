@@ -5388,6 +5388,26 @@ class BackEnvFixedGrammarTests(unittest.TestCase):
         self.assertIn("wa_back_env_forbidden.empty_only", script)
         self.assertNotIn("WHITELIST PROXY_HOSTS BACK_WHITELIST", script)
 
+    def test_the_hardened_refusal_built_from_the_single_list_still_refuses_each_key(self):
+        # Le shell de hardened.yml, RENDU avec la liste unique puis joué sur de faux .env : mêmes refus qu'avant la factorisation.
+        tasks = check._load(os.path.join(ROLES, "webapp-deploy", "tasks", "hardened.yml"))
+        task = next(t for t in tasks if t.get("name", "").startswith("Look for forbidden settings"))
+        with tempfile.TemporaryDirectory() as tmp:
+            script = _template(task["ansible.builtin.shell"], {"wa_src": tmp + "/", "wa_back_env_file": "back/.env",
+                                                               "wa_back_env_forbidden": _forbidden_keys()})
+            self.assertIn("for k in WHITELIST PROXY_HOSTS BACK_WHITELIST; do", script)
+            os.makedirs(os.path.join(tmp, "back"))
+            for text, expected in [("REDIS_PASSWORD=x\n", ""), ("REDIS_PASSWORD=x\nWHITELIST=1.2.3.4\n", "WHITELIST"),
+                                   ('REDIS_PASSWORD=x\nPROXY_HOSTS="a"\n', "PROXY_HOSTS"),
+                                   ("REDIS_PASSWORD=x\nBACK_WHITELIST=a\n", "BACK_WHITELIST"),
+                                   ("REDIS_PASSWORD=x\nWHITELIST=\nPROXY_HOSTS=\nBACK_WHITELIST=\n", ""),
+                                   ("WHITELIST=\n", "REDIS_PASSWORD")]:
+                with self.subTest(text):
+                    with open(os.path.join(tmp, "back", ".env"), "w", encoding="utf-8") as f:
+                        f.write(text)
+                    out = subprocess.run(["/bin/bash", "-c", script], capture_output=True, text=True)
+                    self.assertEqual(out.stdout.split(), expected.split(), out.stderr)
+
     def test_the_values_touching_tasks_hide_their_output(self):
         for name in (FIXED_CHECK, FIXED_TODO, "Write the back keys fixed by the inventory",
                      "Read back the fixed back keys (names only)"):
@@ -5610,6 +5630,179 @@ class BackEnvFixedRenderTests(unittest.TestCase):
         self.assertEqual(code, 0, out[-3000:])
         self.assertIn("DB_SCHEMA_MODE=\n", self.read_text(), "une clé que l'inventaire ne fixe pas n'est jamais touchée")
         self.assertNotIn("fixée(s) par l'inventaire", out)
+
+
+def _text(path):
+    with open(path, encoding="utf-8") as f:
+        return f.read()
+
+
+def _hardening_task(name_start):
+    tasks = check._load(os.path.join(ROLES, "webapp-setup", "tasks", "hardening.yml"))
+    return next(t for t in tasks if t.get("name", "").startswith(name_start))
+
+
+def derived_services(worker="__absent__", **profile):
+    """`wa_h_services` tel que le calcule la VRAIE tâche « Settle the hardening profile » (défauts du rôle compris)."""
+    from ansible.parsing.dataloader import DataLoader
+    from ansible.template import Templar, trust_as_template
+    with open(os.path.join(ROLES, "webapp-setup", "defaults", "main.yml"), encoding="utf-8") as f:
+        defaults = yaml.safe_load(f)
+    task = _hardening_task("Settle the hardening profile")
+    variables = {"webapp_hardening_defaults": defaults["webapp_hardening_defaults"], "webapp_hardening": profile,
+                 "wa_worker": "off" if worker == "__absent__" else worker, "webapp_forbidden_groups": [],
+                 "remote_username": "srvc", "wa_project": "demo-app", "webapp_vpn_addresses": [], "webapp_eligible_proxies": []}
+    templar = Templar(loader=DataLoader(), variables=variables)
+    variables["_h"] = templar.template(trust_as_template(task["vars"]["_h"]))
+    return Templar(loader=DataLoader(), variables=variables).template(
+        trust_as_template(task["ansible.builtin.set_fact"]["wa_h_services"]))
+
+
+class HardenedServicesDerivationTests(unittest.TestCase):
+    """La liste des services de code du profil durci suit le drapeau worker (BACK_WORKER=off : pas de conteneur
+    back-worker, donc rien à exiger) ; une liste explicite du profil l'emporte."""
+
+    def test_the_worker_off_by_default_gives_back_alone(self):
+        self.assertEqual(derived_services(), ["back"])
+        for off in ("off", "OFF", "false", "no", "", False, None, "0"):
+            with self.subTest(worker=off):
+                self.assertEqual(derived_services(off), ["back"])
+
+    def test_the_worker_on_adds_back_worker(self):
+        for on in ("on", "ON", "true", "True", True):
+            with self.subTest(worker=on):
+                self.assertEqual(derived_services(on), ["back", "back-worker"])
+
+    def test_an_explicit_list_wins_whatever_the_worker(self):
+        for worker in ("off", "on", True):
+            with self.subTest(worker=worker):
+                self.assertEqual(derived_services(worker, services=["back", "back-worker"]), ["back", "back-worker"])
+                self.assertEqual(derived_services(worker, services=["back"]), ["back"])
+                self.assertEqual(derived_services(worker, services=["back", "custom"]), ["back", "custom"])
+        self.assertEqual(derived_services("on", services=[]), [], "une liste vide explicite reste refusée par la garde, jamais remplacée")
+
+    def test_the_defaults_carry_no_fixed_service_list(self):
+        with open(os.path.join(ROLES, "webapp-setup", "defaults", "main.yml"), encoding="utf-8") as f:
+            self.assertNotIn("services", yaml.safe_load(f)["webapp_hardening_defaults"])
+
+    def test_no_other_task_hardcodes_the_worker_service_name(self):
+        # Seule la dérivation (hardening.yml) connaît `back-worker` ; compose-check, violations et runtime lisent
+        # `wa_h_services`, et l'arrêt, le retrait et la purge visent les conteneurs par PROJET (jamais par service).
+        offenders = []
+        for path in glob.glob(os.path.join(ROLES, "webapp-*", "*", "*.yml")) + glob.glob(os.path.join(ROLES, "webapp-*", "*", "*", "*")):
+            if os.path.isfile(path) and "back-worker" in _text(path):
+                offenders.append(os.path.relpath(path, ROLES))
+        self.assertEqual(sorted(offenders), ["webapp-setup/defaults/main.yml", "webapp-setup/tasks/hardening.yml"])
+        readers = {"webapp-deploy/tasks/compose-check.yml", "webapp-security/tasks/violations.yml", "webapp-security/tasks/runtime.yml"}
+        for relative in readers:
+            self.assertIn("wa_h_services", _text(os.path.join(ROLES, relative)), relative)
+        # L'arrêt de sécurité retrouve un conteneur worker par le projet compose, sans le nom du service.
+        self.assertIn("'-(back|front)-'", _text(os.path.join(ROLES, "webapp-security", "tasks", "stop.yml")))
+        pattern = re.compile("^[0-9a-f]+ demo-app-(back|front)-")
+        for line in ("abc123 demo-app-back-192-0-2-10", "abc124 demo-app-front-192-0-2-10"):
+            self.assertTrue(pattern.match(line), line)
+
+
+@unittest.skipUnless(shutil.which("ansible-playbook") and shutil.which("docker"), "ansible-playbook ou docker absent")
+class HardenedServicesConsumersTests(unittest.TestCase):
+    """UNE chaîne réelle : la tâche de dérivation de hardening.yml, puis le contrôle statique du compose
+    (compose-check.yml) et le contrôle d'exécution (violations.yml) lisent la MÊME liste — jouée en local, aucun hôte."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        os.makedirs(os.path.join(self.tmp, "pb"))
+        os.makedirs(os.path.join(self.tmp, "app"))
+        os.symlink(HERE, os.path.join(self.tmp, "scripts"))
+        with open(os.path.join(self.tmp, "ansible.cfg"), "w", encoding="utf-8") as f:
+            f.write(f"[defaults]\nroles_path={ROLES}\nstdout_callback=default\n")
+
+    def compose(self, with_worker):
+        data = copy.deepcopy(GOOD_COMPOSE)
+        if not with_worker:
+            del data["services"]["back-worker"]
+        with open(os.path.join(self.tmp, "app", "compose.yml"), "w", encoding="utf-8") as f:
+            yaml.safe_dump(data, f)
+
+    def play(self, worker, containers_with_worker, profile=None):
+        text = RUNTIME_PLAYBOOK
+        for key, value in GOOD_RUNTIME.items():
+            text = text.replace(key, value)
+        play = yaml.safe_load(text)[0]
+        runtime = play["tasks"][0]
+        runtime["vars"]["wa_app"]["wa_h_services"] = "{{ wa_h_services }}"
+        if not containers_with_worker:
+            runtime["vars"]["wa_containers"] = [c for c in runtime["vars"]["wa_containers"]
+                                                if c["Labels"]["com.docker.compose.service"] != "back-worker"]
+        play["vars_files"] = [os.path.join(ROLES, "webapp-setup", "defaults", "main.yml")]
+        play["vars"].update({
+            "remote_username": "srvc", "wa_project": "fleetforge-gateway", "wa_front_port": 4730, "wa_back_port": 4731,
+            "wa_worker": worker, "wa_src": os.path.join(self.tmp, "app") + "/", "webapp_compose_file": "compose.yml",
+            "webapp_hardening": dict({"runtime_user": "ffgateway", "docker_subnet": "10.73.231.0/24", "front_ip": "10.73.231.10",
+                                      "back_lb_ip": "10.73.231.11"}, **(profile or {})),
+        })
+        derive = _hardening_task("Settle the hardening profile")
+        check_compose = {"ansible.builtin.include_role": {"name": "webapp-deploy", "tasks_from": "compose-check"}}
+        report = {"ansible.builtin.debug": {"msg": "SERVICES={{ wa_h_services | join(',') }}"}}
+        play["tasks"] = [derive, report, check_compose, runtime, play["tasks"][1]]
+        return play
+
+    def run_chain(self, play):
+        with open(os.path.join(self.tmp, "pb", "play.yml"), "w", encoding="utf-8") as f:
+            yaml.safe_dump([play], f)
+        env = dict(os.environ, ANSIBLE_CONFIG=os.path.join(self.tmp, "ansible.cfg"))
+        out = subprocess.run(["ansible-playbook", "-i", "localhost,", "-c", "local", os.path.join(self.tmp, "pb", "play.yml")],
+                             capture_output=True, text=True, env=env, timeout=300)
+        text = out.stdout + out.stderr
+        services = re.search(r'SERVICES=([a-z,-]*)"', text)
+        violations = re.search(r'"VIOLATIONS=\[(.*?)\]"', text)
+        return out.returncode, text, services.group(1) if services else None, violations.group(1) if violations else None
+
+    def test_worker_off_every_consumer_sees_back_alone_and_passes_without_a_worker(self):
+        self.compose(with_worker=False)
+        code, out, services, violations = self.run_chain(self.play("off", containers_with_worker=False))
+        self.assertEqual(code, 0, out[-3500:])
+        self.assertEqual(services, "back")
+        self.assertIn("compose durci (back)", out, "compose-check lit la liste dérivée")
+        self.assertEqual(violations, "", "violations.yml : aucun « service back-worker introuvable »")
+
+    def test_worker_on_every_consumer_sees_both_services(self):
+        self.compose(with_worker=True)
+        code, out, services, violations = self.run_chain(self.play("on", containers_with_worker=True))
+        self.assertEqual(code, 0, out[-3500:])
+        self.assertEqual(services, "back,back-worker")
+        self.assertIn("compose durci (back, back-worker)", out)
+        self.assertEqual(violations, "")
+
+    def test_worker_on_without_a_worker_is_still_refused_by_both_controls(self):
+        # La liste dérivée n'assouplit rien : worker actif, un compose ou un hôte sans back-worker échoue.
+        self.compose(with_worker=False)
+        code, out, services, _ = self.run_chain(self.play("on", containers_with_worker=True))
+        self.assertNotEqual(code, 0)
+        self.assertEqual(services, "back,back-worker")
+        self.assertIn("service back-worker absent", out)
+        self.compose(with_worker=True)
+        code, out, services, violations = self.run_chain(self.play("on", containers_with_worker=False))
+        self.assertEqual(code, 0, out[-3500:])
+        self.assertEqual(violations, "service back-worker introuvable")
+
+    def test_the_old_fixed_list_failed_on_a_worker_less_application_and_an_explicit_list_still_forces_it(self):
+        # Constat du 17/11/2026 : `services: [back, back-worker]` en défaut, worker éteint → « service back-worker introuvable ».
+        self.compose(with_worker=False)
+        code, out, services, violations = self.run_chain(
+            self.play("off", containers_with_worker=False, profile={"services": ["back", "back-worker"]}))
+        self.assertNotEqual(code, 0)
+        self.assertEqual(services, "back,back-worker", "la liste explicite l'emporte")
+        self.assertIn("service back-worker absent", out)
+        self.compose(with_worker=True)
+        code, out, services, violations = self.run_chain(
+            self.play("off", containers_with_worker=False, profile={"services": ["back", "back-worker"]}))
+        self.assertEqual(violations, "service back-worker introuvable")
+        # …et une liste explicite plus courte l'emporte aussi quand le worker est actif.
+        code, out, services, violations = self.run_chain(
+            self.play("on", containers_with_worker=True, profile={"services": ["back"]}))
+        self.assertEqual(code, 0, out[-3500:])
+        self.assertEqual(services, "back")
 
 
 class AccountMarkerTests(unittest.TestCase):

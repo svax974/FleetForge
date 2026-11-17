@@ -17,7 +17,13 @@
     wa_h_front_ip: "{{ _h.front_ip | default('') }}"
     wa_h_back_lb_ip: "{{ _h.back_lb_ip | default('') }}"
     wa_h_protected_paths: "{{ ['/home/' ~ remote_username] + (_h.protected_paths | default([])) }}"
-    wa_h_services: "{{ _h.services }}"
+    # Services de code : un `services` explicite du profil l'emporte ; sinon `[back]`, plus `back-worker` SEULEMENT quand le worker
+    # est actif (`webapp_worker` on|true : un booléen YAML `on`/`true` arrive ici comme `True`). Worker éteint (défaut), le conteneur
+    # n'existe pas : l'exiger ferait échouer le contrôle d'exécution (« service back-worker introuvable ») et le compose statique.
+    # Lue par compose-check.yml (--services), webapp-security (violations.yml, runtime.yml) : UNE seule liste.
+    wa_h_services: >-
+      {{ _h.services if _h.services is defined
+         else (['back', 'back-worker'] if (wa_worker | string | lower) in ['on', 'true'] else ['back']) }}
     wa_h_allowed_binds: "{{ _h.allowed_bind_sources }}"
     wa_h_compose_file: "{{ webapp_compose_file | default(_h.compose_file) }}"
     wa_h_forbidden_groups: "{{ webapp_forbidden_groups }}"
