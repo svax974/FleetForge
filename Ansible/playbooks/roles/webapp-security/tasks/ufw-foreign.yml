@@ -21,14 +21,14 @@
       {%- for line in (wa_ufw_numbered.stdout_lines | default([])) if line is match('^[[] *[0-9]+[]]') -%}
       {%- set body = line | regex_replace('^[[] *[0-9]+[]][ ]*', '') -%}
       {#- Antislashs DOUBLÉS : une chaîne Jinja décode `\1` en caractère de contrôle. -#}
-      {%- set m = body | regex_search('^(.*?)[ ]+(ALLOW|DENY|REJECT|LIMIT)([ ]+(IN|OUT|FWD))?([ ]|$)', '\\1', '\\2', '\\4') -%}
+      {%- set m = body | regex_search('^(.*?)[ ]+(ALLOW|DENY|REJECT|LIMIT)([ ]+(IN|OUT|FWD))?([ ]|(?!(?s:.)))', '\\1', '\\2', '\\4') -%}
       {%- if not m -%}
         {%- set _ = out.append(line | trim) -%}
       {%- else -%}
         {%- set to = m[0] | regex_replace('[ ]*[(]v6[)]', '') | regex_replace('[ ]+on[ ]+[^ ]+', '') | trim -%}
         {%- set words = to.split() -%}
         {%- set last = words | last | default('') -%}
-        {%- if last is match('^[0-9][0-9,:]*(/(tcp|udp))?$') -%}
+        {%- if last is match('^[0-9][0-9,:]*(/(tcp|udp))?(?!(?s:.))') -%}
           {%- set hit = namespace(v=false) -%}
           {%- for part in last.split('/')[0].split(',') if part | length > 0 -%}
             {%- set bounds = part.split(':') -%}
@@ -39,7 +39,7 @@
           {%- if hit.v -%}{%- set _ = out.append(line | trim) -%}{%- endif -%}
         {%- elif m[1] in ['ALLOW', 'LIMIT'] and m[2] in ['', 'IN', None]
                  and (words | length) == 1
-                 and (last == 'Anywhere' or last is match('^[0-9a-fA-F:.]+(/[0-9]{1,3})?$')) -%}
+                 and (last == 'Anywhere' or last is match('^[0-9a-fA-F:.]+(/[0-9]{1,3})?(?!(?s:.))')) -%}
           {%- set _ = out.append(line | trim) -%}
         {%- endif -%}
       {%- endif -%}

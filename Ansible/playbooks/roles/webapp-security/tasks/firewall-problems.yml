@@ -47,7 +47,7 @@
         {#- Table lue mais SANS chaîne DOCKER-USER (ip6tables sans Docker IPv6) : comme une lecture en échec. -#}
         {%- set _lines = fam.result.stdout_lines | default([]) -%}
         {%- if (fam.result.rc | default(1)) != 0
-               or (_lines | select('match', '^-[NA] DOCKER-USER( |$)') | list | length) == 0 -%}
+               or (_lines | select('match', '^-[NA] DOCKER-USER( |(?!(?s:.)))') | list | length) == 0 -%}
           {%- if fam.required -%}{%- set ns.p = ns.p + [fam.family ~ ' : chaîne DOCKER-USER illisible ou absente'] -%}{%- endif -%}
         {%- else -%}
           {%- set all_lines = fam.result.stdout_lines | default([]) -%}

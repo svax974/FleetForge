@@ -51,8 +51,8 @@
   when:
     - hostvars[item].hostname is defined
     - hostvars[item].ansible_host is defined
-    - hostvars[item].ansible_host is match('^[0-9]{1,3}([.][0-9]{1,3}){3}$')
-    - hostvars[item].hostname is search('[.]' ~ cfdns_zone ~ '$')
+    - hostvars[item].ansible_host is match('^[0-9]{1,3}([.][0-9]{1,3}){3}(?!(?s:.))')
+    - hostvars[item].hostname is search('[.]' ~ cfdns_zone ~ '(?!(?s:.))')
   delegate_to: localhost
   become: false
   run_once: true
@@ -67,7 +67,7 @@
       ({{ 'pas de hostname' if hostvars[item].hostname is not defined
           else ('ansible_host non IPv4 : ' ~ (hostvars[item].ansible_host | default('absent')))
                if hostvars[item].ansible_host is not defined
-                  or not (hostvars[item].ansible_host is match('^[0-9]{1,3}([.][0-9]{1,3}){3}$'))
+                  or not (hostvars[item].ansible_host is match('^[0-9]{1,3}([.][0-9]{1,3}){3}(?!(?s:.))'))
           else ('nom hors de la zone ' ~ cfdns_zone) }})
   loop: "{{ cfdns_a_scope | default(groups[cfdns_group] | default([]) | sort) }}"
   when: item not in (cfdns_records | default([]) | map(attribute='host') | list)

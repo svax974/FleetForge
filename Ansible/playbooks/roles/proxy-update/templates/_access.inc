@@ -61,7 +61,7 @@
 {% set _oh = host | string %}
 {% set _oa = (hostvars[_oh].ansible_host | default('') | string) if _oh in hostvars else '' %}
 {% if _oh in (hostvars[access_entry].access_linked | default([]))
-      and _oa is match('^(0|[1-9][0-9]{0,2})([.](0|[1-9][0-9]{0,2})){3}$') and _oa == (_oa | trim)
+      and _oa is match('^(0|[1-9][0-9]{0,2})([.](0|[1-9][0-9]{0,2})){3}(?!(?s:.))') and _oa == (_oa | trim)
       and (_oa.splitlines() | length) == 1 and _oa not in _vpn_addresses %}
         allow {{ _oa }};  # serveur lié {{ _oh }}
 {% else %}
@@ -108,7 +108,7 @@
         {% for cidr in hostvars[host].access_local_cidrs | default([]) %}
         {% set _lc = namespace(ok=false, vpn=false) %}
         {% if cidr is string and (cidr.splitlines() | length) == 1 and cidr == (cidr | trim)
-              and cidr is match('^(0|[1-9][0-9]{0,2})([.](0|[1-9][0-9]{0,2})){3}/(0|[1-9][0-9]?)$') %}
+              and cidr is match('^(0|[1-9][0-9]{0,2})([.](0|[1-9][0-9]{0,2})){3}/(0|[1-9][0-9]?)(?!(?s:.))') %}
         {% set _o = cidr.split('/')[0].split('.') | map('int') | list %}
         {% set _len = cidr.split('/')[1] | int %}
         {% if (_o | max) <= 255 and _len >= 16 and _len <= 32 %}
@@ -116,7 +116,7 @@
         {% set _size = 2 ** (32 - _len) %}
         {% for v in groups['vpns'] | default([]) %}
         {% set _va = hostvars[v]['ansible_host'] | default('') | string %}
-        {% if _va is match('^[0-9]{1,3}([.][0-9]{1,3}){3}$') %}
+        {% if _va is match('^[0-9]{1,3}([.][0-9]{1,3}){3}(?!(?s:.))') %}
         {% set _vo = _va.split('.') | map('int') | list %}
         {% set _vn = ((_vo[0] * 256 + _vo[1]) * 256 + _vo[2]) * 256 + _vo[3] %}
         {% if _vn >= _net and _vn < _net + _size %}{% set _lc.vpn = true %}{% endif %}

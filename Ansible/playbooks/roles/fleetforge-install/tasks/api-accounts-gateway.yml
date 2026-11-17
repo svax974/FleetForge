@@ -18,7 +18,7 @@
     that:
       - _named | reject('mapping') | list | length == 0
       - _named | map('dict2items') | flatten | map(attribute='key') | reject('in', ['read', 'check', 'run']) | list | length == 0
-      - _named | map('dict2items') | flatten | map(attribute='value') | map('string') | reject('match', '^ffg_[a-z0-9_]{1,27}$') | list | length == 0
+      - _named | map('dict2items') | flatten | map(attribute='value') | map('string') | reject('match', '^ffg_[a-z0-9_]{1,27}(?!(?s:.))') | list | length == 0
     fail_msg: >-
       `ffg_upstreams[].users` d'une passerelle (groupe `fleetforge_gateways`) : un mapping {read, check, run} de noms
       `ffg_<…>` (minuscules, chiffres, _) — tout autre nom échapperait aux bornes des comptes de la passerelle.

@@ -14,13 +14,13 @@
   ansible.builtin.assert:
     that:
       - item.user is defined
-      - item.user is match('^[a-z][a-z0-9_]{0,31}$')
+      - item.user is match('^[a-z][a-z0-9_]{0,31}(?!(?s:.))')
       - item.mode | default('read') in ['read', 'check', 'run']
       - item.parcs | default([parc_name]) is not string
       - item.parcs | default([parc_name]) | length > 0
       - item.user not in [ff_web_user, ff_api_user]
       - item.deny_playbooks | default([]) is not string
-      - item.deny_playbooks | default([]) | reject('match', '^[A-Za-z0-9_.*?-]{1,128}$') | list | length == 0
+      - item.deny_playbooks | default([]) | reject('match', '^[A-Za-z0-9_.*?-]{1,128}(?!(?s:.))') | list | length == 0
       - item.max_hosts | default(1) is integer
       - item.max_hosts | default(1) | int >= 1
       - item.max_hosts | default(1) | int <= 1000
@@ -38,7 +38,7 @@
       - item.accept_own_checks | default(true) or (item.mode | default('read') == 'run' and item.accept_checks_from | default([]) | length > 0)
       - item.allow_playbooks is not defined or item.allow_playbooks is not string
       - item.allow_playbooks | default(['x']) | length > 0
-      - item.allow_playbooks | default([]) | reject('match', '^[A-Za-z0-9_.*?-]{1,128}$') | list | length == 0
+      - item.allow_playbooks | default([]) | reject('match', '^[A-Za-z0-9_.*?-]{1,128}(?!(?s:.))') | list | length == 0
       - item.allow_extra_vars | default(false) is boolean
       - item.allow_diff | default(false) is boolean
       - not (item.allow_extra_vars | default(false) or item.allow_diff | default(false)) or item.mode | default('read') == 'check'
