@@ -719,3 +719,7 @@ sémantique documentée, et par `nginx -t` au déploiement).
   dans ces locations. Exigé par `vhost --public`.
 - **`body: 0`** : `client_max_body_size 0` est ILLIMITÉ pour nginx. La grammaire des faits (`facts.yml`, toute location), la garde de la
   passerelle (limite exigée des locations publiques) et `vhost --public` exigent désormais un corps strictement positif.
+- **Vhost écrit à la main** : `parcs/<parc>/nginx/sites-enabled/<projet>.conf` REMPLACE le vhost générique (`proxy-update/tasks/
+  webapp-sites.yml`) et échapperait à la garde comme à `vhost --public`. `gateway-guard.yml` refuse l'entrée de la passerelle si ce
+  fichier existe (même chemin et même nom de projet que `webapp-sites.yml`, `webapp_project` sinon le nom de l'entrée ; contrôle par NOM
+  de fichier, le contenu n'est jamais lu) ou si `parc_name` manque.

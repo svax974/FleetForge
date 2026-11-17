@@ -213,6 +213,7 @@
     _fmt: __wa_internal_probe__
     _front_port: __wa_internal_probe__
     _h: __wa_internal_probe__
+    _hand_written_vhost: __wa_internal_probe__
     _host_octet: __wa_internal_probe__
     _hosts: __wa_internal_probe__
     _identity_addresses: __wa_internal_probe__
@@ -506,6 +507,7 @@
       - lookup('ansible.builtin.vars', '_fmt') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_front_port') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_h') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', '_hand_written_vhost') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_host_octet') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_hosts') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_identity_addresses') | string == '__wa_internal_probe__'

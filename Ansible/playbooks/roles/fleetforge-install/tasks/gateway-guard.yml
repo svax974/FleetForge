@@ -78,6 +78,24 @@
       par le propriétaire avant le premier déploiement).
     quiet: true
 
+# Un vhost écrit à la main `parcs/<parc>/nginx/sites-enabled/<projet>.conf` REMPLACE le vhost générique (proxy-update/tasks/
+# webapp-sites.yml : même chemin, même nom de projet) : il échapperait à tout ce que la passerelle exige du rendu (accès privé,
+# listes nommées, locations publiques de la liste blanche, certificat client, `vhost --public`). Refusé pour l'entrée de la passerelle.
+# Contrôle local, par NOM de fichier seulement (le contenu n'est jamais lu ni affiché).
+- name: Check no hand-written vhost replaces the generic one of the gateway
+  vars:
+    _hand_written_vhost: "{{ playbook_dir }}/../parcs/{{ parc_name | default('') }}/nginx/sites-enabled/{{ webapp_project | default(inventory_hostname) }}.conf"
+  ansible.builtin.assert:
+    that:
+      - parc_name is defined
+      - (parc_name | string | length) > 0
+      - not (_hand_written_vhost is file)
+    fail_msg: >-
+      {{ inventory_hostname }} : un vhost écrit à la main `parcs/{{ parc_name | default('?') }}/nginx/sites-enabled/{{ webapp_project | default(inventory_hostname) }}.conf`
+      existe (ou `parc_name` manque) : il remplacerait le vhost généré de la passerelle et échapperait à ses gardes
+      (`vhost`, `vhost --public`). Le retirer : la passerelle n'a que le vhost générique (`webapp_vhost_locations`).
+    quiet: true
+
 # E2 : locations PUBLIQUES (`mode: public`, aucune liste d'adresses ; la barrière est l'allow-list par credential de
 # l'application, plus le certificat client de NOTRE Cloudflare exigé par `_access.inc`). LISTE BLANCHE EXACTE : ces cinq
 # chemins, chacun avec SA `raw_uri`, relayé au back-lb, corps borné, délai ≤ 90 s (Cloudflare coupe à ~100 s) ; tout autre chemin

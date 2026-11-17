@@ -2761,6 +2761,70 @@ class GuardTests(unittest.TestCase):
                 self.assertNotEqual(code, 0)
                 self.assertIn("hors grammaire", out)
 
+    def guard_in_a_tree(self, files, inventory=None):
+        """GUARD_PLAY joué depuis `<arbre>/playbooks/` : `playbook_dir/../parcs/<parc>/nginx/sites-enabled/` est alors celui de l'arbre
+        factice, où `files` ({chemin relatif à parcs/: contenu}) pose des fichiers. Le contenu n'a aucune importance : seul le NOM compte."""
+        with tempfile.TemporaryDirectory() as tree:
+            os.makedirs(os.path.join(tree, "playbooks"))
+            with open(os.path.join(tree, "playbooks", "guard.yml"), "w", encoding="utf-8") as f:
+                f.write(GUARD_PLAY)
+            for name, content in files.items():
+                path = os.path.join(tree, "parcs", name)
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(content)
+            return run_local_play(None, inventory or guard_inventory(), {"apps.yml": "fleetforge-gateway: /nonexistent/app/\n"},
+                                  playbook=os.path.join(tree, "playbooks", "guard.yml"))
+
+    def test_a_hand_written_vhost_for_the_gateway_is_refused_because_it_would_replace_the_generic_one(self):
+        site = "demo/nginx/sites-enabled/"
+        code, out = self.guard_in_a_tree({site + "other.conf": "server {}\n"})
+        self.assertEqual(code, 0, "un autre vhost du parc ne gêne pas : " + out[-1500:])
+        self.assertIn("GUARD=OK", out)
+        code, out = self.guard_in_a_tree({site + "fleetforge-gateway.conf": "server {}\n"})
+        self.assertNotEqual(code, 0, out[-1500:])
+        self.assertIn("vhost écrit à la main", out)
+        self.assertIn("fleetforge-gateway.conf", out)
+        code, out = self.guard_in_a_tree({"other-parc/nginx/sites-enabled/fleetforge-gateway.conf": "server {}\n"})
+        self.assertEqual(code, 0, "le fichier d'un AUTRE parc n'est pas lu : " + out[-1500:])
+        # Le nom de projet est celui de webapp-sites.yml : `webapp_project` quand il est posé, sinon le nom de l'entrée.
+        named = guard_inventory(webapp_project="gw-project", webapp_app_id="fleetforge-gateway")
+        code, out = self.guard_in_a_tree({site + "gw-project.conf": "server {}\n"}, named)
+        self.assertNotEqual(code, 0, out[-1500:])
+        self.assertIn("gw-project.conf", out)
+        code, out = self.guard_in_a_tree({site + "fleetforge-gateway.conf": "server {}\n"}, named)
+        self.assertEqual(code, 0, "avec webapp_project, le fichier au nom de l'entrée ne remplace rien : " + out[-1500:])
+        # Un répertoire de ce nom n'est pas un vhost (le test `file` de webapp-sites.yml).
+        code, out = self.guard_in_a_tree({site + "fleetforge-gateway.conf/keep": ""})
+        self.assertEqual(code, 0, out[-1500:])
+        # La tâche jouée SEULE, dans un arbre factice : le répertoire lu est celui du parc de l'inventaire, jamais un parc écrit en dur.
+        guard = yaml.safe_load(open(os.path.join(ROLES, "fleetforge-install", "tasks", "gateway-guard.yml"), encoding="utf-8"))
+        task = next(t for t in guard if t.get("name") == "Check no hand-written vhost replaces the generic one of the gateway")
+
+        def alone(files, **variables):
+            with tempfile.TemporaryDirectory() as tree:
+                os.makedirs(os.path.join(tree, "playbooks"))
+                with open(os.path.join(tree, "playbooks", "task.yml"), "w", encoding="utf-8") as f:
+                    f.write(yaml.safe_dump([{"hosts": "localhost", "gather_facts": False, "vars": variables, "tasks": [task]}]))
+                for name in files:
+                    os.makedirs(os.path.join(tree, "parcs", os.path.dirname(name)), exist_ok=True)
+                    open(os.path.join(tree, "parcs", name), "w").close()
+                return run_local_play(None, playbook=os.path.join(tree, "playbooks", "task.yml"))[0]
+        mine = "nova/nginx/sites-enabled/localhost.conf"
+        self.assertNotEqual(alone([mine], parc_name="nova"), 0)
+        self.assertEqual(alone([mine], parc_name="other-parc"), 0, "le fichier d'un autre parc que celui de l'inventaire")
+        self.assertEqual(alone([], parc_name="nova"), 0)
+        # Sans parc connu le chemin n'a pas de sens : refusé plutôt que deviné.
+        self.assertNotEqual(alone([], parc_name=""), 0)
+        self.assertNotEqual(alone([]), 0)
+
+    def test_the_hand_written_vhost_check_reads_the_same_path_as_the_generic_vhost_selection(self):
+        sites = yaml.safe_load(open(os.path.join(ROLES, "proxy-update", "tasks", "webapp-sites.yml"), encoding="utf-8"))
+        text = json.dumps(sites)
+        self.assertIn("proxy_update_dir ~ '/sites-enabled/' ~ (h.webapp_project | default(n)) ~ '.conf') is file", text)
+        defaults = yaml.safe_load(open(os.path.join(ROLES, "proxy-update", "defaults", "main.yml"), encoding="utf-8"))
+        self.assertEqual(defaults["proxy_update_dir"], "{{ playbook_dir }}/../parcs/{{ parc_name }}/nginx")
+
     def test_the_gateway_mcp_location_must_check_the_raw_uri(self):
         no_raw = {k: v for k, v in MCP.items() if k != "raw_uri"}
         code, out = self.guard(guard_inventory(webapp_vhost_locations=[no_raw, WELL_KNOWN]))
