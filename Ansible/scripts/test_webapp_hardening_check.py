@@ -5275,6 +5275,36 @@ class DbMigrationTests(unittest.TestCase):
                 self.assertEqual(owned.get("PROJECT_NAME"), "fleetforge-gateway" if hardened else None, (hardened, key))
 
 
+class AdminWalletCheckTests(unittest.TestCase):
+    """webapp-setup/facts.yml : `webapp_admin_wallet` est vide/absent ou une adresse EVM (0x + 40 chiffres hexadécimaux)."""
+
+    GOOD = "0x38D9A01b67A92781c52DA94011F3D9102c55BbF8"
+
+    @classmethod
+    def setUpClass(cls):
+        tasks = check._load(os.path.join(ROLES, "webapp-setup", "tasks", "facts.yml"))
+        cls.cond = next(t for t in tasks if t.get("name", "").startswith("Check the admin wallet address"))[
+            "ansible.builtin.assert"]["that"]
+
+    def passes(self, **variables):
+        from ansible.parsing.dataloader import DataLoader
+        from ansible.template import Templar, trust_as_template
+        return Templar(loader=DataLoader(), variables=variables).template(
+            trust_as_template("{{ " + self.cond + " }}"))
+
+    def test_absent_and_empty_pass(self):
+        self.assertTrue(self.passes())
+        self.assertTrue(self.passes(webapp_admin_wallet=""))
+
+    def test_the_real_address_passes(self):
+        self.assertTrue(self.passes(webapp_admin_wallet=self.GOOD))
+
+    def test_typos_are_refused(self):
+        for bad in (self.GOOD[:-1], self.GOOD + "0", self.GOOD[2:], "0x" + "g" * 40, self.GOOD + "\n", " " + self.GOOD,
+                    self.GOOD.replace("0x", "0X")):
+            self.assertFalse(self.passes(webapp_admin_wallet=bad), repr(bad))
+
+
 class HardenFlagArgvTests(unittest.TestCase):
     """hardened.yml : run.sh reçoit `--harden` pour le compose durci par défaut, seulement si le run.sh de l'app le connaît."""
 

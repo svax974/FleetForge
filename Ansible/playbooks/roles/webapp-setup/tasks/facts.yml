@@ -23,6 +23,15 @@
     quiet: true
   tags: [always]
 
+- name: Check the admin wallet address (public, optional)
+  ansible.builtin.assert:
+    that: (webapp_admin_wallet | default('') | string) == '' or (webapp_admin_wallet | string) is match('^0x[0-9a-fA-F]{40}(?!(?s:.))')
+    fail_msg: >-
+      {{ inventory_hostname }} : `webapp_admin_wallet` n'est pas une adresse EVM (0x suivi de 40 chiffres hexadécimaux) ;
+      rien n'a été écrit dans ADMIN_WALLET.
+    quiet: true
+  tags: [always]
+
 - name: Work out the identity, the ports and the front mode of the application
   ansible.builtin.set_fact:
     wa_project: "{{ webapp_project | default(inventory_hostname) }}"

@@ -31,7 +31,8 @@
 #                         à 127.0.0.1 par défaut : `0.0.0.0` pour des proxies DISTANTS (le filtre est alors DOCKER-USER)
 #   webapp_extra_secrets  secrets propres à l'app : liste de { key, kind (hex_32|base64_32|password|api_key), length?, note? }
 #   webapp_back_env_example  modèle du back/.env d'une app neuve (défaut back/.env.example)
-#   webapp_admin_wallet   ADMIN_WALLET (adresse publique, clé « si absente » : jamais réécrite)
+#   webapp_admin_wallet   ADMIN_WALLET (adresse publique, clé « si absente » : jamais réécrite). Posée PAR PARC dans
+#                         group_vars/<parc>.yml (web3c, papanglabs), surchargeable par entrée ; format contrôlé (facts.yml)
 #   webapp_vhost_locations  blocs supplémentaires du vhost : liste de { path, regex?, mode?, ws?, body?, timeout?, buffering?,
 #                         upstream? (front | back : back-lb), priority? (`^~`), access? }. `access: { hosts, whitelist?,
 #                         vpn_addresses?, v6_min_prefix? }` remplace le mode par une liste NOMMÉE (proxy-update/_named_access.inc) :
