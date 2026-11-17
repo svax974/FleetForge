@@ -5275,6 +5275,44 @@ class DbMigrationTests(unittest.TestCase):
                 self.assertEqual(owned.get("PROJECT_NAME"), "fleetforge-gateway" if hardened else None, (hardened, key))
 
 
+class HardenFlagArgvTests(unittest.TestCase):
+    """hardened.yml : run.sh reçoit `--harden` pour le compose durci par défaut, seulement si le run.sh de l'app le connaît."""
+
+    DEFAULT = "scripts/docker-compose-hardened.yml"
+
+    @classmethod
+    def setUpClass(cls):
+        tasks = check._load(os.path.join(ROLES, "webapp-deploy", "tasks", "hardened.yml"))
+        block = next(t for t in tasks if t.get("name", "").startswith("Deploy, verify, or stop"))["block"]
+        names = [t.get("name", "") for t in block]
+        cls.look_task = next(t for t in block if t.get("name", "").startswith("Look for the --harden flag"))
+        cls.run_task = next(t for t in block if t.get("name", "").startswith("Run the deployment scripts"))
+        cls.look_before_run = names.index(cls.look_task["name"]) < names.index(cls.run_task["name"])
+
+    def argv(self, compose, rc):
+        from ansible.parsing.dataloader import DataLoader
+        from ansible.template import Templar, trust_as_template
+        variables = dict(wa_env="prod", webapp_phase="all", webapp_tag="", wa_migrate=False, wa_update_common=False,
+                         wa_h_compose_file=compose, wa_h_harden_flag={"rc": rc})
+        return Templar(loader=DataLoader(), variables=variables).template(
+            trust_as_template(self.run_task["ansible.builtin.command"]["argv"]))
+
+    def test_the_flag_is_passed_for_the_default_hardened_compose_when_run_sh_knows_it(self):
+        self.assertEqual(self.argv(self.DEFAULT, 0), ["./scripts/run.sh", "prod", "--harden", "--no-update-common"])
+
+    def test_an_older_run_sh_keeps_the_variable_only(self):
+        self.assertNotIn("--harden", self.argv(self.DEFAULT, 1))
+
+    def test_another_hardened_compose_stays_on_the_variable(self):
+        self.assertNotIn("--harden", self.argv("scripts/autre-durci.yml", 0))
+
+    def test_the_variable_is_still_exported_and_the_detection_runs_first(self):
+        self.assertEqual(self.run_task["environment"]["COMPOSE_FILE_NAME"], "{{ wa_h_compose_file }}")
+        self.assertTrue(self.look_before_run)
+        self.assertIs(self.look_task["check_mode"], False)
+        self.assertEqual(self.look_task["ansible.builtin.command"]["argv"][:3], ["grep", "-q", "-e"])
+
+
 class EnvGrammarTests(unittest.TestCase):
     """back/.env d'une app durcie : grammaire stricte et aucune clé en double (programme de hardened.yml, joué tel quel)."""
 

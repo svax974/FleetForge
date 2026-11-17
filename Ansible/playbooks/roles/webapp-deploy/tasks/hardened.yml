@@ -188,10 +188,26 @@
           {{ wa_h_compose_check.rc == 0
              and (webapp_phase not in ['all', 'deploy'] or (wa_firewall_problems | default('x') | trim | length == 0)) }}
 
+    # Le drapeau `--harden` de run.sh (vx-public >= 50dd11c) remplace la variable COMPOSE_FILE_NAME pour le compose durci PAR
+    # DÉFAUT : un hôte dont le sous-module est plus ancien ne le connaît pas (option refusée), il garde la variable, toujours
+    # posée ci-dessous et dans back/.env (même valeur : aucun conflit). Un compose durci AUTRE que le défaut reste par variable.
+    - name: Look for the --harden flag in run.sh of the application
+      ansible.builtin.command:
+        argv: ['grep', '-q', '-e', '--harden', 'scripts/run.sh']
+        chdir: "{{ wa_src }}"
+      delegate_to: localhost
+      become: false
+      register: wa_h_harden_flag
+      changed_when: false
+      failed_when: wa_h_harden_flag.rc not in [0, 1]
+      check_mode: false
+      when: wa_h_predeploy_checked | bool
+
     - name: Run the deployment scripts of the hardened application
       ansible.builtin.command:
         argv: >-
           {{ ['./scripts/run.sh', wa_env]
+             + (['--harden'] if (wa_h_compose_file == 'scripts/docker-compose-hardened.yml' and (wa_h_harden_flag.rc | default(1)) == 0) else [])
              + (['--build'] if webapp_phase == 'build' else ['--push'] if webapp_phase == 'push' else ['--deploy'] if webapp_phase == 'deploy' else [])
              + (['--tag=' ~ webapp_tag] if webapp_tag | length > 0 else [])
              + (['--migrate'] if (wa_migrate | bool and webapp_phase in ['all', 'deploy']) else [])

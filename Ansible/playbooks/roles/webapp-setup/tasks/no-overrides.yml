@@ -78,6 +78,7 @@
     wa_fw_script: __wa_internal_probe__
     wa_fw_script_file: __wa_internal_probe__
     wa_h_cgroup_probe: __wa_internal_probe__
+    wa_h_harden_flag: __wa_internal_probe__
     wa_h_local_proxy: __wa_internal_probe__
     _order_awk: __wa_internal_probe__
     _nginx_probe: __wa_internal_probe__
@@ -380,6 +381,7 @@
       - lookup('ansible.builtin.vars', 'wa_fw_script') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', 'wa_fw_script_file') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', 'wa_h_cgroup_probe') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'wa_h_harden_flag') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', 'wa_h_local_proxy') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_order_awk') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', '_nginx_probe') | string == '__wa_internal_probe__'

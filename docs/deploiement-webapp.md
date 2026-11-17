@@ -109,7 +109,10 @@ du parc**, et les clés de chiffrement à sauvegarder hors du serveur. Restent m
     propre à l'app (proxies admis distants, règles en tête, unité `webapp-<projet>-firewall`), compose durci
     (`scripts/docker-compose-hardened.yml` du gabarit, § 8 de l'étude) contrôlé par `scripts/webapp_hardening_check.py`
     AVANT `run.sh`, durcissement RÉEL vérifié après (`--tags hardening` pour le recontrôle seul), conteneurs ARRÊTÉS au
-    moindre écart, vhost qui réécrit X-Forwarded-For, sondes `firewall_<port>` ;
+    moindre écart, vhost qui réécrit X-Forwarded-For, sondes `firewall_<port>` ; le compose durci par défaut est demandé à
+    `run.sh` par son drapeau `--harden` quand le `run.sh` de l'app le connaît (vx-public >= 50dd11c, détecté par `grep`), et
+    TOUJOURS par `COMPOSE_FILE_NAME` (environnement et `back/.env`, même valeur : aucun conflit) ; un autre compose durci
+    ne passe que par la variable ;
     Sortie du sous-réseau bornée : `webapp_hardening.egress_allow: [{name, proxies: true | inventory_host | host, port,
     proto, masquerade_ack?}]` (vide = rien, hors réponses, trafic interne et DNS de la machine), FORWARD pour une autre
     machine, INPUT pour celle-ci — une ligne vers un proxy DISTANT (MASQUERADE : il voit l'adresse de la machine) exige
