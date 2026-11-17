@@ -46,6 +46,9 @@
   register: wa_h_env_grammar
   changed_when: false
   check_mode: false
+  # En `--check` le rendu du .env est simulé : le fichier n'existe pas (premier déploiement) et le refus qui lit ce
+  # résultat est lui-même sauté.
+  when: not ansible_check_mode
 
 - name: Fail on a back env line outside the grammar or a duplicated key
   ansible.builtin.assert:
@@ -78,6 +81,7 @@
   register: wa_h_switches
   changed_when: false
   check_mode: false
+  when: not ansible_check_mode
 
 - name: Fail on a forbidden setting of the back env file
   ansible.builtin.assert:
