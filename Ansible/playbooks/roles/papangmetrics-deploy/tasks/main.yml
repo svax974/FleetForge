@@ -10,7 +10,7 @@
 # `-e` l'emporte sur l'inventaire : `pm_dir` désigne le script lancé par cron.
 - name: Check the code directory is a plain absolute path
   ansible.builtin.assert:
-    that: pm_dir is match('^/[A-Za-z0-9._/-]*$')
+    that: pm_dir is match('^/[A-Za-z0-9._/-]*(?!(?s:.))')
     fail_msg: "pm_dir : chemin absolu sans espace ni métacaractère ({{ pm_dir }})."
     quiet: true
   tags: [always]

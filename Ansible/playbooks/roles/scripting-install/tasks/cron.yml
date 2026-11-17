@@ -28,7 +28,7 @@
             {%- set ok = f | length >= 3 and f[0] in ['@reboot', '@yearly', '@annually', '@monthly', '@weekly', '@daily', '@midnight', '@hourly'] -%}
             {%- set user = f[1] if f | length > 1 else '' -%}
           {%- else -%}
-            {%- set ok = f | length >= 7 and (f[:5] | select('match', '^[0-9A-Za-z*/,-]+$') | list | length) == 5 -%}
+            {%- set ok = f | length >= 7 and (f[:5] | select('match', '^[0-9A-Za-z*/,-]+(?!(?s:.))') | list | length) == 5 -%}
             {%- set user = f[5] if f | length > 5 else '' -%}
           {%- endif -%}
           {%- if not ok -%}

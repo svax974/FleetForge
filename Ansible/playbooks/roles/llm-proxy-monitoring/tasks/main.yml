@@ -58,7 +58,7 @@
       Sonde(s) secondaire(s) à 0 :
       {{ llm_proxy_probe.content.split('\n')
          | select('search', 'service_check_up\\{service="llm-proxy"')
-         | select('search', ' 0$')
+         | select('search', ' 0(?!(?s:.))')
          | list }}
       — vérifier les noms de conteneurs (`docker ps` sur
       {{ ansible_host }}) contre llm-proxy-monitoring/defaults.

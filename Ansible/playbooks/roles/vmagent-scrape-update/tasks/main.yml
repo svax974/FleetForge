@@ -91,7 +91,7 @@
 # définition que la tâche suivante.
 - name: Check the target interval (it is read into a sed program)
   ansible.builtin.assert:
-    that: _vmagent_target is match('^([0-9]+(ms|s|m|h|d|w|y))+$')
+    that: _vmagent_target is match('^([0-9]+(ms|s|m|h|d|w|y))+(?!(?s:.))')
     fail_msg: "Intervalle attendu sous la forme 10s, 1m30s… : {{ _vmagent_target }}"
     quiet: true
   vars:

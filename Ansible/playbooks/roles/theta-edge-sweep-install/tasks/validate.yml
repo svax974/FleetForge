@@ -17,7 +17,7 @@
     that:
       - theta_wallet is defined
       - theta_wallet is string
-      - theta_wallet is match('^0x[0-9a-fA-F]{40}$')
+      - theta_wallet is match('^0x[0-9a-fA-F]{40}(?!(?s:.))')
     fail_msg: >-
       theta_wallet doit être une adresse Ethereum entre guillemets : 0x + 40
       hexadécimaux (group_vars du parc). Reçu :

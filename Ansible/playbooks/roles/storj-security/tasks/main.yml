@@ -56,7 +56,7 @@
 - name: Fail when DOCKER-USER blocks the P2P port
   ansible.builtin.assert:
     that: >-
-      storjsec_docker_user.stdout_lines | select('search', '--dport 28967( |$)')
+      storjsec_docker_user.stdout_lines | select('search', '--dport 28967( |(?!(?s:.)))')
       | select('search', '-j (DROP|REJECT)') | list | length == 0
     fail_msg: >-
       DOCKER-USER bloque le port interne 28967 du nœud : le nœud Storj ne serait plus

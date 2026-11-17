@@ -60,7 +60,7 @@
       - item.products is defined and item.products is sequence and item.products is not string
       - item.source_repo in (scripting_repos | map(attribute='name'))
       - item.name not in (scripting_repos | map(attribute='name'))
-      - item.name is match('^[A-Za-z0-9_.-]+$')
+      - item.name is match('^[A-Za-z0-9_.-]+(?!(?s:.))')
     fail_msg: >-
       Instance d'autodéploiement invalide (« {{ item.name | default('?') }} ») :
       name (simple, distinct des dépôts), source_repo (nom d'un dépôt de

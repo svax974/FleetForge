@@ -11,12 +11,12 @@
   ansible.builtin.assert:
     that: >-
       xmrigsec_sockets.stdout_lines
-      | select('search', ':' ~ xmrigsec_api_port ~ '( |$)')
+      | select('search', ':' ~ xmrigsec_api_port ~ '( |(?!(?s:.)))')
       | reject('search', ' (127[.]0[.]0[.]1|.::1[]]):')
       | list | length == 0
     fail_msg: >-
       L'API de XMRig ({{ xmrigsec_api_port }}) écoute au-delà de la boucle locale :
-      {{ xmrigsec_sockets.stdout_lines | select('search', ':' ~ xmrigsec_api_port ~ '( |$)') | list }}
+      {{ xmrigsec_sockets.stdout_lines | select('search', ':' ~ xmrigsec_api_port ~ '( |(?!(?s:.)))') | list }}
     quiet: true
 
 - name: Read the miner configuration permissions

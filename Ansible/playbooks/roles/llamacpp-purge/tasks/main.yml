@@ -10,7 +10,7 @@
 
 - name: Set discovered instance ids
   ansible.builtin.set_fact:
-    llamacpp_found_instances: "{{ ansible_facts.services.keys() | select('match', '^llamacpp-[0-9]+[.]service$') | map('regex_replace', '^llamacpp-([0-9]+)[.]service$', '\\1') | list }}"
+    llamacpp_found_instances: "{{ ansible_facts.services.keys() | select('match', '^llamacpp-[0-9]+[.]service(?!(?s:.))') | map('regex_replace', '^llamacpp-([0-9]+)[.]service$', '\\1') | list }}"
 
 - name: Remove instances, engine, probe and Prometheus targets
   ansible.builtin.include_role:

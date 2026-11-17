@@ -8,9 +8,9 @@
 - name: Check the tool paths are plain absolute paths
   ansible.builtin.assert:
     that:
-      - agenthub_macos_sdkmanager is match('^/[A-Za-z0-9._/-]*$')
-      - agenthub_macos_flutter_dir is match('^/[A-Za-z0-9._/-]*$')
-      - agenthub_android_sdk_dir is match('^/[A-Za-z0-9._/-]*$')
+      - agenthub_macos_sdkmanager is match('^/[A-Za-z0-9._/-]*(?!(?s:.))')
+      - agenthub_macos_flutter_dir is match('^/[A-Za-z0-9._/-]*(?!(?s:.))')
+      - agenthub_android_sdk_dir is match('^/[A-Za-z0-9._/-]*(?!(?s:.))')
     fail_msg: "agenthub_macos_sdkmanager, agenthub_macos_flutter_dir, agenthub_android_sdk_dir : chemins absolus sans espace ni métacaractère."
     quiet: true
   tags: [always]

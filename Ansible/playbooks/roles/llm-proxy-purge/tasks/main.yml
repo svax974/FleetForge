@@ -61,7 +61,7 @@
 # Le nom entre dans le motif `grep -E '^<nom>[_-]'` qui désigne ce qui est SUPPRIMÉ.
 - name: Check the project name (it becomes a purge pattern)
   ansible.builtin.assert:
-    that: llm_proxy_project_name is match('^[a-z0-9][a-z0-9_-]{0,62}$')
+    that: llm_proxy_project_name is match('^[a-z0-9][a-z0-9_-]{0,62}(?!(?s:.))')
     fail_msg: "llm_proxy_project_name : minuscules, chiffres, _ et - seulement"
     quiet: true
 

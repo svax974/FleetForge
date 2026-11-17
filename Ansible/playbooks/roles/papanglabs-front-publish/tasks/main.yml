@@ -60,7 +60,7 @@
 # pour deploy-full.sh. Une seule interprétation, donc un seul comportement.
 - name: Check the env file name (it is read into a shell message)
   ansible.builtin.assert:
-    that: pgf_env_file is match('^[A-Za-z0-9._/-]+$')
+    that: pgf_env_file is match('^[A-Za-z0-9._/-]+(?!(?s:.))')
     fail_msg: "pgf_env_file : un chemin relatif (lettres, chiffres, . _ / -)"
     quiet: true
 

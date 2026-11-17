@@ -86,7 +86,7 @@
     state: absent
   loop: >-
     {{ theta_edge_existing.files | map(attribute='path') | map('basename')
-       | map('regex_replace', '^instance', '') | select('match', '^[0-9]+$')
+       | map('regex_replace', '^instance', '') | select('match', '^[0-9]+(?!(?s:.))')
        | map('int') | reject('in', theta_edge_ids) | list }}
   failed_when: false
 
