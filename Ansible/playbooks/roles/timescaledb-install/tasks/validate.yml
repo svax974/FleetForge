@@ -8,10 +8,10 @@
 - name: Database and role names are plain values
   ansible.builtin.assert:
     that:
-      - tsdb_db is match('^[A-Za-z0-9_][A-Za-z0-9_.-]*$')
-      - tsdb_user is match('^[A-Za-z0-9_][A-Za-z0-9_.-]*$')
-      - tsdb_repl_user is match('^[A-Za-z0-9_][A-Za-z0-9_.-]*$')
-      - (tsdb_port | string) is match('^[0-9]+$')
+      - tsdb_db is match('^[A-Za-z0-9_][A-Za-z0-9_.-]*(?!(?s:.))')
+      - tsdb_user is match('^[A-Za-z0-9_][A-Za-z0-9_.-]*(?!(?s:.))')
+      - tsdb_repl_user is match('^[A-Za-z0-9_][A-Za-z0-9_.-]*(?!(?s:.))')
+      - (tsdb_port | string) is match('^[0-9]+(?!(?s:.))')
     fail_msg: >-
       tsdb_db, tsdb_user, tsdb_repl_user : nom simple ([A-Za-z0-9_.-], sans `-` en tête) ; tsdb_port : un nombre.
     quiet: true

@@ -63,7 +63,7 @@
         {%- if (hc.SecurityOpt | default([], true) | select('search', 'unconfined') | list | length) > 0 -%}
           {%- set ns.v = ns.v + [name ~ ' : seccomp/AppArmor unconfined'] -%}
         {%- endif -%}
-        {%- if (hc.SecurityOpt | default([], true) | select('match', '^no-new-privileges(:true)?$') | list | length) == 0 -%}
+        {%- if (hc.SecurityOpt | default([], true) | select('match', '^no-new-privileges(:true)?(?!(?s:.))') | list | length) == 0 -%}
           {%- set ns.v = ns.v + [name ~ ' : sans no-new-privileges'] -%}
         {%- endif -%}
         {%- for m in c.Mounts | default([], true) if m.Type | default('') == 'bind' and (m.Source | default('')) not in wa_app.wa_h_allowed_binds -%}
@@ -111,7 +111,7 @@
         {#- CHAQUE adresse du conteneur DANS le sous-réseau dédié (pas seulement le réseau qui le porte). -#}
         {%- for ip in ips -%}
           {%- set _ok = namespace(v=false) -%}
-          {%- if (ip | string) is match('^[0-9]{1,3}([.][0-9]{1,3}){3}$') -%}
+          {%- if (ip | string) is match('^[0-9]{1,3}([.][0-9]{1,3}){3}(?!(?s:.))') -%}
             {%- set _io = (ip | string).split('.') | map('int') | list -%}
             {%- set _iv = ((_io[0] * 256 + _io[1]) * 256 + _io[2]) * 256 + _io[3] -%}
             {%- set _ok.v = _lo <= _iv and _iv < _hi -%}

@@ -30,20 +30,32 @@
    APRÈS remplacement — il ne faut donc PAS y admettre les plages Cloudflare.
 
    Plages : `cloudflare_ips` (group_vars/all.yml), seule liste du parc.
-   Modèle écrit à la main : openclaw.conf, ctdapi.conf (à migrer).
+   Modèle écrit à la main : openclaw.conf, ctdapi.conf (à migrer). ATTENTION : ces deux-là lisent
+   CF-Connecting-IP SANS ce partiel ni certificat client (Authenticated Origin Pulls n'est activé
+   que sur les noms d'entrées `cloudflare_front`/`cloudflare_named`, `cfopull_hostnames`) : leur
+   filtre d'adresse a la faiblesse décrite ci-dessus, non corrigée tant que le nom n'est pas migré.
 
    Authenticated Origin Pulls : ce partiel pose AUSSI la vérification du
    certificat client que Cloudflare présente (autorité PROPRE au parc,
    deploy-cloudflare-origin-pull.yml), en `optional` : rien n'est exigé ici.
    C'est `_access.inc` qui l'exige, dans chaque location en mode `public` d'une
    entrée `cloudflare_front` — une location privée garde son filtre d'adresse et
-   reste joignable par ses appelants directs (Alertmanager local…).
+   reste joignable par ses appelants directs (Alertmanager local…), mais refuse (403)
+   une socket d'une plage Cloudflare SANS certificat client vérifié : n'importe quel
+   client Cloudflare peut y forger CF-Connecting-IP et passer le filtre d'adresse
+   (`geo` + `map` d'`_cloudflare_untrusted.inc`, à inclure AVANT le `server {}` par un
+   vhost écrit à la main ; `webapp.conf.j2` le fait pour les deux attributs).
    Pourquoi pas un filtre sur `cloudflare_ips` : ces plages sont communes à TOUS
    les clients Cloudflare (n'importe quel compte peut pointer un nom vers nos
    proxies) ; le certificat client, lui, n'est présenté que pour NOTRE zone.
    L'autorité est déposée par proxy-update (main et deploy-one-site) AVANT tout
    gabarit : `nginx -t` refuse un `ssl_client_certificate` absent. #}
 {% if (hostvars[access_entry].cloudflare_front | default(false) | bool) or (hostvars[access_entry].cloudflare_named | default(false) | bool) %}
+{# FERMÉ : un vhost qui lit CF-Connecting-IP doit avoir posé `cf_untrusted_var` ET inclus `_cloudflare_untrusted.inc` avant son
+   `server {}`. Sans la variable, `_access.inc` / `_named_access.inc` ne poseraient AUCUNE garde pour `cloudflare_front` : le rendu
+   échoue ici (variable non définie, dont le nom dit quoi ajouter). Un vhost qui n'inclut pas ce partiel (agenthub-preview.conf,
+   openclaw.conf, ctdapi.conf) n'est pas concerné. Si la variable est posée mais le partiel oublié, `nginx -t` refuse la variable inconnue. #}
+{% if cf_untrusted_var is not defined %}{{ ERREUR_rendu_refuse__un_vhost_qui_inclut__cloudflare_front_inc__doit_poser__cf_slug__et__cf_untrusted_var__puis_inclure__cloudflare_untrusted_inc__avant_son_server }}{% endif %}
     # Derrière Cloudflare ({{ access_entry }}) : IP cliente lue dans CF-Connecting-IP.
     {% for ip in cloudflare_ips %}
     set_real_ip_from {{ ip }};

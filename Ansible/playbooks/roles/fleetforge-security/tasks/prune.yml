@@ -53,7 +53,7 @@
   ansible.builtin.set_fact:
     ff_ufw_foreign: >-
       {{ ff_ufw_added.stdout_lines
-         | select('search', '(port |allow |deny )' ~ ff_port ~ '(/| |$)')
+         | select('search', '(port |allow |deny )' ~ ff_port ~ '(/| |(?!(?s:.)))')
          | reject('search', 'comment .(' ~ ff_ufw_owner_service ~ '|' ~ ff_ufw_owner_scrape ~ ')')
          | list }}
 

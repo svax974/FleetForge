@@ -12,7 +12,7 @@
 
 - name: Set discovered instance units
   ansible.builtin.set_fact:
-    llamacpp_found_units: "{{ ansible_facts.services.keys() | select('match', '^llamacpp-.*[.]service$') | list }}"
+    llamacpp_found_units: "{{ ansible_facts.services.keys() | select('match', '^llamacpp-.*[.]service(?!(?s:.))') | list }}"
 
 - name: Stop and disable llama.cpp instances
   ansible.builtin.systemd:

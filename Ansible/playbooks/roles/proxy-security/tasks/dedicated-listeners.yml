@@ -42,11 +42,11 @@
       {%- set out = [22, 80, 443, ansible_port | default(22) | int] -%}
       {%- for k in _reserved_names -%}
       {%- set v = lookup('ansible.builtin.vars', k, default='') | string -%}
-      {%- if v is match('^[0-9]+$') -%}{%- set _ = out.append(v | int) -%}{%- endif -%}
+      {%- if v is match('^[0-9]+(?!(?s:.))') -%}{%- set _ = out.append(v | int) -%}{%- endif -%}
       {%- endfor -%}
       {{ out }}
     _vpn_addresses: "{{ groups['vpns'] | default([]) | map('extract', hostvars, 'ansible_host') | map('string') | list }}"
-    _ipv4: '^(0|[1-9][0-9]{0,2})([.](0|[1-9][0-9]{0,2})){3}$'
+    _ipv4: '^(0|[1-9][0-9]{0,2})([.](0|[1-9][0-9]{0,2})){3}(?!(?s:.))'
     _computed: >-
       {%- set ns = namespace(listeners=[], problems=[], ports=[]) -%}
       {%- for n in groups['all'] if hostvars[n].dedicated_listeners is defined -%}
@@ -63,19 +63,19 @@
       {%- set lname = l.name | default('') | string -%}
       {%- set lport = l.port | default('') | string -%}
       {%- set ok = namespace(v=true) -%}
-      {%- if lname is not match('^[a-z][a-z0-9_-]{0,31}$') or lname in names.seen -%}
+      {%- if lname is not match('^[a-z][a-z0-9_-]{0,31}(?!(?s:.))') or lname in names.seen -%}
       {%- set ns.problems = ns.problems + [nm ~ ' : nom d écouteur invalide ou en double'] -%}
       {%- set ok.v = false -%}
       {%- endif -%}
       {%- set names.seen = names.seen + [lname] -%}
-      {%- if lport is not match('^[1-9][0-9]{3,4}$') or lport | int > 65535 or lport | int < 1024 -%}
+      {%- if lport is not match('^[1-9][0-9]{3,4}(?!(?s:.))') or lport | int > 65535 or lport | int < 1024 -%}
       {%- set ns.problems = ns.problems + [nm ~ '/' ~ (lname | regex_replace('[^a-z0-9_-]', '?')) ~ ' : port hors 1024-65535'] -%}
       {%- set ok.v = false -%}
       {%- elif lport | int in _reserved or lport | int in ns.ports or lport | int in [hv.app_port | default(0) | int, hv.back_port | default(0) | int] -%}
       {%- set ns.problems = ns.problems + [nm ~ '/' ~ lname ~ ' : port ' ~ lport ~ ' déjà réservé, utilisé par l application ou déclaré deux fois'] -%}
       {%- set ok.v = false -%}
       {%- endif -%}
-      {%- if lport is match('^[0-9]+$') -%}{%- set ns.ports = ns.ports + [lport | int] -%}{%- endif -%}
+      {%- if lport is match('^[0-9]+(?!(?s:.))') -%}{%- set ns.ports = ns.ports + [lport | int] -%}{%- endif -%}
       {%- set clients = l.clients | default([]) -%}
       {%- set addrs = namespace(v=[]) -%}
       {%- if clients is string or clients is mapping or clients is not iterable or clients | length == 0 -%}

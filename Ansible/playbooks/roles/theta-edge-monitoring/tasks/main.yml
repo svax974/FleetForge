@@ -79,7 +79,7 @@
   delay: 5
   until: >-
     theta_edge_probe.status | default(0) == 200 and
-    (theta_edge_probe.content.split('\n') | select('match', '^theta_edge_up[{].*[}] 1$') | list | length)
+    (theta_edge_probe.content.split('\n') | select('match', '^theta_edge_up[{].*[}] 1(?!(?s:.))') | list | length)
     == theta_edge_instances | int
   changed_when: false
 

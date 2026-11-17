@@ -10,7 +10,7 @@
 # Les noms entrent dans une requête SQL entre apostrophes : grammaire des slots PostgreSQL.
 - name: Check the replication slot names (they are read into SQL)
   ansible.builtin.assert:
-    that: tsdb_slots | reject('match', '^[a-z0-9_]{1,63}$') | list | length == 0
+    that: tsdb_slots | reject('match', '^[a-z0-9_]{1,63}(?!(?s:.))') | list | length == 0
     fail_msg: "tsdb_slots : minuscules, chiffres et _ seulement (63 au plus)"
     quiet: true
 

@@ -5,7 +5,7 @@
 # `-e` wins over the inventory: `brk_home` names the programs run below (bitcoin-cli, brk).
 - name: Check the BRK home is a plain absolute path
   ansible.builtin.assert:
-    that: brk_home is match('^/[A-Za-z0-9._/-]*$')
+    that: brk_home is match('^/[A-Za-z0-9._/-]*(?!(?s:.))')
     fail_msg: "brk_home : chemin absolu sans espace ni métacaractère ({{ brk_home }})."
     quiet: true
   tags: [always]

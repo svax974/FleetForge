@@ -33,7 +33,7 @@
   vars:
     agenthub_env_differing: >-
       {{ agenthub_env_status.stdout_lines
-         | select('search', '[ \t\n\r\f\v]+differs[ \t\n\r\f\v]*$') | map('split') | map(attribute=1) | list }}
+         | select('search', '[ \t\n\r\f\v]+differs[ \t\n\r\f\v]*(?!(?s:.))') | map('split') | map(attribute=1) | list }}
   ansible.builtin.fail:
     msg: >-
       Le .env {{ agenthub_env_differing | join(' et ') }} de {{ agenthub_src }} diffère de la copie du

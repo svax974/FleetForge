@@ -14,7 +14,7 @@
   ansible.builtin.assert:
     that:
       - ff_ansible_repo | length > 0
-      - ff_ansible_branch is match('^[A-Za-z0-9][A-Za-z0-9._/-]*$')
+      - ff_ansible_branch is match('^[A-Za-z0-9][A-Za-z0-9._/-]*(?!(?s:.))')
       - "'..' not in ff_ansible_branch"
       - ff_ansible_cache_keep | int >= 1
       - ff_ansible_cache_keep | int <= 50
@@ -81,8 +81,8 @@
 - name: Check the port of the repository
   ansible.builtin.assert:
     that:
-      - ff_ansible_repo_host is match('^[A-Za-z0-9.-]+$')
-      - ff_ansible_repo_port == '' or (ff_ansible_repo_port is match('^[0-9]{1,5}$') and ff_ansible_repo_port | int < 65536)
+      - ff_ansible_repo_host is match('^[A-Za-z0-9.-]+(?!(?s:.))')
+      - ff_ansible_repo_port == '' or (ff_ansible_repo_port is match('^[0-9]{1,5}(?!(?s:.))') and ff_ansible_repo_port | int < 65536)
     fail_msg: >-
       Hôte ou port du dépôt illisible dans `ff_ansible_repo` ({{ ff_ansible_repo_host | default('?') }}:{{ ff_ansible_repo_port | default('') }}) :
       forme `ssh://git@hôte[:port]/chemin.git` ou `git@hôte:chemin.git` (voir RUNNING.md).

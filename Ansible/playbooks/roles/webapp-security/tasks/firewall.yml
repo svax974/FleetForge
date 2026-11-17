@@ -76,24 +76,24 @@
 - name: Check the values written into the firewall script
   ansible.builtin.assert:
     that:
-      - wa_app.wa_front_port | string is match('^[0-9]{2,5}$')
-      - wa_app.wa_back_port | string is match('^[0-9]{2,5}$')
+      - wa_app.wa_front_port | string is match('^[0-9]{2,5}(?!(?s:.))')
+      - wa_app.wa_back_port | string is match('^[0-9]{2,5}(?!(?s:.))')
       - wa_app.wa_front_port | int != wa_app.wa_back_port | int
-      - wa_app.wa_h_subnet is match('^[0-9]{1,3}([.][0-9]{1,3}){3}/[0-9]{1,2}$')
-      - wa_app.wa_h_subnet is not match('^172[.]16[.]0[.]0/12$')
-      - wa_app.wa_h_remote_proxies | reject('match', '^[0-9]{1,3}([.][0-9]{1,3}){3}$') | list | length == 0
+      - wa_app.wa_h_subnet is match('^[0-9]{1,3}([.][0-9]{1,3}){3}/[0-9]{1,2}(?!(?s:.))')
+      - wa_app.wa_h_subnet is not match('^172[.]16[.]0[.]0/12(?!(?s:.))')
+      - wa_app.wa_h_remote_proxies | reject('match', '^[0-9]{1,3}([.][0-9]{1,3}){3}(?!(?s:.))') | list | length == 0
       - wa_app.wa_h_remote_proxies | intersect(wa_app.wa_h_vpn_addresses) | length == 0
-      - wa_app.wa_h_tag is match('^webapp-[a-z][a-z0-9-]{0,40}$')
-      - wa_app.ansible_host is match('^[0-9]{1,3}([.][0-9]{1,3}){3}$')
-      - wa_app.wa_h_egress | map(attribute='dest') | map('string') | reject('match', '^[0-9]{1,3}([.][0-9]{1,3}){3}$') | list | length == 0
-      - wa_app.wa_h_egress | map(attribute='port') | map('string') | reject('match', '^[1-9][0-9]{0,4}$') | list | length == 0
+      - wa_app.wa_h_tag is match('^webapp-[a-z][a-z0-9-]{0,40}(?!(?s:.))')
+      - wa_app.ansible_host is match('^[0-9]{1,3}([.][0-9]{1,3}){3}(?!(?s:.))')
+      - wa_app.wa_h_egress | map(attribute='dest') | map('string') | reject('match', '^[0-9]{1,3}([.][0-9]{1,3}){3}(?!(?s:.))') | list | length == 0
+      - wa_app.wa_h_egress | map(attribute='port') | map('string') | reject('match', '^[1-9][0-9]{0,4}(?!(?s:.))') | list | length == 0
       - wa_app.wa_h_egress | map(attribute='proto') | reject('in', ['tcp', 'udp']) | list | length == 0
-      - wa_app.wa_h_egress | map(attribute='name') | map('string') | reject('match', '^[a-z][a-z0-9_-]{0,31}$') | list | length == 0
-      - wa_dns_resolvers | reject('match', '^[0-9]{1,3}([.][0-9]{1,3}){3}$') | list | length == 0
-      - wa_h_nginx_cgroup == '' or wa_h_nginx_cgroup is match('^[A-Za-z0-9@._-]+(/[A-Za-z0-9@._-]+)*$')
+      - wa_app.wa_h_egress | map(attribute='name') | map('string') | reject('match', '^[a-z][a-z0-9_-]{0,31}(?!(?s:.))') | list | length == 0
+      - wa_dns_resolvers | reject('match', '^[0-9]{1,3}([.][0-9]{1,3}){3}(?!(?s:.))') | list | length == 0
+      - wa_h_nginx_cgroup == '' or wa_h_nginx_cgroup is match('^[A-Za-z0-9@._-]+(/[A-Za-z0-9@._-]+)*(?!(?s:.))')
       - "'..' not in wa_h_nginx_cgroup"
-      - webapp_front_container_port | string is match('^[1-9][0-9]{0,4}$')
-      - wa_fw_script is match('^/[A-Za-z0-9._/-]+$')
+      - webapp_front_container_port | string is match('^[1-9][0-9]{0,4}(?!(?s:.))')
+      - wa_fw_script is match('^/[A-Za-z0-9._/-]+(?!(?s:.))')
     fail_msg: >-
       Ports, sous-réseau DÉDIÉ (jamais 172.16.0.0/12) et adresses des proxies : formes numériques IPv4 attendues ;
       aucun proxy admis à l'adresse d'un VPN.

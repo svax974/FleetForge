@@ -26,6 +26,7 @@ import unittest
 
 import jinja2
 import yaml
+from jinja2 import nodes
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ANSIBLE = os.path.dirname(HERE)
@@ -767,20 +768,24 @@ def render_vhost(proxy="proxy3", entry="fleetforge-gateway", whitelist=None, mcp
                            nginx_version="1.26.0", cloudflare_ips=CLOUDFLARE_IPS)
 
 
-def render_access(entry_attributes, mode=None, proxy="proxy3"):
-    """`_access.inc` seul, pour une entrée `x` qui porte `entry_attributes` (mode de la location : `mode`)."""
+def render_access(entry_attributes, mode=None, proxy="proxy3", cf_var=True):
+    """`_access.inc` seul, pour une entrée `x` qui porte `entry_attributes` (mode de la location : `mode`) ;
+    `cf_var=False` : le vhost ne pose pas `cf_untrusted_var` (vhost écrit à la main qui ne lit pas CF-Connecting-IP)."""
     hostvars = copy.deepcopy(INVENTORY)
     hostvars["x"] = dict(entry_attributes)
-    source = "{% set access_entry = 'x' %}{% set cf_untrusted_var = 'cf_untrusted_x' %}" + ("{% set access_mode_local = '" + mode + "' %}" if mode else "") + "{% include '_access.inc' %}"
+    source = ("{% set access_entry = 'x' %}" + ("{% set cf_untrusted_var = 'cf_untrusted_x' %}" if cf_var else "")
+              + ("{% set access_mode_local = '" + mode + "' %}" if mode else "") + "{% include '_access.inc' %}")
     return _env().from_string(source).render(hostvars=hostvars, ansible_host=hostvars[proxy]["ansible_host"], whitelist=WHITELIST,
                                              groups={"vpns": ["vpn1"]}, prometheus_host="monitor")
 
 
-def render_edge(entry_attributes):
-    """`_cloudflare_front.inc` seul."""
+def render_edge(entry_attributes, cf_var=True):
+    """`_cloudflare_front.inc` seul ; `cf_var=False` : le vhost ne pose pas `cf_untrusted_var` (le rendu doit alors ÉCHOUER pour une
+    entrée `cloudflare_front` / `cloudflare_named`, et rester vide pour les autres)."""
     hostvars = copy.deepcopy(INVENTORY)
     hostvars["x"] = dict(entry_attributes)
-    return _env().from_string("{% set access_entry = 'x' %}{% include '_cloudflare_front.inc' %}").render(
+    return _env().from_string("{% set access_entry = 'x' %}" + ("{% set cf_untrusted_var = 'cf_untrusted_x' %}" if cf_var else "")
+                              + "{% include '_cloudflare_front.inc' %}").render(
         hostvars=hostvars, cloudflare_ips=CLOUDFLARE_IPS)
 
 
@@ -3537,14 +3542,17 @@ class CloudflareNamedForgedAddressTests(unittest.TestCase):
         other = render_vhost(entry="plain", cloudflare_named=True)
         self.assertIn("$cf_untrusted_plain_example_test", other)
         self.assertNotIn("cf_untrusted_ffg", other)
-        for entry, attributes in (("plain", {}), ("fleetforge-gateway", {}), ("plain", {"cloudflare_front": True})):
+        for entry, attributes in (("plain", {}), ("fleetforge-gateway", {})):
             text = render_vhost(entry=entry, **attributes)
             for marker in ("geo ", "cf_untrusted", "cf_socket", "Cloudflare-CDN-Cache-Control", "realip_remote_addr"):
                 self.assertNotIn(marker, text, f"{entry} {attributes}")
 
-    def test_the_partials_add_the_guard_for_a_named_entry_only(self):
+    def test_the_partials_add_the_guard_for_a_cloudflare_entry_only(self):
+        # `render_access` pose `cf_untrusted_var` (le vhost générique la pose toujours) : `cloudflare_front` reçoit la garde comme
+        # `cloudflare_named`. Sans la variable (vhost écrit à la main qui ne lit pas CF-Connecting-IP) : voir CloudflareFrontGuardTests.
         for attributes, expected in (({"cloudflare_named": True}, True), ({"cloudflare_named": "false"}, False), ({}, False),
-                                     ({"cloudflare_front": True}, False), ({"cloudflare_front": True, "cloudflare_named": True}, False)):
+                                     ({"cloudflare_front": "false"}, False), ({"cloudflare_front": True}, True),
+                                     ({"cloudflare_front": True, "cloudflare_named": True}, True)):
             with self.subTest(attributes):
                 private = render_access(dict(attributes, access_mode="private"))
                 self.assertEqual("if ($cf_untrusted_x) {" in private, expected, private)
@@ -3614,8 +3622,9 @@ class CloudflareNamedNoStoreTests(unittest.TestCase):
             self.assertEqual([d for d in directives(location_body(text, head)) if d.startswith("add_header")], [self.HEADER], head)
 
     def test_the_other_entries_render_without_it(self):
-        for entry, attributes in (("plain", {}), ("fleetforge-gateway", {}), ("plain", {"cloudflare_front": True})):
+        for entry, attributes in (("plain", {}), ("fleetforge-gateway", {})):
             self.assertNotIn("Cloudflare-CDN-Cache-Control", render_vhost(entry=entry, **attributes), f"{entry} {attributes}")
+        self.assertIn(self.HEADER, render_vhost(entry="plain", cloudflare_front=True), "cloudflare_front : même en-tête (CloudflareFrontGuardTests)")
         self.assertNotIn("add_header", render_access({"access_mode": "private"}).replace("`add_header`", ""))
         self.assertIn(self.HEADER, render_access({"access_mode": "private", "cloudflare_named": True}))
         self.assertNotIn("Cloudflare-CDN-Cache-Control", render_access({"access_mode": "public", "cloudflare_named": True}),
@@ -3630,6 +3639,272 @@ class CloudflareNamedNoStoreTests(unittest.TestCase):
                 self.assertTrue(any("no-store" in e for e in vhost_errors(mutated, public=True)), head)
         wrong = text.replace('"no-store"', '"public"', 1)
         self.assertTrue(vhost_errors(wrong, public=True))
+
+
+# Vhost écrit à la main sur le modèle d'agenthub.conf (`cloudflare_front`, API sous `-back`) : le `geo` + `map` partagés
+# (`_cloudflare_untrusted.inc`) sont inclus avant le `server {}`, `cf_untrusted_var` les relie à `_access.inc`. Une location
+# publique (certificat client exigé) et une PRIVÉE (hooks Alertmanager : `allow` du pont Docker avant l'include).
+HAND_WRITTEN_SERVER = """\
+server {
+    listen      443 ssl;
+    server_name hand-back.example.test;
+
+    {% include '_cloudflare_front.inc' %}
+
+    location /api/v1/ws/ {
+        {% set access_mode_local = 'public' %}
+        {% include '_access.inc' %}
+        proxy_pass         http://203.0.113.60:4701;
+    }
+
+    location ~* ^/api/v1/hooks/ {
+        allow 172.17.0.0/16;  # Alertmanager en conteneur
+        {% set access_mode_local = 'private' %}
+        {% include '_access.inc' %}
+        proxy_pass         http://203.0.113.60:4701;
+    }
+}
+"""
+HAND_WRITTEN_GUARD = """\
+{% set cf_slug = 'hand-back.example.test' | regex_replace('[^a-z0-9]', '_') %}
+{% set cf_untrusted_var = 'cf_untrusted_' ~ cf_slug %}
+{% include '_cloudflare_untrusted.inc' %}{{ '\\n' -}}
+"""
+
+
+def render_hand_written(guard=True, source=None, **attributes):
+    """`guard` : True (variable + partiel), "var" (variable posée, partiel OUBLIÉ), False (ni l'un ni l'autre)."""
+    hostvars = copy.deepcopy(INVENTORY)
+    hostvars["hand"] = {"ansible_host": "203.0.113.60", "access_mode": "private", "cloudflare_front": True}
+    hostvars["hand"].update(attributes)
+    prelude = HAND_WRITTEN_GUARD if guard is True else ("\n".join(HAND_WRITTEN_GUARD.splitlines()[:2]) + "\n" if guard == "var" else "")
+    template = "{% set access_entry = 'hand' %}\n" + prelude + "\n" + (source or HAND_WRITTEN_SERVER)
+    return _env().from_string(template).render(hostvars=hostvars, ansible_host=hostvars["proxy3"]["ansible_host"], whitelist=WHITELIST,
+                                               groups={"vpns": ["vpn1"]}, prometheus_host="monitor", cloudflare_ips=CLOUDFLARE_IPS)
+
+
+def edge_errors(text):
+    return vhost_errors(text, cloudflare_edge=True)
+
+
+class CloudflareFrontGuardTests(unittest.TestCase):
+    """`cloudflare_front` (agenthub…) avait la même faiblesse que `cloudflare_named` : `set_real_ip_from` fait confiance à
+    CF-Connecting-IP de TOUTE socket d'une plage Cloudflare, et sans certificat client (Authenticated Origin Pulls) un tiers qui y
+    ouvre une socket forge une adresse de la whitelist ou du VPN et passe le filtre d'adresse des locations privées. Même mécanisme
+    que `cloudflare_named` (`_cloudflare_untrusted.inc`, `_access.inc`, `_named_access.inc`), vhost générique ET écrit à la main."""
+
+    LOCATIONS = [{"path": "/pub", "mode": "public"}, {"path": "/admin/", "access": {"hosts": ["agenthub"]}},
+                 {"path": "/api/", "ws": True}]
+    GUARD = "if ($cf_untrusted_plain_back_example_test) {"
+    HEADER = CloudflareNamedNoStoreTests.HEADER
+
+    def front(self, **more):
+        return render_vhost(entry="plain", cloudflare_front=True, webapp_vhost_locations=self.LOCATIONS, **more)
+
+    def test_every_private_location_of_a_front_entry_refuses_before_the_address_filter_and_forbids_the_edge_cache(self):
+        text = self.front()
+        for head in ("/", "/admin/", "/api/"):  # `/` repli, `/admin/` liste NOMMÉE, `/api/` mode de l'entrée
+            with self.subTest(head):
+                body = location_body(text, head)
+                self.assertIn(self.GUARD, body)
+                self.assertIn("return 403;", body.split(self.GUARD, 1)[1].split("}", 1)[0])
+                self.assertIn(self.HEADER, body)
+                first_filter = min(i for i in (body.find("allow "), body.find("deny all;")) if i >= 0)
+                self.assertLess(body.index(self.GUARD), first_filter, "avant tout allow / deny")
+                self.assertNotIn("198.51.100.128", body, "jamais les plages Cloudflare dans un allow")
+        public = location_body(text, "/pub")
+        self.assertIn("if ($ssl_client_verify != SUCCESS) {", public, "la location publique garde le certificat client")
+        self.assertNotIn("cf_untrusted", public)
+        self.assertNotIn("Cloudflare-CDN-Cache-Control", public, "pas de no-store sur une location publique")
+        self.assertNotIn("X-FFG-Origin", text, "le marqueur de la sonde d'origine reste propre à cloudflare_named")
+        self.assertEqual(edge_errors(text), [])
+
+    def test_a_socket_in_a_cloudflare_range_needs_the_verified_client_certificate(self):
+        text = self.front()
+        for address, verify, expected in (
+                ("198.51.100.130", "NONE", "1"), ("198.51.100.130", "SUCCESS", "0"), ("198.51.100.130", "FAILED:certificate has expired", "1"),
+                ("198.51.100.130", "", "1"), ("2001:db8:cf::7", "NONE", "1"), ("2001:db8:cf::7", "SUCCESS", "0"),
+                ("198.51.100.127", "NONE", "0"), ("203.0.113.9", "NONE", "0"), ("203.0.113.9", "SUCCESS", "0"),
+                ("172.17.0.4", "NONE", "0"), ("192.0.2.10", "NONE", "0")):
+            with self.subTest(address=address, verify=verify):
+                self.assertEqual(nginx_untrusted(text, address, verify), expected)
+        self.assertLess(text.index("geo $realip_remote_addr"), text.index("server {"), "au niveau http, avant le server {}")
+
+    def test_front_and_named_share_one_mechanism_and_the_named_text_is_the_one_of_before(self):
+        front = render_vhost(entry="plain", cloudflare_front=True)
+        named = render_vhost(entry="plain", cloudflare_named=True)
+        edge = "geo $realip_remote_addr"
+
+        def block(text, slug):
+            start = text.index(edge)
+            return text[start:text.index("}\n", text.index("map ", start)) + 2].replace(slug, "SLUG")
+        self.assertEqual(block(front, "plain_back_example_test"), block(named, "plain_example_test"))
+        # Le rendu `cloudflare_named` d'avant l'extraction du partiel, octet pour octet (réécriture : un test, pas un instantané du parc).
+        legacy = ("# Socket d'une plage Cloudflare (`cloudflare_ips`, la même liste que `set_real_ip_from`) : elle SEULE peut remplacer l'adresse\n"
+                  "# cliente par CF-Connecting-IP. Une telle socket sans certificat client valide (Authenticated Origin Pulls de NOTRE zone) n'est\n"
+                  "# pas Cloudflare : `$cf_untrusted_plain_example_test` vaut 1 et les locations PRIVÉES refusent (403) avant tout filtre d'adresse. Fermé par\n"
+                  "# défaut : seule une clé « hors Cloudflare » (0:…) ou « Cloudflare + certificat vérifié » (1:SUCCESS) donne 0.\n"
+                  "geo $realip_remote_addr $cf_socket_plain_example_test {\n    default 0;\n    198.51.100.128/25 1;\n    2001:db8:cf::/48 1;\n}\n"
+                  'map "$cf_socket_plain_example_test:$ssl_client_verify" $cf_untrusted_plain_example_test {\n    default 1;\n    "~^0:" 0;\n'
+                  '    "1:SUCCESS" 0;\n}\n\nserver {\n    listen      80;\n')
+        self.assertIn(legacy, named)
+        self.assertIn(legacy.replace("plain_example_test", "plain_back_example_test"), front)
+
+    def test_without_the_attribute_nothing_of_it_is_rendered_and_the_bytes_do_not_change(self):
+        for entry in ("fleetforge-gateway", "plain"):
+            reference = render_vhost(entry=entry, webapp_vhost_locations=self.LOCATIONS)
+            for label, value in (("false", False), ("string", "false"), ("no", "no")):
+                with self.subTest(entry=entry, value=label):
+                    self.assertEqual(render_vhost(entry=entry, webapp_vhost_locations=self.LOCATIONS, cloudflare_front=value), reference)
+            for marker in ("ssl_verify_client", "real_ip_header", "geo ", "cf_untrusted", "Cloudflare"):
+                self.assertNotIn(marker, reference, f"{entry} : {marker}")
+        for attribute in ("cloudflare_front", "cloudflare_named"):
+            self.assertEqual(render_access({"access_mode": "private", attribute: False}), render_access({"access_mode": "private"}))
+
+    def test_a_hand_written_vhost_includes_the_partial_and_every_private_location_is_guarded(self):
+        text = render_hand_written()
+        guard = "if ($cf_untrusted_hand_back_example_test) {"
+        hooks = location_body(text, "~* ^/api/v1/hooks/")
+        self.assertIn(guard, hooks)
+        self.assertIn(self.HEADER, hooks)
+        self.assertIn("allow 172.17.0.0/16;", hooks, "le pont Docker d'Alertmanager reste admis (socket hors Cloudflare)")
+        ws = location_body(text, "/api/v1/ws/")
+        self.assertIn("if ($ssl_client_verify != SUCCESS) {", ws)
+        self.assertNotIn("cf_untrusted", ws)
+        for address, verify, expected in (("198.51.100.130", "NONE", "1"), ("198.51.100.130", "SUCCESS", "0"), ("172.17.0.4", "NONE", "0"),
+                                          ("203.0.113.9", "NONE", "0")):
+            self.assertEqual(nginx_untrusted(text, address, verify), expected, (address, verify))
+        self.assertEqual(edge_errors(text), [])
+
+    def test_a_hand_written_vhost_that_reads_cloudflare_without_the_guard_variable_fails_to_render(self):
+        # `_access.inc` ne pose aucune garde pour `cloudflare_front` sans `cf_untrusted_var` (c'est ce qui laisse
+        # agenthub-preview.conf, qui ne lit pas CF-Connecting-IP, rendu comme avant) : l'oubli sur un vhost qui inclut
+        # `_cloudflare_front.inc` (donc lit CF-Connecting-IP) ferait un vhost SANS protection. `_cloudflare_front.inc` refuse le rendu.
+        for attributes in ({"cloudflare_front": True}, {"cloudflare_named": True, "cloudflare_front": False}):
+            with self.subTest(attributes):
+                with self.assertRaises(jinja2.UndefinedError) as raised:
+                    render_hand_written(guard=False, **attributes)
+                self.assertIn("cloudflare_untrusted_inc", str(raised.exception), "le message nomme le partiel à inclure")
+                self.assertIn("cf_untrusted_var", str(raised.exception))
+        with self.assertRaises(jinja2.UndefinedError):
+            render_edge({"cloudflare_front": True}, cf_var=False)
+        with self.assertRaises(jinja2.UndefinedError):
+            render_edge({"cloudflare_named": True}, cf_var=False)
+        # Une entrée sans l'un ni l'autre attribut ne lit rien : pas de variable exigée, rendu vide comme avant.
+        self.assertEqual(render_edge({}, cf_var=False), "")
+        self.assertEqual(render_edge({"cloudflare_front": False, "cloudflare_named": "false"}, cf_var=False), "")
+        # Variable posée, partiel oublié : `nginx -t` refuserait la variable inconnue, et le contrôle le voit déjà.
+        errors = edge_errors(render_hand_written(guard="var"))
+        self.assertTrue(any("`geo $realip_remote_addr` et `map $ssl_client_verify`" in e for e in errors), errors)
+        self.assertEqual(edge_errors(render_hand_written()), [])
+
+    def test_a_vhost_that_does_not_include_the_cloudflare_partial_renders_without_the_variable(self):
+        # agenthub-preview.conf, openclaw.conf, ctdapi.conf : pas d'`_cloudflare_front.inc`, donc aucune variable exigée.
+        inline_real_ip = ("server {\n  {% for ip in cloudflare_ips %}\n  set_real_ip_from {{ ip }};\n  {% endfor %}\n  real_ip_header CF-Connecting-IP;\n"
+                          "  location / {\n    {% include '_access.inc' %}\n    proxy_pass http://203.0.113.60:4701;\n  }\n}\n")
+        for source in (inline_real_ip, "server {\n  location / {\n    {% include '_access.inc' %}\n  }\n}\n"):
+            text = render_hand_written(guard=False, source=source)
+            self.assertNotIn("cf_untrusted", text)
+            self.assertEqual(text, render_hand_written(guard=False, source=source, cloudflare_front=False))
+
+    def test_a_vhost_of_a_front_entry_that_does_not_read_cloudflare_keeps_its_bytes(self):
+        preview = "{% set access_entry = 'hand' %}server {\n    location / {\n        {% include '_access.inc' %}\n        proxy_pass http://203.0.113.60:4701;\n    }\n}\n"
+        reference = render_hand_written(guard=False, source=preview, cloudflare_front=False)
+        self.assertEqual(render_hand_written(guard=False, source=preview), reference)
+        self.assertNotIn("cf_untrusted", reference)
+        self.assertEqual(render_access({"access_mode": "private", "cloudflare_front": True}, cf_var=False),
+                         render_access({"access_mode": "private"}, cf_var=False))
+
+        def named_list(attributes, cf_var):  # `_named_access.inc` seul
+            hostvars = copy.deepcopy(INVENTORY)
+            hostvars["x"] = dict(attributes)
+            source = ("{% set access_entry = 'x' %}" + ("{% set cf_untrusted_var = 'cf_untrusted_x' %}" if cf_var else "")
+                      + "{% set named_access = {'hosts': ['agenthub']} %}{% include '_named_access.inc' %}")
+            return _env().from_string(source).render(hostvars=hostvars, groups={"vpns": ["vpn1"]}, whitelist=WHITELIST)
+        self.assertEqual(named_list({"cloudflare_front": True}, cf_var=False), named_list({}, cf_var=False))
+        self.assertIn("if ($cf_untrusted_x) {", named_list({"cloudflare_front": True}, cf_var=True))
+        self.assertNotIn("cf_untrusted", named_list({}, cf_var=True))
+        self.assertEqual(edge_errors(reference), [], "sans real_ip_header CF-Connecting-IP : rien à contrôler")
+
+    def test_the_check_catches_each_way_the_guard_could_be_lost(self):
+        text = render_hand_written()
+        self.assertEqual(edge_errors(text), [])
+        geo_start = text.index("geo $realip_remote_addr")
+        map_start = text.index('map "$cf_socket')
+        map_end = text.index("}\n", map_start) + 2
+        hooks = location_body(text, "~* ^/api/v1/hooks/")
+        guard = "        if ($cf_untrusted_hand_back_example_test) {\n            return 403;\n        }\n"
+        mutations = {
+            "partial not included": text[:geo_start] + text[map_end:],
+            "no map": text[:map_start] + text[map_end:],
+            "map open by default": text.replace("    default 1;\n", "    default 0;\n", 1),
+            "map trusts a failed certificate": text.replace('    "1:SUCCESS" 0;', '    "1:FAILED" 0;\n    "1:SUCCESS" 0;', 1),
+            "geo misses a range": text.replace("    2001:db8:cf::/48 1;\n", "", 1),
+            "geo default trusts": text.replace("    default 0;\n", "    default 1;\n", 1),
+            "private location without the guard": text.replace(hooks, hooks.replace(guard, "", 1), 1),
+            "guard answers 200": text.replace(hooks, hooks.replace("return 403;", "return 200;", 1), 1),
+            "guard on another variable": text.replace(hooks, hooks.replace("$cf_untrusted_hand_back_example_test", "$cf_untrusted_other", 1), 1),
+            "private location without no-store": text.replace(hooks, hooks.replace(self.HEADER, "", 1), 1),
+            "public location without the certificate": text.replace("        if ($ssl_client_verify != SUCCESS) {\n            return 403;\n        }\n", "", 1),
+            "certificate not verified": text.replace("ssl_verify_client optional;", "", 1),
+            "no client certificate authority": text.replace("ssl_client_certificate /etc/nginx/cloudflare-origin-pull-ca.pem;", "", 1),
+        }
+        for label, mutated in mutations.items():
+            with self.subTest(label):
+                self.assertNotEqual(mutated, text, label)
+                self.assertTrue(edge_errors(mutated), label)
+
+    def test_a_closed_location_needs_neither_the_guard_nor_no_store(self):
+        # `deny all;` sans aucun `allow` : mode inconnu (`_access.inc` ferme) ou `restricted-linked` sans serveur : personne n'y entre.
+        closed = ("    location /unknown-mode/ {\n        {% set access_mode_local = 'bogus' %}\n        {% include '_access.inc' %}\n    }\n"
+                  "    location /no-linked-server/ {\n        {% set access_only_local = [] %}\n        {% include '_access.inc' %}\n    }\n")
+        source = HAND_WRITTEN_SERVER.rstrip()[:-1] + closed + "}\n"
+        text = render_hand_written(source=source)
+        for head in ("/unknown-mode/", "/no-linked-server/"):
+            body = location_body(text, head)
+            self.assertIn("deny all;", body)
+            self.assertNotIn("allow ", body)
+            self.assertNotIn("cf_untrusted", body, "fermée par le gabarit : aucune garde posée")
+        self.assertEqual(edge_errors(text), [])
+        # Une location qui admet quelqu'un reste tenue d'avoir la garde.
+        hooks = location_body(text, "~* ^/api/v1/hooks/")
+        self.assertTrue(edge_errors(text.replace(hooks, hooks.replace("return 403;", "return 200;", 1), 1)))
+        # Une location ouverte (ni `deny all;` ni certificat) reste refusée.
+        opened = text.replace(location_body(text, "/unknown-mode/"), "\n        proxy_pass http://203.0.113.60:4701;\n    ", 1)
+        self.assertTrue(any("/unknown-mode/" in e for e in edge_errors(opened)))
+
+    def test_the_edge_check_runs_in_addition_to_the_other_vhost_checks_never_instead(self):
+        text = public_vhost()
+        self.assertEqual(edge_errors(text), [])
+        self.assertEqual(vhost_errors(text, public=True, cloudflare_edge=True), [])
+        # Liste nommée : un `allow` trop large reste refusé AVEC le drapeau.
+        wide = mutate(text, "/.well-known/", "deny all;", "allow 10.0.0.0/8;\n        deny all;")
+        self.assertTrue(any("allow trop large" in e for e in vhost_errors(wide, cloudflare_edge=True)))
+        self.assertTrue(any("allow trop large" in e for e in vhost_errors(wide, public=True, cloudflare_edge=True)))
+        # `--public` : la liste blanche des locations publiques reste contrôlée AVEC le drapeau.
+        stripped = mutate(text, "~* " + PUBLIC_MCP["path"], "if ($ssl_client_verify != SUCCESS) {", "if (0) {")
+        self.assertTrue(any("certificat client" in e for e in vhost_errors(stripped, public=True, cloudflare_edge=True)))
+        # Et chaque contrôle ne dépend pas de l'autre : l'écart du bord se voit même quand les autres sont satisfaits.
+        self.assertTrue(vhost_errors(text.replace("ssl_verify_client optional;", "", 1), public=True, cloudflare_edge=True))
+        # Sans aucune location à liste nommée : l'erreur d'avant sans le drapeau, pas avec (vhost écrit à la main : rien à nommer).
+        hand = render_hand_written()
+        self.assertTrue(any("aucune location à liste nommée" in e for e in vhost_errors(hand)))
+        self.assertFalse(any("aucune location à liste nommée" in e for e in vhost_errors(hand, cloudflare_edge=True)))
+
+    def test_the_check_reads_the_generic_front_vhost_and_the_command_line_agrees(self):
+        text = self.front()
+        self.assertEqual(edge_errors(text), [])
+        self.assertTrue(edge_errors(text.replace("if ($cf_untrusted_plain_back_example_test) {", "if (0) {", 1)))
+        fd, path = tempfile.mkstemp(suffix=".conf")
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        try:
+            self.assertEqual(check.main(["vhost", path, "--cloudflare-edge"]), 0)
+            with open(path, "w") as f:
+                f.write(text.replace("ssl_verify_client optional;", "", 1))
+            self.assertEqual(check.main(["vhost", path, "--cloudflare-edge"]), 1)
+        finally:
+            os.unlink(path)
 
 
 @unittest.skipUnless(shutil.which("ansible-playbook"), "ansible-playbook absent")
@@ -4996,7 +5271,253 @@ class JinjaEscapeWarningTests(unittest.TestCase):
                 self.assertEqual([m.start() for m in compiled.finditer(text)], [i for i, c in enumerate(text) if c == "["], text)
 
 
-DEPLOY_FLEETFORGE = os.path.join(PLAYBOOKS, "deploy-fleetforge.yml")
+class MatchEndAnchorTests(unittest.TestCase):
+    """Aucune validation Jinja des playbooks ne se termine par `$` : `$` accepte un saut de ligne final, donc `x\\n` passerait
+    une grammaire écrite pour être stricte. Fin de chaîne du dépôt : `(?!(?s:.))` (ni `$`, ni `\\Z` : DeprecationWarning).
+    Balayage, par l'AST Jinja, de TOUT `Ansible/playbooks` : tests `match` / `search` / `regex`, filtre `regex_search`, filtres
+    `select` / `reject` / `selectattr` / `rejectattr` / `map` portant l'un d'eux, et variables-motifs (`*_pattern`, `*_regex`,
+    `*_ipv4`, `*_ipv6`, `*_octet`). Un `$` hors classe de caractères et non échappé y est refusé, sauf entrée de ALLOWED.
+    Hors périmètre, par construction : `regex_replace` / `regex_findall` (substitution et extraction `(?m)`), les motifs de
+    commandes (grep, sed, awk), de nginx, de Prometheus et de Docker, et le Python des fichiers `files/`."""
+
+    TESTS = {"match", "search", "regex"}
+    PICKERS = {"select", "reject", "selectattr", "rejectattr", "map"}
+    PATTERN_KEY = re.compile(r"(?:pattern|regex|_ipv4|_ipv6|_octet)$")
+    # (fichier relatif à Ansible, littéral) -> pourquoi le `$` reste.
+    ALLOWED = {
+        ("playbooks/roles/fleetforge-install/tasks/api-accounts-gateway.yml", ")$"):
+            "fin du motif de refus `_denied_allowed` : `$` n'y élargit que la détection d'un conflit (sens sûr, décision de "
+            "EndOfStringGapsTests) ; un nom de playbook de la liste blanche ne porte de toute façon pas de saut de ligne",
+        ("playbooks/roles/fleetforge-install/tasks/gateway-guard.yml", ")$"): "idem : `_denied_allowed` du garde de la passerelle",
+    }
+
+    @staticmethod
+    def _dollars(pattern):
+        """Nombre de `$` ancres (ni échappés, ni dans une classe `[...]`) d'un motif."""
+        found, i, in_class = 0, 0, False
+        while i < len(pattern):
+            c = pattern[i]
+            if c == "\\":
+                i += 2
+                continue
+            if not in_class and c == "[":
+                in_class = True
+                i += 1
+                i += pattern[i:i + 1] == "^"
+                i += pattern[i:i + 1] == "]"
+                continue
+            if in_class and c == "]":
+                in_class = False
+            elif not in_class and c == "$":
+                found += 1
+            i += 1
+        return found
+
+    @staticmethod
+    def _consts(node):
+        return [n.value for n in [node, *node.find_all(nodes.Const)] if isinstance(n, nodes.Const) and isinstance(n.value, str)]
+
+    def _literals(self, ast):
+        """Les littéraux de motif d'une expression : (littéral, vient-d'une-variable-motif)."""
+        for test in ast.find_all(nodes.Test):
+            if test.name.split(".")[-1] in self.TESTS and test.args:
+                yield from self._consts(test.args[0])
+        for call in ast.find_all(nodes.Filter):
+            if call.name.split(".")[-1] == "regex_search" and call.args:
+                yield from self._consts(call.args[0])
+            elif call.name in self.PICKERS:
+                tests = [i for i, a in enumerate(call.args) if isinstance(a, nodes.Const) and a.value in self.TESTS | {"regex_search"}]
+                for arg in call.args[tests[0] + 1:] if tests else []:
+                    yield from self._consts(arg)
+        for assign in ast.find_all(nodes.Assign):
+            if isinstance(assign.target, nodes.Name) and self.PATTERN_KEY.search(assign.target.name):
+                yield from self._consts(assign.node)
+
+    def _scan(self, root=PLAYBOOKS):
+        """(`$` trouvés hors ALLOWED, nombre de littéraux examinés, entrées de ALLOWED rencontrées)."""
+        import warnings
+
+        env = JinjaEscapeWarningTests._environment()
+        base = os.path.dirname(root)
+        found, seen, allowed = [], [0], set()
+
+        def examine(source, where, path):
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    ast = env.parse(source)
+            except jinja2.TemplateSyntaxError:
+                return
+            for literal in self._literals(ast):
+                seen[0] += 1
+                if self._dollars(literal):
+                    key = (os.path.relpath(path, base).replace(os.sep, "/"), literal)
+                    if key in self.ALLOWED:
+                        allowed.add(key)
+                    else:
+                        found.append(f"{where} : {literal!r}")
+
+        def walk(node, where, path, bare=False):
+            if isinstance(node, yaml.ScalarNode):
+                at = f"{where}:{node.start_mark.line + 1}"
+                if "{{" in node.value or "{%" in node.value:
+                    examine(node.value, at, path)
+                elif bare:
+                    examine("{{ " + node.value + " }}", at, path)
+            elif isinstance(node, yaml.SequenceNode):
+                for child in node.value:
+                    walk(child, where, path, bare)
+            elif isinstance(node, yaml.MappingNode):
+                for key, value in node.value:
+                    if (isinstance(value, yaml.ScalarNode) and self.PATTERN_KEY.search(key.value)
+                            and "{{" not in value.value and self._dollars(value.value)):
+                        entry = (os.path.relpath(path, base).replace(os.sep, "/"), value.value)
+                        if entry in self.ALLOWED:
+                            allowed.add(entry)
+                        else:
+                            found.append(f"{where}:{value.start_mark.line + 1} : {value.value!r}")
+                    walk(value, where, path, key.value in JinjaEscapeWarningTests.BARE_KEYS)
+
+        for directory, subdirectories, names in os.walk(root):
+            subdirectories[:] = sorted(d for d in subdirectories if d not in (".git", "__pycache__"))
+            for name in sorted(names):
+                path = os.path.join(directory, name)
+                where = os.path.relpath(path, base)
+                if name.endswith((".yml", ".yaml")):
+                    with open(path, encoding="utf-8") as f:
+                        text = f.read()
+                    try:
+                        for document in yaml.compose_all(text, Loader=yaml.SafeLoader):
+                            if document is not None:
+                                walk(document, where, path)
+                    except yaml.YAMLError:
+                        examine(text, where, path)
+                elif name.endswith((".j2", ".inc")) or os.sep + "templates" + os.sep in path:
+                    try:
+                        with open(path, encoding="utf-8") as f:
+                            examine(f.read(), where, path)
+                    except UnicodeDecodeError:
+                        continue
+        return found, seen[0], allowed
+
+    def test_no_validation_of_the_playbooks_ends_with_a_dollar(self):
+        found, seen, allowed = self._scan()
+        self.assertGreater(seen, 250, "le balayage doit voir les motifs des playbooks, rôles et gabarits")
+        self.assertEqual(found, [], "`$` en fin de motif : écrire `(?!(?s:.))` (`x\\n` passerait sinon)")
+        self.assertEqual(allowed, set(self.ALLOWED), "entrée de ALLOWED périmée : le `$` n'existe plus, la retirer")
+
+    def test_the_scan_flags_a_dollar_reintroduced_in_a_file(self):
+        end = "(?!(?s:.))"
+        with open(os.path.join(ROLES, "vmagent-scrape-update", "tasks", "main.yml"), encoding="utf-8") as f:
+            text = f.read()
+        self.assertEqual(text.count("(ms|s|m|h|d|w|y))+" + end + "')"), 1)
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "playbooks", "roles", "x", "tasks")
+            os.makedirs(target)
+            path = os.path.join(target, "main.yml")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+            found, seen, _ = self._scan(os.path.join(tmp, "playbooks"))
+            self.assertEqual((found, seen > 0), ([], True))
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text.replace("(ms|s|m|h|d|w|y))+" + end + "')", "(ms|s|m|h|d|w|y))+$')"))
+            found, _, _ = self._scan(os.path.join(tmp, "playbooks"))
+            self.assertEqual(len(found), 1, found)
+            self.assertIn("main.yml", found[0])
+
+    def test_the_scan_flags_every_form_and_only_those(self):
+        env = JinjaEscapeWarningTests._environment()
+
+        def flagged(source):
+            return [lit for lit in self._literals(env.parse(source)) if self._dollars(lit)]
+        for bad in ("{{ x is match('^a$') }}", "{{ x is not search('[.]' ~ z ~ '$') }}", "{{ x | regex_search('a$') }}",
+                    "{{ l | select('match', '^a$') | list }}", "{{ l | reject('search', 'a(/|$)') | list }}",
+                    "{{ l | selectattr('d', 'match', '.*[.]html$') | list }}", "{{ l | map('regex_search', '^a$') | list }}",
+                    "{% set _host_ipv4 = '^a$' %}", "{{ x is match(\"^a$\") }}", "{{ x is match('^a[$]b$') }}"):
+            with self.subTest(bad):
+                self.assertTrue(flagged(bad), bad)
+        for good in ("{{ x is match('^a(?!(?s:.))') }}", "{{ x is match('^a[$]') }}", "{{ x is match('^a[^$]b') }}", "{{ x is match('^a\\\\$') }}",
+                     "{{ x | regex_replace('/+$', '') }}", "{{ t | regex_findall('(?m)^(a.*)$') }}", "{{ x is match(pattern) }}",
+                     "{{ l | select('equalto', 'a$') | list }}", "{{ l | map('regex_replace', '$', '/32') | list }}"):
+            with self.subTest(good):
+                self.assertFalse(flagged(good), good)
+
+    # -- le comportement : `x` passe, `x\n` est refusé, par le moteur de gabarits d'Ansible ----------------------------------
+
+    @staticmethod
+    def _yaml(*parts):
+        with open(os.path.join(ROLES, *parts), encoding="utf-8") as f:
+            return yaml.safe_load(f)
+
+    def _strings(self, node):
+        if isinstance(node, str):
+            yield node
+        elif isinstance(node, dict):
+            for value in node.values():
+                yield from self._strings(value)
+        elif isinstance(node, list):
+            for value in node:
+                yield from self._strings(value)
+
+    def _expression(self, parts, needle):
+        found = [s for s in self._strings(self._yaml(*parts)) if needle in s]
+        self.assertEqual(len(found), 1, f"{'/'.join(parts)} : {needle!r}")
+        return found[0]
+
+    def _passes(self, expression, variables):
+        return str(_template("{{ " + expression + " }}", variables)) == "True"
+
+    @unittest.skipUnless(shutil.which("ansible-playbook"), "ansible-playbook absent")
+    def test_a_block_scalar_grammar_refuses_a_trailing_newline(self):
+        """`>-` : `_taken` (webapp-setup/hardening.yml) ne retient que les ports de la grammaire `^[0-9]+`."""
+        task = next(t for t in self._yaml("webapp-setup", "tasks", "hardening.yml") if "_taken" in t.get("vars", {}))
+        scalar = task["vars"]["_taken"]
+        self.assertIn("(?!(?s:.))", scalar)
+        for port, kept in (("8080", True), ("8080\n", False), ("8080 ", False), ("80a", False)):
+            with self.subTest(port=repr(port)):
+                variables = {"inventory_hostname": "a", "wa_machine_ports": {"b": {"ports": {"front": port}}}}
+                self.assertEqual(str(_template(scalar, variables)) == port, kept)
+
+    @unittest.skipUnless(shutil.which("ansible-playbook"), "ansible-playbook absent")
+    def test_a_template_grammar_refuses_a_trailing_newline(self):
+        """Gabarit `.inc` : la variable-motif `_na_ipv4` de `_named_access.inc`, rendue avec le gabarit lui-même."""
+        with open(os.path.join(TEMPLATES, "_named_access.inc"), encoding="utf-8") as f:
+            declaration = re.search(r"^\{% set _na_ipv4 = .*%\}$", f.read(), re.M).group(0)
+        self.assertIn("(?!(?s:.))", declaration)
+        for address, ok in (("192.0.2.10", True), ("192.0.2.10\n", False), ("192.0.2.10 ", False), ("192.0.2", False)):
+            with self.subTest(address=repr(address)):
+                rendered = _template(declaration + "{{ addr is match(_na_ipv4) }}", {"addr": address})
+                self.assertEqual(str(rendered) == "True", ok)
+
+    @unittest.skipUnless(shutil.which("ansible-playbook"), "ansible-playbook absent")
+    def test_a_grammar_with_alternation_refuses_a_trailing_newline(self):
+        """Alternation : `^([0-9]+(ms|s|m|h|d|w|y))+` (vmagent-scrape-update), la fin de chaîne s'applique à toute la grammaire."""
+        expression = self._expression(("vmagent-scrape-update", "tasks", "main.yml"), "_vmagent_target is match(")
+        for value, ok in (("10s", True), ("1m30s", True), ("10s\n", False), ("1m30s\n", False), ("10", False)):
+            with self.subTest(value=repr(value)):
+                self.assertEqual(self._passes(expression, {"_vmagent_target": value}), ok)
+
+    @unittest.skipUnless(shutil.which("ansible-playbook"), "ansible-playbook absent")
+    def test_a_filter_grammar_and_a_double_quoted_grammar_refuse_a_trailing_newline(self):
+        slots = self._expression(("timescaledb-install", "tasks", "slot.yml"), "tsdb_slots | reject(")
+        for value, ok in (("replica_1", True), ("replica_1\n", False)):
+            with self.subTest(slot=repr(value)):
+                self.assertEqual(self._passes(slots, {"tsdb_slots": [value]}), ok)
+        url = self._expression(("alertmanager-install", "tasks", "main.yml"), "alertmanager_agenthub_webhook_url is not match(")
+        for value, refused in (("https://hub.example.test/api/v1/agenthub/hooks/abc/def", False),
+                               ("https://hub.example.test/api/v1/agenthub/hooks/abc/def\n", True)):
+            with self.subTest(url=repr(value)):
+                self.assertEqual(self._passes(url, {"alertmanager_agenthub_webhook_url": value}), refused)
+
+    @unittest.skipUnless(shutil.which("ansible-playbook"), "ansible-playbook absent")
+    def test_a_pattern_variable_refuses_a_trailing_newline(self):
+        pattern = self._yaml("backup-setup", "defaults", "main.yml")["backup_ipv4_pattern"]
+        for value, ok in (("192.0.2.10", True), ("192.0.2.10\n", False), ("192.0.2.256", False)):
+            with self.subTest(address=repr(value)):
+                self.assertEqual(self._passes("addr is match(pattern)", {"addr": value, "pattern": pattern}), ok)
+
+
+DEPLOY_FLEETFORGE =os.path.join(PLAYBOOKS, "deploy-fleetforge.yml")
 GATEWAY_BACKUP_LIB = os.path.join(PLAYBOOKS, "lib")
 
 

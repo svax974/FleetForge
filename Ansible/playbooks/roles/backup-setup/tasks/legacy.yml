@@ -59,4 +59,4 @@
   throttle: 1
   when:
     - (backup_legacy_purge | default('') | string) == 'yes'
-    - bk_legacy_dir is match('^/[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)+$')
+    - bk_legacy_dir is match('^/[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)+(?!(?s:.))')

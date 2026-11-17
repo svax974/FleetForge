@@ -8,7 +8,7 @@
 # `-e` l'emporte sur l'inventaire : `pgbak_dir` désigne le script lancé par cron.
 - name: Check the backup directory is a plain absolute path
   ansible.builtin.assert:
-    that: pgbak_dir is match('^/[A-Za-z0-9._/-]*$')
+    that: pgbak_dir is match('^/[A-Za-z0-9._/-]*(?!(?s:.))')
     fail_msg: "pgbak_dir : chemin absolu sans espace ni métacaractère ({{ pgbak_dir }})."
     quiet: true
   tags: [always]
@@ -26,10 +26,10 @@
 - name: Check the backup name, the retention and the encryption recipient
   ansible.builtin.assert:
     that:
-      - pgbak_name is match('^[a-z0-9][a-z0-9-]{0,62}$')
-      - pgbak_db is match('^[A-Za-z0-9_][A-Za-z0-9_-]{0,62}$')
-      - pgbak_keep | string is match('^[0-9]{1,4}$') and pgbak_keep | int >= 1 and pgbak_keep | int <= 1000
-      - pgbak_encrypt_recipient | length == 0 or pgbak_encrypt_recipient is match('^age1[02-9ac-hj-np-z]{58}$')
+      - pgbak_name is match('^[a-z0-9][a-z0-9-]{0,62}(?!(?s:.))')
+      - pgbak_db is match('^[A-Za-z0-9_][A-Za-z0-9_-]{0,62}(?!(?s:.))')
+      - pgbak_keep | string is match('^[0-9]{1,4}(?!(?s:.))') and pgbak_keep | int >= 1 and pgbak_keep | int <= 1000
+      - pgbak_encrypt_recipient | length == 0 or pgbak_encrypt_recipient is match('^age1[02-9ac-hj-np-z]{58}(?!(?s:.))')
     fail_msg: >-
       pgbak_name (minuscules, chiffres, tirets), pgbak_db (lettres, chiffres, _ et -), pgbak_keep (1 à 1000) ou
       pgbak_encrypt_recipient (vide, ou destinataire age « age1… » de 62 caractères) invalide.

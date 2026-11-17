@@ -6,9 +6,9 @@
 - name: Check the backup account settings
   ansible.builtin.assert:
     that:
-      - backup_account is match('^[a-z][a-z0-9-]{1,30}$')
-      - backup_account_root is match('^/[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)+$')
-      - backup_gate_path is match('^/[A-Za-z0-9._/-]+$')
+      - backup_account is match('^[a-z][a-z0-9-]{1,30}(?!(?s:.))')
+      - backup_account_root is match('^/[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)+(?!(?s:.))')
+      - backup_gate_path is match('^/[A-Za-z0-9._/-]+(?!(?s:.))')
     fail_msg: >-
       backup_account (minuscules, 2 à 31 caractères), backup_account_root (chemin absolu d'au moins deux niveaux) et
       backup_gate_path (chemin absolu) : valeurs invalides.

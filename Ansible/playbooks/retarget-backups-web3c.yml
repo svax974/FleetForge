@@ -145,7 +145,7 @@
   tasks:
     - name: Répertoire de sauvegarde simple
       ansible.builtin.assert:
-        that: retarget_pgbak_dir is match('^/[A-Za-z0-9._/-]*$')
+        that: retarget_pgbak_dir is match('^/[A-Za-z0-9._/-]*(?!(?s:.))')
         fail_msg: "pgbak_dir : chemin absolu sans espace ni métacaractère."
         quiet: true
 
@@ -167,7 +167,7 @@
   tasks:
     - name: Répertoire de sauvegarde simple
       ansible.builtin.assert:
-        that: retarget_pgbak_dir is match('^/[A-Za-z0-9._/-]*$')
+        that: retarget_pgbak_dir is match('^/[A-Za-z0-9._/-]*(?!(?s:.))')
         fail_msg: "pgbak_dir : chemin absolu sans espace ni métacaractère."
         quiet: true
       when: run_now | default(false) | bool
@@ -225,5 +225,5 @@
         path: "{{ item.0 }}/{{ item.1 }}"
         state: absent
       loop: "{{ old_roots | product(retarget_old_dirs) | list }}"
-      when: item.1 is match('^[a-z0-9][a-z0-9-]{0,62}$')
+      when: item.1 is match('^[a-z0-9][a-z0-9-]{0,62}(?!(?s:.))')
       become: true

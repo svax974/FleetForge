@@ -30,7 +30,7 @@
   ansible.builtin.include_tasks: keys-instance.yml
   loop: >-
     {{ theta_edge_key_dirs.files | map(attribute='path') | map('basename')
-       | map('regex_replace', '^instance', '') | select('match', '^[0-9]+$')
+       | map('regex_replace', '^instance', '') | select('match', '^[0-9]+(?!(?s:.))')
        | map('int') | sort | list }}
   loop_control:
     loop_var: theta_edge_id

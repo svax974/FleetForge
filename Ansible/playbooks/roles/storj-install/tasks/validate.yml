@@ -7,7 +7,7 @@
 # l'argument d'un `rm -rf` — chemin absolu sans métacaractère, jamais une option.
 - name: Check the base directory is a plain absolute path
   ansible.builtin.assert:
-    that: storj_base_dir is match('^/[A-Za-z0-9._/-]*$')
+    that: storj_base_dir is match('^/[A-Za-z0-9._/-]*(?!(?s:.))')
     fail_msg: "storj_base_dir : chemin absolu sans espace ni métacaractère ({{ storj_base_dir }})."
     quiet: true
 
@@ -17,11 +17,11 @@
 - name: List the invalid or missing parameters
   ansible.builtin.set_fact:
     storj_problems: >-
-      {{ ([] if storj_email | string is match('^[^@ ]+@[^@ ]+$') else
+      {{ ([] if storj_email | string is match('^[^@ ]+@[^@ ]+(?!(?s:.))') else
            ['storj_email : manquant ou invalide (« ' ~ storj_email ~ ' ») — adresse e-mail où Storj envoie ses alertes'])
-       + ([] if storj_storage_size | string is match('^[0-9]+([.][0-9]+)?(B|KB|MB|GB|TB|PB|KiB|MiB|GiB|TiB|PiB)$') else
+       + ([] if storj_storage_size | string is match('^[0-9]+([.][0-9]+)?(B|KB|MB|GB|TB|PB|KiB|MiB|GiB|TiB|PiB)(?!(?s:.))') else
            ['storj_storage_size : manquant ou invalide (« ' ~ storj_storage_size ~ ' ») — nombre + unité collée, 500GB minimum (500GB, 2TB, 1.5TiB)'])
-       + ([] if storj_wallet_address | string is match('^0x[0-9a-fA-F]{40}$') else
+       + ([] if storj_wallet_address | string is match('^0x[0-9a-fA-F]{40}(?!(?s:.))') else
            ['storj_wallet_address : manquant ou invalide (« ' ~ storj_wallet_address ~ ' ») — adresse Ethereum de VOTRE wallet : 0x + 40 hexadécimaux']) }}
 
 - name: Fail with the list of problems and a complete example
@@ -45,7 +45,7 @@
       {{ (storj_storage_size | regex_search('^[0-9]+([.][0-9]+)?') | float
           * {'B': 1, 'KB': 1000, 'MB': 1000000, 'GB': 1000000000, 'TB': 1000000000000,
              'PB': 1000000000000000, 'KiB': 1024, 'MiB': 1048576, 'GiB': 1073741824,
-             'TiB': 1099511627776, 'PiB': 1125899906842624}[storj_storage_size | regex_search('[A-Za-z]+$')]) | int }}
+             'TiB': 1099511627776, 'PiB': 1125899906842624}[storj_storage_size | regex_search('[A-Za-z]+(?!(?s:.))')]) | int }}
 
 - name: Require the 500 GB minimum
   ansible.builtin.assert:

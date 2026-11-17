@@ -13,7 +13,7 @@
       - webapp_phase in ['all', 'build', 'push', 'deploy']
       - webapp_phase != 'deploy' or webapp_tag | length > 0
       - webapp_phase == 'all' or wa_registry_on | bool
-      - webapp_tag is match('^[A-Za-z0-9_.-]*$')
+      - webapp_tag is match('^[A-Za-z0-9_.-]*(?!(?s:.))')
     fail_msg: >-
       webapp_phase={{ webapp_phase }} : all | build | push | deploy. `deploy` exige `-e webapp_tag=<tag>`, et les
       phases build/push/deploy n'existent qu'en mode registre (un registre dans le parc, `webapp_registry` non faux).

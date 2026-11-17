@@ -9,7 +9,7 @@
 # `-e` l'emporte sur l'inventaire : `starnet_node_dir` désigne le npm lancé.
 - name: Check the Node directory is a plain absolute path
   ansible.builtin.assert:
-    that: starnet_node_dir is match('^/[A-Za-z0-9._/-]*$')
+    that: starnet_node_dir is match('^/[A-Za-z0-9._/-]*(?!(?s:.))')
     fail_msg: "starnet_node_dir : chemin absolu sans espace ni métacaractère ({{ starnet_node_dir }})."
     quiet: true
   tags: [always]

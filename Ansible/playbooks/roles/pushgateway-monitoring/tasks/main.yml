@@ -108,7 +108,7 @@
 # suffit pas (un `/` ou un `{` y écrirait du code awk), d'où cette grammaire.
 - name: Check the scrape job name read into an awk pattern
   ansible.builtin.assert:
-    that: pushgwmon_job is match('^[A-Za-z0-9_-]{1,64}$')
+    that: pushgwmon_job is match('^[A-Za-z0-9_-]{1,64}(?!(?s:.))')
     fail_msg: "pushgwmon_job : lettres, chiffres, _ et - seulement (64 au plus)"
     quiet: true
   tags: [monitoring]

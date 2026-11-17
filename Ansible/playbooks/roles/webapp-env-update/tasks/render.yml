@@ -95,7 +95,7 @@
 
 - name: Fail when a local env file differs from the vault
   vars:
-    wa_env_differing: "{{ wa_env_status.stdout_lines | select('search', ' differs *$') | map('split') | map(attribute=1) | list }}"
+    wa_env_differing: "{{ wa_env_status.stdout_lines | select('search', ' differs *(?!(?s:.))') | map('split') | map(attribute=1) | list }}"
   ansible.builtin.fail:
     msg: >-
       Le .env {{ wa_env_differing | join(' et ') }} de {{ wa_src }} diffère de la copie du coffre : le restaurer
@@ -189,9 +189,9 @@
 - name: Check the keys of the hardening profile
   ansible.builtin.assert:
     that:
-      - ansible_check_mode or (wa_h_env.HARDEN_RUNTIME_UID is match('^[1-9][0-9]*$') and wa_h_env.HARDEN_RUNTIME_GID is match('^[1-9][0-9]*$'))
-      - wa_h_env.HARDEN_BACK_LB_REALIP is match('^(set_real_ip_from [0-9.]+;[ ]?)+$')
-      - wa_h_env.TRUST_PROXY is match('^[0-9.,]+$')
+      - ansible_check_mode or (wa_h_env.HARDEN_RUNTIME_UID is match('^[1-9][0-9]*(?!(?s:.))') and wa_h_env.HARDEN_RUNTIME_GID is match('^[1-9][0-9]*(?!(?s:.))'))
+      - wa_h_env.HARDEN_BACK_LB_REALIP is match('^(set_real_ip_from [0-9.]+;[ ]?)+(?!(?s:.))')
+      - wa_h_env.TRUST_PROXY is match('^[0-9.,]+(?!(?s:.))')
     fail_msg: "uid/gid du compte {{ wa_h_user }} (non root), relais de confiance (IPv4) : hors grammaire."
     quiet: true
   when: webapp_hardening is defined
@@ -209,7 +209,7 @@
     wa_env_vault_bad: >-
       {%- set out = [] -%}
       {%- for k, v in (webapp_env_from_vault | default({})).items() -%}
-      {%- if not (k is match('^[A-Z][A-Z0-9_]{0,63}$')) or not ((lookup('ansible.builtin.vars', v, default='') | string | trim) is match('^[A-Za-z0-9._~+/=-]{16,512}$')) -%}{%- set _ = out.append(k) -%}{%- endif -%}
+      {%- if not (k is match('^[A-Z][A-Z0-9_]{0,63}(?!(?s:.))')) or not ((lookup('ansible.builtin.vars', v, default='') | string | trim) is match('^[A-Za-z0-9._~+/=-]{16,512}(?!(?s:.))')) -%}{%- set _ = out.append(k) -%}{%- endif -%}
       {%- endfor -%}
       {{ out }}
   no_log: true
@@ -393,7 +393,7 @@
   ansible.builtin.assert:
     that:
       - wa_env_injected is mapping
-      - wa_env_injected.keys() | reject('match', '^[A-Z][A-Z0-9_]{0,63}$') | list | length == 0
+      - wa_env_injected.keys() | reject('match', '^[A-Z][A-Z0-9_]{0,63}(?!(?s:.))') | list | length == 0
       - wa_env_injected.values() | map('string') | select('search', "['$\\n\\\\]") | list | length == 0
     fail_msg: "`wa_env_injected` : noms en MAJUSCULES, valeurs sans apostrophe, `$`, antislash ni fin de ligne."
     quiet: true

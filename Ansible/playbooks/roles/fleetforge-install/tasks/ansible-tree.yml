@@ -34,7 +34,7 @@
 # Un `-e ff_tree` l'emporte sur ce fait : c'est le point de départ d'un find sur CE poste.
 - name: Check the Ansible tree is a plain absolute path
   ansible.builtin.assert:
-    that: ff_tree is match('^/[A-Za-z0-9._/-]*$')
+    that: ff_tree is match('^/[A-Za-z0-9._/-]*(?!(?s:.))')
     fail_msg: "ff_tree : chemin absolu sans espace ni métacaractère ({{ ff_tree }})."
     quiet: true
 

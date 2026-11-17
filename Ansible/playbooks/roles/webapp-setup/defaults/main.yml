@@ -91,7 +91,7 @@ webapp_eligible_proxies: >-
      | rejectattr('ansible_host', 'in', webapp_vpn_addresses)
      | map(attribute='inventory_hostname') | list }}
 # Sous-réseau privé /16 à /32 (grammaire de `_access.inc`), sans zéro en tête d'un octet.
-webapp_private_cidr_regex: '^(10[.](0|[1-9][0-9]{0,2})[.](0|[1-9][0-9]{0,2})|172[.](1[6-9]|2[0-9]|3[01])[.](0|[1-9][0-9]{0,2})|192[.]168[.](0|[1-9][0-9]{0,2}))[.](0|[1-9][0-9]{0,2})/(1[6-9]|2[0-9]|3[0-2])$'
+webapp_private_cidr_regex: '^(10[.](0|[1-9][0-9]{0,2})[.](0|[1-9][0-9]{0,2})|172[.](1[6-9]|2[0-9]|3[01])[.](0|[1-9][0-9]{0,2})|192[.]168[.](0|[1-9][0-9]{0,2}))[.](0|[1-9][0-9]{0,2})/(1[6-9]|2[0-9]|3[0-2])(?!(?s:.))'
 # Défauts du profil. `services` (services de CODE contrôlés et vérifiés à l'exécution) n'a PAS de défaut fixe : il est DÉRIVÉ du
 # drapeau worker par hardening.yml (`[back]`, plus `back-worker` seulement si `webapp_worker` vaut on|true — BACK_WORKER=off ne
 # lance aucun conteneur back-worker) ; un `webapp_hardening.services` explicite l'emporte.

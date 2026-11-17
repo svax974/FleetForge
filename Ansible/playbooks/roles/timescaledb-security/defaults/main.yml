@@ -28,7 +28,7 @@ tsdb_allowed_ips: >-
   {{ ((groups['backs'] | default([])) + (groups['nodes'] | default([])) + tsdb_extra_db_hosts)
      | map('extract', hostvars, 'ansible_host')
      | select('defined')
-     | select('match', '^[0-9]{1,3}([.][0-9]{1,3}){3}$')
+     | select('match', '^[0-9]{1,3}([.][0-9]{1,3}){3}(?!(?s:.))')
      | unique | list }}
 
 # Hôtes d'inventaire supplémentaires ayant besoin de la base.

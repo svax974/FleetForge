@@ -105,7 +105,7 @@
 - name: Fail when the content hash is unusable
   ansible.builtin.assert:
     that:
-      - ansible_check_mode or (sync_image_tag is match('^[0-9a-f]{12}$'))
+      - ansible_check_mode or (sync_image_tag is match('^[0-9a-f]{12}(?!(?s:.))'))
     fail_msg: "Empreinte des sources illisible (« {{ sync_src_hash.stdout | default('') }} », {{ sync_src_hash.stderr | default('') }})."
     quiet: true
   tags: [build]
