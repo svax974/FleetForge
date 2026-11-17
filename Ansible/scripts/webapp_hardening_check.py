@@ -1197,6 +1197,8 @@ def check_public(where, text):
         size = re.search(r"client_max_body_size\s+(\S+);", code)
         if size is None and rule["body_required"]:
             errors.append(f"{where_block} : limite de corps (client_max_body_size) exigée")
+        if size is not None and _nginx_bytes(size.group(1)) == 0:
+            errors.append(f"{where_block} : client_max_body_size {size.group(1)} = illimité pour nginx (une limite strictement positive est exigée)")
         if size is not None and (_nginx_bytes(size.group(1)) is None or _nginx_bytes(size.group(1)) > rule["body"]):
             errors.append(f"{where_block} : client_max_body_size {size.group(1)} au-dessus de {rule['body']} octets")
         read = re.search(r"proxy_read_timeout\s+(\S+);", code)

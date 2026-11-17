@@ -174,7 +174,7 @@
       {%- if l.regex | default(false) | bool -%}
         {%- if not (path is match('^[/^]/?[A-Za-z0-9._~/()|?*+^$-]*$')) -%}{%- set ns.b = ns.b + ['path'] -%}{%- endif -%}
       {%- elif not (path is match('^/[A-Za-z0-9._~/-]*$')) -%}{%- set ns.b = ns.b + ['path'] -%}{%- endif -%}
-      {%- if l.body is defined and not ((l.body | string) is match('^[0-9]{1,6}[kKmMgG]?$')) -%}{%- set ns.b = ns.b + ['body'] -%}{%- endif -%}
+      {%- if l.body is defined and not (((l.body | string) is match('^[0-9]{1,6}[kKmMgG]?$')) and ((l.body | string | regex_replace('[^0-9]', '') | int) > 0)) -%}{%- set ns.b = ns.b + ['body'] -%}{%- endif -%}
       {%- if l.timeout is defined and not ((l.timeout | string) is match('^[0-9]{1,5}(ms|s|m|h)?$')) -%}{%- set ns.b = ns.b + ['timeout'] -%}{%- endif -%}
       {%- if l.mode is defined and l.mode not in ['private', 'public'] -%}{%- set ns.b = ns.b + ['mode'] -%}{%- endif -%}
       {%- if l.raw_uri is defined and not ((l.raw_uri | string) is match('^[/^]/?[]A-Za-z0-9._~/()|?*+^$[-]*$')) -%}{%- set ns.b = ns.b + ['raw_uri'] -%}{%- endif -%}
@@ -186,7 +186,7 @@
       - _bad | trim | length == 0
     fail_msg: >-
       {{ inventory_hostname }} : `webapp_vhost_locations` hors grammaire ({{ _bad }}) — path `/…` (lettres, chiffres,
-      . _ ~ / -, et pour `regex: true` les métacaractères ( ) | ? * + ^ $), body `<n>[k|m|g]`, timeout `<n>[ms|s|m|h]`,
+      . _ ~ / -, et pour `regex: true` les métacaractères ( ) | ? * + ^ $), body `<n>[k|m|g]` avec n > 0 (0 = illimité pour nginx), timeout `<n>[ms|s|m|h]`,
       mode private|public, raw_uri `^/…` ; jamais d'espace, de `;`, `{`, `}`, guillemet ni saut de ligne.
     quiet: true
   when: webapp_vhost_locations is defined

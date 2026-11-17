@@ -717,3 +717,5 @@ sémantique documentée, et par `nginx -t` au déploiement).
   `Cache-Control` pour l'edge ; le navigateur garde `Cache-Control`). Un `add_header` de location remplace ceux du `server`/`http` :
   le vhost généré n'en pose aucun au-dessus (test), mais un `add_header` ajouté un jour dans `nginx.conf` ou le `server {}` serait perdu
   dans ces locations. Exigé par `vhost --public`.
+- **`body: 0`** : `client_max_body_size 0` est ILLIMITÉ pour nginx. La grammaire des faits (`facts.yml`, toute location), la garde de la
+  passerelle (limite exigée des locations publiques) et `vhost --public` exigent désormais un corps strictement positif.

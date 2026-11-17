@@ -121,6 +121,8 @@
       {%- if (l.upstream | default('')) != 'back' -%}{%- set ns.p = ns.p + [path ~ ': upstream must be back'] -%}{%- endif -%}
       {%- if l.priority | default(false) | bool or l.ws | default(false) | bool -%}{%- set ns.p = ns.p + [path ~ ': no priority (^~) nor websocket'] -%}{%- endif -%}
       {%- if rule.body_required and not body -%}{%- set ns.p = ns.p + [path ~ ': body limit required'] -%}{%- endif -%}
+      {#- `client_max_body_size 0` = illimité pour nginx : une limite exigée doit être strictement positive. -#}
+      {%- if body and body_bytes <= 0 -%}{%- set ns.p = ns.p + [path ~ ': body limit must be above 0 (0 means unlimited)'] -%}{%- endif -%}
       {%- if body and body_bytes > rule.body -%}{%- set ns.p = ns.p + [path ~ ': body above ' ~ rule.body ~ ' bytes'] -%}{%- endif -%}
       {%- if rule.timeout_required and not timeout -%}{%- set ns.p = ns.p + [path ~ ': timeout required'] -%}{%- endif -%}
       {%- if timeout and timeout_seconds > _public_timeout_max -%}{%- set ns.p = ns.p + [path ~ ': timeout above ' ~ _public_timeout_max ~ ' s'] -%}{%- endif -%}

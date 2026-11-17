@@ -3023,6 +3023,37 @@ class PublicLocationsGuardTests(unittest.TestCase):
                           if loc["path"] != location["path"]]
                 self.refused([CONNECTIONS, location] + others + [WELL_KNOWN_CLOSED])
 
+    def test_a_body_limit_of_zero_means_unlimited_for_nginx_and_is_refused_everywhere(self):
+        zero = ("0", 0, "0k", "0m", "00", "000g")
+        # 1. grammaire des faits (toute location, publique ou non) : le guard n'y est pour rien.
+        for value in zero:
+            with self.subTest(layer="facts", value=value):
+                code, out = run_local_play(FACTS_PLAY, guard_inventory(webapp_vhost_locations=[{"path": "/api/", "body": value}]),
+                                           {"apps.yml": "fleetforge-gateway: /nonexistent/app/\n"})
+                self.assertNotEqual(code, 0, out[-1500:])
+                self.assertIn("hors grammaire", out)
+        for value in ("1", 1, "1k", "10m", "128k"):
+            with self.subTest(layer="facts ok", value=value):
+                code, out = run_local_play(FACTS_PLAY, guard_inventory(webapp_vhost_locations=[{"path": "/api/", "body": value}]),
+                                           {"apps.yml": "fleetforge-gateway: /nonexistent/app/\n"})
+                self.assertEqual(code, 0, out[-1500:])
+        # 2. garde de la passerelle, jouée SEULE (sans la grammaire des faits) : une limite exigée doit être > 0.
+        guard = yaml.safe_load(open(os.path.join(ROLES, "fleetforge-install", "tasks", "gateway-guard.yml"), encoding="utf-8"))
+        task = next(t for t in guard if t.get("name") == "Check the public locations of the gateway entry")
+        for label, location, passes in (("mcp 0", dict(PUBLIC_MCP, body="0"), False), ("mcp 0k", dict(PUBLIC_MCP, body="0k"), False),
+                                        ("oauth 0m", dict(PUBLIC_OAUTH, body="0m"), False), ("well-known 0", dict(PUBLIC_PRM, body="0"), False),
+                                        ("well-known 1k", dict(PUBLIC_PRM, body="1k"), True), ("mcp 128k", PUBLIC_MCP, True)):
+            with self.subTest(layer="guard", case=label):
+                others = [loc for loc in (PUBLIC_MCP, PUBLIC_PRM, PUBLIC_AS, PUBLIC_OAUTH, PUBLIC_REGISTER) if loc["path"] != location["path"]]
+                play = yaml.safe_dump([{"hosts": "localhost", "gather_facts": False,
+                                        "vars": {"webapp_vhost_locations": [CONNECTIONS, location] + others, "cloudflare_named": True,
+                                                 "webapp_public_checks": PUBLIC_CHECKS},
+                                        "tasks": [task]}])
+                code, out = run_local_play(play)
+                self.assertEqual(code == 0, passes, out[-1500:])
+                if not passes:
+                    self.assertIn("above 0", out)
+
     def test_the_same_path_cannot_be_declared_twice(self):
         named = dict(MCP)
         self.refused(PUBLIC_SET + [named], "mcp")
@@ -3173,6 +3204,18 @@ class PublicVhostTests(unittest.TestCase):
             with self.subTest(label + " (unchecked without --public)"):
                 self.assertEqual(vhost_errors(mutated), [] if "root" not in label else vhost_errors(mutated))
 
+    def test_a_zero_body_limit_is_unlimited_for_nginx_and_is_caught(self):
+        text = public_vhost()
+        mcp = "~* ^/mcp(/.*)?$"
+        for value in ("0", "0k", "0m", "00"):
+            with self.subTest(value):
+                errors = vhost_errors(mutate(text, mcp, "client_max_body_size    128k;", f"client_max_body_size    {value};"), public=True)
+                self.assertTrue(any("illimité" in e for e in errors), errors)
+        oauth = "~* " + PUBLIC_OAUTH["path"]
+        self.assertTrue(any("illimité" in e for e in vhost_errors(
+            mutate(text, oauth, "client_max_body_size    16k;", "client_max_body_size    0;"), public=True)))
+        self.assertEqual(vhost_errors(mutate(text, mcp, "client_max_body_size    128k;", "client_max_body_size    1;"), public=True), [])
+
     def test_a_public_location_outside_the_whitelist_is_caught_in_the_rendered_vhost(self):
         extra = {"path": "/api/v1/users/", "mode": "public", "upstream": "back"}
         text = public_vhost(PUBLIC_SET + [extra])
@@ -3243,7 +3286,6 @@ class PublicVhostTests(unittest.TestCase):
         self.assertEqual(CloudflareNamedPlaybookTests.hosts_running(task, other, group="apps", extra_vars={"webapp_vhost_entries": ["mail1"]}), [])
 
 
-@unittest.skipUnless(shutil.which("ansible-playbook"), "ansible-playbook absent")
 def nginx_untrusted(text, socket_address, client_verify):
     """Valeur de `$cf_untrusted_*` du vhost RENDU pour une socket et un `$ssl_client_verify`, lue comme nginx lit le `geo` (adresse de
     la SOCKET, `$realip_remote_addr`, plus petite plage) et le `map` (clé exacte sans casse, puis regex dans l'ordre, puis `default`)."""
@@ -3416,6 +3458,7 @@ class CloudflareNamedNoStoreTests(unittest.TestCase):
         self.assertTrue(vhost_errors(wrong, public=True))
 
 
+@unittest.skipUnless(shutil.which("ansible-playbook"), "ansible-playbook absent")
 class PublicEdgeProbeTests(unittest.TestCase):
     """A3 : `webapp_public_checks` → sondes svcprobe `public_edge` (401 par le nom) et `public_edge_origin` (403 à
     l'origine sans certificat client), jouées depuis la machine de la passerelle."""
