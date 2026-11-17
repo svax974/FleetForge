@@ -4671,8 +4671,8 @@ class EndOfStringGrammarTests(unittest.TestCase):
     ligne final est refusé là où `$` l'accepterait. Forme retenue : `(?!(?s:.))` (rien, pas même un saut de ligne, ne suit)."""
 
     END = "(?!(?s:.))"
-    SITES = {("fleetforge-install", "gateway-guard.yml"): 3, ("webapp-monitoring", "extra-checks.yml"): 7,
-             ("webapp-setup", "facts.yml"): 6}
+    SITES = {("fleetforge-install", "gateway-guard.yml"): 5, ("webapp-monitoring", "extra-checks.yml"): 10,
+             ("webapp-setup", "facts.yml"): 8}
     GATEWAY = ("all", "children", "fleetforge_gateways", "hosts", "fleetforge-gateway")
 
     @staticmethod
@@ -4730,7 +4730,7 @@ class EndOfStringGrammarTests(unittest.TestCase):
         alphabet = list("a1/_.-~()|^$[]*+?kmsAZ ;\n\r")
         strings = ["".join(chars) for size in range(4) for chars in itertools.product(alphabet, repeat=size)]
         strings += ["a" * 253, "a" * 254, "a.b-c\n", "/api/\n", "/api/\r\n", "5k\n", "30s\n", "401\n", "POST\n", "main\n", "443\n",
-                    "^/mcp(/|[?]|$)\n", "^/mcp(/.*)?$\n", "ffg.example.test\n", "ffg.example.test \n", "\nffg", "a\n\n"]
+                    "^/mcp(/|[?]|$)\n", "^/mcp(/.*)?$\n", "webapp-a\n", "webapp-fleetforge-gateway\n", "https://a\n", "https://a/b\n", "ffg.example.test\n", "ffg.example.test \n", "\nffg", "a\n\n"]
         for (role, name), expected in self.SITES.items():
             text = self._text(role, name)
             self.assertNotIn("\\Z", text, name)
@@ -4778,6 +4778,104 @@ class EndOfStringGrammarTests(unittest.TestCase):
         self.assertIn("hors grammaire", out)
         code, out = run_local_play(MONITORING_PLAY.replace("{id: main,", '{id: "main_2",'))
         self.assertEqual(code, 0, out[-1500:])
+
+
+class EndOfStringGapsTests(unittest.TestCase):
+    """Les `$` qui restaient dans les grammaires de la garde de la passerelle, des faits `webapp` et de la sonde d'amont :
+    `$` accepte `x\\n`, or ces valeurs entrent dans un chemin ou une commande. Même forme que ci-dessus
+    (`(?!(?s:.))`). Laissés tels quels, volontairement : les clés/`raw_uri` de la liste blanche (données nginx, comparées
+    par égalité), `[kmg]$` / `[a-z]+$` (calcul numérique, la grammaire de `body` et `timeout` est tenue par facts.yml) et
+    `')$'` de `_denied_allowed` (le `$` n'y élargit que la détection de conflit : sens sûr)."""
+
+    END = EndOfStringGrammarTests.END
+    GONE = {
+        ("fleetforge-install", "gateway-guard.yml"): [
+            "proxy_hostname is search('[.]' ~ (domain_name | regex_escape) ~ '$')",
+            "_ev.hostname is search('[.]' ~ (domain_name | regex_escape) ~ '$')",
+            "item.id is match('^[a-z][a-z0-9_]{0,31}$')",
+            "~ '(/|$)')",
+            "is match('^[][{}A-Za-z0-9 \",:._/-]+$')"],
+        ("webapp-setup", "facts.yml"): [
+            "is match('^[a-z][a-z0-9-]*$')",
+            "is match('^[0-9a-zA-Z.:-]+$')",
+            "proxy_hostname is search('[.]' ~ (domain_name | regex_escape) ~ '$')"],
+        ("webapp-monitoring", "extra-checks.yml"): [
+            "wa_project is match('^[a-z][a-z0-9-]{0,40}$')",
+            "wa_h_tag is match('^webapp-[a-z][a-z0-9-]{0,40}$')",
+            "(/[A-Za-z0-9._/-]*)?$')"],
+    }
+
+    def test_no_dollar_anchored_match_or_search_is_left_in_these_files(self):
+        for (role, name), gone in self.GONE.items():
+            text = EndOfStringGrammarTests._text(role, name)
+            for snippet in gone:
+                self.assertNotIn(snippet, text, f"{name} : {snippet}")
+            leftovers = [line.strip() for line in text.splitlines()
+                         if re.search(r"\b(?:match|search)\(", line) and re.search(r"\$\)?'\)", line)]
+            self.assertEqual(leftovers, [], f"{name} : `$` en fin de grammaire")
+
+    def test_the_new_forms_differ_from_dollar_only_by_the_trailing_newline(self):
+        import itertools
+
+        pairs = [
+            ("[.]example[.]test$", "[.]example[.]test" + self.END, "search"),
+            ("^https://infra[.]example[.]test(/|$)", "^https://infra[.]example[.]test(/|" + self.END + ")", "match"),
+        ]
+        tokens = ["https://", "infra", ".", "example", "test", "/", "x", "\n", "\r\n"]
+        strings = ["".join(chars) for size in range(7) for chars in itertools.product(tokens, repeat=size)]
+        strings += ["https://infra.example.test\n", "https://infra.example.test/\n", "https://infra.example.test/x\n"]
+        for old, new, mode in pairs:
+            find = (lambda r, s: r.search(s)) if mode == "search" else (lambda r, s: r.match(s))
+            old_re, new_re = re.compile(old), re.compile(new)
+            refused_only_by_new = 0
+            for s in strings:
+                before, after = bool(find(old_re, s)), bool(find(new_re, s))
+                if not s.endswith("\n"):
+                    self.assertEqual(before, after, f"{old} : {s!r}")
+                else:
+                    self.assertFalse(after and not before, f"{old} : {s!r} accepté par la nouvelle forme seulement")
+                    refused_only_by_new += before and not after
+            self.assertGreater(refused_only_by_new, 0, f"{old} : le piège de `$` doit être réel")
+
+    @unittest.skipUnless(shutil.which("ansible-playbook"), "ansible-playbook absent")
+    def test_the_gateway_guard_refuses_a_trailing_newline_where_dollar_let_it_through(self):
+        def guard(**gateway):
+            return run_local_play(GUARD_PLAY, guard_inventory(**gateway), {"apps.yml": "fleetforge-gateway: /nonexistent/app/\n"})
+        probe = {"id": "main", "url": "https://infra-priv.example.test/healthz"}
+        for url in ("https://infra-priv.example.test", "https://infra-priv.example.test/healthz"):
+            with self.subTest(valid=url):
+                code, out = guard(webapp_upstream_checks=[dict(probe, url=url)])
+                self.assertEqual(code, 0, out[-2000:])
+        for label, change, condition in (
+                ("probe url", dict(webapp_upstream_checks=[dict(probe, url="https://infra-priv.example.test\n")]), "(/|(?!(?s:.)))"),
+                ("upstream id", dict(ffg_upstreams=[{"id": "main\n", "entry": "infra1", "parcs": ["demo"]}]), "item.id is match("),
+                ("proxy_hostname", dict(proxy_hostname="ffg.example.test\n"), "proxy_hostname is search(")):
+            with self.subTest(label):
+                code, out = guard(**change)
+                self.assertNotEqual(code, 0, out[-1500:])
+                self.assertIn(condition, out, "le refus doit venir de la grammaire visée")
+
+    @unittest.skipUnless(shutil.which("ansible-playbook"), "ansible-playbook absent")
+    def test_the_webapp_facts_refuse_a_trailing_newline_in_the_environment_name(self):
+        def facts(**fields):
+            return run_local_play(FACTS_PLAY, guard_inventory(**fields), {"apps.yml": "fleetforge-gateway: /nonexistent/app/\n"})
+        code, out = facts(webapp_env="staging")
+        self.assertEqual(code, 0, out[-2000:])
+        code, out = facts(webapp_env="staging\n")
+        self.assertNotEqual(code, 0, out[-1500:])
+        self.assertIn("webapp_env", out)
+
+    @unittest.skipUnless(shutil.which("ansible-playbook"), "ansible-playbook absent")
+    def test_the_probe_checks_refuse_a_trailing_newline_in_project_tag_and_url(self):
+        self.assertEqual(run_local_play(MONITORING_PLAY)[0], 0)
+        for old, new in (("wa_project: fleetforge-gateway", 'wa_project: "fleetforge-gateway\\n"'),
+                         ("wa_h_tag: webapp-fleetforge-gateway", 'wa_h_tag: "webapp-fleetforge-gateway\\n"'),
+                         ('url: "https://infra.example.test/healthz"', 'url: "https://infra.example.test/healthz\\n"')):
+            with self.subTest(new):
+                self.assertIn(old, MONITORING_PLAY)
+                code, out = run_local_play(MONITORING_PLAY.replace(old, new))
+                self.assertNotEqual(code, 0, out[-1500:])
+                self.assertIn("hors grammaire", out)
 
 
 DEPLOY_FLEETFORGE = os.path.join(PLAYBOOKS, "deploy-fleetforge.yml")

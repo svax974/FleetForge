@@ -48,7 +48,7 @@
       - access_mode == 'private'
       - hostname is defined
       - proxy_hostname is defined
-      - proxy_hostname is search('[.]' ~ (domain_name | regex_escape) ~ '$')
+      - proxy_hostname is search('[.]' ~ (domain_name | regex_escape) ~ '(?!(?s:.))')
       - proxy_hostname != 'proxy.' ~ domain_name
       - _mcp_ok | bool
       # Sorties du sous-réseau (pare-feu du profil) : l'amont par UN proxy nommé, en 443, et le relais SMTP
@@ -226,7 +226,7 @@
   ansible.builtin.assert:
     that:
       - item.id is defined
-      - item.id is match('^[a-z][a-z0-9_]{0,31}$')
+      - item.id is match('^[a-z][a-z0-9_]{0,31}(?!(?s:.))')
       - _e in (groups['infras'] | default([]))
       - _ev.proxy_hostname is defined
       - _ev.proxy_hostname is match('^[a-z0-9][a-z0-9.-]{0,252}(?!(?s:.))')
@@ -235,14 +235,14 @@
       # (la machine de l'amont), que la passerelle soit sur cette machine ou non.
       - _ev.hostname is defined
       - _ev.hostname is match('^[a-z0-9][a-z0-9.-]{0,252}(?!(?s:.))')
-      - _ev.hostname is search('[.]' ~ (domain_name | regex_escape) ~ '$')
+      - _ev.hostname is search('[.]' ~ (domain_name | regex_escape) ~ '(?!(?s:.))')
       - hostvars[_upstream_egress[0].inventory_host | default('')].ansible_host | default('') == _ev.ansible_host | default('')
       # Hors 443 : l'amont déclare CET écouteur dédié (`dedicated_listeners`), dont le seul client est cette passerelle.
       # Sans lui la sortie ouverte ne mène à aucun `server {}`. Le contrôle de la déclaration (port, clients, adresses)
       # est celui de proxy-security/tasks/dedicated-listeners.yml, avant toute ouverture.
       - (_up_port | int) == 443 or (_listeners | length == 1 and (_listeners[0].clients | default([])) == [inventory_hostname])
       # La sonde `upstream_<id>` (`webapp_upstream_checks`) joint le MÊME nom et le MÊME port que `FFG_UPSTREAMS`.
-      - _probe | length == 0 or (_probe[0].url | default('')) is match('^https://' ~ (_authority | regex_escape) ~ '(/|$)')
+      - _probe | length == 0 or (_probe[0].url | default('')) is match('^https://' ~ (_authority | regex_escape) ~ '(/|(?!(?s:.)))')
       - inventory_hostname in (_ev.access_linked | default([]))
       - item.parcs is defined and item.parcs is not string and item.parcs | length > 0
       - (_users.values() | unique | list | length) == 3
@@ -328,7 +328,7 @@
 - name: Check FFG_UPSTREAMS
   ansible.builtin.assert:
     that:
-      - wa_env_injected.FFG_UPSTREAMS is match('^[][{}A-Za-z0-9 ",:._/-]+$')
+      - wa_env_injected.FFG_UPSTREAMS is match('^[][{}A-Za-z0-9 ",:._/-]+(?!(?s:.))')
       - wa_env_injected.FFG_UPSTREAMS | from_json | length == ffg_upstreams | length
     fail_msg: "FFG_UPSTREAMS hors grammaire (ids, noms publics et parcs : [A-Za-z0-9._-])."
     quiet: true
