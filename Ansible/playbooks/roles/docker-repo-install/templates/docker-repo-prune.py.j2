@@ -7,7 +7,14 @@
 # sha de commit, non triables. Un manifeste n'est supprimé que si AUCUN tag conservé ne le référence.
 # Métriques (node_exporter, collecteur textfile) : docker_repo_prune_last_success_timestamp_seconds,
 # docker_repo_images, docker_repo_pruned_total — `RegistryPruneStale` alerte quand le passage cesse d'avoir lieu.
-import base64, json, subprocess, sys, time, urllib.error, urllib.request
+#
+# INTÉGRITÉ (constat du 17/11/2026) : le ramasse-miettes de `registry:2` supprime les DONNÉES d'un blob mais laisse son LIEN
+# (`_layers/sha256/<d>/link`) dans les dépôts. Un push suivant croit la couche présente (HEAD ou montage inter-dépôts) et ne
+# l'envoie pas : l'image publiée est incomplète, et un `docker pull` depuis une AUTRE machine échoue (`short read … EOF`) — alors
+# que la machine du registre, qui garde les couches en cache local, ne voit rien. Après chaque ramasse-miettes ce script retire donc
+# les liens sans données, puis compte les images dont une couche manque (docker_repo_broken_images, alerte
+# `RegistryBrokenImages`). `--repair` supprime en plus ces tags inutilisables (le prochain déploiement repousse l'image).
+import base64, json, os, subprocess, sys, time, urllib.error, urllib.request
 
 URL = "http://127.0.0.1:{{ docker_repo_port }}"
 KEEP = {{ docker_repo_keep_tags }}
@@ -19,6 +26,56 @@ ACCEPT = ("application/vnd.docker.distribution.manifest.v2+json,"
           "application/vnd.oci.image.index.v1+json,"
           "application/vnd.docker.distribution.manifest.list.v2+json")
 DRY = "--dry-run" in sys.argv
+REPAIR = "--repair" in sys.argv
+V2 = "{{ docker_repo_dir }}/data/docker/registry/v2"
+
+
+def blob_path(digest):
+    h = digest.split(":", 1)[1]
+    return "%s/blobs/sha256/%s/%s/data" % (V2, h[:2], h)
+
+
+def layers_of(digest, seen=None):
+    """Digests (config + couches) qu'un manifeste référence, un index OCI étant parcouru ; None si le manifeste manque."""
+    if not os.path.isfile(blob_path(digest)):
+        return None
+    m = json.load(open(blob_path(digest)))
+    if "manifests" in m:
+        out = []
+        for child in m["manifests"]:
+            sub = layers_of(child["digest"])
+            out.extend(sub if sub is not None else [child["digest"]])
+        return out
+    return [m["config"]["digest"]] + [l["digest"] for l in m.get("layers", [])]
+
+
+def stale_links():
+    """Liens de couche dont les données du blob n'existent plus : à retirer (sinon un push saute l'envoi de la couche)."""
+    out = []
+    base = V2 + "/repositories"
+    for dirpath, dirnames, filenames in os.walk(base):
+        if os.path.basename(os.path.dirname(dirpath)) == "sha256" and os.path.basename(os.path.dirname(os.path.dirname(dirpath))) == "_layers" \
+                and "link" in filenames:
+            digest = "sha256:" + os.path.basename(dirpath)
+            if not os.path.isfile(blob_path(digest)):
+                out.append(dirpath)
+    return out
+
+
+def broken_images():
+    """(dépôt, tag, répertoire du tag, couches manquantes) de chaque tag dont une couche n'est plus stockée."""
+    out = []
+    for tag_dir in sorted(__import__("glob").glob(V2 + "/repositories/*/*/_manifests/tags/*")):
+        repo = "/".join(tag_dir.split("/")[-5:-3])
+        try:
+            digest = open(tag_dir + "/current/link").read().strip()
+        except OSError:
+            continue
+        refs = layers_of(digest)
+        missing = [d for d in (refs if refs is not None else [digest]) if not os.path.isfile(blob_path(d))]
+        if missing:
+            out.append((repo, os.path.basename(tag_dir), tag_dir, digest, missing))
+    return out
 
 
 def call(path, method="GET", accept=None):
@@ -82,11 +139,28 @@ if not DRY:
     if has_repos:
         subprocess.run(["docker", "exec", "docker-repo-registry", "registry", "garbage-collect", "--delete-untagged",
                         "/etc/docker/registry/config.yml"], check=True)
+    # Intégrité APRÈS le ramasse-miettes (c'est lui qui crée les liens périmés), avant l'écriture de la métrique.
+    for link_dir in stale_links():
+        print("lien de couche périmé retiré : %s" % link_dir.split("/repositories/", 1)[1])
+        for name in os.listdir(link_dir):
+            os.remove(os.path.join(link_dir, name))
+        os.rmdir(link_dir)
+    broken = broken_images()
+    for repo, tag, tag_dir, digest, missing in broken:
+        print("IMAGE INCOMPLÈTE %s:%s (%d couche(s) absente(s) du stockage)%s" % (repo, tag, len(missing), " — supprimée" if REPAIR else ""))
+        if REPAIR:
+            subprocess.run(["rm", "-rf", tag_dir], check=True)
+            rev = "%s/repositories/%s/_manifests/revisions/sha256/%s" % (V2, repo, digest.split(":", 1)[1])
+            subprocess.run(["rm", "-rf", rev], check=True)
+    if REPAIR and broken:
+        subprocess.run(["docker", "restart", "docker-repo-registry"], check=True)
+        broken = []
     with open("{{ docker_repo_textfile_dir }}/docker_repo_prune.prom.tmp", "w") as f:
         f.write("# TYPE docker_repo_prune_last_success_timestamp_seconds gauge\n"
                 "docker_repo_prune_last_success_timestamp_seconds %d\n"
                 "# TYPE docker_repo_images gauge\ndocker_repo_images %d\n"
-                "# TYPE docker_repo_pruned_total gauge\ndocker_repo_pruned_total %d\n" % (time.time(), images - pruned, pruned))
-    import os
+                "# TYPE docker_repo_pruned_total gauge\ndocker_repo_pruned_total %d\n"
+                "# TYPE docker_repo_broken_images gauge\ndocker_repo_broken_images %d\n"
+                % (time.time(), images - pruned, pruned, len(broken)))
     os.replace("{{ docker_repo_textfile_dir }}/docker_repo_prune.prom.tmp", "{{ docker_repo_textfile_dir }}/docker_repo_prune.prom")
 print("%d image(s) conservée(s), %d supprimée(s)%s" % (images - pruned, pruned, " (simulation)" if DRY else ""))

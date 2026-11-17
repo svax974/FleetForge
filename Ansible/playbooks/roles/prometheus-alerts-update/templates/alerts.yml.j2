@@ -1722,6 +1722,19 @@ groups:
             Aucun passage réussi de docker-repo-prune depuis plus de
             {{ ((prom_alert_registry_prune_max_age_seconds | default(172800)) / 3600) | int }} h (il est quotidien). Le registre se
             remplit : `journalctl -u docker-repo-prune` sur {{ '{{' }} $labels.instance {{ '}}' }}.
+      # Image publiée mais INCOMPLÈTE : le ramasse-miettes de registry:2 supprime les données d'un blob et laisse son lien, un
+      # push suivant saute alors la couche. Invisible depuis la machine du registre (cache local), fatal pour un pull ailleurs.
+      - alert: RegistryBrokenImages
+        expr: docker_repo_broken_images > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Images incomplètes dans le registre Docker de {{ '{{' }} $labels.instance {{ '}}' }}"
+          description: >-
+            {{ '{{' }} $value {{ '}}' }} image(s) du registre ont des couches absentes du stockage : un `docker pull` depuis une autre
+            machine échouera (`short read … unexpected EOF`). `docker-repo-prune.py --repair` supprime ces tags, puis redéployer
+            l'application pour repousser l'image.
 {% endif %}
 {% if 'backups' in prom_alert_groups %}
 

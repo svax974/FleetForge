@@ -1102,8 +1102,8 @@ mod tests {
         for (playbook, imports) in [
             ("update-prometheus-alerts.yml", vec![]),
             ("check-monitoring.yml", vec![]),
-            ("deploy-fleetforge.yml", vec!["deploy-webapp.yml"]),
-            ("deploy-agenthub.yml", vec!["deploy-webapp.yml"]),
+            ("deploy-fleetforge.yml", vec!["deploy-webapp.yml", "lib/gateway-backup-guard.yml", "lib/gateway-backup-install.yml", "lib/probe-entry-ports.yml"]),
+            ("deploy-agenthub.yml", vec!["deploy-webapp.yml", "lib/probe-entry-ports.yml"]),
             ("deploy-openclaw.yml", vec!["deploy-llamacpp.yml"]),
             ("deploy-timescaledb-standalone.yml", vec!["deploy-timescaledb.yml"]),
         ] {

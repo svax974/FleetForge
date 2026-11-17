@@ -157,14 +157,21 @@ d'un chemin LOCAL, inutilisable avec un daemon distant ; `webapp_migrate: true` 
 `webapp_redis_port` / `webapp_db_port` (pas `redis_port`) ; `webapp_proxy: external` ne pose AUCUN filtrage DOCKER-USER (il couperait le trafic
 direct de Cloudflare) ; `webapp_front: pages` + `webapp_pages_managed: false` pour un projet Pages partagé (branche de préprod) ; un `.env`
 local rendu puis refusé doit déjà être au coffre (les refus du rôle passent APRÈS la sauvegarde) ; les images du registre sont construites SANS
-attestation BuildKit (un index OCI perd ses enfants au ramasse-miettes de `registry:2`).
+attestation BuildKit (un index OCI perd ses enfants au ramasse-miettes de `registry:2`) ; **le ramasse-miettes de `registry:2` supprime les
+DONNÉES d'un blob mais laisse son LIEN (`_layers/sha256/<d>/link`) dans les dépôts** : un push suivant croit la couche présente (HEAD ou montage
+inter-dépôts), ne l'envoie pas, et l'image publiée est incomplète. Un `docker pull` sur la machine du registre réussit (cache local des couches)
+alors qu'il échoue ailleurs (`short read … unexpected EOF`, le registre répondant 200 sans octet) : **un pull ne se valide JAMAIS depuis la
+machine du registre**. `docker-repo-prune.py` retire désormais les liens sans données après le ramasse-miettes, publie
+`docker_repo_broken_images` (alerte `RegistryBrokenImages`) et, avec `--repair`, supprime les tags incomplets (redéployer l'application les
+repousse).
 
 ## Validations par l'usage (suivi)
 
 | Situation | Signal | Conditions de départ |
 |---|---|---|
 | **VALIDÉ 15/11/2026** — Premier `push` vers le registre | pas de 413 ; ligne `[IMAGE:<projet>] … builder=` | `deploy-docker-repo.yml` rejoué (vhost `client_max_body_size 0`), builder connecté (`docker login localhost:<port>` par `srvc`) |
-| **VALIDÉ 15/11/2026** — Premier `pull` d'une cible | `[IMAGE:<projet>] … host=` ; sinon 403 du vhost | `webapp-install` rejoué (docker login, compte `docker_repo_pull_*` au coffre) ; vhost du registre re-déployé (liste `allow` dérivée des entrées webapp) |
+| **INVALIDÉ 17/11/2026** (relevé sur la machine du registre : le cache local masquait des couches absentes) — Premier `pull` d'une cible DISTANTE | `[IMAGE:<projet>] … host=` d'un hôte qui n'est PAS celui du registre ; sinon 403 du vhost ou `short read … EOF` | `webapp-install` rejoué (docker login, compte `docker_repo_pull_*` au coffre) ; vhost du registre re-déployé (liste `allow` dérivée des entrées webapp) ; `count(docker_repo_broken_images)` = 1 puis valeur 0 |
+| Intégrité du registre | `docker_repo_broken_images` = 0 ; l'alerte `RegistryBrokenImages` ne sonne pas | passage quotidien de `docker-repo-prune` ; après une réparation (`--repair`), chaque application repousse son image au déploiement suivant |
 | **VALIDÉ 15/11/2026** — Premier déploiement du registre papanglabs | `docker-repo.papanglabs.com/v2/` répond 401 depuis un hôte admis (back1-prod) et expire ailleurs ; `docker_repo_pass` et `docker_repo_pull_pass` apparus dans `group_vars/papanglabs.yml` (à COMMITTER dans le dépôt privé) | `./play.sh papanglabs deploy-docker-repo.yml` (d'abord `--check --diff`, qui n'écrit rien) ; CNAME publié par le rôle, vhost par le play `proxy-conf` |
 | **VALIDÉ 15/11/2026** — Rétention | `count(docker_repo_prune_last_success_timestamp_seconds)` = 1 ; `docker-repo-prune --dry-run` d'abord | `registry` à ajouter à `prom_alert_groups` APRÈS ce premier passage |
 | **VALIDÉ 15/11/2026** — Adoption des secrets | message « ADOPTÉ(S) … NOUVEAU(X) » : aucun secret de chiffrement ne doit être « NOUVEAU » pour une app déjà en production | premier `deploy-webapp.yml` d'une app existante, d'abord en `--check --diff --tags config` |

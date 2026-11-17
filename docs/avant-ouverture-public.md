@@ -337,5 +337,16 @@ Détail : `docs/deploiement-webapp.md`.
   dans `prom_alert_groups` après le premier passage ; registre papanglabs prêt (back1-preprod, 5000) mais pas déployé :
   vérifier l'espace disque de la machine (≈ 90 Go partagés avec les dumps de sauvegarde, `docker_repo_keep_tags: 8`).
 - **Sauvegarde hors serveur des clés de chiffrement** des apps (le coffre du parc ne suffit pas à lui seul).
+- **Intégrité du registre (ajouté le 17/11/2026)** : le ramasse-miettes de `registry:2` laisse des liens de couche périmés, un push saute
+  alors la couche et l'image publiée est incomplète — invisible depuis la machine du registre (cache local), fatal pour un pull ailleurs.
+  Corrigé dans `docker-repo-prune.py` (liens retirés après le ramasse-miettes, `docker_repo_broken_images`, alerte `RegistryBrokenImages`).
+  À valider par l'usage : premier pull réussi depuis une machine DISTANTE (TradeKong, 17/11/2026), puis `docker_repo_broken_images` = 0
+  après un ramasse-miettes réel portant sur deux apps qui partagent des couches de base. Revue humaine de `--repair` (supprime des tags).
+  Rétention à 1 tag sur web3c : plus de retour arrière par tag depuis le registre (l'image `:previous` locale de chaque hôte reste).
+- **Défauts de la famille `webapp` ≠ défauts de `deploy-full.sh`** : `BACK_WORKER` valait `off` (famille) contre `on` (script) et a retiré
+  le worker de ctdapi à sa conversion ; revoir chaque app convertie contre ses défauts historiques (clés réécrites : `BACK_REPLICAS`,
+  `INFRA_BIND`, `BACK_WORKER`).
+- **Test rouge hérité** : `cargo test -p fleetforge-core --test ansible_quoting` échoue sur `backup-setup` (garde de `delegate_to`) et
+  `proxy-update/tasks/resync.yml` (`| quote`, `--`) depuis les commits du 16/11/2026 : à corriger avant d'ouvrir.
 - **Limites de Cloudflare Pages** (sources tierces, non confirmées officiellement) : 100 projets par compte, 500 builds par mois ;
   à vérifier sur developers.cloudflare.com/pages/platform/limits avant d'y migrer d'autres apps (2 aujourd'hui).
