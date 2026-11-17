@@ -139,6 +139,9 @@
 {% elif _access_mode == 'public' and ((hostvars[access_entry].cloudflare_front | default(false) | bool) or (hostvars[access_entry].cloudflare_named | default(false) | bool)) %}
         # Mode public ({{ access_entry }}) derrière Cloudflare : certificat client de NOTRE zone exigé.
         if ($ssl_client_verify != SUCCESS) {
+{% if (hostvars[access_entry].cloudflare_named | default(false) | bool) and not (hostvars[access_entry].cloudflare_front | default(false) | bool) %}
+            add_header X-FFG-Origin cert-required always;
+{% endif %}
             return 403;
         }
 {% elif _access_mode == 'public' %}

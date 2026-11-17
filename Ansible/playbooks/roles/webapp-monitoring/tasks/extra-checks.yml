@@ -14,7 +14,7 @@
     that:
       - wa_project is match('^[a-z][a-z0-9-]{0,40}$')
       - webapp_hardening is not defined or wa_h_tag is match('^webapp-[a-z][a-z0-9-]{0,40}$')
-      - webapp_upstream_checks | default([]) | map(attribute='id') | reject('match', '^[a-z][a-z0-9_]{0,31}$') | list | length == 0
+      - webapp_upstream_checks | default([]) | map(attribute='id') | reject('match', '^[a-z][a-z0-9_]{0,31}\Z') | list | length == 0
       - webapp_upstream_checks | default([]) | map(attribute='url') | reject('match', '^https://[a-z0-9][a-z0-9.-]{0,252}(:[1-9][0-9]{0,4})?(/[A-Za-z0-9._/-]*)?$') | list | length == 0
     fail_msg: "Nom de projet, id ou URL (https://<nom>[:<port>]/<chemin>) d'un amont hors grammaire : ils entrent dans la commande de la sonde."
     quiet: true
@@ -27,14 +27,14 @@
     that:
       - webapp_public_checks is not string and webapp_public_checks is sequence
       - webapp_public_checks | reject('mapping') | list | length == 0
-      - webapp_public_checks | map(attribute='name', default='') | reject('match', '^[a-z][a-z0-9_]{0,31}$') | list | length == 0
+      - webapp_public_checks | map(attribute='name', default='') | reject('match', '^[a-z][a-z0-9_]{0,31}\Z') | list | length == 0
       - webapp_public_checks | map(attribute='name', default='') | unique | list | length == webapp_public_checks | length
-      - webapp_public_checks | map(attribute='path', default='') | reject('match', '^/[A-Za-z0-9._~/-]*$') | list | length == 0
-      - webapp_public_checks | selectattr('method', 'defined') | map(attribute='method') | reject('match', '^[A-Z]{3,7}$') | list | length == 0
-      - webapp_public_checks | map(attribute='edge_status', default='') | map('string') | reject('match', '^[1-5][0-9]{2}$') | list | length == 0
-      - webapp_public_checks | selectattr('origin_status', 'defined') | map(attribute='origin_status') | map('string') | reject('match', '^[1-5][0-9]{2}$') | list | length == 0
+      - webapp_public_checks | map(attribute='path', default='') | reject('match', '^/[A-Za-z0-9._~/-]*\Z') | list | length == 0
+      - webapp_public_checks | selectattr('method', 'defined') | map(attribute='method') | reject('match', '^[A-Z]{3,7}\Z') | list | length == 0
+      - webapp_public_checks | map(attribute='edge_status', default='') | map('string') | reject('match', '^[1-5][0-9]{2}\Z') | list | length == 0
+      - webapp_public_checks | selectattr('origin_status', 'defined') | map(attribute='origin_status') | map('string') | reject('match', '^[1-5][0-9]{2}\Z') | list | length == 0
       - proxy_hostname is defined
-      - proxy_hostname is match('^[a-z0-9][a-z0-9.-]{0,252}$')
+      - proxy_hostname is match('^[a-z0-9][a-z0-9.-]{0,252}\Z')
       - (webapp_public_checks | selectattr('origin_status', 'defined') | list | length == 0) or (wa_h_eligible_proxies is defined and wa_h_eligible_proxies | length > 0)
     fail_msg: >-
       `webapp_public_checks` : liste de { name (a-z0-9_, unique), path (/…), method? (GET par défaut), edge_status (100-599),
@@ -92,7 +92,8 @@
       {{ out }}
     # Bord public : `<name>` joint le NOM public (par Cloudflare) sans identifiant et attend `edge_status` (401 : la route répond
     # mais refuse) ; `<name>_origin` joint chaque proxy ADMIS DIRECTEMENT (`--resolve`, sans le certificat client de Cloudflare) et
-    # attend `origin_status` (403) de TOUS. Un 200 direct = le vhost est ouvert à qui contourne Cloudflare ; un 403/ban de Cloudflare
+    # attend `origin_status` (403) de TOUS, ET l'en-tête `X-FFG-Origin: cert-required` que le vhost pose sur CE refus (sans lui un vhost
+    # absent, dont le serveur par défaut répond aussi 403, passerait pour un vhost fermé). Un 200 direct = le vhost est ouvert à qui contourne Cloudflare ; un 403/ban de Cloudflare
     # sur la sonde du nom = règle WAF qui défie les appels serveur. À 0 alors que service_up vaut 1 : ServiceCheckFailing.
     _origins: >-
       {{ (wa_h_eligible_proxies | default([])) | map('extract', hostvars, 'ansible_host') | select('defined') | unique | list }}
@@ -102,8 +103,9 @@
       {%- set _ = out.append({'name': p.name, 'kind': 'http', 'method': p.method | default('GET'), 'url': 'https://' ~ proxy_hostname ~ p.path, 'status': [p.edge_status | int], 'timeout': 15}) -%}
       {%- if p.origin_status is defined -%}
       {%- set _ = out.append({'name': p.name ~ '_origin', 'kind': 'command', 'timeout': 40,
-            'argv': ['/bin/sh', '-c', 'for ip in ' ~ (_origins | join(' ')) ~ '; do c=$(curl -s -o /dev/null -X ' ~ (p.method | default('GET')) ~ ' -w "%{http_code}" --max-time 10 --resolve '
-                    ~ proxy_hostname ~ ':443:$ip https://' ~ proxy_hostname ~ p.path ~ '); [ "$c" = "' ~ (p.origin_status | int) ~ '" ] || exit 1; done']}) -%}
+            'argv': ['/bin/sh', '-c', 'for ip in ' ~ (_origins | join(' ')) ~ '; do o=$(curl -s -o /dev/null -D - -X ' ~ (p.method | default('GET')) ~ ' -w "%{http_code}" --max-time 10 --resolve '
+                    ~ proxy_hostname ~ ':443:$ip https://' ~ proxy_hostname ~ p.path ~ '); c=$(printf "%s" "$o" | tail -n 1); [ "$c" = "' ~ (p.origin_status | int)
+                    ~ '" ] || exit 1; printf "%s" "$o" | grep -qiE "^x-ffg-origin: cert-required[[:space:]]*$" || exit 1; done']}) -%}
       {%- endif -%}
       {%- endfor -%}
       {{ out }}

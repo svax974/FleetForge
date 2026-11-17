@@ -728,3 +728,9 @@ sémantique documentée, et par `nginx -t` au déploiement).
   cfopull_enforce_tls_strict=true` ou réglage manuel SSL/TLS → Full (strict)) ; échappatoire explicite `cfopull_allow_non_strict_tls: true`
   (faux par défaut). Mode illisible (jeton sans lecture) : avertissement seulement, comme `cloudflare_front` seul (comportement d'avant).
   Jamais joué en `--check` (tout le côté Cloudflare y est sauté).
+- **Sonde d'origine attribuable** : `<name>_origin` n'acceptait qu'un 403, or le serveur par défaut d'un proxy où le vhost est ABSENT répond
+  aussi 403. Le `if ($ssl_client_verify != SUCCESS)` des locations publiques d'une entrée `cloudflare_named` ajoute `add_header X-FFG-Origin
+  cert-required always;` (pas pour `cloudflare_front`, rendu inchangé) ; la sonde lit les en-têtes (`curl -D -`) et exige code ET en-tête
+  sur CHAQUE proxy admis ; `vhost --public` exige la forme exacte. Les fins de grammaire `$` des `match` de `facts.yml`, de la garde et des
+  sondes (`name`, `path`, `method`, statuts, noms d'hôte) deviennent `\Z` : `$` accepte un saut de ligne final. Piège vérifié : dans un
+  scalaire `>-` le `\Z` s'écrit avec UN antislash (`\\Z` n'y matche rien) ; dans un `that:` les deux marchent.

@@ -1185,8 +1185,9 @@ def check_public(where, text):
         if rule is None:
             errors.append(f"{where_block} : location publique hors liste blanche (aucun `deny all;`)")
             continue
-        if "if ($ssl_client_verify != SUCCESS) { return 403; }" not in code:
-            errors.append(f"{where_block} : le certificat client de Cloudflare n'est pas exigé (403)")
+        if "if ($ssl_client_verify != SUCCESS) { add_header X-FFG-Origin cert-required always; return 403; }" not in code:
+            errors.append(f"{where_block} : le certificat client de Cloudflare n'est pas exigé (403 portant `X-FFG-Origin: cert-required`, "
+                          "que la sonde d'origine exige pour distinguer ce refus de celui d'un vhost absent)")
         if f'if ($request_uri !~* "{rule["raw_uri"]}") {{ return 400; }}' not in code:
             errors.append(f"{where_block} : URI brute non contrôlée (`{rule['raw_uri']}` → 400 attendu)")
         relay = re.search(r"proxy_pass\s+(\S+);", body)

@@ -172,12 +172,12 @@
       {%- for l in _locations -%}
       {%- set path = l.path | default('') | string -%}
       {%- if l.regex | default(false) | bool -%}
-        {%- if not (path is match('^[/^]/?[A-Za-z0-9._~/()|?*+^$-]*$')) -%}{%- set ns.b = ns.b + ['path'] -%}{%- endif -%}
-      {%- elif not (path is match('^/[A-Za-z0-9._~/-]*$')) -%}{%- set ns.b = ns.b + ['path'] -%}{%- endif -%}
-      {%- if l.body is defined and not (((l.body | string) is match('^[0-9]{1,6}[kKmMgG]?$')) and ((l.body | string | regex_replace('[^0-9]', '') | int) > 0)) -%}{%- set ns.b = ns.b + ['body'] -%}{%- endif -%}
-      {%- if l.timeout is defined and not ((l.timeout | string) is match('^[0-9]{1,5}(ms|s|m|h)?$')) -%}{%- set ns.b = ns.b + ['timeout'] -%}{%- endif -%}
+        {%- if not (path is match('^[/^]/?[A-Za-z0-9._~/()|?*+^$-]*\Z')) -%}{%- set ns.b = ns.b + ['path'] -%}{%- endif -%}
+      {%- elif not (path is match('^/[A-Za-z0-9._~/-]*\Z')) -%}{%- set ns.b = ns.b + ['path'] -%}{%- endif -%}
+      {%- if l.body is defined and not (((l.body | string) is match('^[0-9]{1,6}[kKmMgG]?\Z')) and ((l.body | string | regex_replace('[^0-9]', '') | int) > 0)) -%}{%- set ns.b = ns.b + ['body'] -%}{%- endif -%}
+      {%- if l.timeout is defined and not ((l.timeout | string) is match('^[0-9]{1,5}(ms|s|m|h)?\Z')) -%}{%- set ns.b = ns.b + ['timeout'] -%}{%- endif -%}
       {%- if l.mode is defined and l.mode not in ['private', 'public'] -%}{%- set ns.b = ns.b + ['mode'] -%}{%- endif -%}
-      {%- if l.raw_uri is defined and not ((l.raw_uri | string) is match('^[/^]/?[]A-Za-z0-9._~/()|?*+^$[-]*$')) -%}{%- set ns.b = ns.b + ['raw_uri'] -%}{%- endif -%}
+      {%- if l.raw_uri is defined and not ((l.raw_uri | string) is match('^[/^]/?[]A-Za-z0-9._~/()|?*+^$[-]*\Z')) -%}{%- set ns.b = ns.b + ['raw_uri'] -%}{%- endif -%}
       {%- endfor -%}
       {{ ns.b | unique | join(', ') }}
   ansible.builtin.assert:
@@ -205,7 +205,7 @@
       - not (cloudflare_named | bool) or (webapp_front | default('')) != 'pages'
       - not (cloudflare_named | bool) or (webapp_proxy | default('internal')) == 'internal'
       - not (cloudflare_named | bool) or proxy_hostname is defined
-      - not (cloudflare_named | bool) or proxy_hostname is match('^[a-z0-9][a-z0-9.-]{0,252}$')
+      - not (cloudflare_named | bool) or proxy_hostname is match('^[a-z0-9][a-z0-9.-]{0,252}\Z')
       - not (cloudflare_named | bool) or proxy_hostname is search('[.]' ~ (domain_name | regex_escape) ~ '$')
       - not (cloudflare_named | bool) or proxy_hostname != 'proxy.' ~ domain_name
       - not (cloudflare_named | bool) or (access_mode | default('')) in ['private', 'public']

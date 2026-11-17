@@ -3616,23 +3616,85 @@ class PublicEdgeProbeTests(unittest.TestCase):
             self.assertIn(fragment, script)
         self.assertEqual(list(self.checks(MONITORING_PLAY))[-1], "upstream_main", "sans l'attribut : les sondes d'avant")
 
-    def test_the_origin_probe_succeeds_only_when_every_eligible_proxy_answers_403(self):
+    def test_the_origin_probe_succeeds_only_when_every_eligible_proxy_answers_403_with_the_vhost_header(self):
         script = self.checks()["public_edge_origin"]["argv"][2]
+        for fragment in ("-D -", "x-ffg-origin: cert-required"):
+            self.assertIn(fragment, script)
         with tempfile.TemporaryDirectory() as tmp:
             fake = os.path.join(tmp, "curl")
+            # Un faux curl : avec `-D -` il écrit d'abord les en-têtes de réponse (statut, puis HDR…), puis le code (`-w`).
             with open(fake, "w") as f:
-                f.write('#!/bin/sh\nfor a in "$@"; do case "$a" in\n  *:443:192.0.2.10) printf "%s" "$CODE10";;\n'
-                        '  *:443:192.0.2.30) printf "%s" "$CODE30";;\nesac; done\n')
+                f.write('#!/bin/sh\ndump=0; prev=""\nfor a in "$@"; do [ "$prev" = "-D" ] && [ "$a" = "-" ] && dump=1; prev="$a"; done\n'
+                        'for a in "$@"; do case "$a" in\n  *:443:192.0.2.10) c="$CODE10"; h="$HDR10";;\n  *:443:192.0.2.30) c="$CODE30"; h="$HDR30";;\nesac; done\n'
+                        '[ "$dump" = 1 ] && printf "HTTP/2 %s \\r\\n%s\\r\\ncontent-length: 0\\r\\n\\r\\n" "$c" "$h"\nprintf "%s" "$c"\n')
             os.chmod(fake, 0o755)
+            good = "X-FFG-Origin: cert-required"
 
-            def run(code10, code30):
-                env = dict(os.environ, PATH=tmp + os.pathsep + os.environ["PATH"], CODE10=code10, CODE30=code30)
+            def run(code10, code30, hdr10=good, hdr30=good):
+                env = dict(os.environ, PATH=tmp + os.pathsep + os.environ["PATH"], CODE10=code10, CODE30=code30, HDR10=hdr10, HDR30=hdr30)
                 return subprocess.run(["/bin/sh", "-c", script], env=env, capture_output=True).returncode
             self.assertEqual(run("403", "403"), 0)
+            self.assertEqual(run("403", "403", "x-ffg-origin: cert-required", "x-ffg-origin: cert-required"), 0, "HTTP/2 : en-têtes en minuscules")
             self.assertEqual(run("403", "200"), 1, "un proxy qui répond sans certificat client")
             self.assertEqual(run("200", "403"), 1)
             self.assertEqual(run("", "403"), 1, "pas de réponse du tout n'est pas un 403")
             self.assertEqual(run("401", "403"), 1)
+            # Un 403 sans l'en-tête du vhost : serveur par défaut d'un proxy où le vhost est ABSENT, pas un vhost fermé.
+            self.assertEqual(run("403", "403", hdr30=""), 1, "403 du serveur par défaut")
+            self.assertEqual(run("403", "403", hdr10="X-FFG-Origin: other"), 1)
+            self.assertEqual(run("403", "403", hdr10="X-Other: cert-required"), 1)
+            self.assertEqual(run("403", "403", hdr10="X-FFG-Origin: cert-required-not"), 1)
+            self.assertEqual(run("403", "403", hdr10="Via: x-ffg-origin: cert-required"), 1, "l'en-tête doit commencer la ligne")
+
+    def test_the_public_locations_of_a_named_vhost_mark_their_certificate_refusal_and_cloudflare_front_does_not(self):
+        header = "add_header X-FFG-Origin cert-required always;"
+        text = public_vhost()
+        for location in (PUBLIC_MCP, PUBLIC_PRM, PUBLIC_AS, PUBLIC_OAUTH, PUBLIC_REGISTER):
+            body = location_body(text, "~* " + location["path"])
+            self.assertEqual(directives(body.split("if ($ssl_client_verify != SUCCESS) {", 1)[1].split("}", 1)[0]), [header, "return 403;"])
+        for head in ("/", "^~ /mcp/connections", "/.well-known/"):
+            self.assertNotIn("X-FFG-Origin", location_body(text, head), "les locations privées ne portent pas le marqueur")
+        public = {"access_mode": "public"}
+        self.assertIn(header, render_access(dict(public, cloudflare_named=True)))
+        self.assertNotIn("X-FFG-Origin", render_access(dict(public, cloudflare_front=True)), "cloudflare_front : rendu d'avant")
+        self.assertNotIn("X-FFG-Origin", render_access(dict(public, cloudflare_front=True, cloudflare_named=True)))
+        locations = [{"path": "/pub", "mode": "public"}]
+        self.assertNotIn("X-FFG-Origin", render_vhost(entry="plain", webapp_vhost_locations=locations, cloudflare_front=True))
+        self.assertNotIn("X-FFG-Origin", render_vhost(entry="plain", webapp_vhost_locations=locations))
+        # Le contrôle du vhost rendu l'exige sur chaque location publique.
+        for location in (PUBLIC_MCP, PUBLIC_OAUTH):
+            mutated = mutate(text, "~* " + location["path"], header, "")
+            self.assertTrue(any("X-FFG-Origin" in e for e in vhost_errors(mutated, public=True)), location["path"])
+        self.assertTrue(vhost_errors(mutate(text, "~* ^/mcp(/.*)?$", header, "add_header X-FFG-Origin other always;"), public=True))
+        self.assertTrue(vhost_errors(mutate(text, "~* ^/mcp(/.*)?$", header, "add_header X-FFG-Origin cert-required;"), public=True), "sans `always`")
+
+    def test_the_trailing_newline_grammar_is_closed(self):
+        # `$` d'une regex Python accepte « x\n » ; `\Z` non. Les valeurs entrent dans le vhost et dans une commande de sonde.
+        for label, change in (("path", {"path": "/api/\n"}), ("body", {"path": "/api/", "body": "5k\n"}),
+                              ("timeout", {"path": "/api/", "timeout": "30s\n"}),
+                              ("raw_uri", {"path": "^/mcp(/.*)?$", "regex": True, "raw_uri": "^/mcp(/|[?]|$)\n"}),
+                              ("regex path", {"path": "^/mcp(/.*)?$\n", "regex": True})):
+            with self.subTest(label):
+                code, out = run_local_play(FACTS_PLAY, guard_inventory(webapp_vhost_locations=[change]),
+                                           {"apps.yml": "fleetforge-gateway: /nonexistent/app/\n"})
+                self.assertNotEqual(code, 0, out[-1500:])
+                self.assertIn("hors grammaire", out)
+        code, out = run_local_play(FACTS_PLAY, guard_inventory(webapp_vhost_locations=[{"path": "/api/", "body": "5k", "timeout": "30s"}]),
+                                   {"apps.yml": "fleetforge-gateway: /nonexistent/app/\n"})
+        self.assertEqual(code, 0, out[-1500:])
+        code, out = run_local_play(FACTS_PLAY, guard_inventory(cloudflare_named=True, proxy_hostname="ffg.example.test\n"),
+                                   {"apps.yml": "fleetforge-gateway: /nonexistent/app/\n"})
+        self.assertNotEqual(code, 0, out[-1500:])
+        # Sondes du bord public : le nom, le chemin et la méthode entrent dans une commande.
+        for field, value in (("path", "/mcp\n"), ("name", "public_edge\n"), ("method", "POST\n"), ("edge_status", "401\n"),
+                             ("origin_status", "403\n")):
+            with self.subTest(field):
+                play = self.PLAY.replace(json.dumps(PUBLIC_CHECKS), json.dumps([dict(PUBLIC_CHECKS[0], **{field: value})]))
+                code, out = run_local_play(play, self.INVENTORY)
+                self.assertNotEqual(code, 0, out[-1500:])
+                self.assertIn("webapp_public_checks", out)
+        hostile = self.PLAY.replace("proxy_hostname: ffg.example.test", 'proxy_hostname: "ffg.example.test\\n"')
+        self.assertNotEqual(run_local_play(hostile, self.INVENTORY)[0], 0)
 
     def test_hostile_or_incomplete_declarations_are_refused(self):
         bad = [dict(PUBLIC_CHECKS[0], path="/mcp; rm -rf /"), dict(PUBLIC_CHECKS[0], name="Public Edge"),
