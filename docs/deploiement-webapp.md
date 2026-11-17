@@ -147,12 +147,12 @@ Applications déployées par `deploy-webapp.yml` : `llm-proxy` (mode registre), 
 Entrées créées, vérifiées en `--check`, NON déployées : `tradekong` (`webapp_proxy: external`, `webapp_trust_proxy`), `ctdapi`, `maestro`
 (ne compile pas : deux erreurs TypeScript de l'application), `air-farmer` (squelette sans `.env` de production).
 
-À faire : front d'AgentHub (build en échec : `vx-private` avancé vers un état dont les `vendor/*.js` ne sont pas versionnés) et conteneur
-`voice-engine` d'AgentHub, retiré par le déploiement (`VOICE_ENGINE` absent du `.env`, donc `off`) ; validation de la préprod PapangWorkspace
-avant la PROD (deux hôtes par environnement : `BACK_HOSTS` de plusieurs entrées, `webapp_upstreams`, `webapp_metrics_push`,
-`DEPLOY_CLOUD_DB_BACKUP=0`) ; déploiement réel de TradeKong et ctdapi (go explicite) ; back-lb sans la `location` AgentHub du template ;
-mode registre de social-manager (worker bâti `FROM` l'image du back) et des autres apps ; suppression des rôles par app une fois migrés ;
-métrique `webapp_deployed_info`.
+À faire : front d'AgentHub (le `vendor/` de `vx-private` est corrigé, à redéployer) et conteneur `voice-engine` d'AgentHub, retiré par le
+déploiement (`VOICE_ENGINE` absent du `.env`, donc `off`) ; validation de la préprod PapangWorkspace avant la PROD (deux hôtes par
+environnement : `BACK_HOSTS` de plusieurs entrées, `webapp_upstreams`, `webapp_metrics_push`, `DEPLOY_CLOUD_DB_BACKUP=0`) ; back-lb et
+`front/nginx.conf` du template sans la `location` AgentHub ; support du worker à build propre en mode registre (social-manager) ; rôles
+par app restants (`papanglabs-back-*`, `agenthub-deploy` / `-install`, `ctdapi-*`, `tradekong-*`). Fait le 17-18/11/2026 : TradeKong, ctdapi
+et Maestro déployés par `deploy-webapp.yml` en mode registre, rôles llm-proxy supprimés, métrique `webapp_deployed_info`.
 
 Leçons des premiers déploiements : `REMOTE_USER` et `*_REMOTE_APP_DIR` du même compte (`"~/<projet>/back"` entre guillemets : un `~` nu est
 développé par le shell LOCAL) ; `SSH_KEY_FILE` obligatoire (`webapp_ssh_key_file` au parc) ; un `configs: file:` de compose devient un `bind`
@@ -174,6 +174,7 @@ repousse).
 |---|---|---|
 | **VALIDÉ 15/11/2026** — Premier `push` vers le registre | pas de 413 ; ligne `[IMAGE:<projet>] … builder=` | `deploy-docker-repo.yml` rejoué (vhost `client_max_body_size 0`), builder connecté (`docker login localhost:<port>` par `srvc`) |
 | **INVALIDÉ 17/11/2026** (relevé sur la machine du registre : le cache local masquait des couches absentes) — Premier `pull` d'une cible DISTANTE | `[IMAGE:<projet>] … host=` d'un hôte qui n'est PAS celui du registre ; sinon 403 du vhost ou `short read … EOF` | `webapp-install` rejoué (docker login, compte `docker_repo_pull_*` au coffre) ; vhost du registre re-déployé (liste `allow` dérivée des entrées webapp) ; `count(docker_repo_broken_images)` = 1 puis valeur 0 |
+| **VALIDÉ 18/11/2026** — Version en service | `count(webapp_deployed_info{app="<projet>"})` = 1 et son label `revision` = celle de `/api/v1/health` (publié par `webapp-monitoring`, rejouable seul : `--tags monitoring`) | collecteur textfile de node_exporter présent sur la machine ; sinon rien n'est publié |
 | Intégrité du registre | `docker_repo_broken_images` = 0 ; l'alerte `RegistryBrokenImages` ne sonne pas | passage quotidien de `docker-repo-prune` ; après une réparation (`--repair`), chaque application repousse son image au déploiement suivant |
 | **VALIDÉ 15/11/2026** — Premier déploiement du registre papanglabs | `docker-repo.papanglabs.com/v2/` répond 401 depuis un hôte admis (back1-prod) et expire ailleurs ; `docker_repo_pass` et `docker_repo_pull_pass` apparus dans `group_vars/papanglabs.yml` (à COMMITTER dans le dépôt privé) | `./play.sh papanglabs deploy-docker-repo.yml` (d'abord `--check --diff`, qui n'écrit rien) ; CNAME publié par le rôle, vhost par le play `proxy-conf` |
 | **VALIDÉ 15/11/2026** — Rétention | `count(docker_repo_prune_last_success_timestamp_seconds)` = 1 ; `docker-repo-prune --dry-run` d'abord | `registry` à ajouter à `prom_alert_groups` APRÈS ce premier passage |

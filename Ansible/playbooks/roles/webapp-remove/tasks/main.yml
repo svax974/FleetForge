@@ -47,6 +47,13 @@
   become: true
   tags: [monitoring]
 
+- name: Remove the published version of the application
+  ansible.builtin.file:
+    path: "{{ node_exporter_textfile_dir | default('/var/lib/node_exporter/textfile_collector') }}/webapp_deployed_{{ wa_project | regex_replace('[^A-Za-z0-9_]', '_') }}.prom"
+    state: absent
+  become: true
+  tags: [monitoring]
+
 - name: Remove the execution stamp
   ansible.builtin.file:
     path: "/var/lib/fleetforge/state/webapp-{{ wa_project }}.json"

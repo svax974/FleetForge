@@ -92,3 +92,45 @@
     - not ansible_check_mode
     - wa_down_checks | length > 0
   tags: [monitoring]
+
+# Version en service, lisible dans Prometheus sans ouvrir l'hôte : `webapp_deployed_info{app,env,revision} 1` et
+# `webapp_deployed_timestamp_seconds{app,env}`, publiés dans le collecteur textfile de node_exporter (activé par
+# exporter-sys-install). Le `revision` est celui que le back rend sur /api/v1/health (DEPLOY_REVISION, posé par deploy-full.sh).
+# Sans réponse du back ou sans collecteur sur la machine : rien n'est publié (jamais une valeur inventée) et le déploiement n'échoue
+# pas pour autant. Retiré par webapp-remove. Contrôle : `count(webapp_deployed_info{app="<projet>"})` vaut 1.
+- name: Read the version the back reports
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ wa_back_port }}/api/v1/health"
+    return_content: true
+    timeout: 10
+  register: wa_version_probe
+  failed_when: false
+  changed_when: false
+  when: not ansible_check_mode
+  tags: [monitoring]
+
+- name: Look for the textfile collector directory of node_exporter
+  ansible.builtin.stat:
+    path: "{{ node_exporter_textfile_dir | default('/var/lib/node_exporter/textfile_collector') }}"
+  register: wa_textfile_dir
+  tags: [monitoring]
+
+- name: Publish the version in service for Prometheus
+  ansible.builtin.copy:
+    dest: "{{ node_exporter_textfile_dir | default('/var/lib/node_exporter/textfile_collector') }}/webapp_deployed_{{ wa_project | regex_replace('[^A-Za-z0-9_]', '_') }}.prom"
+    content: |
+      # TYPE webapp_deployed_info gauge
+      webapp_deployed_info{app="{{ wa_project }}",env="{{ wa_env }}",revision="{{ wa_version_probe.json.revision | string | regex_replace('[^A-Za-z0-9._-]', '_') }}"} 1
+      # TYPE webapp_deployed_timestamp_seconds gauge
+      webapp_deployed_timestamp_seconds{app="{{ wa_project }}",env="{{ wa_env }}"} {{ now(utc=true).timestamp() | int }}
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+  when:
+    - not ansible_check_mode
+    - wa_textfile_dir.stat.isdir | default(false)
+    - wa_version_probe.json is defined
+    - wa_version_probe.json is mapping
+    - wa_version_probe.json.revision is defined
+  tags: [monitoring]
