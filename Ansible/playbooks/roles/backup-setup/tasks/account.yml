@@ -21,7 +21,7 @@
   changed_when: false
   failed_when: bk_existing_account.rc not in [0, 2]
   check_mode: false
-  delegate_to: "{{ bk_target }}"
+  delegate_to: "{{ bk_target if bk_target in groups['all'] else undef(hint='bk_target: not an inventory host') }}"
   throttle: 1
 
 - name: Refuse to take over a system account
@@ -46,7 +46,7 @@
     groups: []
     append: false
     system: false
-  delegate_to: "{{ bk_target }}"
+  delegate_to: "{{ bk_target if bk_target in groups['all'] else undef(hint='bk_target: not an inventory host') }}"
   become: true
   throttle: 1
 
@@ -57,7 +57,7 @@
     owner: "{{ backup_account }}"
     group: "{{ backup_account }}"
     mode: '0750'
-  delegate_to: "{{ bk_target }}"
+  delegate_to: "{{ bk_target if bk_target in groups['all'] else undef(hint='bk_target: not an inventory host') }}"
   become: true
   throttle: 1
 
@@ -68,7 +68,7 @@
     owner: "{{ backup_account }}"
     group: "{{ backup_account }}"
     mode: '0750'
-  delegate_to: "{{ bk_target }}"
+  delegate_to: "{{ bk_target if bk_target in groups['all'] else undef(hint='bk_target: not an inventory host') }}"
   become: true
   throttle: 1
 
@@ -79,6 +79,6 @@
     owner: root
     group: root
     mode: '0755'
-  delegate_to: "{{ bk_target }}"
+  delegate_to: "{{ bk_target if bk_target in groups['all'] else undef(hint='bk_target: not an inventory host') }}"
   become: true
   throttle: 1

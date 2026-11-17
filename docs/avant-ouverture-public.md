@@ -336,7 +336,6 @@ Détail : `docs/deploiement-webapp.md`.
   seule la séparation des secrets borne une fuite) ; rétention planifiée à valider (`--dry-run` d'abord) ; `registry` à déclarer
   dans `prom_alert_groups` après le premier passage ; registre papanglabs prêt (back1-preprod, 5000) mais pas déployé :
   vérifier l'espace disque de la machine (≈ 90 Go partagés avec les dumps de sauvegarde, `docker_repo_keep_tags: 8`).
-- **Sauvegarde hors serveur des clés de chiffrement** des apps (le coffre du parc ne suffit pas à lui seul).
 - **Intégrité du registre (ajouté le 17/11/2026)** : le ramasse-miettes de `registry:2` laisse des liens de couche périmés, un push saute
   alors la couche et l'image publiée est incomplète — invisible depuis la machine du registre (cache local), fatal pour un pull ailleurs.
   Corrigé dans `docker-repo-prune.py` (liens retirés après le ramasse-miettes, `docker_repo_broken_images`, alerte `RegistryBrokenImages`).
@@ -349,4 +348,36 @@ Détail : `docs/deploiement-webapp.md`.
 - **Test rouge hérité** : `cargo test -p fleetforge-core --test ansible_quoting` échoue sur `backup-setup` (garde de `delegate_to`) et
   `proxy-update/tasks/resync.yml` (`| quote`, `--`) depuis les commits du 16/11/2026 : à corriger avant d'ouvrir.
 - **Limites de Cloudflare Pages** (sources tierces, non confirmées officiellement) : 100 projets par compte, 500 builds par mois ;
+- **Notes de décision au 17/11/2026** (à relire, aucune n'est urgente) :
+  - **ctdapi, exposition de Postgres et Redis** : publiés sur toutes les interfaces et filtrés par DOCKER-USER, conservés tels quels
+    (`webapp_db_exposed: true`). Les refermer demande de nommer d'abord les clients distants réels.
+  - **ctdapi, erreurs `418` de l'API d'un échange** dans les journaux du worker, qui tourne depuis le 17/11 : refus de l'API tierce
+    (limitation ou blocage d'adresse). À surveiller ; l'origine (nouveau ou ancien) n'est pas établie.
+  - **Sauvegarde avant déploiement, 72 h** (défaut du template depuis le 17/11/2026) : une base qui change vite perd jusqu'à 3 jours de
+    données sur CETTE sauvegarde (`--force-db-backup` et `--migrate` dumpent toujours). Les apps le reçoivent à leur prochain
+    `update_common.sh`.
+  - **Dump de l'instance orpheline de CompanyManager** gardé sur la machine partagée (hors dossier de l'app) : à supprimer quand il ne
+    sert plus.
+  - **AgentHub, moteur vocal** : le conteneur a été retiré par le déploiement générique (`VOICE_ENGINE` absent du `.env` = off). Le
+    remettre = `VOICE_ENGINE=on` plus sa version et son jeton.
+  - **PapangWorkspace prod** (2 hôtes par environnement) : hors `deploy-webapp.yml` (une entrée par app et par environnement), à migrer
+    après validation de la préprod.
+  - **Maestro** : première mise en service le 17/11/2026. SQLite, `DB_SCHEMA_MODE=sync` fixé par l'inventaire (`manual` laisse une base
+    sans table, `migrations` ne crée pas les tables de base du template). Son `.env` définit `NODE_ENV=production` : le template ne
+    le laisse plus supprimer les dépendances de développement du build local. Ses clés `CRYPT_DB_MASTER_KEY` et `ADMIN_TOKEN` ont
+    été affichées dans une session de travail : à régénérer tant qu'il n'a pas de données chiffrées. 18 suites jest de `back/` échouent
+    (les specs utilisent les globaux jest sans les importer, `types: ["node"]`), sans lien avec le déploiement. air-farmer : squelette.
+  - **proxy2** : à sortir du groupe `proxies` par l'exploitant (aucun enregistrement A n'est publié pour lui).
+- **Dette du déploiement générique** :
+  - **`back-lb` et `front/nginx.conf` du template** portent encore la `location` d'AgentHub (`/api/v1/agenthub/git/`). Le front sait déjà
+    fusionner les `location` d'une app (`front/nginx.locations.conf`, repère `# @app-locations`) ; `back-lb`, dont la configuration
+    est écrite dans le compose, n'a pas d'équivalent. Sortir ce bloc demande une livraison coordonnée (un bloc partagé ET un bloc d'app =
+    `location` en double, nginx refuse) et un `nginx -t` sur la configuration rendue, impossible sans nginx local.
+  - **Mode registre et `back-worker` avec son propre `build`** (social-manager : navigateur bâti `FROM` le back) : refusé avant tout
+    build par `deploy-images.sh` depuis le 17/11/2026 (`BACK_WORKER=off` ou pas de registre). Le support réel = construire le worker
+    avec `--build-context` sur l'image du back poussée, le pousser, le tirer puis le retaguer ; à faire quand ce worker sera réactivé.
+  - **Rôles par app** : supprimés le 17/11/2026 pour llm-proxy (6 rôles, 3 playbooks) et `agenthub-monitoring` / `agenthub-security`. Restent
+    `agenthub-deploy` / `agenthub-install` (runner du hub), `papanglabs-back-*` (la prod en dépend), `ctdapi-*` et `tradekong-*`
+    (supervision et purge).
+- **Sauvegarde hors serveur des clés de chiffrement** des apps (le coffre du parc ne suffit pas à lui seul).
   à vérifier sur developers.cloudflare.com/pages/platform/limits avant d'y migrer d'autres apps (2 aujourd'hui).

@@ -1,6 +1,6 @@
 ---
 # Joué sur `ctdapi` (hôte canonique de la machine partagée), pas sur les entrées
-# `sync-*` — voir defaults/main.yml. Modèle : agenthub-security.
+# `sync-*` — voir defaults/main.yml. Modèle : webapp-security (ancien agenthub-security, supprimé le 17/11/2026).
 
 - name: Fail when the sync_servers group is empty
   ansible.builtin.assert:
@@ -64,7 +64,7 @@
   ansible.builtin.assert:
     that:
       # Motif et non égalité : `iptables -S` intercale `-m tcp` et réordonne les
-      # options selon la version (cf. agenthub-security).
+      # options selon la version (cf. webapp-security).
       - sync_chain.stdout is search('--dport ' ~ item ~ '.*-j DROP')
     fail_msg: >-
       Le port {{ item }} est publié sur 0.0.0.0 mais aucun DROP ne le protège

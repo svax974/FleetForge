@@ -24,7 +24,7 @@
   changed_when: false
   failed_when: bk_revoke_accounts.rc not in [0, 2]
   check_mode: false
-  delegate_to: "{{ bk_revoke_target }}"
+  delegate_to: "{{ bk_revoke_target if bk_revoke_target in groups['all'] else undef(hint='bk_revoke_target: not an inventory host') }}"
 
 - name: Revoke the key of this source by its content
   ansible.posix.authorized_key:
@@ -36,7 +36,7 @@
   loop: "{{ bk_revoke_accounts.results | selectattr('rc', 'equalto', 0) | list }}"
   loop_control:
     label: "{{ item.item }}"
-  delegate_to: "{{ bk_revoke_target }}"
+  delegate_to: "{{ bk_revoke_target if bk_revoke_target in groups['all'] else undef(hint='bk_revoke_target: not an inventory host') }}"
   become: true
   throttle: 1
   when: bk_pubkey | length > 0
@@ -47,7 +47,7 @@
     regexp: " {{ bk_comment | regex_escape }}$"
     state: absent
   loop: ["{{ backup_account }}", "{{ bk_legacy_user }}"]
-  delegate_to: "{{ bk_revoke_target }}"
+  delegate_to: "{{ bk_revoke_target if bk_revoke_target in groups['all'] else undef(hint='bk_revoke_target: not an inventory host') }}"
   become: true
   throttle: 1
 
@@ -56,7 +56,7 @@
     path: "{{ item }}"
     state: absent
   loop: ["{{ backup_account_root }}/{{ bk_name }}", "{{ bk_legacy_dir }}"]
-  delegate_to: "{{ bk_revoke_target }}"
+  delegate_to: "{{ bk_revoke_target if bk_revoke_target in groups['all'] else undef(hint='bk_revoke_target: not an inventory host') }}"
   become: true
   throttle: 1
   when:

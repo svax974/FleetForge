@@ -39,6 +39,7 @@
         argv:
           - cp
           - -a
+          - --
           - "{{ proxy_update_nginx_dir }}/{{ item }}"
           - "{{ proxy_update_backup_dir.path }}/{{ item }}"
         removes: "{{ proxy_update_nginx_dir }}/{{ item }}"
@@ -233,7 +234,7 @@
     - name: Generate prometheus write token
       ansible.builtin.shell: >
         echo 'set $prometheus_write_token "'"$(openssl rand -hex 32)"'";'
-        > {{ proxy_update_nginx_dir }}/prometheus-write-token.conf
+        > {{ proxy_update_nginx_dir | quote }}/prometheus-write-token.conf
       when:
         - proxy_write_token_enabled | bool
         - not prometheus_write_token_file.stat.exists
@@ -295,6 +296,7 @@
         argv:
           - cp
           - -a
+          - --
           - "{{ proxy_update_backup_dir.path }}/{{ item }}"
           - "{{ proxy_update_nginx_dir }}/{{ item }}"
         removes: "{{ proxy_update_backup_dir.path }}/{{ item }}"

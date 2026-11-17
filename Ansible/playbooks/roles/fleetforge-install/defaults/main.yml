@@ -344,7 +344,6 @@ ffg_required_denies:
   - "deploy-freellm*"
   - "deploy-grass*"
   - "deploy-llamacpp*"
-  - "deploy-llm-proxy*"
   - "deploy-mailrelay*"
   - "deploy-mailserver*"
   - "deploy-monero*"
