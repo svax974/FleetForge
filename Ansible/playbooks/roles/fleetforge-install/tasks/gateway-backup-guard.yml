@@ -19,14 +19,14 @@
 - name: Check the database backup declaration of the gateway
   ansible.builtin.assert:
     that:
-      - pgbak_name is defined and pgbak_name is match('^[a-z0-9][a-z0-9-]{0,62}$')
-      - pgbak_db is defined and pgbak_db is match('^[A-Za-z0-9_]{1,63}$')
-      - pgbak_user is defined and pgbak_user is match('^[A-Za-z0-9_]{1,63}$')
+      - pgbak_name is defined and pgbak_name is match('^[a-z0-9][a-z0-9-]{0,62}(?!(?s:.))')
+      - pgbak_db is defined and pgbak_db is match('^[A-Za-z0-9_]{1,63}(?!(?s:.))')
+      - pgbak_user is defined and pgbak_user is match('^[A-Za-z0-9_]{1,63}(?!(?s:.))')
       - pgbak_container is defined
       - pgbak_container == (webapp_project | default(inventory_hostname)) ~ '_postgres'
       - pgbak_dest_host | default('') in (groups['backups'] | default([]))
       - hostvars[pgbak_dest_host].ansible_host | default('') != ansible_host
-      - pgbak_dir is defined and pgbak_dir is match('^/[A-Za-z0-9._/-]*$')
+      - pgbak_dir is defined and pgbak_dir is match('^/[A-Za-z0-9._/-]*(?!(?s:.))')
       - pgbak_name in pgbak_dir
       - pgbak_name in (prom_alert_backup_max_age_hours | default({}))
     fail_msg: >-
@@ -43,11 +43,11 @@
     _parc_port: "{{ ssh_custom_port | default(22) }}"
     _dest_port: "{{ hostvars[pgbak_dest_host].ansible_port | default(_parc_port) }}"
     # Mêmes formes que backup-setup/defaults (`backup_ipv4_pattern`, `backup_ipv6_pattern`).
-    _ipv4: '^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])[.]){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])$'
-    _ipv6: '^(?=.*:.*:)(?!.*:::)([0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4}$'
+    _ipv4: '^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])[.]){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])(?!(?s:.))'
+    _ipv6: '^(?=.*:.*:)(?!.*:::)([0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4}(?!(?s:.))'
   ansible.builtin.assert:
     that:
-      - _recipient is match('^age1[02-9ac-hj-np-z]{58}$')
+      - _recipient is match('^age1[02-9ac-hj-np-z]{58}(?!(?s:.))')
       - (_dest_port | string) == (_parc_port | string) or pgbak_dest_port is defined
       - pgbak_dest_port is not defined or (pgbak_dest_port | string) == (_dest_port | string)
       # La clé de la passerelle est liée à son adresse (`from=`) sur la destination, comme l'ouverture ufw : une

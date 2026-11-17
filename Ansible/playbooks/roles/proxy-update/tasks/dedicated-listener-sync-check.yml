@@ -73,7 +73,7 @@
   vars:
     _others: >-
       {{ ([proxy_update_dir ~ '/nginx.conf'] if (proxy_update_dir ~ '/nginx.conf') is file else [])
-         + (query('ansible.builtin.fileglob', proxy_update_dir ~ '/streams-enabled/*') | reject('match', '.*/_[^/]*$') | list) }}
+         + (query('ansible.builtin.fileglob', proxy_update_dir ~ '/streams-enabled/*') | reject('match', '.*/_[^/]*(?!(?s:.))') | list) }}
   ansible.builtin.set_fact:
     proxy_listener_foreign: >-
       {%- set out = [] -%}

@@ -38,7 +38,7 @@
     # `remote_username` compose le chemin du script lancé plus bas (`-e` l'emporte).
     - name: Compte de service simple
       ansible.builtin.assert:
-        that: remote_username is match('^[a-z_][a-z0-9_-]*$')
+        that: remote_username is match('^[a-z_][a-z0-9_-]*(?!(?s:.))')
         fail_msg: "remote_username : nom de compte simple attendu."
         quiet: true
   roles:

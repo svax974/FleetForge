@@ -116,7 +116,7 @@
       - tsdb_repl_pass | length >= 24
       # Liste blanche : `:` et `\` sont des séparateurs du format .pgpass, et tout caractère spécial compliquerait
       # le conninfo de primary_conninfo.
-      - tsdb_repl_pass is match('^[A-Za-z0-9_.-]+$')
+      - tsdb_repl_pass is match('^[A-Za-z0-9_.-]+(?!(?s:.))')
     fail_msg: "papangmetrics_repl_pass : 24 caractères minimum, uniquement [A-Za-z0-9_.-]."
     quiet: true
   no_log: true

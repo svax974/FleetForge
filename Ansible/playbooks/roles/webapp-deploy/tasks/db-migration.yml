@@ -19,14 +19,14 @@
     _expected: "{{ _project ~ '-back-' ~ (wa_h_back_host | lower | regex_replace('[^a-z0-9]', '-')) ~ '_postgres_data' }}"
     _old: "{{ wa_project ~ '_postgres_data' }}"
     _others: >-
-      {{ wa_h_volumes | select('match', '^' ~ (_project | regex_escape) ~ '-.+_postgres_data$')
+      {{ wa_h_volumes | select('match', '^' ~ (_project | regex_escape) ~ '-.+_postgres_data(?!(?s:.))')
          | reject('equalto', _expected) | list }}
     _expected_present: "{{ _expected in wa_h_volumes }}"
     _reasons: >-
       {%- set r = [] -%}
       {%- if _old in wa_h_volumes and not _expected_present -%}{%- set _ = r.append('ancien volume ' ~ _old ~ ' (compose du gabarit), ' ~ _expected ~ ' absent') -%}{%- endif -%}
       {%- if _others | length > 0 and not _expected_present -%}{%- set _ = r.append('autre volume du même projet : ' ~ (_others | join(', ')) ~ ' (renommage ?)') -%}{%- endif -%}
-      {%- if wa_h_pg_mounts | select('search', '_postgres_data$') | reject('equalto', _expected) | list | length > 0 -%}{%- set _ = r.append('le conteneur ' ~ wa_project ~ '_postgres utilise ' ~ (wa_h_pg_mounts | join(', '))) -%}{%- endif -%}
+      {%- if wa_h_pg_mounts | select('search', '_postgres_data(?!(?s:.))') | reject('equalto', _expected) | list | length > 0 -%}{%- set _ = r.append('le conteneur ' ~ wa_project ~ '_postgres utilise ' ~ (wa_h_pg_mounts | join(', '))) -%}{%- endif -%}
       {%- set _marker = wa_h_marker if wa_h_marker is mapping else {'invalid': '1'} -%}
       {%- if _marker | length > 0 -%}
         {%- if _marker.invalid is defined or _marker.project is not defined or _marker.volume is not defined -%}

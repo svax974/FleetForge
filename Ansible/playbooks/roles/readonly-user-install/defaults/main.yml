@@ -35,4 +35,4 @@ readonly_key_from:
   id_fleetforge_ro.pub: "{{ groups['infras'] | default([]) | map('extract', hostvars, 'ansible_host') | list }}"
 # Forme admise d'une adresse d'origine : IPv4/IPv6 littérale, CIDR facultatif.
 # Un nom DNS n'est pas admis : `from=` le comparerait au DNS inverse.
-readonly_origin_pattern: '^[0-9A-Fa-f.:]+(/[0-9]{1,3})?$'
+readonly_origin_pattern: '^[0-9A-Fa-f.:]+(/[0-9]{1,3})?(?!(?s:.))'

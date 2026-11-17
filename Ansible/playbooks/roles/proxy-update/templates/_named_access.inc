@@ -22,7 +22,7 @@
 {% set _na_vpn_addresses = groups['vpns'] | default([]) | map('extract', hostvars, 'ansible_host') | list %}
 {% set _na_allow_vpn = named_access.vpn_addresses | default(false) | bool %}
 {% set _na_v6_min = named_access.v6_min_prefix | default(128) | int %}
-{% set _na_ipv4 = '^(0|[1-9][0-9]{0,2})([.](0|[1-9][0-9]{0,2})){3}$' %}
+{% set _na_ipv4 = '^(0|[1-9][0-9]{0,2})([.](0|[1-9][0-9]{0,2})){3}(?!(?s:.))' %}
         # named-access
 {% if (hostvars[access_entry].cloudflare_named | default(false) | bool) and not (hostvars[access_entry].cloudflare_front | default(false) | bool) %}
         # Nom servi par Cloudflare : socket Cloudflare sans certificat client valide refusée avant tout filtre d'adresse
@@ -48,8 +48,8 @@
 {% set _ip = ip | string %}
 {% set _shown = _ip | regex_replace('[^0-9A-Fa-f.:/]', '?') %}
 {% set _clean = _ip == (_ip | trim) and (_ip.splitlines() | length) == 1 and ' ' not in _ip %}
-{% set _v4 = _clean and _ip is match('^(0|[1-9][0-9]{0,2})([.](0|[1-9][0-9]{0,2})){3}(/32)?$') %}
-{% set _v6 = _clean and _ip is match('^[0-9A-Fa-f:]*:[0-9A-Fa-f:]*(/[0-9]{1,3})?$')
+{% set _v4 = _clean and _ip is match('^(0|[1-9][0-9]{0,2})([.](0|[1-9][0-9]{0,2})){3}(/32)?(?!(?s:.))') %}
+{% set _v6 = _clean and _ip is match('^[0-9A-Fa-f:]*:[0-9A-Fa-f:]*(/[0-9]{1,3})?(?!(?s:.))')
              and ((_ip.split('/')[1] | int) if '/' in _ip else 128) >= _na_v6_min
              and ((_ip.split('/')[1] | int) if '/' in _ip else 128) <= 128 %}
 {% set _is_vpn = _ip.split('/')[0] in _na_vpn_addresses %}

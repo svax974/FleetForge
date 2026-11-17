@@ -85,7 +85,7 @@
     # `remote_username` compose le chemin du script lancé (`-e` l'emporte).
     - name: Compte de service simple
       ansible.builtin.assert:
-        that: remote_username is match('^[a-z_][a-z0-9_-]*$')
+        that: remote_username is match('^[a-z_][a-z0-9_-]*(?!(?s:.))')
         fail_msg: "remote_username : nom de compte simple attendu."
         quiet: true
 
@@ -121,7 +121,7 @@
     # un `-e backup_cmd=…` aurait choisi ce qui est lancé.
     - name: Compte de service simple
       ansible.builtin.assert:
-        that: remote_username is match('^[a-z_][a-z0-9_-]*$')
+        that: remote_username is match('^[a-z_][a-z0-9_-]*(?!(?s:.))')
         fail_msg: "remote_username : nom de compte simple attendu."
         quiet: true
       when: run_now | default(false) | bool

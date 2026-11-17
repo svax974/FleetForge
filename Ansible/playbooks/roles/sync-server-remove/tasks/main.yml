@@ -8,7 +8,7 @@
 # `-e` l'emporte sur l'inventaire : le script de pare-feu est lancé en root.
 - name: Check the firewall script is a plain absolute path
   ansible.builtin.assert:
-    that: sync_mon_firewall_script is match('^/[A-Za-z0-9._/-]*$')
+    that: sync_mon_firewall_script is match('^/[A-Za-z0-9._/-]*(?!(?s:.))')
     fail_msg: "sync_mon_firewall_script : chemin absolu sans espace ni métacaractère."
     quiet: true
   tags: [always]

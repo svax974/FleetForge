@@ -97,7 +97,7 @@
 - name: Check the hardening profile of the entry
   vars:
     _prefix: "{{ wa_h_subnet.split('/')[0].rsplit('.', 1)[0] }}"
-    _host_octet: '[.]([2-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-4])$'
+    _host_octet: '[.]([2-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-4])(?!(?s:.))'
     # Sortie FORWARD vers l'adresse d'un proxy (jamais cette machine : celle-là passe par INPUT) : le proxy voit
     # l'adresse PUBLIQUE de cette machine, MASQUERADE oblige. Les vhosts du parc l'admettent au titre de chaque entrée
     # qui la porte (`access_linked`, listes nommées, hôtes de l'inventaire…) : l'app en hériterait.
@@ -123,8 +123,8 @@
   ansible.builtin.assert:
     that:
       - webapp_hardening is mapping
-      - wa_project is match('^[a-z][a-z0-9-]{0,40}$')
-      - wa_h_user is match('^[a-z_][a-z0-9_-]{0,30}$')
+      - wa_project is match('^[a-z][a-z0-9-]{0,40}(?!(?s:.))')
+      - wa_h_user is match('^[a-z_][a-z0-9_-]{0,30}(?!(?s:.))')
       - wa_h_user != remote_username
       # Jamais un compte réservé, ni celui d'une AUTRE entrée durcie (account.yml refuse aussi tout compte existant
       # qui ne porte pas le marqueur de ce déploiement ; webapp-remove ne supprime que le compte marqué).
@@ -136,7 +136,7 @@
         | selectattr('webapp_hardening', 'defined') | map(attribute='webapp_hardening')
         | map(attribute='runtime_user', default='') | select('equalto', wa_h_user) | list | length == 0
       - wa_h_subnet is match(webapp_private_cidr_regex)
-      - wa_h_subnet is match('^[0-9.]+/24$')
+      - wa_h_subnet is match('^[0-9.]+/24(?!(?s:.))')
       # Hors des plages que Docker attribue par défaut : un autre projet de la machine ne peut pas recevoir le même.
       - wa_h_subnet is not match('^(172[.](1[6-9]|2[0-9]|3[01])|192[.]168)[.]')
       # Admis par le vhost d'un serveur lié SEULEMENT sur un proxy de la même machine (`_access.inc`) : inutile (et
@@ -145,11 +145,11 @@
       - wa_h_front_ip != wa_h_back_lb_ip
       - wa_h_front_ip is match('^' ~ (_prefix | regex_escape) ~ _host_octet)
       - wa_h_back_lb_ip is match('^' ~ (_prefix | regex_escape) ~ _host_octet)
-      - wa_h_protected_paths | reject('match', '^/[A-Za-z0-9._/-]+$') | list | length == 0
+      - wa_h_protected_paths | reject('match', '^/[A-Za-z0-9._/-]+(?!(?s:.))') | list | length == 0
       - wa_h_services is not string and wa_h_services | length > 0
-      - wa_h_services | reject('match', '^[a-z][a-z0-9-]{0,40}$') | list | length == 0
+      - wa_h_services | reject('match', '^[a-z][a-z0-9-]{0,40}(?!(?s:.))') | list | length == 0
       - wa_h_allowed_binds is not string
-      - wa_h_compose_file is match('^[A-Za-z0-9._/-]+$')
+      - wa_h_compose_file is match('^[A-Za-z0-9._/-]+(?!(?s:.))')
       - "'..' not in wa_h_compose_file"
       # Ports publiés par Docker : une règle ufw serait décorative (et resterait après un resserrement).
       - not (ufw_app_ports | default(true) | bool)
@@ -160,17 +160,17 @@
       # Front en conteneur sur la même machine que le back : un seul projet compose, donc un seul réseau dédié.
       - wa_front_mode == 'container'
       - not (wa_external | bool)
-      - wa_h_remote_proxies | reject('match', '^[0-9]{1,3}([.][0-9]{1,3}){3}$') | list | length == 0
+      - wa_h_remote_proxies | reject('match', '^[0-9]{1,3}([.][0-9]{1,3}){3}(?!(?s:.))') | list | length == 0
       - wa_h_remote_proxies | intersect(wa_h_vpn_addresses) | length == 0
-      - (wa_h_trusted_relays + [wa_h_front_ip, wa_h_back_lb_ip]) | reject('match', '^[0-9]{1,3}([.][0-9]{1,3}){3}$') | list | length == 0
+      - (wa_h_trusted_relays + [wa_h_front_ip, wa_h_back_lb_ip]) | reject('match', '^[0-9]{1,3}([.][0-9]{1,3}){3}(?!(?s:.))') | list | length == 0
       # Sorties : une ADRESSE IPv4 (jamais un réseau, jamais 0/8, 127/8, 169.254/16), un port, tcp ou udp, un nom.
       - webapp_hardening.egress_allow | default([]) is not string
       - webapp_hardening.egress_allow | default([]) | reject('mapping') | list | length == 0
-      - wa_h_egress | map(attribute='dest') | reject('match', '^(0|[1-9][0-9]{0,2})([.](0|[1-9][0-9]{0,2})){3}$') | list | length == 0
+      - wa_h_egress | map(attribute='dest') | reject('match', '^(0|[1-9][0-9]{0,2})([.](0|[1-9][0-9]{0,2})){3}(?!(?s:.))') | list | length == 0
       - wa_h_egress | map(attribute='dest') | select('match', '^(0[.]|169[.]254[.]|127[.])') | list | length == 0
-      - wa_h_egress | map(attribute='port') | map('string') | reject('match', '^[1-9][0-9]{0,4}$') | list | length == 0
+      - wa_h_egress | map(attribute='port') | map('string') | reject('match', '^[1-9][0-9]{0,4}(?!(?s:.))') | list | length == 0
       - wa_h_egress | map(attribute='proto') | reject('in', ['tcp', 'udp']) | list | length == 0
-      - wa_h_egress | map(attribute='name') | map('string') | reject('match', '^[a-z][a-z0-9_-]{0,31}$') | list | length == 0
+      - wa_h_egress | map(attribute='name') | map('string') | reject('match', '^[a-z][a-z0-9_-]{0,31}(?!(?s:.))') | list | length == 0
       # Jamais un proxy DISTANT sans décision explicite : par FORWARD puis MASQUERADE il verrait l'adresse PUBLIQUE de cette
       # machine, que ses vhosts admettent au titre des autres entrées de la machine — l'app en hériterait. Admis seulement
       # si chaque ligne vers un proxy porte `masquerade_ack: true` ET que la machine n'a aucune identité privilégiée
@@ -232,7 +232,7 @@
     _taken: >-
       {%- set ns = namespace(p=[]) -%}
       {%- for n, d in wa_machine_ports.items() if n != inventory_hostname -%}
-      {%- for k, v in d.ports.items() if v is match('^[0-9]+$') -%}
+      {%- for k, v in d.ports.items() if v is match('^[0-9]+(?!(?s:.))') -%}
       {%- set ns.p = ns.p + [v] -%}
       {%- endfor -%}
       {%- endfor -%}

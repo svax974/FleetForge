@@ -84,7 +84,7 @@
 
 - name: Warn when a secondary check reports down
   vars:
-    wa_down_checks: "{{ wa_probe.content.split('\n') | select('search', 'service_check_up[{]service=\"' ~ wa_project ~ '\"') | select('search', ' 0$') | list }}"
+    wa_down_checks: "{{ wa_probe.content.split('\n') | select('search', 'service_check_up[{]service=\"' ~ wa_project ~ '\"') | select('search', ' 0(?!(?s:.))') | list }}"
   ansible.builtin.debug:
     msg: "Sonde(s) secondaire(s) à 0 : {{ wa_down_checks }} — vérifier les noms de conteneurs (`docker ps` sur {{ ansible_host }})."
   # Pas de relecture de la sonde en `--check` (elle n'est pas lue : `wa_probe` n'a pas de contenu).

@@ -21,7 +21,7 @@
       {%- set seen = [] -%}
       {%- for a in accounts -%}
       {%- if a is not mapping or a.login is not defined or a.login is not string
-             or not (a.login is match('^[a-z0-9._+-]{1,64}$')) -%}
+             or not (a.login is match('^[a-z0-9._+-]{1,64}(?!(?s:.))')) -%}
       {%- set _ = out.append('entry ' ~ loop.index ~ ': login must be lowercase [a-z0-9._+-], no realm') -%}
       {%- else -%}
       {%- if a.login in seen -%}{%- set _ = out.append(a.login ~ ': declared twice') -%}{%- endif -%}

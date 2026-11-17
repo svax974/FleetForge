@@ -25,7 +25,7 @@
 # Le port entre dans un motif awk (`$0 ~ p`) qui désigne les règles SUPPRIMÉES.
 - name: Check the port (it becomes a rule-removal pattern)
   ansible.builtin.assert:
-    that: searxng_port | string is match('^[0-9]{1,5}$')
+    that: searxng_port | string is match('^[0-9]{1,5}(?!(?s:.))')
     fail_msg: "searxng_port : un numéro de port"
     quiet: true
 

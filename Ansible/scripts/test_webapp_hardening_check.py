@@ -26,6 +26,7 @@ import unittest
 
 import jinja2
 import yaml
+from jinja2 import nodes
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ANSIBLE = os.path.dirname(HERE)
@@ -4996,7 +4997,253 @@ class JinjaEscapeWarningTests(unittest.TestCase):
                 self.assertEqual([m.start() for m in compiled.finditer(text)], [i for i, c in enumerate(text) if c == "["], text)
 
 
-DEPLOY_FLEETFORGE = os.path.join(PLAYBOOKS, "deploy-fleetforge.yml")
+class MatchEndAnchorTests(unittest.TestCase):
+    """Aucune validation Jinja des playbooks ne se termine par `$` : `$` accepte un saut de ligne final, donc `x\\n` passerait
+    une grammaire écrite pour être stricte. Fin de chaîne du dépôt : `(?!(?s:.))` (ni `$`, ni `\\Z` : DeprecationWarning).
+    Balayage, par l'AST Jinja, de TOUT `Ansible/playbooks` : tests `match` / `search` / `regex`, filtre `regex_search`, filtres
+    `select` / `reject` / `selectattr` / `rejectattr` / `map` portant l'un d'eux, et variables-motifs (`*_pattern`, `*_regex`,
+    `*_ipv4`, `*_ipv6`, `*_octet`). Un `$` hors classe de caractères et non échappé y est refusé, sauf entrée de ALLOWED.
+    Hors périmètre, par construction : `regex_replace` / `regex_findall` (substitution et extraction `(?m)`), les motifs de
+    commandes (grep, sed, awk), de nginx, de Prometheus et de Docker, et le Python des fichiers `files/`."""
+
+    TESTS = {"match", "search", "regex"}
+    PICKERS = {"select", "reject", "selectattr", "rejectattr", "map"}
+    PATTERN_KEY = re.compile(r"(?:pattern|regex|_ipv4|_ipv6|_octet)$")
+    # (fichier relatif à Ansible, littéral) -> pourquoi le `$` reste.
+    ALLOWED = {
+        ("playbooks/roles/fleetforge-install/tasks/api-accounts-gateway.yml", ")$"):
+            "fin du motif de refus `_denied_allowed` : `$` n'y élargit que la détection d'un conflit (sens sûr, décision de "
+            "EndOfStringGapsTests) ; un nom de playbook de la liste blanche ne porte de toute façon pas de saut de ligne",
+        ("playbooks/roles/fleetforge-install/tasks/gateway-guard.yml", ")$"): "idem : `_denied_allowed` du garde de la passerelle",
+    }
+
+    @staticmethod
+    def _dollars(pattern):
+        """Nombre de `$` ancres (ni échappés, ni dans une classe `[...]`) d'un motif."""
+        found, i, in_class = 0, 0, False
+        while i < len(pattern):
+            c = pattern[i]
+            if c == "\\":
+                i += 2
+                continue
+            if not in_class and c == "[":
+                in_class = True
+                i += 1
+                i += pattern[i:i + 1] == "^"
+                i += pattern[i:i + 1] == "]"
+                continue
+            if in_class and c == "]":
+                in_class = False
+            elif not in_class and c == "$":
+                found += 1
+            i += 1
+        return found
+
+    @staticmethod
+    def _consts(node):
+        return [n.value for n in [node, *node.find_all(nodes.Const)] if isinstance(n, nodes.Const) and isinstance(n.value, str)]
+
+    def _literals(self, ast):
+        """Les littéraux de motif d'une expression : (littéral, vient-d'une-variable-motif)."""
+        for test in ast.find_all(nodes.Test):
+            if test.name.split(".")[-1] in self.TESTS and test.args:
+                yield from self._consts(test.args[0])
+        for call in ast.find_all(nodes.Filter):
+            if call.name.split(".")[-1] == "regex_search" and call.args:
+                yield from self._consts(call.args[0])
+            elif call.name in self.PICKERS:
+                tests = [i for i, a in enumerate(call.args) if isinstance(a, nodes.Const) and a.value in self.TESTS | {"regex_search"}]
+                for arg in call.args[tests[0] + 1:] if tests else []:
+                    yield from self._consts(arg)
+        for assign in ast.find_all(nodes.Assign):
+            if isinstance(assign.target, nodes.Name) and self.PATTERN_KEY.search(assign.target.name):
+                yield from self._consts(assign.node)
+
+    def _scan(self, root=PLAYBOOKS):
+        """(`$` trouvés hors ALLOWED, nombre de littéraux examinés, entrées de ALLOWED rencontrées)."""
+        import warnings
+
+        env = JinjaEscapeWarningTests._environment()
+        base = os.path.dirname(root)
+        found, seen, allowed = [], [0], set()
+
+        def examine(source, where, path):
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    ast = env.parse(source)
+            except jinja2.TemplateSyntaxError:
+                return
+            for literal in self._literals(ast):
+                seen[0] += 1
+                if self._dollars(literal):
+                    key = (os.path.relpath(path, base).replace(os.sep, "/"), literal)
+                    if key in self.ALLOWED:
+                        allowed.add(key)
+                    else:
+                        found.append(f"{where} : {literal!r}")
+
+        def walk(node, where, path, bare=False):
+            if isinstance(node, yaml.ScalarNode):
+                at = f"{where}:{node.start_mark.line + 1}"
+                if "{{" in node.value or "{%" in node.value:
+                    examine(node.value, at, path)
+                elif bare:
+                    examine("{{ " + node.value + " }}", at, path)
+            elif isinstance(node, yaml.SequenceNode):
+                for child in node.value:
+                    walk(child, where, path, bare)
+            elif isinstance(node, yaml.MappingNode):
+                for key, value in node.value:
+                    if (isinstance(value, yaml.ScalarNode) and self.PATTERN_KEY.search(key.value)
+                            and "{{" not in value.value and self._dollars(value.value)):
+                        entry = (os.path.relpath(path, base).replace(os.sep, "/"), value.value)
+                        if entry in self.ALLOWED:
+                            allowed.add(entry)
+                        else:
+                            found.append(f"{where}:{value.start_mark.line + 1} : {value.value!r}")
+                    walk(value, where, path, key.value in JinjaEscapeWarningTests.BARE_KEYS)
+
+        for directory, subdirectories, names in os.walk(root):
+            subdirectories[:] = sorted(d for d in subdirectories if d not in (".git", "__pycache__"))
+            for name in sorted(names):
+                path = os.path.join(directory, name)
+                where = os.path.relpath(path, base)
+                if name.endswith((".yml", ".yaml")):
+                    with open(path, encoding="utf-8") as f:
+                        text = f.read()
+                    try:
+                        for document in yaml.compose_all(text, Loader=yaml.SafeLoader):
+                            if document is not None:
+                                walk(document, where, path)
+                    except yaml.YAMLError:
+                        examine(text, where, path)
+                elif name.endswith((".j2", ".inc")) or os.sep + "templates" + os.sep in path:
+                    try:
+                        with open(path, encoding="utf-8") as f:
+                            examine(f.read(), where, path)
+                    except UnicodeDecodeError:
+                        continue
+        return found, seen[0], allowed
+
+    def test_no_validation_of_the_playbooks_ends_with_a_dollar(self):
+        found, seen, allowed = self._scan()
+        self.assertGreater(seen, 250, "le balayage doit voir les motifs des playbooks, rôles et gabarits")
+        self.assertEqual(found, [], "`$` en fin de motif : écrire `(?!(?s:.))` (`x\\n` passerait sinon)")
+        self.assertEqual(allowed, set(self.ALLOWED), "entrée de ALLOWED périmée : le `$` n'existe plus, la retirer")
+
+    def test_the_scan_flags_a_dollar_reintroduced_in_a_file(self):
+        end = "(?!(?s:.))"
+        with open(os.path.join(ROLES, "vmagent-scrape-update", "tasks", "main.yml"), encoding="utf-8") as f:
+            text = f.read()
+        self.assertEqual(text.count("(ms|s|m|h|d|w|y))+" + end + "')"), 1)
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "playbooks", "roles", "x", "tasks")
+            os.makedirs(target)
+            path = os.path.join(target, "main.yml")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+            found, seen, _ = self._scan(os.path.join(tmp, "playbooks"))
+            self.assertEqual((found, seen > 0), ([], True))
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text.replace("(ms|s|m|h|d|w|y))+" + end + "')", "(ms|s|m|h|d|w|y))+$')"))
+            found, _, _ = self._scan(os.path.join(tmp, "playbooks"))
+            self.assertEqual(len(found), 1, found)
+            self.assertIn("main.yml", found[0])
+
+    def test_the_scan_flags_every_form_and_only_those(self):
+        env = JinjaEscapeWarningTests._environment()
+
+        def flagged(source):
+            return [lit for lit in self._literals(env.parse(source)) if self._dollars(lit)]
+        for bad in ("{{ x is match('^a$') }}", "{{ x is not search('[.]' ~ z ~ '$') }}", "{{ x | regex_search('a$') }}",
+                    "{{ l | select('match', '^a$') | list }}", "{{ l | reject('search', 'a(/|$)') | list }}",
+                    "{{ l | selectattr('d', 'match', '.*[.]html$') | list }}", "{{ l | map('regex_search', '^a$') | list }}",
+                    "{% set _host_ipv4 = '^a$' %}", "{{ x is match(\"^a$\") }}", "{{ x is match('^a[$]b$') }}"):
+            with self.subTest(bad):
+                self.assertTrue(flagged(bad), bad)
+        for good in ("{{ x is match('^a(?!(?s:.))') }}", "{{ x is match('^a[$]') }}", "{{ x is match('^a[^$]b') }}", "{{ x is match('^a\\\\$') }}",
+                     "{{ x | regex_replace('/+$', '') }}", "{{ t | regex_findall('(?m)^(a.*)$') }}", "{{ x is match(pattern) }}",
+                     "{{ l | select('equalto', 'a$') | list }}", "{{ l | map('regex_replace', '$', '/32') | list }}"):
+            with self.subTest(good):
+                self.assertFalse(flagged(good), good)
+
+    # -- le comportement : `x` passe, `x\n` est refusé, par le moteur de gabarits d'Ansible ----------------------------------
+
+    @staticmethod
+    def _yaml(*parts):
+        with open(os.path.join(ROLES, *parts), encoding="utf-8") as f:
+            return yaml.safe_load(f)
+
+    def _strings(self, node):
+        if isinstance(node, str):
+            yield node
+        elif isinstance(node, dict):
+            for value in node.values():
+                yield from self._strings(value)
+        elif isinstance(node, list):
+            for value in node:
+                yield from self._strings(value)
+
+    def _expression(self, parts, needle):
+        found = [s for s in self._strings(self._yaml(*parts)) if needle in s]
+        self.assertEqual(len(found), 1, f"{'/'.join(parts)} : {needle!r}")
+        return found[0]
+
+    def _passes(self, expression, variables):
+        return str(_template("{{ " + expression + " }}", variables)) == "True"
+
+    @unittest.skipUnless(shutil.which("ansible-playbook"), "ansible-playbook absent")
+    def test_a_block_scalar_grammar_refuses_a_trailing_newline(self):
+        """`>-` : `_taken` (webapp-setup/hardening.yml) ne retient que les ports de la grammaire `^[0-9]+`."""
+        task = next(t for t in self._yaml("webapp-setup", "tasks", "hardening.yml") if "_taken" in t.get("vars", {}))
+        scalar = task["vars"]["_taken"]
+        self.assertIn("(?!(?s:.))", scalar)
+        for port, kept in (("8080", True), ("8080\n", False), ("8080 ", False), ("80a", False)):
+            with self.subTest(port=repr(port)):
+                variables = {"inventory_hostname": "a", "wa_machine_ports": {"b": {"ports": {"front": port}}}}
+                self.assertEqual(str(_template(scalar, variables)) == port, kept)
+
+    @unittest.skipUnless(shutil.which("ansible-playbook"), "ansible-playbook absent")
+    def test_a_template_grammar_refuses_a_trailing_newline(self):
+        """Gabarit `.inc` : la variable-motif `_na_ipv4` de `_named_access.inc`, rendue avec le gabarit lui-même."""
+        with open(os.path.join(TEMPLATES, "_named_access.inc"), encoding="utf-8") as f:
+            declaration = re.search(r"^\{% set _na_ipv4 = .*%\}$", f.read(), re.M).group(0)
+        self.assertIn("(?!(?s:.))", declaration)
+        for address, ok in (("192.0.2.10", True), ("192.0.2.10\n", False), ("192.0.2.10 ", False), ("192.0.2", False)):
+            with self.subTest(address=repr(address)):
+                rendered = _template(declaration + "{{ addr is match(_na_ipv4) }}", {"addr": address})
+                self.assertEqual(str(rendered) == "True", ok)
+
+    @unittest.skipUnless(shutil.which("ansible-playbook"), "ansible-playbook absent")
+    def test_a_grammar_with_alternation_refuses_a_trailing_newline(self):
+        """Alternation : `^([0-9]+(ms|s|m|h|d|w|y))+` (vmagent-scrape-update), la fin de chaîne s'applique à toute la grammaire."""
+        expression = self._expression(("vmagent-scrape-update", "tasks", "main.yml"), "_vmagent_target is match(")
+        for value, ok in (("10s", True), ("1m30s", True), ("10s\n", False), ("1m30s\n", False), ("10", False)):
+            with self.subTest(value=repr(value)):
+                self.assertEqual(self._passes(expression, {"_vmagent_target": value}), ok)
+
+    @unittest.skipUnless(shutil.which("ansible-playbook"), "ansible-playbook absent")
+    def test_a_filter_grammar_and_a_double_quoted_grammar_refuse_a_trailing_newline(self):
+        slots = self._expression(("timescaledb-install", "tasks", "slot.yml"), "tsdb_slots | reject(")
+        for value, ok in (("replica_1", True), ("replica_1\n", False)):
+            with self.subTest(slot=repr(value)):
+                self.assertEqual(self._passes(slots, {"tsdb_slots": [value]}), ok)
+        url = self._expression(("alertmanager-install", "tasks", "main.yml"), "alertmanager_agenthub_webhook_url is not match(")
+        for value, refused in (("https://hub.example.test/api/v1/agenthub/hooks/abc/def", False),
+                               ("https://hub.example.test/api/v1/agenthub/hooks/abc/def\n", True)):
+            with self.subTest(url=repr(value)):
+                self.assertEqual(self._passes(url, {"alertmanager_agenthub_webhook_url": value}), refused)
+
+    @unittest.skipUnless(shutil.which("ansible-playbook"), "ansible-playbook absent")
+    def test_a_pattern_variable_refuses_a_trailing_newline(self):
+        pattern = self._yaml("backup-setup", "defaults", "main.yml")["backup_ipv4_pattern"]
+        for value, ok in (("192.0.2.10", True), ("192.0.2.10\n", False), ("192.0.2.256", False)):
+            with self.subTest(address=repr(value)):
+                self.assertEqual(self._passes("addr is match(pattern)", {"addr": value, "pattern": pattern}), ok)
+
+
+DEPLOY_FLEETFORGE =os.path.join(PLAYBOOKS, "deploy-fleetforge.yml")
 GATEWAY_BACKUP_LIB = os.path.join(PLAYBOOKS, "lib")
 
 

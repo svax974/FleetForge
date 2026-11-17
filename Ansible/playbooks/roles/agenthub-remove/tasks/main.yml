@@ -89,7 +89,7 @@
 # désigne ce qui est SUPPRIMÉ : grammaire des projets compose, rien d'autre.
 - name: Check the project name (it becomes a removal pattern)
   ansible.builtin.assert:
-    that: agenthub_project_name is match('^[a-z0-9][a-z0-9_-]{0,62}$')
+    that: agenthub_project_name is match('^[a-z0-9][a-z0-9_-]{0,62}(?!(?s:.))')
     fail_msg: "agenthub_project_name : minuscules, chiffres, _ et - seulement"
     quiet: true
 

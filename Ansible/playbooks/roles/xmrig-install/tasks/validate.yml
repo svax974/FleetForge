@@ -5,15 +5,15 @@
 - name: List the invalid or missing parameters
   ansible.builtin.set_fact:
     xmrig_problems: >-
-      {{ ([] if xmrig_wallet | string is match('^[48][0-9AB][1-9A-HJ-NP-Za-km-z]{93}$') else
+      {{ ([] if xmrig_wallet | string is match('^[48][0-9AB][1-9A-HJ-NP-Za-km-z]{93}(?!(?s:.))') else
            ['xmrig_wallet : manquant ou invalide (« ' ~ (xmrig_wallet | string | truncate(20, True, '…')) ~ ' ») — adresse Monero PUBLIQUE de 95 caractères commençant par 4 (jamais les 25 mots de la clé)'])
        + ([] if xmrig_server | string in ['vps', 'physical'] else
            ['server : manquant ou inconnu (« ' ~ xmrig_server ~ ' ») — vps (machine virtuelle ou louée) ou physical (machine à vous : MSR, pages de 1 Gio, gouverneur CPU)'])
        + ([] if xmrig_mode | string in ['pool', 'solo'] else
            ['xmrig_mode : manquant ou inconnu (« ' ~ xmrig_mode ~ ' ») — pool (minage mutualisé) ou solo (vers votre nœud monerod)'])
-       + ([] if xmrig_mode != 'pool' or xmrig_pool_url | string is match('^[A-Za-z0-9.-]+:[0-9]{2,5}$') else
+       + ([] if xmrig_mode != 'pool' or xmrig_pool_url | string is match('^[A-Za-z0-9.-]+:[0-9]{2,5}(?!(?s:.))') else
            ['xmrig_pool_url : manquant ou invalide (« ' ~ xmrig_pool_url ~ ' ») — hôte:port du pool, sans schéma (pool.exemple.org:443)'])
-       + ([] if xmrig_api_port | string is match('^[0-9]{4,5}$') and xmrig_api_port | int >= 1024 and xmrig_api_port | int <= 65535 else
+       + ([] if xmrig_api_port | string is match('^[0-9]{4,5}(?!(?s:.))') and xmrig_api_port | int >= 1024 and xmrig_api_port | int <= 65535 else
            ['xmrig_api_port : invalide (« ' ~ (xmrig_api_port | string | truncate(20, True, '…')) ~ ' ») — un port entre 1024 et 65535 (il entre dans une URL qui porte le jeton de la sonde : que des chiffres)']) }}
 
 - name: Fail with the list of problems and complete examples

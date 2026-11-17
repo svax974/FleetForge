@@ -85,7 +85,7 @@
     - hostvars[item].cloudflare_named | default(false) | bool
     - hostvars[item].access_mode | default('') == 'private'
     - hostvars[item].proxy_hostname is defined
-    - hostvars[item].proxy_hostname is search('[.]' ~ cfdns_zone ~ '$')
+    - hostvars[item].proxy_hostname is search('[.]' ~ cfdns_zone ~ '(?!(?s:.))')
   delegate_to: localhost
   become: false
   run_once: true
@@ -106,7 +106,7 @@
   loop: "{{ cfdns_cname_scope | default(groups[cfdns_group] | default([]) | sort) }}"
   when:
     - hostvars[item].proxy_hostname is defined
-    - hostvars[item].proxy_hostname is search('[.]' ~ cfdns_zone ~ '$')
+    - hostvars[item].proxy_hostname is search('[.]' ~ cfdns_zone ~ '(?!(?s:.))')
     - not (hostvars[item].cloudflare_front | default(false) | bool)
     # Le global du parc (group_vars) vaut le front lui-même : un hôte sans attribut
     # d'inventaire le HÉRITE. Ce n'est pas un nom public — le publier ferait
@@ -127,7 +127,7 @@
   loop: "{{ cfdns_cname_scope | default(groups[cfdns_group] | default([]) | sort) }}"
   when:
     - hostvars[item].proxy_hostname is defined
-    - not (hostvars[item].proxy_hostname is search('[.]' ~ cfdns_zone ~ '$'))
+    - not (hostvars[item].proxy_hostname is search('[.]' ~ cfdns_zone ~ '(?!(?s:.))'))
     - item not in (cfdns_cnames | default([]) | map(attribute='host') | list)
   delegate_to: localhost
   become: false

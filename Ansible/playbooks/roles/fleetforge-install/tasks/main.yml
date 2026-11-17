@@ -12,10 +12,10 @@
 - name: Check the paths and names that compose a program path
   ansible.builtin.assert:
     that:
-      - ff_dir is match('^/[A-Za-z0-9._/-]*$')
-      - ff_ansible_target is match('^/[A-Za-z0-9._/-]*$')
-      - ff_user is match('^[a-z_][a-z0-9_-]*$')
-      - ff_cargo_profile is match('^[A-Za-z0-9_][A-Za-z0-9_-]*$')
+      - ff_dir is match('^/[A-Za-z0-9._/-]*(?!(?s:.))')
+      - ff_ansible_target is match('^/[A-Za-z0-9._/-]*(?!(?s:.))')
+      - ff_user is match('^[a-z_][a-z0-9_-]*(?!(?s:.))')
+      - ff_cargo_profile is match('^[A-Za-z0-9_][A-Za-z0-9_-]*(?!(?s:.))')
     fail_msg: "ff_dir, ff_ansible_target : chemins absolus sans métacaractère ; ff_user, ff_cargo_profile : noms simples."
     quiet: true
   tags: [always]
@@ -71,7 +71,7 @@
   ansible.builtin.assert:
     that:
       - proxy_hostname is defined
-      - proxy_hostname is search('[.]' ~ domain_name ~ '$')
+      - proxy_hostname is search('[.]' ~ domain_name ~ '(?!(?s:.))')
       - proxy_hostname != 'proxy.' ~ domain_name
     fail_msg: >-
       {{ inventory_hostname }} ne déclare pas de `proxy_hostname` propre : sans

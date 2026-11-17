@@ -33,7 +33,7 @@
       - vsecret_file is defined
       - vsecret_owner is defined
       - vsecret_items is defined
-      - vsecret_items | map(attribute='name') | map('regex_search', '^[a-z][a-z0-9_]*$') | select('none') | list | length == 0
+      - vsecret_items | map(attribute='name') | map('regex_search', '^[a-z][a-z0-9_]*(?!(?s:.))') | select('none') | list | length == 0
       - vsecret_items | map(attribute='kind') | difference(['base64_32', 'hex_32', 'password', 'api_key']) | length == 0
     fail_msg: >-
       vault-secret-setup attend vsecret_file, vsecret_owner et vsecret_items (name `[a-z][a-z0-9_]*`,

@@ -61,4 +61,4 @@
   throttle: 1
   when:
     - bk_remove_data | bool
-    - bk_name is match('^[a-z0-9][a-z0-9-]{0,62}$')
+    - bk_name is match('^[a-z0-9][a-z0-9-]{0,62}(?!(?s:.))')

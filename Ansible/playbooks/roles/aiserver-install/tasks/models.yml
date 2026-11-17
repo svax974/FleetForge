@@ -41,10 +41,10 @@
   vars:
     _friendly: "{{ item.display_name | default('') }}"
     _ext: >-
-      {{ item.filename | regex_search('[.][^./]+$') | default('', true) }}
+      {{ item.filename | regex_search('[.][^./]+(?!(?s:.))') | default('', true) }}
     _final: >-
       {{ item.filename if _friendly | length == 0
-         else (_friendly if (_friendly | regex_search('[.][^/]+$')) else _friendly ~ _ext) }}
+         else (_friendly if (_friendly | regex_search('[.][^/]+(?!(?s:.))')) else _friendly ~ _ext) }}
   loop: "{{ aiserver_comfyui_models | rejectattr('is_folder', 'defined') | list }}"
   loop_control:
     label: "{{ item.name }}"
@@ -66,14 +66,14 @@
 - name: Check the model volumes and file paths (they become mounts and written paths)
   ansible.builtin.assert:
     that:
-      - (aiserver_llm_models_volume ~ '') is match('^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$')
-      - (aiserver_comfyui_models_volume ~ '') is match('^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$')
+      - (aiserver_llm_models_volume ~ '') is match('^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}(?!(?s:.))')
+      - (aiserver_comfyui_models_volume ~ '') is match('^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}(?!(?s:.))')
       - >-
         (aiserver_llm_files | default([]) | map(attribute='filename') | list
          + aiserver_comfyui_files | default([]) | map(attribute='filename') | list
          + aiserver_comfyui_files | default([]) | map(attribute='subdir') | list
          + aiserver_comfyui_files | default([]) | map(attribute='dest_name') | list)
-        | reject('match', '^(?!/)(?!.*[.][.])[A-Za-z0-9_./+-]{1,255}$') | list | length == 0
+        | reject('match', '^(?!/)(?!.*[.][.])[A-Za-z0-9_./+-]{1,255}(?!(?s:.))') | list | length == 0
     fail_msg: "Volume nommé (lettres, chiffres, _ . -) et chemins relatifs sans `..` attendus"
     quiet: true
 

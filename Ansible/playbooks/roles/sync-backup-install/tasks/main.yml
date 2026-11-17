@@ -9,8 +9,8 @@
 - name: Check the script and log paths are plain absolute paths
   ansible.builtin.assert:
     that:
-      - sync_backup_script is match('^/[A-Za-z0-9._/-]*$')
-      - sync_backup_log is match('^/[A-Za-z0-9._/-]*$')
+      - sync_backup_script is match('^/[A-Za-z0-9._/-]*(?!(?s:.))')
+      - sync_backup_log is match('^/[A-Za-z0-9._/-]*(?!(?s:.))')
     fail_msg: "sync_backup_script, sync_backup_log : chemins absolus sans espace ni métacaractère."
     quiet: true
   tags: [always]
@@ -26,9 +26,9 @@
 - name: Check the backup name, the retention and the encryption recipient
   ansible.builtin.assert:
     that:
-      - sync_backup_name is match('^[a-z0-9][a-z0-9-]{0,62}$')
-      - sync_backup_keep | string is match('^[0-9]{1,4}$') and sync_backup_keep | int >= 1 and sync_backup_keep | int <= 1000
-      - sync_backup_encrypt_recipient | length == 0 or sync_backup_encrypt_recipient is match('^age1[02-9ac-hj-np-z]{58}$')
+      - sync_backup_name is match('^[a-z0-9][a-z0-9-]{0,62}(?!(?s:.))')
+      - sync_backup_keep | string is match('^[0-9]{1,4}(?!(?s:.))') and sync_backup_keep | int >= 1 and sync_backup_keep | int <= 1000
+      - sync_backup_encrypt_recipient | length == 0 or sync_backup_encrypt_recipient is match('^age1[02-9ac-hj-np-z]{58}(?!(?s:.))')
     fail_msg: >-
       sync_backup_name (minuscules, chiffres, tirets), sync_backup_keep (1 à 1000) ou sync_backup_encrypt_recipient
       (vide, ou destinataire age « age1… » de 62 caractères) invalide.

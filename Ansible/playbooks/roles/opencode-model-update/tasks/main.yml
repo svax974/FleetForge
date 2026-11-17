@@ -40,7 +40,7 @@
     msg: >-
       {{ opencode_model }} n'existe pas chez OpenCode Zen. Modèles gratuits
       actuellement publiés :
-      {{ opencode_zen_catalogue.json.data | map(attribute='id') | select('search', '-free$') | map('regex_replace', '^', 'opencode/') | join(', ') }}.
+      {{ opencode_zen_catalogue.json.data | map(attribute='id') | select('search', '-free(?!(?s:.))') | map('regex_replace', '^', 'opencode/') | join(', ') }}.
       Catalogue complet : {{ opencode_zen_models_url }}.
   when: opencode_model_verify and opencode_model.startswith('opencode/')
         and opencode_zen_catalogue.status | default(0) == 200
