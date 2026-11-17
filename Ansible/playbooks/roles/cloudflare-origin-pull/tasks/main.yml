@@ -17,11 +17,25 @@
 # `nginx.yml` est aussi inclus par proxy-update (main, deploy-one-site, deploy-webapp-site)
 # avant tout gabarit. Aucune de ces entrées : aucun nom à activer, Cloudflare n'est
 # pas appelé (le jeton n'a alors pas besoin de la permission SSL).
+# En mode `--check` les appels à l'API Cloudflare (`uri`) sont sautés : leurs résultats n'ont pas de `json`, et les
+# `assert` qui les lisent échouaient (« object of type 'dict' has no attribute 'json' »). Le côté Cloudflare n'est donc
+# pas simulé : il crée un certificat, l'envoie et l'active, ce qu'aucune simulation ne peut prouver.
+- name: Say that the Cloudflare side is not simulated
+  ansible.builtin.debug:
+    msg: >-
+      Côté Cloudflare non simulé en --check (certificat client, activation sur {{ cfopull_hostnames | join(', ') }}) :
+      rien n'est lu ni écrit chez Cloudflare.
+  when:
+    - cfopull_part | default('cloudflare') == 'cloudflare'
+    - cfopull_hostnames | length > 0
+    - ansible_check_mode
+
 - name: Run the Cloudflare side
   ansible.builtin.include_tasks: cloudflare.yml
   when:
     - cfopull_part | default('cloudflare') == 'cloudflare'
     - cfopull_hostnames | length > 0
+    - not ansible_check_mode
 
 - name: Run the nginx side
   ansible.builtin.include_tasks: nginx.yml
