@@ -302,12 +302,27 @@ journée, revue comprise), non implémenté.
 
 ### Sauvegarde de la base de la passerelle
 
-Famille `backup` EXISTANTE, rôle générique `postgres-backup-install` joué par `deploy-backup.yml` sur
-`tradekong:ctdapi:fleetforge_gateways_backup`. Ce dernier groupe est construit au début du playbook, SANS connexion : seules
-les entrées de `fleetforge_gateways` qui portent `backup` y entrent, après la garde de la passerelle
-(`fleetforge-install/tasks/gateway-backup-guard.yml`, la même que `deploy-fleetforge.yml`). Une passerelle sans `backup`
-n'est jamais touchée par les playbooks de la famille. Mode d'emploi commun (compte dédié, chiffrement, clé de l'opérateur,
+Famille `backup` EXISTANTE, rôle générique `postgres-backup-install` joué sur `fleetforge_gateways_backup`. Ce groupe est construit
+SANS connexion : seules les entrées de `fleetforge_gateways` qui portent `backup` y entrent, après la garde de la passerelle
+(`fleetforge-install/tasks/gateway-backup-guard.yml`, la même que `gateway-guard.yml`). Une passerelle sans `backup`
+n'est jamais touchée. Mode d'emploi commun (compte dédié, chiffrement, clé de l'opérateur,
 restauration) : `Ansible/README.md`, « Sauvegardes (famille `backup`) ».
+
+**Deux points d'entrée, une seule définition** (`Ansible/playbooks/lib/gateway-backup-guard.yml` : opt-in et garde sans connexion ;
+`lib/gateway-backup-install.yml` : contrôle préalable puis `postgres-backup-install`), importés par les deux playbooks :
+
+- `deploy-fleetforge.yml` (le passage unique, **tag `backup`**) les joue EN FIN de playbook, une fois la base créée par les plays de la
+  passerelle, puis ouvre le pare-feu de la destination par un play dont le motif d'hôte est EN DUR (`backup-fleetforge-gateway`, jamais
+  une variable ; la garde refuse un `pgbak_dest_host` d'un autre nom plutôt que de sauter l'ouverture sans bruit) : la passerelle et sa
+  destination SEULES, aucune autre entrée `backups` (tradekong, ctdapi, brk, synchro). `ff_deploy_scope=fleetforge` : rien (ni garde,
+  ni groupe, aucune connexion) ; `--tags backup` : la sauvegarde seule ; les autres tags (`proxy-conf`, `alerts`, `code`, …) ne rouvrent
+  aucune connexion pour elle (le groupe n'est construit que pour `backup` ou tous les tags). Parc sans passerelle ou passerelle sans
+  `backup` : aucun hôte visé, aucune connexion. **`--check`** : la garde et l'ouverture du pare-feu de la destination sont jouées, le
+  rôle d'installation est SAUTÉ et dit pourquoi : au premier passage la clé SSH dédiée (`openssh_keypair`, pas de `public_key` en
+  simulation) et le compte de destination (`authorized_key`/`file` sur un utilisateur que `user` n'a pas réellement créé) n'existent
+  pas, leur simulation lirait des résultats absents. Aucun `register` dans ces plays.
+- `deploy-backup.yml` (les autres sauvegardes, `--tags retarget`, un repointage) importe les mêmes plays SANS le drapeau
+  `gwbk_embedded` : comportement d'avant (liste des plays contrôlée, `--list-tasks` comparé avant/après sur un inventaire factice).
 
 - **Ce qui est sauvegardé** : la base Postgres du conteneur `<projet>_postgres` (`fleetforge-gateway_postgres` : le projet est
   le nom de l'entrée sauf `webapp_project`), base et rôle `fleetforgegateway` (défaut de `webapp` : nom du projet sans tiret ;
@@ -364,9 +379,13 @@ restauration) : `Ansible/README.md`, « Sauvegardes (famille `backup`) ».
 - **Activation** (inventaire et group_vars PRIVÉS, hors de ce dépôt ; décisions du propriétaire) : générer la clé de
   l'opérateur sur SON poste (`Ansible/README.md`) et poser son destinataire public ; entrée de destination sur `station`
   (`ansible_port: 22`, `backup_sources: [fleetforge-gateway]`, `ansible_roles: [backup]`) ; `backup` + `pgbak_*` +
-  `pgbak_dest_port: 22` sur l'entrée de la passerelle ; seuil. Puis `./play.sh web3c deploy-backup.yml --limit
-  fleetforge-gateway:backup-fleetforge-gateway` — jamais contre une machine sans décision du propriétaire. Repointer la
-  destination : `retarget-backups-web3c.yml` (ou `deploy-backup.yml --tags retarget --limit <entrée>`).
+  `pgbak_dest_port: 22` sur l'entrée de la passerelle ; seuil. Puis `./play.sh web3c deploy-fleetforge.yml` (la sauvegarde est la
+  dernière étape du passage unique ; seule : `--tags backup`) — jamais contre une machine sans décision du propriétaire. Avant le
+  passage unique : `./play.sh web3c deploy-backup.yml --limit fleetforge-gateway:backup-fleetforge-gateway`, toujours valable.
+  Repointer la destination : `retarget-backups-web3c.yml` (ou `deploy-backup.yml --tags retarget --limit <entrée>`).
+  Les règles `BackupStale`/`BackupMissing` de la passerelle sont chargées par le play « Règles d'alerte FleetForge » (tous les
+  groupes de `prom_alert_groups`, dont `backups` quand le parc l'active) : `ff_deploy_scope=gateway` le saute, alors
+  `update-prometheus-alerts.yml`.
 
 #### Première vérification supervisée (lecture seule, sans secret)
 

@@ -46,24 +46,11 @@
 # deploy-fleetforge.yml) avant tout contact, et rejoint le groupe
 # `fleetforge_gateways_backup` que visent les plays suivants. Sans `backup`,
 # l'entrée n'est jamais touchée par ce playbook.
+#
+# Plays dans `lib/gateway-backup-guard.yml` (et `lib/gateway-backup-install.yml`, plus bas) : une seule définition, importée
+# aussi par deploy-fleetforge.yml, qui joue cette sauvegarde à la suite de la passerelle (tag `backup`).
 - name: Passerelle MCP — opt-in et garde de la sauvegarde
-  hosts: fleetforge_gateways
-  gather_facts: false
-  tasks:
-    - name: Check the database backup declaration of the gateway
-      ansible.builtin.include_role:
-        name: fleetforge-install
-        tasks_from: gateway-backup-guard
-        apply:
-          tags: [always]
-      when: "'backup' in (ansible_roles | default([]))"
-      tags: [always]
-
-    - name: Keep the gateways that opt in
-      ansible.builtin.group_by:
-        key: "{{ 'fleetforge_gateways_backup' if 'backup' in (ansible_roles | default([])) else 'fleetforge_gateways_nobackup' }}"
-      changed_when: false
-      tags: [always]
+  ansible.builtin.import_playbook: lib/gateway-backup-guard.yml
 
 # ── Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ───────────────────────
 - name: Contrôle préalable (sources natives)
@@ -73,8 +60,10 @@
     - role: host-preflight
       preflight_require_docker: false
 
+# La passerelle MCP (`fleetforge_gateways_backup`) a son propre contrôle préalable, juste avant son installation
+# (lib/gateway-backup-install.yml, plus bas).
 - name: Contrôle préalable (sources Docker)
-  hosts: tradekong:ctdapi:fleetforge_gateways_backup:sync_servers
+  hosts: tradekong:ctdapi:sync_servers
   remote_user: "{{ remote_username }}"
   roles:
     - role: host-preflight
@@ -95,15 +84,19 @@
 
 # ── web3c ──────────────────────────────────────────────────────────────────
 #
-# `fleetforge_gateways_backup` : la base de la passerelle MCP (entrée `webapp`
-# durcie qui a opté pour `backup`, garde passée ci-dessus). Groupe vide sur un
-# parc sans passerelle — voir docs/etude-passerelle-sur-webapp.md, « Sauvegarde
-# de la base de la passerelle ».
-- name: Sauvegarde PostgreSQL — tradekong, ctdapi et passerelle MCP
-  hosts: tradekong:ctdapi:fleetforge_gateways_backup
+- name: Sauvegarde PostgreSQL — tradekong et ctdapi
+  hosts: tradekong:ctdapi
   remote_user: "{{ remote_username }}"
   roles:
     - postgres-backup-install
+
+# `fleetforge_gateways_backup` : la base de la passerelle MCP (entrée `webapp`
+# durcie qui a opté pour `backup`, garde passée ci-dessus) — contrôle préalable
+# puis `postgres-backup-install`, plays partagés avec deploy-fleetforge.yml.
+# Groupe vide sur un parc sans passerelle — voir
+# docs/etude-passerelle-sur-webapp.md, « Sauvegarde de la base de la passerelle ».
+- name: Sauvegarde PostgreSQL — passerelle MCP
+  ansible.builtin.import_playbook: lib/gateway-backup-install.yml
 
 # Instantané SQLite cohérent (VACUUM INTO) + blobs, poussé en SSH vers
 # `backup-sync`. Cron quotidien 04:xx, rétention 14 générations, métrique

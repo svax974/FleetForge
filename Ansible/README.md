@@ -303,6 +303,11 @@ playbook** que FleetForge : `deploy-fleetforge.yml` (garde du groupe `fleetforge
   statique avant déploiement, `docker inspect` après — conteneurs arrêtés en cas d'écart).
 - **Contrôles statiques** : `scripts/webapp_hardening_check.py` et ses tests
   (`python3 -I scripts/test_webapp_hardening_check.py`, tenus par `cargo test -p fleetforge-core --test gateway_isolation`).
+- **Sauvegarde de sa base** (famille `backup`, opt-in : `backup` dans `ansible_roles` + `pgbak_*` + destinataire age) : dernière
+  étape du même playbook, tag `backup` (`deploy-fleetforge.yml --tags backup` pour elle seule ; `ff_deploy_scope=fleetforge` la
+  saute) — la passerelle et sa destination `backup-fleetforge-gateway` seules, jamais les autres sauvegardes du parc ; non
+  simulée en `--check`. `deploy-backup.yml --limit fleetforge-gateway:backup-fleetforge-gateway` reste valable (mêmes plays :
+  `playbooks/lib/gateway-backup-*.yml`).
 - Retrait : `remove-webapp.yml -e webapp=fleetforge-gateway`, `purge-webapp.yml -e webapp=fleetforge-gateway
   -e webapp_purge_confirm=fleetforge-gateway` (FleetForge intact).
 - Étude d'isolation par VM légère : `../docs/etude-isolation-passerelle-vm.md`.

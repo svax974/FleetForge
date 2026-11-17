@@ -1,0 +1,24 @@
+---
+# Sauvegarde de la base de la passerelle MCP — côté SOURCE : contrôle préalable puis `postgres-backup-install`
+# (compte dédié et clé liée sur la destination, script, cron, métriques). Importé par deploy-backup.yml ET
+# deploy-fleetforge.yml ; les deux plays ne visent que `fleetforge_gateways_backup`, groupe construit SANS connexion par
+# lib/gateway-backup-guard.yml (aucun hôte : aucune connexion, aucun rôle joué).
+#
+# `gwbk_embedded` (absent = faux, voir gateway-backup-guard.yml) : posé par deploy-fleetforge.yml. En `--check` la
+# sauvegarde n'y est PAS simulée : la clé SSH dédiée n'existe pas encore au premier passage (`openssh_keypair` ne rend pas de
+# `public_key` en simulation, `bk_pubkey` serait indéfini) et le compte de destination non plus (`authorized_key`, `file`
+# échouent sur un utilisateur que `user` n'a pas réellement créé). Une tâche qui lit le résultat d'une tâche simulée ne
+# se simule pas : le rôle est sauté, jamais joué à moitié. Absent (deploy-backup.yml seul) : comportement d'avant.
+- name: Contrôle préalable (passerelle MCP, sauvegarde)
+  hosts: fleetforge_gateways_backup
+  remote_user: "{{ remote_username }}"
+  roles:
+    - role: host-preflight
+      preflight_require_docker: true
+
+- name: Sauvegarde PostgreSQL — passerelle MCP
+  hosts: fleetforge_gateways_backup
+  remote_user: "{{ remote_username }}"
+  roles:
+    - role: postgres-backup-install
+      when: not ((gwbk_embedded | default(false) | bool) and ansible_check_mode)

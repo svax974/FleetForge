@@ -1,0 +1,41 @@
+---
+# Sauvegarde de la base de la passerelle MCP — opt-in et garde, SANS connexion. Importé par deploy-backup.yml ET
+# deploy-fleetforge.yml (une seule définition) ; `lib/gateway-backup-install.yml` joue ensuite la sauvegarde sur le
+# groupe construit ici.
+#
+# Une entrée de `fleetforge_gateways` n'est sauvegardée que si elle porte `backup` dans `ansible_roles` : elle passe alors
+# la garde de la passerelle (destination d'une AUTRE machine, dump CHIFFRÉ, port explicite —
+# fleetforge-install/tasks/gateway-backup-guard.yml, la même que gateway-guard.yml de deploy-fleetforge.yml) avant tout
+# contact, et rejoint le groupe `fleetforge_gateways_backup` que visent les plays suivants. Sans `backup`, l'entrée n'est
+# jamais touchée.
+#
+# `gwbk_embedded` (absent = faux) : posé par deploy-fleetforge.yml, qui joue cette sauvegarde à la suite de la passerelle
+# (docs/etude-passerelle-sur-webapp.md, « Sauvegarde de la base de la passerelle »). Alors :
+#   • `ff_deploy_scope=fleetforge` : ni garde ni groupe, aucune connexion ;
+#   • le groupe n'est construit que si `backup` (ou tous les tags) est demandé : un `--tags proxy-conf` ou `--tags code` ne
+#     rouvre aucune connexion vers la passerelle pour une sauvegarde (les plays suivants ne visent alors aucun hôte).
+# Absent (deploy-backup.yml seul) : comportement d'avant, octet pour octet.
+- name: Passerelle MCP — opt-in et garde de la sauvegarde
+  hosts: fleetforge_gateways
+  gather_facts: false
+  vars:
+    gwbk_off: "{{ (gwbk_embedded | default(false) | bool) and (ff_deploy_scope | default('all')) == 'fleetforge' }}"
+    gwbk_wanted: >-
+      {{ not (gwbk_embedded | default(false) | bool)
+         or (not (gwbk_off | bool) and ('all' in ansible_run_tags or 'backup' in ansible_run_tags)) }}
+  tasks:
+    - name: Check the database backup declaration of the gateway
+      ansible.builtin.include_role:
+        name: fleetforge-install
+        tasks_from: gateway-backup-guard
+        apply:
+          tags: [always]
+      when: "'backup' in (ansible_roles | default([])) and not (gwbk_off | bool)"
+      tags: [always]
+
+    - name: Keep the gateways that opt in
+      ansible.builtin.group_by:
+        key: "{{ 'fleetforge_gateways_backup' if 'backup' in (ansible_roles | default([])) else 'fleetforge_gateways_nobackup' }}"
+      changed_when: false
+      when: gwbk_wanted | bool
+      tags: [always]

@@ -4780,6 +4780,196 @@ class EndOfStringGrammarTests(unittest.TestCase):
         self.assertEqual(code, 0, out[-1500:])
 
 
+DEPLOY_FLEETFORGE = os.path.join(PLAYBOOKS, "deploy-fleetforge.yml")
+GATEWAY_BACKUP_LIB = os.path.join(PLAYBOOKS, "lib")
+
+
+@unittest.skipUnless(shutil.which("ansible-playbook"), "ansible-playbook absent")
+class GatewayBackupInDeployFleetforgeTests(unittest.TestCase):
+    """deploy-fleetforge.yml joue aussi la sauvegarde de la base de la passerelle (plays de lib/gateway-backup-*.yml, partagés
+    avec deploy-backup.yml), pour la passerelle et sa destination SEULES. Jamais de vrai rôle ici : les plays réels sont repris
+    du fichier, leurs rôles remplacés par un témoin `MARK <rôle> <hôte>` (host-preflight, postgres-backup-install et
+    backup-security modifieraient la machine qui joue le test) ; la garde et les conditions, elles, sont celles du dépôt."""
+
+    DEST = "backup-fleetforge-gateway"
+
+    @staticmethod
+    def _load(path):
+        with open(path, encoding="utf-8") as f:
+            return yaml.safe_load(f)
+
+    def block(self):
+        """Les plays de la sauvegarde : tout ce qui suit l'import de deploy-webapp.yml."""
+        plays = self._load(DEPLOY_FLEETFORGE)
+        names = [p.get("ansible.builtin.import_playbook") for p in plays]
+        return plays[names.index("deploy-webapp.yml") + 1:]
+
+    @staticmethod
+    def marked(play):
+        play = dict(play)
+        play.pop("become", None)
+        play.pop("remote_user", None)
+        tasks = list(play.get("tasks", []))
+        for role in play.pop("roles", []):
+            name = role if isinstance(role, str) else role["role"]
+            task = {"name": "MARK " + name, "ansible.builtin.debug": {"msg": "MARK " + name + " {{ inventory_hostname }}"}}
+            if isinstance(role, dict) and "when" in role:
+                task["when"] = role["when"]
+            tasks.append(task)
+        play["tasks"] = tasks
+        return play
+
+    def harness(self):
+        out = []
+        for entry in self.block():
+            target = entry.get("ansible.builtin.import_playbook")
+            if target == "lib/gateway-backup-guard.yml":  # garde RÉELLE : des assert, aucune connexion
+                out.append(dict(entry, **{"ansible.builtin.import_playbook": os.path.join(GATEWAY_BACKUP_LIB, "gateway-backup-guard.yml")}))
+            elif target:
+                for play in self._load(os.path.join(PLAYBOOKS, target)):
+                    out.append(self.marked(dict(play, vars=dict(play.get("vars", {}), **entry.get("vars", {})), tags=entry.get("tags", []))))
+            else:
+                out.append(self.marked(entry))
+        return yaml.safe_dump(out)
+
+    def run_harness(self, inventory, *args):
+        code, out = run_local_play(self.harness(), inventory, args=list(args))
+        return code, out, sorted(set(re.findall(r'"msg": "MARK ([\w-]+) ([\w-]+)"', out)))
+
+    @staticmethod
+    def inventory(**gateway):
+        inventory = GuardTests.backup_inventory(None, **gateway)
+        # Les autres sauvegardes du parc : elles ne doivent jamais être visées.
+        inventory["all"]["children"]["backups"]["hosts"]["backup-tradekong"] = {"ansible_host": "203.0.113.91",
+                                                                                 "backup_sources": ["tradekong"]}
+        inventory["all"]["children"]["apps"]["hosts"]["tradekong"] = {"ansible_host": "203.0.113.92", "ansible_roles": ["backup"],
+                                                                      "pgbak_dest_host": "backup-tradekong"}
+        return inventory
+
+    WANTED = [("backup-security", DEST), ("host-preflight", "fleetforge-gateway"), ("postgres-backup-install", "fleetforge-gateway")]
+
+    def test_the_backup_plays_come_after_the_gateway_with_literal_patterns_and_the_backup_tag(self):
+        plays = self._load(DEPLOY_FLEETFORGE)
+        names = [p.get("ansible.builtin.import_playbook") for p in plays]
+        webapp = names.index("deploy-webapp.yml")
+        block = plays[webapp + 1:]
+        self.assertEqual(len(block), 4, "garde, destination attendue, installation, pare-feu de la destination")
+        for entry in block:
+            self.assertEqual(entry.get("tags"), ["backup"], entry.get("name"))
+        guard, install = [e for e in block if e.get("ansible.builtin.import_playbook")]
+        self.assertEqual((guard["ansible.builtin.import_playbook"], install["ansible.builtin.import_playbook"]),
+                         ("lib/gateway-backup-guard.yml", "lib/gateway-backup-install.yml"))
+        self.assertIs(guard["vars"]["gwbk_embedded"], True)
+        self.assertIs(install["vars"]["gwbk_embedded"], True)
+        self.assertLess(block.index(guard), block.index(install))
+        destination = block[-1]
+        self.assertEqual(destination["hosts"], self.DEST)
+        self.assertEqual(destination["roles"], ["backup-security"])
+        # Jamais de variable dans un `hosts:` (le motif est résolu avant les group_vars).
+        for path in (DEPLOY_FLEETFORGE, os.path.join(GATEWAY_BACKUP_LIB, "gateway-backup-guard.yml"),
+                     os.path.join(GATEWAY_BACKUP_LIB, "gateway-backup-install.yml")):
+            for play in self._load(path):
+                self.assertNotIn("{{", str(play.get("hosts", "")), path)
+        # Aucun `register` dans les plays ajoutés (rien qui lise le résultat d'une tâche sautée ou simulée).
+        for path in (os.path.join(GATEWAY_BACKUP_LIB, "gateway-backup-guard.yml"), os.path.join(GATEWAY_BACKUP_LIB, "gateway-backup-install.yml")):
+            with open(path, encoding="utf-8") as f:
+                self.assertNotIn("register:", f.read(), path)
+        self.assertEqual([p.get("hosts") for p in block if not p.get("ansible.builtin.import_playbook")],
+                         ["fleetforge_gateways_backup", self.DEST])
+
+    def test_listing_with_the_backup_tag_names_only_the_gateway_destination_and_roles(self):
+        code, out = run_local_play(None, self.inventory(), playbook=DEPLOY_FLEETFORGE, args=["--list-tasks", "--tags", "backup"])
+        self.assertEqual(code, 0, out[-3000:])
+        patterns = re.findall(r"play #\d+ \(([^)]*)\)", out)
+        # Les plays de FleetForge et de la passerelle (tâches `always`) précèdent ; la sauvegarde est la FIN du playbook.
+        self.assertEqual(patterns[-5:], ["fleetforge_gateways", "fleetforge_gateways_backup", "fleetforge_gateways_backup",
+                                         "fleetforge_gateways_backup", self.DEST])
+        self.assertIn("postgres-backup-install : Generate the dedicated backup SSH key", out)
+        self.assertIn("backup-security : Allow SSH from each backup source", out)
+        for other in ("backup-tradekong", "tradekong", "ctdapi", "brk1", "timescale1", "sync_servers", "backups", "sync-iptv"):
+            self.assertNotIn(other, patterns)
+
+    def test_the_gateway_and_its_destination_only_are_visited(self):
+        code, out, marks = self.run_harness(self.inventory())
+        self.assertEqual(code, 0, out[-3000:])
+        self.assertEqual(marks, self.WANTED)
+        self.assertEqual(self.run_harness(self.inventory(), "--tags", "backup")[2], self.WANTED)
+        self.assertTrue(all(host not in ("backup-tradekong", "tradekong") for _, host in marks), "les autres sauvegardes ne sont pas visées")
+
+    def test_nothing_is_visited_without_an_opt_in_a_gateway_or_for_the_fleetforge_scope(self):
+        # Passerelle sans `backup`, alors que l'entrée de destination existe : rien, et aucune connexion (pas de faits).
+        code, out, marks = self.run_harness(guard_inventory())
+        self.assertEqual((code, marks), (0, []), out[-2000:])
+        inventory = self.inventory()
+        inventory["all"]["children"]["backups"]["hosts"][self.DEST] = {"ansible_host": "203.0.113.90"}
+        inventory["all"]["children"]["fleetforge_gateways"]["hosts"]["fleetforge-gateway"]["ansible_roles"] = ["webapp"]
+        code, out, marks = self.run_harness(inventory)
+        self.assertEqual((code, marks), (0, []), out[-2000:])
+        self.assertNotIn("Gathering Facts", out)
+        # Parc sans passerelle.
+        inventory = self.inventory()
+        del inventory["all"]["children"]["fleetforge_gateways"]
+        code, out, marks = self.run_harness(inventory)
+        self.assertEqual((code, marks), (0, []), out[-2000:])
+        # Portée `fleetforge` : ni garde ni groupe (même une déclaration incomplète ne bloque pas), aucune connexion.
+        broken = self.inventory()
+        del broken["all"]["vars"]["backup_encrypt_recipient"]
+        for variable in ("ff_deploy_scope=fleetforge", ):
+            code, out, marks = self.run_harness(broken, "-e", variable)
+            self.assertEqual((code, marks), (0, []), out[-2000:])
+            self.assertNotIn("Gathering Facts", out)
+        code, out, marks = self.run_harness(self.inventory(), "-e", "ff_deploy_scope=gateway")
+        self.assertEqual(marks, self.WANTED, "la portée `gateway` joue la sauvegarde")
+
+    def test_other_tags_do_not_open_a_connection_for_the_backup(self):
+        for tags in ("proxy-conf", "alerts", "code", "gateway", "monitoring"):
+            with self.subTest(tags=tags):
+                code, out, marks = self.run_harness(self.inventory(), "--tags", tags)
+                self.assertEqual((code, marks), (0, []), out[-2000:])
+                self.assertNotIn("Gathering Facts", out)
+
+    def test_check_mode_runs_the_guard_and_the_firewall_but_does_not_simulate_the_install(self):
+        code, out, marks = self.run_harness(self.inventory(), "--check")
+        self.assertEqual(code, 0, out[-3000:])
+        self.assertEqual(marks, [("backup-security", self.DEST), ("host-preflight", "fleetforge-gateway")])
+        self.assertIn("sauvegarde non simulée en --check", out)
+        # La garde tient aussi en --check.
+        broken = self.inventory()
+        del broken["all"]["vars"]["backup_encrypt_recipient"]
+        code, out, marks = self.run_harness(broken, "--check")
+        self.assertNotEqual(code, 0)
+        self.assertEqual(marks, [])
+
+    def test_a_bad_declaration_or_another_destination_name_stops_before_anything_runs(self):
+        broken = self.inventory()
+        del broken["all"]["vars"]["backup_encrypt_recipient"]
+        code, out, marks = self.run_harness(broken)
+        self.assertNotEqual(code, 0, out[-2000:])
+        self.assertIn("destinataire de chiffrement", out)
+        self.assertEqual(marks, [])
+        other = self.inventory(pgbak_dest_host="backup-elsewhere")
+        other["all"]["children"]["backups"]["hosts"]["backup-elsewhere"] = {"ansible_host": "203.0.113.95"}
+        code, out, marks = self.run_harness(other)
+        self.assertNotEqual(code, 0, out[-2000:])
+        self.assertIn("backup-fleetforge-gateway", out)
+        self.assertNotIn(("postgres-backup-install", "fleetforge-gateway"), marks, "pas d'installation sans ouverture possible")
+
+    def test_deploy_backup_keeps_its_plays_and_imports_the_same_gateway_plays_without_the_flag(self):
+        plays = self._load(os.path.join(PLAYBOOKS, "deploy-backup.yml"))
+        imports = [p for p in plays if p.get("ansible.builtin.import_playbook")]
+        self.assertEqual([p["ansible.builtin.import_playbook"] for p in imports],
+                         ["lib/gateway-backup-guard.yml", "lib/gateway-backup-install.yml"])
+        for entry in imports:
+            self.assertNotIn("vars", entry, "deploy-backup.yml seul : aucun drapeau, comportement d'avant")
+            self.assertNotIn("tags", entry)
+        code, out = run_local_play(None, self.inventory(), playbook=os.path.join(PLAYBOOKS, "deploy-backup.yml"), args=["--list-tasks"])
+        self.assertEqual(code, 0, out[-3000:])
+        self.assertEqual(re.findall(r"play #\d+ \(([^)]*)\)", out),
+                         ["fleetforge_gateways", "brk1:timescale1", "tradekong:ctdapi:sync_servers", "brk1", "timescale1",
+                          "tradekong:ctdapi", "fleetforge_gateways_backup", "fleetforge_gateways_backup", "sync_servers", "backups",
+                          "brk1:timescale1", "prometheus1:monitor"])
+
+
 @unittest.skipUnless(shutil.which("ansible-playbook"), "ansible-playbook absent")
 class DbMigrationTests(unittest.TestCase):
     """Bascule vers le compose durci : jamais sur une base VIDE sans migration déclarée."""

@@ -57,13 +57,13 @@
 #       ./play.sh web3c deploy-readonly-user.yml --limit <entrées canoniques>
 #   • `ff_ansible_dir` / `ff_ansible_sync: false` — arbre Ansible tenu ailleurs.
 #
-# ════ DEUX SERVICES, UN PLAYBOOK : FleetForge ET sa passerelle MCP ═════════
+# ════ UN PLAYBOOK : FleetForge, sa passerelle MCP ET la sauvegarde de sa base ═
 # Ce playbook déploie aussi la passerelle MCP de FleetForge (`fleetforge-gateway`,
 # app Nest du gabarit, dépôt PRIVÉ séparé) : une entrée d'inventaire DÉDIÉE du
 # groupe `fleetforge_gateways`, de famille GÉNÉRIQUE `webapp` avec le profil
 # durci `webapp_hardening` (jamais l'entrée de FleetForge, jamais la famille
-# `fleetforge`). Ses plays sont ceux de deploy-webapp.yml, IMPORTÉ en fin de
-# playbook (docs/etude-passerelle-sur-webapp.md). Un parc sans ce groupe
+# `fleetforge`). Ses plays sont ceux de deploy-webapp.yml, IMPORTÉ après ceux de
+# FleetForge (docs/etude-passerelle-sur-webapp.md), suivi de la sauvegarde de sa base (ci-dessous). Un parc sans ce groupe
 # (papanglabs) se déploie exactement comme avant : rien n'est visé.
 #
 #   ./play.sh web3c deploy-fleetforge.yml                              # les deux
@@ -73,7 +73,18 @@
 #   ./play.sh web3c deploy-fleetforge.yml --tags proxy-conf            # les DEUX vhosts
 #   ./play.sh web3c deploy-fleetforge.yml -e ff_deploy_scope=gateway --tags hardening
 #                                                   # recontrôle du durcissement seul
+#   ./play.sh web3c deploy-fleetforge.yml --tags backup                # sauvegarde de la base seule
 # Retrait : remove-webapp.yml / purge-webapp.yml -e webapp=fleetforge-gateway.
+#
+# SAUVEGARDE DE LA BASE DE LA PASSERELLE (famille `backup`, tag `backup`) : jouée EN FIN de
+# playbook, une fois la base créée, pour la seule passerelle et sa seule destination
+# (`backup-fleetforge-gateway`) — avant, `deploy-backup.yml --limit
+# fleetforge-gateway:backup-fleetforge-gateway` à part. Opt-in par l'inventaire (`backup` dans
+# `ansible_roles` de la passerelle, `pgbak_*`, destinataire age ; docs/etude-passerelle-sur-webapp.md) :
+# sans cela, aucun hôte visé et aucune connexion. `ff_deploy_scope=fleetforge` la saute ; en
+# `--check` elle n'est pas simulée (voir le bas du fichier). `deploy-backup.yml` reste le
+# playbook des autres sauvegardes et de `--tags retarget` ; il importe les mêmes plays de la
+# passerelle (lib/gateway-backup-*.yml).
 #
 # PRÉREQUIS AVANT LE PREMIER DÉPLOIEMENT RÉEL de la passerelle :
 #   1. CHOISIR LA MACHINE : `ansible_host` de l'entrée dédiée (aucune adresse,
@@ -397,3 +408,82 @@
          else (groups['fleetforge_gateways'] | default([]) | first | default('')) }}
     webapp_optional: true
   tags: [gateway]
+
+# ════════════════════════════════════════════════════════════════════════════
+# Sauvegarde de la base de la passerelle (famille `backup`) — APRÈS les plays de
+# la passerelle : la base existe. Ce que `./play.sh <parc> deploy-backup.yml
+# --limit fleetforge-gateway:backup-fleetforge-gateway` faisait à part, sans
+# toucher aux autres sauvegardes du parc (tradekong, ctdapi, brk, serveurs de
+# synchro : jamais visés ici). Les plays source (garde, contrôle préalable,
+# `postgres-backup-install`) sont ceux de deploy-backup.yml, importés de
+# lib/gateway-backup-*.yml : une seule définition.
+#
+# Opt-in par l'inventaire (docs/etude-passerelle-sur-webapp.md, « Sauvegarde de
+# la base de la passerelle », « Activation ») : l'entrée de la passerelle porte
+# `backup` dans `ansible_roles` + `pgbak_*` + le destinataire age, et son
+# `pgbak_dest_host` est l'entrée `backup-fleetforge-gateway` (groupe `backups`).
+# Parc sans passerelle, passerelle sans `backup` : AUCUN hôte visé, aucune
+# connexion (groupe construit sans connexion par la garde). `ff_deploy_scope=
+# fleetforge` : idem. Tag `backup` (`--tags backup` : la sauvegarde seule ; les
+# autres tags ne rouvrent aucune connexion pour elle).
+#
+# `--check` : la garde et l'ouverture du pare-feu de la destination sont jouées ;
+# le rôle d'installation est SAUTÉ (clé SSH et compte de destination n'existent
+# pas encore au premier passage, leur simulation lirait des résultats absents —
+# le play de contrôle préalable, lui, est simulé comme partout).
+# ════════════════════════════════════════════════════════════════════════════
+- name: Sauvegarde de la passerelle — opt-in et garde (sans connexion)
+  ansible.builtin.import_playbook: lib/gateway-backup-guard.yml
+  vars:
+    gwbk_embedded: true
+  tags: [backup]
+
+# Le motif d'hôte du pare-feu ci-dessous est EN DUR (jamais une variable dans un
+# `hosts:`) : la destination déclarée doit être cette entrée, sinon l'ouverture
+# serait sautée sans bruit après l'installation de la sauvegarde. Aucune connexion.
+- name: Sauvegarde de la passerelle — destination attendue (sans connexion)
+  hosts: fleetforge_gateways_backup
+  gather_facts: false
+  tags: [backup]
+  tasks:
+    - name: Check the destination is the entry this playbook opens
+      ansible.builtin.assert:
+        that: pgbak_dest_host | default('') == 'backup-fleetforge-gateway'
+        fail_msg: >-
+          {{ inventory_hostname }} : `pgbak_dest_host` = « {{ pgbak_dest_host | default('?') }} » ; deploy-fleetforge.yml ouvre le
+          pare-feu de l'entrée `backup-fleetforge-gateway` seule (motif d'hôte en dur). Nommer ainsi l'entrée de destination, ou
+          jouer `deploy-backup.yml --limit {{ inventory_hostname }}:{{ pgbak_dest_host | default('<destination>') }}`.
+        quiet: true
+
+    - name: Say that the backup install is not simulated in check mode
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }} : sauvegarde non simulée en --check (clé SSH dédiée et compte de destination absents au
+          premier passage) ; garde passée, rien n'est lu ni écrit.
+      when: ansible_check_mode
+
+- name: Sauvegarde de la passerelle — contrôle préalable et installation
+  ansible.builtin.import_playbook: lib/gateway-backup-install.yml
+  vars:
+    gwbk_embedded: true
+  tags: [backup]
+
+# Reposé après coup, comme deploy-backup.yml : l'installation ouvre le SSH pour LA
+# source, ce play couvre la destination (`backup_sources` de son entrée). Pas
+# d'entrée de la destination concernée par une passerelle sans `backup` : le
+# play s'arrête sans connexion (`gather_facts` faux, `end_play`).
+- name: Pare-feu de la destination de la sauvegarde de la passerelle
+  hosts: backup-fleetforge-gateway
+  remote_user: "{{ remote_username }}"
+  become: true
+  gather_facts: false
+  tags: [backup]
+  pre_tasks:
+    - name: Skip unless a gateway that backs up names this destination
+      ansible.builtin.meta: end_play
+      when: >-
+        inventory_hostname not in (groups['fleetforge_gateways_backup'] | default([])
+        | map('extract', hostvars, 'pgbak_dest_host') | select('defined') | list)
+      tags: [always]
+  roles:
+    - backup-security
