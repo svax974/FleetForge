@@ -18,7 +18,7 @@
 - name: Fail early when a PapangMetrics secret is missing from the vault
   ansible.builtin.assert:
     that:
-      - pm_admin_password_hash is match('^scrypt\$')
+      - pm_admin_password_hash is match('^scrypt[$]')
       - pm_admin_jwt_secret | length >= 32
       - pm_metrics_auth_token | length >= 32
     fail_msg: >-

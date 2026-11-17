@@ -48,7 +48,7 @@
     path: "{{ site_pages_docroot }}/{{ site_pages_dir }}/{{ item.0.dest }}"
     regexp: "{{ item.1.regexp }}"
     replace: "{{ item.1.replace }}"
-  loop: "{{ site_pages_files | selectattr('dest', 'match', '.*\\.html$') | list | product(site_pages_replace) | list }}"
+  loop: "{{ site_pages_files | selectattr('dest', 'match', '.*[.]html$') | list | product(site_pages_replace) | list }}"
   loop_control:
     label: "{{ item.0.dest }}"
   # En --check les fichiers copiés n'existent pas encore sur l'hôte.

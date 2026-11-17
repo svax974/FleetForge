@@ -85,7 +85,7 @@
       community.general.cloudflare_dns:
         api_token: "{{ cloudflare_token }}"
         zone: "{{ domain_name }}"
-        record: "{{ item.name | regex_replace('\\.' ~ domain_name ~ '$', '') }}"
+        record: "{{ item.name | regex_replace('[.]' ~ domain_name ~ '$', '') }}"
         type: "{{ item.type }}"
         value: "{{ item.content }}"
         state: absent

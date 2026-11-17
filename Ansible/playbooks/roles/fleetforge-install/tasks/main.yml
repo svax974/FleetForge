@@ -71,7 +71,7 @@
   ansible.builtin.assert:
     that:
       - proxy_hostname is defined
-      - proxy_hostname is search('\.' ~ domain_name ~ '$')
+      - proxy_hostname is search('[.]' ~ domain_name ~ '$')
       - proxy_hostname != 'proxy.' ~ domain_name
     fail_msg: >-
       {{ inventory_hostname }} ne déclare pas de `proxy_hostname` propre : sans
