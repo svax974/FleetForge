@@ -95,7 +95,7 @@
   register: brk_installed_version
   changed_when: false
   # `brk --version` sort « brk <version> » avec des codes ANSI de couleur.
-  failed_when: brk_version not in (brk_installed_version.stdout | regex_replace('\x1b\[[0-9;]*m', ''))
+  failed_when: brk_version not in (brk_installed_version.stdout | regex_replace('\x1b(?![]])[][][0-9;]*m', ''))
   tags: [install]
 
 - name: Create BRK working directory

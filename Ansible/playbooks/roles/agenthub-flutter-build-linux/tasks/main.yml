@@ -322,4 +322,4 @@
     msg: >-
       ATTENTION {{ inventory_hostname }} : flutter doctor signale un problème sur « Android toolchain »
       (voir le rapport ci-dessus). Les autres avertissements (Chrome, Android Studio) sont sans effet.
-  when: agenthub_flutter_build_doctor.stdout is search('\[[^\]]*\] Android toolchain') and not (agenthub_flutter_build_doctor.stdout is search('\[✓\] Android toolchain'))
+  when: agenthub_flutter_build_doctor.stdout is search('(?![]])[][][^]]*[]] Android toolchain') and not (agenthub_flutter_build_doctor.stdout is search('(?![]])[][]✓[]] Android toolchain'))

@@ -26,7 +26,7 @@
     that:
       - starnet_sidecar_sockets.stdout_lines
         | map('split') | map(attribute=3)
-        | reject('match', '^(127\.0\.0\.1|\[::1\]|\[::ffff:127\.0\.0\.1\]):')
+        | reject('match', '^(127[.]0[.]0[.]1|(?![]])[][](::1|::ffff:127[.]0[.]0[.]1)[]]):')
         | list | length == 0
     fail_msg: >-
       Le sidecar StarNet écoute hors de la boucle locale sur le port

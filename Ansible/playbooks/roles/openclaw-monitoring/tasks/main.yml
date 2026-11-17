@@ -96,6 +96,6 @@
   ansible.builtin.debug:
     msg: >-
       {{ openclaw_probe.content.splitlines()
-         | select('match', '(service_up|service_check_up)\{service="openclaw"|openclaw_model_(up|unchecked|probe_info)\{')
+         | select('match', '(service_up|service_check_up)[{]service="openclaw"|openclaw_model_(up|unchecked|probe_info)[{]')
          | list }}
   tags: [monitoring]

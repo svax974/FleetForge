@@ -76,7 +76,7 @@
 
 - name: Report the tag that was handled
   ansible.builtin.debug:
-    msg: "{{ wa_run.stdout_lines | select('search', '\\[IMAGE:') | list }}"
+    msg: "{{ wa_run.stdout_lines | select('search', '(?![]])[][]IMAGE:') | list }}"
   when:
     - wa_registry_on | bool
     - webapp_hardening is not defined
@@ -118,7 +118,7 @@
     WA_PORT: "{{ item }}"
   register: wa_infra_listen
   changed_when: false
-  failed_when: wa_infra_listen.stdout_lines | reject('match', '^(127[.]0[.]0[.]1|\[::1\]):') | list | length > 0
+  failed_when: wa_infra_listen.stdout_lines | reject('match', '^(127[.]0[.]0[.]1|(?![]])[][]::1[]]):') | list | length > 0
   loop: "{{ ([wa_db_port] if wa_db_selfhosted | bool else []) + [wa_redis_port] }}"
   when:
     - webapp_phase in ['all', 'deploy']

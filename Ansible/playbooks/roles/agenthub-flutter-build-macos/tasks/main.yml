@@ -272,4 +272,4 @@
     msg: >-
       ATTENTION {{ inventory_hostname }} : flutter doctor signale un problème sur Android toolchain ou Xcode
       (voir le rapport ci-dessus). Chrome et Android Studio manquants sont sans effet.
-  when: agenthub_macos_doctor.stdout is search('\[✗\] (Android toolchain|Xcode)')
+  when: agenthub_macos_doctor.stdout is search('(?![]])[][]✗[]] (Android toolchain|Xcode)')
