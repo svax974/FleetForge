@@ -4678,7 +4678,7 @@ class EndOfStringGrammarTests(unittest.TestCase):
 
     END = "(?!(?s:.))"
     SITES = {("fleetforge-install", "gateway-guard.yml"): 5, ("webapp-monitoring", "extra-checks.yml"): 10,
-             ("webapp-setup", "facts.yml"): 8}
+             ("webapp-setup", "facts.yml"): 9}
     GATEWAY = ("all", "children", "fleetforge_gateways", "hosts", "fleetforge-gateway")
 
     @staticmethod
@@ -4735,7 +4735,7 @@ class EndOfStringGrammarTests(unittest.TestCase):
 
         alphabet = list("a1/_.-~()|^$[]*+?kmsAZ ;\n\r")
         strings = ["".join(chars) for size in range(4) for chars in itertools.product(alphabet, repeat=size)]
-        strings += ["a" * 253, "a" * 254, "a.b-c\n", "/api/\n", "/api/\r\n", "5k\n", "30s\n", "401\n", "POST\n", "main\n", "443\n",
+        strings += ["0x" + "a" * 40, "0x" + "a" * 40 + "\n", "0x" + "a" * 39, "0x" + "a" * 41, "a" * 253, "a" * 254, "a.b-c\n", "/api/\n", "/api/\r\n", "5k\n", "30s\n", "401\n", "POST\n", "main\n", "443\n",
                     "^/mcp(/|[?]|$)\n", "^/mcp(/.*)?$\n", "webapp-a\n", "webapp-fleetforge-gateway\n", "https://a\n", "https://a/b\n", "ffg.example.test\n", "ffg.example.test \n", "\nffg", "a\n\n"]
         for (role, name), expected in self.SITES.items():
             text = self._text(role, name)
