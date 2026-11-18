@@ -172,7 +172,7 @@
 # Le mode TLS de CETTE zone a été lu (et, s'il le faut, REFUSÉ) par la première passe, zone-check.yml, avant toute écriture : il est repris ici.
 - name: Take the TLS mode read for this zone
   ansible.builtin.set_fact:
-    cfopull_tls: "{{ cfopull_tls_by_zone[cfopull_zone_name] }}"
+    cfopull_zone_tls: "{{ cfopull_tls_by_zone[cfopull_zone_name] }}"
   delegate_to: localhost
   become: false
 
@@ -192,7 +192,7 @@
   become: false
   when:
     - cfopull_enforce_tls_strict | bool
-    - cfopull_tls.status != 200 or (cfopull_tls.json.result.value | default('')) != 'strict'
+    - cfopull_zone_tls.status != 200 or (cfopull_zone_tls.json.result.value | default('')) != 'strict'
 
 - name: Fail when Cloudflare refuses to set the TLS mode that was asked for
   ansible.builtin.assert:
@@ -234,7 +234,7 @@
     content: >-
       {{ {'hostname': item, 'zone': cfopull_zone_name, 'ca_sha256': cfopull_ca_stat.stat.checksum,
           'tls_mode': ('strict' if cfopull_tls_set is not skipped
-                       else ((cfopull_tls.json.result.value | default('unreadable')) if cfopull_tls.status == 200 else 'unreadable'))
+                       else ((cfopull_zone_tls.json.result.value | default('unreadable')) if cfopull_zone_tls.status == 200 else 'unreadable'))
          } | to_nice_json }}
   loop: "{{ cfopull_zone_hostnames }}"
   delegate_to: localhost

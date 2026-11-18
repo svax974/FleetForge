@@ -7924,10 +7924,16 @@ class OwnFilterAopRenderTests(unittest.TestCase):
     def test_without_a_declaration_the_bytes_are_those_of_before(self):
         for kind in OWN_KINDS:
             legacy = render_own(kind, declared=False)
-            for label, kwargs in (("variable absente", dict()), ("aucune entrée", dict(aop={})), ("autre nom en enforce", dict(aop={"other.example.test": "enforce"})),
-                                  ("autre nom en observe", dict(aop={"other.example.test": "observe"}))):
+            for label, kwargs in (("variable absente", dict()), ("aucune entrée", dict(aop={}))):
                 with self.subTest(kind=kind, case=label):
                     self.assertEqual(render_own(kind, **kwargs), legacy)
+            # Règle de nom orphelin (branche papanglabs) : dès qu'une entrée déclare l'attribut, un vhost dont le nom
+            # n'est déclaré par AUCUNE entrée refuse de se rendre — une faute de frappe ne le laisse pas sans protection.
+            for mode in ("observe", "enforce"):
+                with self.subTest(kind=kind, orphan=mode):
+                    with self.assertRaises(jinja2.UndefinedError) as raised:
+                        render_own(kind, aop={"other.example.test": mode})
+                    self.assertIn("aucune_entree", str(raised.exception))
             for marker in ("ssl_verify_client", "ssl_client_certificate", "cf_untrusted", "cf_socket", "log_format", "access_log", "geo "):
                 self.assertNotIn(marker, legacy)
 
@@ -8014,7 +8020,10 @@ class OwnFilterAopRenderTests(unittest.TestCase):
             self.assertFalse(re.search(r"(?m)^\s*(set_real_ip_from|real_ip_header)\b", certserver))
         for part in ("certhttp", "certserver", "cert"):
             self.assertEqual(partial(part, {}), "", "sans déclaration : rien")
-            self.assertEqual(partial(part, {"other.example.test": "enforce"}), "")
+            # Nom orphelin (branche papanglabs) : un nom déclaré qui n'est pas celui du vhost ne rend plus rien en silence.
+            with self.assertRaises(jinja2.UndefinedError) as raised:
+                partial(part, {"other.example.test": "enforce"})
+            self.assertIn("aucune_entree", str(raised.exception))
         self.assertEqual(partial("cert", {"ctdapi-back.example.test": "observe"}), "")
 
     def test_a_vhost_that_forgets_a_variable_fails_to_render_as_soon_as_an_entry_declares_the_attribute(self):
@@ -8028,7 +8037,10 @@ class OwnFilterAopRenderTests(unittest.TestCase):
         with self.assertRaises(jinja2.UndefinedError) as raised:
             render_own("back", aop={"ctdapi-back.example.test": "enforced"})
         self.assertIn("cloudflare_origin_pull_invalide", str(raised.exception))
-        self.assertTrue(render_own("back", aop={"other.example.test": "bogus"}), "le vhost d'un autre nom n'est pas concerné")
+        # Nom non déclaré : refus (règle de nom orphelin) — le mode de l'AUTRE entrée n'est jamais évalué pour ce vhost.
+        with self.assertRaises(jinja2.UndefinedError) as raised:
+            render_own("back", aop={"other.example.test": "bogus"})
+        self.assertIn("aucune_entree", str(raised.exception))
 
     def test_the_real_ansible_engine_gives_the_same_vhost_as_the_plain_jinja_one(self):
         partials = {name: _text(os.path.join(TEMPLATES, name)) for name in ("_cloudflare_realip.inc", "_cloudflare_untrusted.inc")}
