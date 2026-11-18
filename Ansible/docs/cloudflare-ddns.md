@@ -67,13 +67,12 @@ de réconciliation dans `state/status.json` depuis l'hôte. Le rejeu avec
 Sa cible et son ouverture de scrape sont partagées avec
 les autres services de la machine.
 
-**Le groupe d'alertes `cloudflare-ddns` n'est chargé que si Prometheus SCRAPE vraiment cette machine.**
-Sur `station` (92.130.213.98, NAT domestique partagé avec hub, nuc, proxy2 et vpn1), le routeur ne redirige
-que 9100 : svcprobe n'est pas joignable, donc `cloudflare_ddns_up` n'arrive jamais dans Prometheus et une règle
-chargée y serait indiscernable d'une règle qui veille. Le groupe est donc absent de `prom_alert_groups` sur
-web3c, et le déploiement le signale sans bloquer. Pour l'armer : ajouter la redirection du port svcprobe de la
-machine côté routeur (hors Ansible), vérifier `count(cloudflare_ddns_up)` non nul dans Prometheus, PUIS
-réajouter `cloudflare-ddns` à `prom_alert_groups`. Le déploiement échoue désormais si le PREMIER cycle du
+**La sonde est scrapée via la cible svcprobe de la MACHINE** : sur `station` (92.130.213.98, NAT partagé),
+Prometheus joint `92.130.213.98:9110` par `svcprobe/proxy2.json` — les redirections routeur 9100 ET 9110
+existent (vérifié depuis `monitor` le 18/11/2026 : `cloudflare_ddns_up` et `service_up` sont publiés). Le
+groupe d'alertes `cloudflare-ddns` est donc exigé par le déploiement. Sur une machine dont svcprobe ne serait
+PAS scrapable, une règle chargée serait indiscernable d'une règle qui veille : vérifier
+`count(cloudflare_ddns_up)` non nul dans Prometheus avant d'ajouter une nouvelle machine. Le déploiement échoue désormais si le PREMIER cycle du
 client n'aboutit pas (jeton, zone ou liste de noms) : un déploiement vert prouve que Cloudflare a répondu.
 
 ```sh
