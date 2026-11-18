@@ -175,6 +175,49 @@ fn add_inventories(cmd: &mut Command, parc: &Parc) {
     }
 }
 
+/// Hôtes d'inventaire marqués `disabled: true` — jamais déployés, qu'un groupe ou
+/// une liste d'hôtes les cible. Le calcul est celui de `play.sh`
+/// (`scripts/disabled-hosts.sh`, même règle pour les deux lanceurs) ; absent ou en
+/// échec, la liste est vide : le déploiement garde son comportement d'avant.
+fn disabled_hosts(parc: &Parc, env: &AnsibleEnv) -> Vec<String> {
+    let Some(root) = env.root.as_ref() else {
+        return Vec::new();
+    };
+    let script = root.join("scripts/disabled-hosts.sh");
+    if !script.is_file() {
+        return Vec::new();
+    }
+    let mut cmd = Command::new(&script);
+    cmd.current_dir(root);
+    for file in &parc.files {
+        cmd.arg(file);
+    }
+    match cmd.output() {
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
+            .split_whitespace()
+            .map(str::to_string)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// `--limit` du run : la sélection de l'appelant, moins les hôtes désactivés, et
+/// l'exclusion de CHAQUE hôte désactivé (un play peut cibler un groupe qui les
+/// contient). `None` : rien à restreindre.
+fn limit_pattern(selection: Option<&[String]>, disabled: &[String]) -> Option<String> {
+    if selection.is_none() && disabled.is_empty() {
+        return None;
+    }
+    let mut parts: Vec<String> = selection
+        .map(<[String]>::to_vec)
+        .unwrap_or_else(|| vec!["all".to_string()]);
+    parts.extend(disabled.iter().map(|host| format!("!{host}")));
+    if parts.is_empty() {
+        return None;
+    }
+    Some(parts.join(":"))
+}
+
 fn failed_run(
     inventory_path: &str,
     roles: Vec<String>,
@@ -221,14 +264,37 @@ where
         _ => vec!["all".to_string()],
     };
 
+    // Hôtes `disabled: true` : retirés de la sélection, et exclus du run même
+    // quand un play cible un groupe qui les contient.
+    let disabled = disabled_hosts(parc, env);
+    let selected = limit_hosts.as_ref().map(|hosts| {
+        hosts
+            .iter()
+            .filter(|host| !disabled.contains(host))
+            .cloned()
+            .collect::<Vec<String>>()
+    });
+    if let (Some(requested), Some(kept)) = (limit_hosts.as_ref(), selected.as_ref()) {
+        if !requested.is_empty() && kept.is_empty() {
+            return Ok(failed_run(
+                &parc.name,
+                Vec::new(),
+                requested.clone(),
+                started_at,
+                format!(
+                    "Hôte(s) désactivé(s) dans l'inventaire (`disabled: true`) : {} — rien n'est déployé.",
+                    disabled.join(", ")
+                ),
+            ));
+        }
+    }
+
     let mut cmd = Command::new("ansible-playbook");
     env.apply(&mut cmd);
     add_inventories(&mut cmd, parc);
     cmd.arg(playbook_path);
-    if let Some(ref hosts) = limit_hosts {
-        if !hosts.is_empty() {
-            cmd.arg("--limit").arg(hosts.join(","));
-        }
+    if let Some(pattern) = limit_pattern(selected.as_deref(), &disabled) {
+        cmd.arg("--limit").arg(pattern);
     }
     add_extra_vars(&mut cmd, extra_vars);
     add_selection(&mut cmd, selection);
@@ -308,6 +374,26 @@ where
     F: Fn(String) + Send + Sync + 'static,
 {
     let started_at = chrono::Utc::now().to_rfc3339();
+    // Hôtes `disabled: true` : jamais déployés. Ici le play est écrit à la main,
+    // donc c'est la liste `hosts:` qui les exclut (pas un `--limit`).
+    let disabled = disabled_hosts(parc, env);
+    let hosts: Vec<String> = hosts
+        .iter()
+        .filter(|host| !disabled.contains(host))
+        .cloned()
+        .collect();
+    if hosts.is_empty() {
+        return Ok(failed_run(
+            &parc.name,
+            roles.to_vec(),
+            Vec::new(),
+            started_at,
+            format!(
+                "Hôte(s) désactivé(s) dans l'inventaire (`disabled: true`) : {} — rien n'est déployé.",
+                disabled.join(", ")
+            ),
+        ));
+    }
     let hosts_str = hosts.join(",");
     let roles_yaml: String = roles
         .iter()
@@ -431,5 +517,25 @@ mod tests {
         assert_eq!(status_of(Some(0)), "success");
         assert_eq!(status_of(Some(2)), "failed");
         assert_eq!(status_of(None), "failed");
+    }
+
+    #[test]
+    fn a_disabled_host_is_excluded_from_every_pattern() {
+        // Rien à restreindre : aucun `--limit`, le comportement d'avant.
+        assert_eq!(limit_pattern(None, &[]), None);
+        // Sans sélection : tous les hôtes, moins les désactivés.
+        assert_eq!(
+            limit_pattern(None, &["proxy2".to_string()]).as_deref(),
+            Some("all:!proxy2")
+        );
+        // Une sélection garde son motif et gagne l'exclusion (un play peut cibler un groupe).
+        let selected = vec!["proxy1".to_string()];
+        assert_eq!(
+            limit_pattern(Some(&selected), &["proxy2".to_string()]).as_deref(),
+            Some("proxy1:!proxy2")
+        );
+        // Sélection vide et aucun désactivé : rien non plus.
+        let none: Vec<String> = Vec::new();
+        assert_eq!(limit_pattern(Some(&none), &[]), None);
     }
 }

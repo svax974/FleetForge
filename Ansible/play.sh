@@ -95,4 +95,29 @@ export ANSIBLE_CACHE_PLUGIN_CONNECTION="${ANSIBLE_CACHE_PLUGIN_CONNECTION:-$HOME
 # macOS : sans cette variable, les forks d'Ansible meurent sur l'initialisation
 # Objective-C (« objc[…]: +[__NSCFConstantString initialize] … »).
 export OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES
+
+# Hôte `disabled: true` : IGNORÉ au déploiement, qu'un groupe ou une liste d'hôtes
+# le cible. Un seul moyen couvre tous les plays sans les toucher : restreindre le
+# run par `--limit` (il s'applique à CHAQUE play). Un second `--limit` REMPLACE le
+# premier, donc celui de l'appelant est repris et complété des exclusions, jamais
+# écrasé.
+disabled_hosts="$(scripts/disabled-hosts.sh "${inventories[@]}" 2>/dev/null || true)"
+if [ -n "${disabled_hosts}" ]; then
+  caller_limit=""
+  kept=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      # La virgule et les deux-points sont deux séparateurs d'union : on n'en garde
+      # qu'un (le mélange des deux fait perdre des motifs à Ansible).
+      --limit) caller_limit="${caller_limit:+$caller_limit:}${2//,/:}"; shift 2 ;;
+      --limit=*) caller_limit="${caller_limit:+$caller_limit:}${1#--limit=}"; caller_limit="${caller_limit//,/:}"; shift ;;
+      *) kept+=("$1"); shift ;;
+    esac
+  done
+  set -- ${kept[@]+"${kept[@]}"}
+  for h in ${disabled_hosts}; do caller_limit="${caller_limit:-all}:!$h"; done
+  args+=(--limit "${caller_limit}")
+  echo "play.sh: hôte(s) disabled ignoré(s) : ${disabled_hosts}" >&2
+fi
+
 exec ansible-playbook "${args[@]}" "playbooks/$playbook" "$@"
