@@ -679,7 +679,7 @@ incompatible avec le profil durci (`wa_front_mode == 'container'`) et avec l'ém
 certificat client dans les locations `mode: public`. Un seul passage de `deploy-webapp.yml` (donc de `deploy-fleetforge.yml`) :
 CNAME PROXIFIÉ vers `proxy-private.<zone>` (`webapp-install` → `cnames.yml` ; garde si aucun proxy hors adresse VPN), autorité
 et certificat client générés une fois puis envoyés à Cloudflare, activés sur `proxy_hostname` (`cfopull_hostnames`), mode TLS de la
-zone lu (signalé s'il n'est pas `strict` ; `cfopull_enforce_tls_strict: true` le pose), autorité déposée sur les proxies avant tout
+zone lu, puis `strict` POSÉ (avant tout envoi de certificat) pour toute zone qui porte un nom qui l'exige — `cfopull_enforce_tls_strict`, vrai par défaut ; `false` rend le refus d'avant), autorité déposée sur les proxies avant tout
 gabarit (`proxy_update_cloudflare_edge`). Refus (`facts.yml`) : avec `cloudflare_front`, `webapp_front: pages`, `webapp_proxy:
 external`, `proxy_hostname` hors zone ou égal au front `proxy.<zone>`, valeur ni `true` ni `false`. Absent ou faux : rendus
 identiques octet pour octet (114 rendus réels du parc, trois proxies, avant/après).
@@ -766,7 +766,7 @@ sémantique documentée, et par `nginx -t` au déploiement).
   de fichier, le contenu n'est jamais lu) ou si `parc_name` manque.
 - **Mode TLS de la zone** : en « Full » (non strict) Cloudflare ne vérifie pas le certificat de l'origine, le segment Cloudflare → proxy n'est
   pas authentifié. Pour un nom `cloudflare_named`, un mode LISIBLE et non `strict` BLOQUE `cloudflare-origin-pull` (message : `-e
-  cfopull_enforce_tls_strict=true` ou réglage manuel SSL/TLS → Full (strict)) ; échappatoire explicite `cfopull_allow_non_strict_tls: true`
+  `cfopull_enforce_tls_strict=false` — le passage le pose sinon tout seul) ; échappatoire explicite `cfopull_allow_non_strict_tls: true`
   (faux par défaut). Mode ILLISIBLE (jeton sans « Zone → Zone Settings → Read ») : BLOQUE aussi pour un nom `cloudflare_named` (on ne
   pose pas un vhost OAuth/MCP public sur une hypothèse ; message : permission manquante, ajouter Read/Edit au jeton ou assumer
   `cfopull_allow_non_strict_tls: true`) ; `cloudflare_front` seul garde l'avertissement d'avant.
@@ -855,7 +855,7 @@ les defaults des deux rôles, un test les compare). Absente partout : TOUT rend 
    ne présente pas le certificat (réglage retiré dans le tableau de bord, certificat partagé de la zone, nom derrière un Load Balancer
    dont l'activation par nom d'hôte n'est pas éprouvée).
 3. Mode TLS de la zone : un nom `cloudflare_origin_pull` (observe comme enforce) compte comme un nom `cloudflare_named` pour le refus
-   BLOQUANT « lisible et non `strict` » / « illisible » de `cloudflare.yml` (`-e cfopull_enforce_tls_strict=true` ou réglage manuel ;
+   BLOQUANT « lisible et non `strict` » / « illisible » de `cloudflare.yml` (levé par défaut : `strict` est posé ; `-e cfopull_enforce_tls_strict=false` le rétablit ;
    échappatoire explicite `cfopull_allow_non_strict_tls`). Ce refus précède le témoin : pas de preuve pour une zone non `strict`.
 4. Fermé : dès qu'UNE entrée déclare l'attribut, un vhost qui inclut `_cloudflare_realip.inc` sans avoir posé `cf_slug` et `cf_aop_name`
    ne se rend pas (variable non définie dont le nom dit quoi ajouter) ; `deploy-webapp.yml` joue aussi le côté Cloudflare pour une entrée
@@ -869,7 +869,7 @@ les defaults des deux rôles, un test les compare). Absente partout : TOUT rend 
 
 **Ordre exact (papanglabs).**
 (0) Prérequis. Jeton `cloudflare_token` de la zone : « Zone → SSL and Certificates → Edit » et « Zone → Zone Settings → Read » (« Edit » si
-`-e cfopull_enforce_tls_strict=true`). **PASSAGE DE LA ZONE EN `strict` : réglage de TOUTE la zone `papanglabs.com`, et RIEN ne vérifie à
+`-e cfopull_enforce_tls_strict=false`). **PASSAGE DE LA ZONE EN `strict` : POSÉ AUTOMATIQUEMENT (défaut), réglage de TOUTE la zone `papanglabs.com`, et RIEN ne vérifie à
 votre place que chaque nom proxifié de la zone a un certificat d'origine valide pour son nom** (DNS, nuage orange : tous, pas seulement
 les trois API) — un nom sans certificat valide répondra 526 dès le passage en `strict`. Le contrôle de `cloudflare.yml` n'impose le mode
 `strict` que pour ces trois noms ; il ne vérifie aucun autre nom. Vérifier aussi que les origin pulls GLOBAUX de la zone (certificat
@@ -1024,7 +1024,7 @@ autorité, UN certificat client envoyé à chaque zone qui porte au moins un nom
    rendus. L'autorité reste UNIQUE (`keys/cloudflare-origin-pull/`, une par poste).
 
 **Ordre exact (web3c).** (0) Jeton : « Zone → Zone → Read », « Zone → SSL and Certificates → Edit » et « Zone → Zone Settings → Read » (« Edit » pour
-`cfopull_enforce_tls_strict`) sur `web3c.cc` ET `tradekong.app`. Le mode `strict` est un réglage de TOUTE la zone : avant de le poser sur
+`cfopull_enforce_tls_strict`, POSÉ par défaut) sur `web3c.cc` ET `tradekong.app`. Le mode `strict` est un réglage de TOUTE la zone : avant de le laisser poser sur
 `tradekong.app`, vérifier que chaque nom PROXIFIÉ de la zone qui joint un origine a un certificat valide (le certificat des proxies est le
 wildcard `*.tradekong.app`, qui ne couvre PAS le sommet `tradekong.app`) ; vérifier que les origin pulls GLOBAUX des deux zones (certificat partagé
 de Cloudflare) sont désactivés ; vérifier à la main dans Cloudflare que `ctdapi`, `ctdapi-back` et `back.tradekong.app` sont bien PROXIFIÉS (nuage orange)

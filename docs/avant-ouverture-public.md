@@ -29,7 +29,7 @@ par `deploy-fleetforge.yml` (garde du groupe `fleetforge_gateways` puis import d
   `oauth/register`) et sondes `public_edge` / `public_edge_origin` (`docs/etude-passerelle-sur-webapp.md`, « E2 »). Reste :
   `ipAllow` par credential sur CHAQUE clé `ffg_` AVANT le déploiement (plus aucun filtre nginx sur `/mcp`), règles WAF
   Cloudflare qui ne défient pas les appels serveur (hors Ansible, une seule règle de limitation de débit au plan gratuit),
-  mode TLS « Full (strict) » lu par le déploiement mais non posé (`cfopull_enforce_tls_strict`), premier passage supervisé.
+  mode TLS « Full (strict) » POSÉ automatiquement par le déploiement sur toute zone qui porte un nom qui l'exige (`cfopull_enforce_tls_strict`, vrai par défaut) — vérifier que chaque nom proxié de la zone a un certificat d'origine valide avant le premier passage, premier passage supervisé.
 - **Accès de test à `/mcp`** : `whitelist: true` dans l'`access` de la location `/mcp` de l'entrée — à passer à `false` dès la
   fin des tests et AVANT toute exposition E2/E3 (la whitelist n'élargit pas l'allow-list propre à chaque
   credential `exec`, ≤ /16, imposée par `mcp-access`).
