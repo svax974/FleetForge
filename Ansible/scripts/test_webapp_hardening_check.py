@@ -7372,7 +7372,7 @@ class AopRolloutSafetyTests(unittest.TestCase):
     def record(self, inventory, hostnames=("back-prod.example.test", "back-preprod.example.test", "backind.example.test"), tls="strict"):
         tasks = self.tasks("zone.yml", WITNESS_TASKS)
         return self.run_tasks(tasks, inventory, cfopull_zone_hostnames=list(hostnames), cfopull_zone_name="example.test",
-                              cfopull_tls={"status": 200, "json": {"result": {"value": tls}}}, cfopull_tls_set={"skipped": True})
+                              cfopull_zone_tls={"status": 200, "json": {"result": {"value": tls}}}, cfopull_tls_set={"skipped": True})
 
     def witness(self, name):
         with open(os.path.join(self.keys, "active", name + ".json"), encoding="utf-8") as f:
@@ -8594,7 +8594,7 @@ class MultiZoneProofTests(unittest.TestCase):
 
     def record(self, inventory, zone, hostnames):
         return self.run_tasks("zone.yml", list(WITNESS_TASKS), inventory, cfopull_zone_name=zone, cfopull_zone_hostnames=hostnames,
-                              cfopull_tls={"status": 200, "json": {"result": {"value": "strict"}}}, cfopull_tls_set={"skipped": True})
+                              cfopull_zone_tls={"status": 200, "json": {"result": {"value": "strict"}}}, cfopull_tls_set={"skipped": True})
 
     def write_witness(self, name, **content):
         os.makedirs(os.path.join(self.keys, "active"), exist_ok=True)
