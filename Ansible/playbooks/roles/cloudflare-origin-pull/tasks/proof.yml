@@ -25,7 +25,8 @@
 # `enforce` = le vhost refuse (403) une socket Cloudflare sans certificat client vérifié : TOUT le trafic légitime reçoit 403 tant que
 # Cloudflare ne présente pas le certificat sur ce nom (constat attendu si on pose le vhost AVANT l'activation). La preuve est le
 # témoin local que `cloudflare.yml` n'écrit qu'après l'activation constatée `active` et le mode TLS de la zone accepté, au nom de CETTE
-# autorité (empreinte de ca.pem) : absent ou périmé (autorité renouvelée, autre poste de contrôle), le dépôt est refusé ICI, avant
+# autorité (empreinte de ca.pem) ET de CETTE zone (celle du nom, `cfopull_zone_of`) : absent ou périmé (autorité renouvelée, autre poste de
+# contrôle, autre zone), le dépôt est refusé ICI, avant
 # tout gabarit. `observe` n'exige rien : rien n'est refusé, le journal dit ce que Cloudflare présente.
 - name: Hash the origin-pull authority that enforced names must have been activated with
   ansible.builtin.stat:
@@ -37,15 +38,21 @@
   run_once: true
   when: cfopull_aop | dict2items | selectattr('value', 'equalto', 'enforce') | list | length > 0
 
+# Le témoin est celui de CETTE zone : un nom qui n'appartient à aucune zone du parc n'est jamais prouvé, et un témoin écrit pour une autre zone
+# (même nom, autre zone ; témoin d'avant le passage multi-zone, sans zone) ne prouve rien.
 - name: Fail when Cloudflare has not been proven to present the certificate on an enforced name
   ansible.builtin.assert:
     that: >-
-      (cfopull_dir ~ '/active/' ~ item ~ '.json') is file
+      (cfopull_zone_of.get(item, '')) != ''
+      and (cfopull_dir ~ '/active/' ~ item ~ '.json') is file
       and ((lookup('ansible.builtin.file', cfopull_dir ~ '/active/' ~ item ~ '.json') | from_json).ca_sha256 | default(''))
       == (cfopull_ca_stat.stat.checksum | default('no-authority'))
+      and ((lookup('ansible.builtin.file', cfopull_dir ~ '/active/' ~ item ~ '.json') | from_json).zone | default(''))
+      == (cfopull_zone_of.get(item, ''))
     fail_msg: >-
       {{ item }} est en `cloudflare_origin_pull: enforce` mais l'activation des Authenticated Origin Pulls chez Cloudflare n'est pas
-      PROUVÉE depuis ce poste ({{ cfopull_dir }}/active/{{ item }}.json absent, ou écrit pour une autre autorité). Poser ce vhost
+      PROUVÉE depuis ce poste pour la zone « {{ cfopull_zone_of.get(item, '') | default('?', true) }} » ({{ cfopull_dir }}/active/{{ item }}.json
+      absent, ou écrit pour une autre autorité ou une autre zone, ou nom hors de toute zone du parc : {{ cfopull_zones | join(', ') }}). Poser ce vhost
       maintenant répondrait 403 à TOUT le trafic légitime de ce nom. Jouer d'abord
       `./play.sh <parc> deploy-cloudflare-origin-pull.yml` (active le certificat sur les noms, attend `active`, lit le mode TLS de la
       zone, écrit le témoin), contrôler le journal `cf-aop-*.log` en mode `observe` (verify=SUCCESS), puis rejouer. Aucun gabarit

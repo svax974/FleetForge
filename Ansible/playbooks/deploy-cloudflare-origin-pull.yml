@@ -24,6 +24,15 @@
 #   ./play.sh papanglabs deploy-cloudflare-origin-pull.yml        # Cloudflare, puis l'autorité sur chaque proxy
 #   ./play.sh papanglabs update-proxy.yml --limit proxy1          # observe (puis proxy2), ensuite enforce
 #
+# PLUSIEURS ZONES (web3c : `web3c.cc` et `tradekong.app`, `domains` des group_vars) : chaque nom d'hôte de `cfopull_hostnames` va à la plus longue zone
+# de `cfopull_zones` (zone principale + `domains`) ; un seul jeton, une seule autorité (`keys/cloudflare-origin-pull/`). Toutes les zones sont d'abord
+# lues SANS écrire (zone introuvable ou non permise : arrêt, la zone et la permission sont nommées), puis activées une à une (mode TLS lu et exigé
+# PAR zone, témoin par nom ET par zone). Entrées web3c : `ctdapi` (ctdapi.web3c.cc, ctdapi-back.web3c.cc) et `tradekong` (back.tradekong.app, entrée
+# `webapp_proxy: external` : ce playbook est le seul à activer son nom). Ordre et signaux : docs/etude-passerelle-sur-webapp.md, « Authenticated Origin
+# Pulls : ctdapi, tradekong et plusieurs zones ».
+#   ./play.sh web3c deploy-cloudflare-origin-pull.yml             # les deux zones, puis l'autorité sur chaque proxy
+#   ./play.sh web3c update-proxy.yml --limit proxy1               # observe (puis proxy2, proxy3), ensuite enforce
+#
 # Côté vhost, rien à écrire : `_cloudflare_front.inc` pose `ssl_verify_client
 # optional`, `_access.inc` exige le certificat dans les locations en mode public.
 # Les `deploy-<app>.yml` concernés (modèle : deploy-agenthub.yml) jouent eux-mêmes

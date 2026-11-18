@@ -1,10 +1,16 @@
 ---
-# Zone du compte Cloudflare du parc (`domain_name`) et jeton : le même
+# Zone PRINCIPALE du compte Cloudflare du parc (`domain_name`) et jeton : le même
 # `cloudflare_token` que cloudflare-dns-update / cloudflare-pages-setup, mais il
 # lui faut en plus la permission « Zone → SSL and Certificates → Edit » (les
-# origin_tls_client_auth ne sont pas couverts par « Edit zone DNS »).
+# origin_tls_client_auth ne sont pas couverts par « Edit zone DNS »), sur CHAQUE zone dont un nom est activé.
 cfopull_zone: "{{ domain_name }}"
 cfopull_token: "{{ cloudflare_token | default('') }}"
+
+# Zones du parc : la zone principale PUIS `domains` (liste de zones du parc, celle de certbot : web3c = web3c.cc et tradekong.app).
+# Un nom d'hôte est rattaché à la zone la plus SPÉCIFIQUE dont il est le sommet ou un sous-domaine (suffixe le plus long, à la frontière
+# d'un libellé : `evil-tradekong.app` n'est PAS dans `tradekong.app`). Dérivé, jamais un domaine écrit en dur. Un parc à une seule zone
+# (papanglabs) : cette liste n'a qu'un élément et rien ne change. Surchargeable (group_vars) si une zone n'est pas dans `domains`.
+cfopull_zones: "{{ ([cfopull_zone] + (domains | default([]))) | unique | list }}"
 
 # Racine de l'API Cloudflare (surchargée seulement pour tester contre un serveur factice).
 cfopull_api: "https://api.cloudflare.com/client/v4"
@@ -35,6 +41,64 @@ cfopull_hostnames: >-
      | reject('in', pages + ns.named) | list -%}
   {{ pages + ns.named + aop }}
 
+# Zone de chaque nom d'hôte : { nom: zone } (`''` : aucune zone du parc ne le contient). Couvre les noms de `cfopull_hostnames`, le
+# `proxy_hostname` de chaque entrée `cloudflare_named` et chaque nom de `cfopull_aop` (hors noms `?…` invalides, refusés avant).
+# Plus longue zone qui est le nom lui-même ou son suffixe `.<zone>` (casse ignorée).
+cfopull_zone_of: >-
+  {%- set ns = namespace(out={}, names=[]) -%}
+  {%- for h in groups['all'] if (hostvars[h].cloudflare_named | default(false) | bool) and hostvars[h].proxy_hostname is defined -%}
+  {%- set ns.names = ns.names + [hostvars[h].proxy_hostname] -%}
+  {%- endfor -%}
+  {%- set aop = cfopull_aop | dict2items | map(attribute='key') | reject('match', '[?]') | list -%}
+  {%- for n in (cfopull_hostnames + ns.names + aop) | unique if n is string -%}
+  {%- set best = namespace(z='') -%}
+  {%- for z in cfopull_zones if z is string and ((n | lower) == (z | lower) or (n | lower).endswith('.' ~ (z | lower))) and (z | length) > (best.z | length) -%}
+  {%- set best.z = z -%}
+  {%- endfor -%}
+  {%- set _ = ns.out.update({n: best.z}) -%}
+  {%- endfor -%}
+  {{ ns.out }}
+
+# Noms d'hôte à activer, par zone : { zone: [noms] } (zones SANS nom absentes : elles ne sont ni lues ni touchées chez Cloudflare), dans
+# l'ordre de `cfopull_zones` puis de `cfopull_hostnames`. Un nom sans zone n'y figure pas : `cfopull_unzoned_hostnames`.
+cfopull_hostnames_by_zone: >-
+  {%- set ns = namespace(out={}) -%}
+  {%- for z in cfopull_zones -%}
+  {%- set mine = namespace(l=[]) -%}
+  {%- for n in cfopull_hostnames if cfopull_zone_of.get(n, '') == z -%}
+  {%- set mine.l = mine.l + [n] -%}
+  {%- endfor -%}
+  {%- if mine.l | length > 0 -%}
+  {%- set _ = ns.out.update({z: mine.l}) -%}
+  {%- endif -%}
+  {%- endfor -%}
+  {{ ns.out }}
+
+# Noms d'hôte qu'aucune zone du parc ne contient : REFUSÉS avant tout appel à Cloudflare (tasks/cloudflare.yml) et, pour un nom en
+# `enforce`, avant tout gabarit (tasks/proof.yml). Les activer dans « la » zone principale, comme avant, les enverrait à Cloudflare sous
+# une zone qui ne les contient pas.
+cfopull_unzoned_hostnames: >-
+  {%- set ns = namespace(out=[]) -%}
+  {%- for n in cfopull_hostnames if cfopull_zone_of.get(n, '') == '' -%}
+  {%- set ns.out = ns.out + [n] -%}
+  {%- endfor -%}
+  {{ ns.out }}
+
+# Noms qui EXIGENT le mode TLS `strict`, comptés PAR ZONE : { zone: nombre } = entrées `cloudflare_named` (rattachées à la zone de leur
+# `proxy_hostname`, à la zone principale sans nom) + noms `cloudflare_origin_pull` observe/enforce de la zone. Même total qu'avant sur
+# un parc à une seule zone.
+cfopull_strict_entries: >-
+  {%- set ns = namespace(out={}) -%}
+  {%- for h in groups['all'] if (hostvars[h].cloudflare_named | default(false) | bool) -%}
+  {%- set z = cfopull_zone_of.get(hostvars[h].proxy_hostname | default(''), '') or cfopull_zone -%}
+  {%- set _ = ns.out.update({z: ns.out.get(z, 0) + 1}) -%}
+  {%- endfor -%}
+  {%- for n, mode in cfopull_aop.items() if mode in ['observe', 'enforce'] -%}
+  {%- set z = cfopull_zone_of.get(n, '') or cfopull_zone -%}
+  {%- set _ = ns.out.update({z: ns.out.get(z, 0) + 1}) -%}
+  {%- endfor -%}
+  {{ ns.out }}
+
 # Authenticated Origin Pulls des vhosts écrits à la main sur `_cloudflare_realip.inc` : { nom public: mode }. Une entrée l'opte par
 # `cloudflare_origin_pull: observe | enforce` pour son `proxy_hostname` ET pour chaque nom de `cloudflare_origin_pull_aliases` (un nom
 # servi sans entrée propre : backindicators-prod). Le `proxy_hostname` hérité du parc (`proxy.<domaine>`) n'est jamais un nom d'entrée.
@@ -60,16 +124,21 @@ cfopull_aop: >-
   {%- endfor -%}
   {{ ns.out }}
 
-# Mode TLS de la zone (« Full (strict) » exigé : Cloudflare joint l'origine en HTTPS et vérifie son certificat). Lu après l'activation
-# des noms ; un autre mode ou une lecture refusée (jeton sans « Zone Settings : Read ») est SIGNALÉ, jamais bloquant. `true` : le
-# mode est posé à `strict` (réglage de TOUTE la zone, jeton « Zone Settings : Edit ») — décision explicite, faux par défaut.
+# Mode TLS de CHAQUE zone dont un nom est activé (« Full (strict) » exigé : Cloudflare joint l'origine en HTTPS et vérifie son
+# certificat). Lu après l'activation des noms de la zone ; un autre mode ou une lecture refusée (jeton sans « Zone Settings : Read ») est
+# SIGNALÉ, jamais bloquant pour une zone sans nom qui l'exige. `true` : le mode est posé à `strict` (réglage de TOUTE la zone, jeton
+# « Zone Settings : Edit »), seulement quand il ne l'est pas déjà — décision explicite, faux par défaut.
 cfopull_enforce_tls_strict: false
 
-# Un nom `cloudflare_named` (OAuth/MCP publics) EXIGE le mode `strict` : un autre mode (« Full ») laisse le segment Cloudflare → origine
-# sans authentification et BLOQUE le déploiement (message : `cfopull_enforce_tls_strict` ou réglage manuel). Un mode ILLISIBLE (jeton sans
-# « Zone → Zone Settings → Read ») bloque de même : on ne pose pas un vhost public sur une hypothèse (message : la permission manquante
-# et les deux remèdes). `true` : échappatoire explicite aux deux refus, jamais par défaut. Aucun effet sans entrée `cloudflare_named`
-# (le front Pages garde son avertissement).
+# Un nom `cloudflare_named` (OAuth/MCP publics) ou `cloudflare_origin_pull` EXIGE le mode `strict` de SA zone : un autre mode (« Full »)
+# laisse le segment Cloudflare → origine sans authentification et BLOQUE le déploiement (message : la zone, `cfopull_enforce_tls_strict`
+# ou réglage manuel). Un mode ILLISIBLE (jeton sans « Zone → Zone Settings → Read ») bloque de même : on ne pose pas un vhost public sur
+# une hypothèse (message : la zone, la permission manquante et les deux remèdes). Le refus s'applique ZONE PAR ZONE.
+# Échappatoire explicite aux deux refus, jamais par défaut :
+#   • `true` : toutes les zones (comportement historique, aussi sous la forme de la chaîne `true` passée par `-e`) ;
+#   • une LISTE de zones (`["tradekong.app"]`, `-e '{"cfopull_allow_non_strict_tls": ["tradekong.app"]}'`) : ces zones seulement, les
+#     autres gardent le refus. Toute autre valeur (`false`, une chaîne autre que `true`, un dictionnaire) n'ouvre rien.
+# Aucun effet sur une zone sans entrée `cloudflare_named` ni `cloudflare_origin_pull` (le front Pages garde son avertissement).
 cfopull_allow_non_strict_tls: false
 
 # Autorité et certificat client propres à CE parc, générés une fois sur le poste

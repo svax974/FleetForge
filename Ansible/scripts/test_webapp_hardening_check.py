@@ -1219,15 +1219,14 @@ class CloudflareNamedPlaybookTests(unittest.TestCase):
 
     def test_the_tls_mode_of_the_zone_is_read_warned_about_and_only_set_on_request(self):
         state, server = self.fake_zone_tls()
-        tasks = [t for t in yaml.safe_load(open(os.path.join(ROLES, "cloudflare-origin-pull", "tasks", "cloudflare.yml"), encoding="utf-8"))
-                 if t.get("name") in self.TLS_TASKS]
+        tasks = [t for t in role_tasks("zone.yml") if t.get("name") in self.TLS_TASKS]
         self.assertEqual(len(tasks), 4)
 
         def play(enforce=False):
             document = yaml.safe_dump([{
                 "hosts": "localhost", "gather_facts": False,
                 "vars": {"cfopull_api": f"http://127.0.0.1:{server.server_port}", "cfopull_zone_id": "z", "cfopull_token": "FAKE",
-                         "cfopull_zone": "example.test", "cfopull_enforce_tls_strict": enforce},
+                         "cfopull_zone_name": "example.test", "cfopull_enforce_tls_strict": enforce},
                 "tasks": tasks}])
             return run_local_play(document)
         code, out = play()
@@ -1252,12 +1251,11 @@ class CloudflareNamedPlaybookTests(unittest.TestCase):
     def test_a_named_entry_blocks_on_a_non_strict_or_unreadable_tls_mode_and_nothing_else_does(self):
         state, server = self.fake_zone_tls()
         blocks = (self.TLS_BLOCK, self.TLS_UNREADABLE)
-        tasks = {t["name"]: t for t in yaml.safe_load(open(os.path.join(ROLES, "cloudflare-origin-pull", "tasks", "cloudflare.yml"),
-                                                           encoding="utf-8")) if t.get("name") in self.TLS_TASKS + blocks}
+        tasks = {t["name"]: t for t in role_tasks("zone.yml") if t.get("name") in self.TLS_TASKS + blocks}
         self.assertEqual(len(tasks), 6)
         defaults = yaml.safe_load(open(os.path.join(ROLES, "cloudflare-origin-pull", "defaults", "main.yml"), encoding="utf-8"))
         self.assertIs(defaults["cfopull_allow_non_strict_tls"], False, "l'échappatoire est fermée par défaut")
-        order = [t["name"] for t in yaml.safe_load(open(os.path.join(ROLES, "cloudflare-origin-pull", "tasks", "cloudflare.yml"), encoding="utf-8"))]
+        order = [t["name"] for t in role_tasks("zone.yml")]
         for block in blocks:
             self.assertLess(order.index("Report the TLS mode of the zone"), order.index(block), "l'avertissement est affiché d'abord")
 
@@ -1268,8 +1266,9 @@ class CloudflareNamedPlaybookTests(unittest.TestCase):
                 # `cfopull_aop` : les defaults du rôle ne sont PAS chargés ici (jamais `vars_files` : ils remplaceraient l'API factice
                 # par la vraie) ; sa valeur est celle que le rôle calcule pour cet inventaire.
                 "vars": dict({"cfopull_api": f"http://127.0.0.1:{server.server_port}", "cfopull_zone_id": "z", "cfopull_token": "FAKE",
-                              "cfopull_zone": "example.test", "cfopull_enforce_tls_strict": False,
-                              "cfopull_aop": evaluate("cfopull_aop", "cloudflare-origin-pull", inventory)}, **variables),
+                              "cfopull_zone_name": "example.test", "cfopull_enforce_tls_strict": False,
+                              "cfopull_aop": evaluate("cfopull_aop", "cloudflare-origin-pull", inventory),
+                              "cfopull_strict_entries": evaluate("cfopull_strict_entries", "cloudflare-origin-pull", inventory)}, **variables),
                 "tasks": [tasks[n] for n in self.TLS_TASKS + blocks]}])
             return run_local_play(document, inventory)
         named = edge_inventory()
@@ -7246,6 +7245,11 @@ def role_tasks(name):
     return yaml.safe_load(_text(os.path.join(CF_TASKS, name)))
 
 
+# Variables calculées par les defaults du rôle, fournies aux tâches jouées SEULES (leurs defaults ne sont pas chargés : ils remplaceraient
+# l'API factice). Une seule évaluation pour toutes.
+ROLE_DERIVED = {name: name for name in ("cfopull_aop", "cfopull_zones", "cfopull_zone_of", "cfopull_strict_entries")}
+
+
 @unittest.skipUnless(shutil.which("ansible-playbook"), "ansible-playbook absent")
 class AopRolloutSafetyTests(unittest.TestCase):
     """Le certificat exigé AVANT l'activation chez Cloudflare répondrait 403 à tout le trafic légitime : `enforce` n'est posé que si le
@@ -7270,7 +7274,7 @@ class AopRolloutSafetyTests(unittest.TestCase):
     def run_tasks(self, tasks, inventory, **variables):
         play = yaml.safe_dump([{
             "hosts": "proxy1", "gather_facts": False,
-            "vars": dict({"cfopull_dir": self.keys, "cfopull_aop": evaluate("cfopull_aop", "cloudflare-origin-pull", inventory)}, **variables),
+            "vars": dict({"cfopull_dir": self.keys, **evaluate_all(inventory, ROLE_DERIVED)}, **variables),
             "tasks": tasks}])
         return run_local_play(play, inventory)
 
@@ -7280,8 +7284,8 @@ class AopRolloutSafetyTests(unittest.TestCase):
         return self.run_tasks(self.tasks("nginx.yml", [self.CA_TASK]) + self.tasks("proof.yml", [INVALID_TASK, *PROOF_TASKS]), inventory)
 
     def record(self, inventory, hostnames=("back-prod.example.test", "back-preprod.example.test", "backind.example.test"), tls="strict"):
-        tasks = self.tasks("cloudflare.yml", WITNESS_TASKS)
-        return self.run_tasks(tasks, inventory, cfopull_hostnames=list(hostnames), cfopull_zone="example.test",
+        tasks = self.tasks("zone.yml", WITNESS_TASKS)
+        return self.run_tasks(tasks, inventory, cfopull_zone_hostnames=list(hostnames), cfopull_zone_name="example.test",
                               cfopull_tls={"status": 200, "json": {"result": {"value": tls}}}, cfopull_tls_set={"skipped": True})
 
     def witness(self, name):
@@ -7367,12 +7371,14 @@ class AopRolloutSafetyTests(unittest.TestCase):
         code, out = self.run_tasks(self.tasks("cloudflare.yml", [EARLY_INVALID_TASK]), aop_inventory())
         self.assertEqual(code, 0, out[-1500:])
         names = [t["name"] for t in role_tasks("cloudflare.yml")]
-        first_call = min(i for i, t in enumerate(role_tasks("cloudflare.yml")) if "ansible.builtin.uri" in t)
+        # cloudflare.yml n'appelle plus l'API que par les deux `include_tasks` par zone, après la garde : aucun `uri` avant elle
+        self.assertFalse([t for t in role_tasks("cloudflare.yml") if "ansible.builtin.uri" in t], "l'API n'est appelée que par zone-check.yml et zone.yml")
+        first_call = names.index("Check every zone with the token before writing anything")
         self.assertLess(names.index(EARLY_INVALID_TASK), first_call, "avant tout appel à l'API Cloudflare")
         self.assertLess(names.index(EARLY_INVALID_TASK), names.index("Generate the CA"), "avant toute génération")
 
     def test_the_witness_is_written_last_after_the_activation_and_the_tls_checks(self):
-        names = [t["name"] for t in role_tasks("cloudflare.yml")]
+        names = [t["name"] for t in role_tasks("zone.yml")]
         record = names.index("Record that Cloudflare presents the certificate on every hostname")
         for earlier in ("Fail clearly when a hostname is not active", "Report the TLS mode of the zone", CloudflareNamedPlaybookTests.TLS_BLOCK,
                         CloudflareNamedPlaybookTests.TLS_UNREADABLE, "Fail when Cloudflare refuses to set the TLS mode that was asked for"):
@@ -7389,14 +7395,14 @@ class AopRolloutSafetyTests(unittest.TestCase):
         server_state, server = CloudflareNamedPlaybookTests.fake_zone_tls(self)
         names = (*CloudflareNamedPlaybookTests.TLS_TASKS, CloudflareNamedPlaybookTests.TLS_BLOCK, CloudflareNamedPlaybookTests.TLS_UNREADABLE,
                  *WITNESS_TASKS)
-        tasks = self.tasks("cloudflare.yml", names)
+        tasks = self.tasks("zone.yml", names)
 
         def play(inventory, mode="flexible", deny=False, **variables):
             server_state["ssl"], server_state["deny"] = mode, deny
             shutil.rmtree(os.path.join(self.keys, "active"), ignore_errors=True)
             settings = {"cfopull_api": f"http://127.0.0.1:{server.server_port}", "cfopull_zone_id": "z", "cfopull_token": "FAKE",
-                        "cfopull_zone": "example.test", "cfopull_enforce_tls_strict": False,
-                        "cfopull_hostnames": ["back-prod.example.test"]}
+                        "cfopull_zone_name": "example.test", "cfopull_enforce_tls_strict": False,
+                        "cfopull_zone_hostnames": ["back-prod.example.test"]}
             settings.update(variables)
             return self.run_tasks(tasks, inventory, **settings)
         observe = aop_inventory(**{"back1-preprod": {"cloudflare_origin_pull": "observe"}})
@@ -7441,6 +7447,726 @@ class AopRolloutSafetyTests(unittest.TestCase):
                          "une valeur invalide joue le play, dont la première garde la refuse")
         apps["plain"]["webapp_proxy"] = "external"
         self.assertEqual(CloudflareNamedPlaybookTests.hosts_running(pull, inventory), ["pages-app"], "webapp_proxy: external : aucun vhost")
+
+
+
+# ═══ Authenticated Origin Pulls : ctdapi, tradekong, PLUSIEURS zones (branche agent/ct-tk-aop) ═══════════════════════════════
+# Trois vhosts écrits à la main qui GARDENT leur propre filtre d'adresse (ctdapi.conf : real_ip + real_ip_recursive ; ctdapi-back.conf,
+# tradekong-back.conf : aucun real_ip, filtre sur la socket) n'ajoutent que l'EXIGENCE du certificat client aux sockets d'une plage
+# Cloudflare, par les morceaux `certhttp` / `certserver` / `cert` de `_cloudflare_realip.inc`. Et le rôle `cloudflare-origin-pull` devient
+# multi-zone : une zone par nom d'hôte (plus long suffixe de `cfopull_zones`), un seul jeton, une seule autorité.
+
+OWN_REALIP = ("{% for ip in cloudflare_ips %}\n  set_real_ip_from {{ ip }};\n{% endfor %}\n  real_ip_header CF-Connecting-IP;\n"
+              "  real_ip_recursive on;\n\n")
+OWN_KINDS = {
+    # ctdapi.conf : IP lue dans CF-Connecting-IP, filtre = flotte + whitelist (adresse APRÈS remplacement).
+    "front": dict(slug="ctdapi", name="ctdapi.example.test", realip=True, allows=["192.0.2.20", "203.0.113.50"]),
+    # ctdapi-back.conf / tradekong-back.conf : pas de real_ip, filtre = vpns + whitelist + plages Cloudflare + apps (adresse de la socket).
+    "back": dict(slug="ctdapi_back", name="ctdapi-back.example.test", realip=False,
+                 allows=["198.51.100.1", "203.0.113.50", "@CF@", "192.0.2.20"]),
+}
+OWN_GUARD = "if ($cf_untrusted_{slug}) {{"
+
+
+def own_source(kind, declared=True, slug=True, name=True):
+    """Vhost sur le modèle des trois vhosts privés. `declared=False` : le jumeau d'AVANT (aucun des trois include, aucun `set`)."""
+    spec = OWN_KINDS[kind]
+    sets = ""
+    if declared:
+        sets = (("{% set cf_slug = '" + spec["slug"] + "' %}\n") if slug else "") + (("{% set cf_aop_name = '" + spec["name"] + "' %}\n") if name else "")
+
+    def include(part):
+        return ("{% set cf_part = '" + part + "' %}{% include '_cloudflare_realip.inc' %}\n") if declared else ""
+    allows = "".join(("{% for ip in cloudflare_ips %}\n    allow {{ ip }};\n{% endfor %}\n" if a == "@CF@" else f"    allow {a};\n") for a in spec["allows"])
+    return (sets + include("certhttp")
+            + "server {\n  listen 443 ssl;\n  listen [::]:443 ssl;\n\n  server_name           " + spec["name"] + ";\n\n"
+            + (OWN_REALIP if spec["realip"] else "")
+            + include("certserver")
+            + "  location / {\n" + include("cert")
+            + "    proxy_pass         http://192.0.2.30:6101;\n    proxy_set_header   X-Real-IP $remote_addr;\n"
+              "    proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;\n"
+            + allows + "    deny all;\n  }\n  ssl_certificate /etc/letsencrypt/live/example.test/fullchain.pem;\n}\n")
+
+
+def render_own(kind, aop=None, declared=True, **omit):
+    variables = dict(hostvars=copy.deepcopy(INVENTORY), groups={"vpns": ["vpn1"]}, whitelist=REALIP_WHITELIST, cloudflare_ips=CLOUDFLARE_IPS)
+    if aop is not None:
+        variables["proxy_update_aop"] = aop
+    return realip_env().from_string(own_source(kind, declared, **omit)).render(**variables)
+
+
+def own_decision(text, socket_address, verify, claimed=None):
+    """Réponse de `location /` d'un vhost RENDU de ces trois vhosts pour une socket, un `$ssl_client_verify` et un CF-Connecting-IP : 403 ou
+    `pass`, lue comme nginx : `if` (phase rewrite) AVANT les `allow`/`deny` (phase d'accès), adresse remplacée seulement si la socket est une
+    plage `set_real_ip_from`."""
+    import ipaddress
+    body = location_body(text, "/")
+    address = socket_address
+    ranges = re.findall(r"set_real_ip_from (\S+);", text)
+    if ranges and claimed and any(ipaddress.ip_address(socket_address) in ipaddress.ip_network(r) for r in ranges):
+        address = claimed
+    if re.search(r"if \(\$cf_untrusted_\w+\) \{\s*return 403;\s*\}", body) and nginx_untrusted(text, socket_address, verify) == "1":
+        return 403
+    for line in body.splitlines():
+        found = re.match(r"\s*allow (\S+);", line)
+        if found and ipaddress.ip_address(address) in ipaddress.ip_network(found.group(1), strict=False):
+            return "pass"
+        if line.strip() == "deny all;":
+            return 403
+    return "pass"
+
+
+def own_names(kind):
+    return OWN_KINDS[kind]["name"]
+
+
+def partial(part, aop, slug="ctdapi_back", name="ctdapi-back.example.test"):
+    """Sortie du partiel SEUL pour un `cf_part`."""
+    variables = dict(hostvars=copy.deepcopy(INVENTORY), groups={"vpns": ["vpn1"]}, whitelist=REALIP_WHITELIST, cloudflare_ips=CLOUDFLARE_IPS,
+                     proxy_update_aop=aop, cf_slug=slug, cf_aop_name=name, cf_edge_var="x_edge")
+    return _env().from_string("{% set cf_part = '" + part + "' %}{% include '_cloudflare_realip.inc' %}").render(**variables)
+
+
+class OwnFilterAopRenderTests(unittest.TestCase):
+    """Les trois vhosts à filtre d'adresse propre : sans déclaration le rendu d'avant, octet pour octet ; `observe` vérifie et journalise sans
+    rien refuser ; `enforce` refuse la socket Cloudflare sans certificat vérifié ; l'adresse cliente et le filtre ne changent JAMAIS."""
+
+    def test_without_a_declaration_the_bytes_are_those_of_before(self):
+        for kind in OWN_KINDS:
+            legacy = render_own(kind, declared=False)
+            for label, kwargs in (("variable absente", dict()), ("aucune entrée", dict(aop={})), ("autre nom en enforce", dict(aop={"other.example.test": "enforce"})),
+                                  ("autre nom en observe", dict(aop={"other.example.test": "observe"}))):
+                with self.subTest(kind=kind, case=label):
+                    self.assertEqual(render_own(kind, **kwargs), legacy)
+            for marker in ("ssl_verify_client", "ssl_client_certificate", "cf_untrusted", "cf_socket", "log_format", "access_log", "geo "):
+                self.assertNotIn(marker, legacy)
+
+    def test_observe_verifies_and_logs_and_refuses_nothing_more(self):
+        for kind, spec in OWN_KINDS.items():
+            with self.subTest(kind=kind):
+                text, legacy = render_own(kind, aop={spec["name"]: "observe"}), render_own(kind, declared=False)
+                server = text.split("server {", 1)[1].split("location", 1)[0]
+                self.assertIn("ssl_client_certificate /etc/nginx/cloudflare-origin-pull-ca.pem;", server)
+                self.assertIn("ssl_verify_client optional_no_ca;", server)
+                self.assertNotIn("ssl_verify_client optional;", server)
+                self.assertIn(f"access_log /var/log/nginx/cf-aop-{spec['slug']}.log cf_aop_{spec['slug']};", server)
+                self.assertIn("mode=observe", text)
+                self.assertNotIn(OWN_GUARD.format(slug=spec["slug"]), text)
+                self.assertLess(text.index("log_format"), text.index("server {"), "au niveau http, avant le server {}")
+                self.assertEqual(location_body(text, "/"), location_body(legacy, "/"), "la location est celle d'avant, octet pour octet")
+                for address, verify, claimed in (("198.51.100.130", "NONE", "203.0.113.50"), ("198.51.100.130", "SUCCESS", "203.0.113.50"),
+                                                 ("198.51.100.130", "FAILED:certificate has expired", "203.0.113.9"), ("2001:db8:cf::7", "NONE", "203.0.113.50"),
+                                                 ("192.0.2.20", "NONE", None), ("203.0.113.9", "NONE", None), ("198.51.100.1", "NONE", None)):
+                    self.assertEqual(own_decision(text, address, verify, claimed), own_decision(legacy, address, verify, claimed), (address, verify, claimed))
+
+    def test_enforce_front_refuses_a_forged_whitelisted_address_from_a_cloudflare_socket_and_keeps_its_own_filter(self):
+        # ctdapi.conf : le filtre d'adresse est lu APRÈS remplacement par CF-Connecting-IP. Sans certificat, un tiers qui ouvre une socket
+        # depuis une plage Cloudflare et forge une adresse de la whitelist passait : c'est ce que le certificat ferme.
+        text, legacy = render_own("front", aop={"ctdapi.example.test": "enforce"}), render_own("front", declared=False)
+        self.assertIn(OWN_GUARD.format(slug="ctdapi"), location_body(text, "/"))
+        self.assertIn("ssl_verify_client optional;", text)
+        self.assertNotIn("optional_no_ca", text)
+        for address, verify, claimed, before, after in (
+                ("198.51.100.130", "NONE", "203.0.113.50", "pass", 403),      # adresse forgée, sans certificat : fermé
+                ("198.51.100.130", "", "192.0.2.20", "pass", 403),
+                ("198.51.100.130", "FAILED:unable to verify the first certificate", "203.0.113.50", "pass", 403),
+                ("2001:db8:cf::7", "NONE", "203.0.113.50", "pass", 403),
+                ("198.51.100.130", "SUCCESS", "203.0.113.50", "pass", "pass"),  # notre zone Cloudflare : le filtre d'avant décide
+                ("198.51.100.130", "SUCCESS", "203.0.113.9", 403, 403),
+                ("192.0.2.20", "NONE", None, "pass", "pass"),                    # appel direct de la flotte : aucun certificat attendu
+                ("203.0.113.50", "NONE", None, "pass", "pass"),
+                ("203.0.113.9", "NONE", None, 403, 403)):
+            with self.subTest(address=address, verify=verify, claimed=claimed):
+                self.assertEqual(own_decision(legacy, address, verify, claimed), before)
+                self.assertEqual(own_decision(text, address, verify, claimed), after)
+
+    def test_enforce_back_refuses_a_cloudflare_socket_without_certificate_and_nobody_else(self):
+        # ctdapi-back.conf / tradekong-back.conf : la socket est l'adresse ; les plages Cloudflare sont dans la liste des `allow`.
+        text, legacy = render_own("back", aop={"ctdapi-back.example.test": "enforce"}), render_own("back", declared=False)
+        self.assertIn(OWN_GUARD.format(slug="ctdapi_back"), location_body(text, "/"))
+        for address, verify, before, after in (
+                ("198.51.100.130", "NONE", "pass", 403), ("198.51.100.130", "", "pass", 403), ("2001:db8:cf::7", "NONE", "pass", 403),
+                ("198.51.100.130", "FAILED:certificate has expired", "pass", 403),
+                ("198.51.100.130", "SUCCESS", "pass", "pass"),
+                ("198.51.100.1", "NONE", "pass", "pass"),   # VPN
+                ("203.0.113.50", "NONE", "pass", "pass"),   # whitelist
+                ("192.0.2.20", "NONE", "pass", "pass"),     # app du parc
+                ("203.0.113.9", "NONE", 403, 403)):
+            with self.subTest(address=address, verify=verify):
+                self.assertEqual(own_decision(legacy, address, verify), before)
+                self.assertEqual(own_decision(text, address, verify), after)
+
+    def test_the_real_ip_handling_is_never_touched_and_never_added(self):
+        for mode in (None, "observe", "enforce"):
+            aop = {} if mode is None else {"ctdapi.example.test": mode}
+            front = render_own("front", aop=aop)
+            self.assertEqual(sorted(re.findall(r"set_real_ip_from (\S+);", front)), sorted(CLOUDFLARE_IPS))
+            self.assertEqual(front.count("real_ip_header CF-Connecting-IP;"), 1)
+            self.assertEqual(front.count("real_ip_recursive on;"), 1)
+            back = render_own("back", aop={} if mode is None else {"ctdapi-back.example.test": mode})
+            self.assertFalse(re.search(r"(?m)^\s*(set_real_ip_from|real_ip_header|real_ip_recursive)\b", back),
+                             "ctdapi-back ne lit PAS CF-Connecting-IP : l'application lit X-Forwarded-For (TRUST_PROXY)")
+            for text in (front, back):
+                self.assertIn("proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;", text)
+                self.assertIn("proxy_set_header   X-Real-IP $remote_addr;", text)
+
+    def test_the_new_parts_are_the_very_authentication_pieces_of_geo_and_realip(self):
+        for mode in ("observe", "enforce"):
+            aop = {"ctdapi-back.example.test": mode}
+            geo, certhttp = partial("geo", aop), partial("certhttp", aop)
+            self.assertIn("geo $realip_remote_addr $cf_socket_ctdapi_back {", certhttp)
+            self.assertTrue(geo.endswith(certhttp.replace("de ce vhost.", "de ce vhost, inline-image comprise.", 1)),
+                            "même geo + map + journal que la partie `geo`, sans le filtre d'adresse d'edge")
+            self.assertIn("geo $realip_remote_addr $x_edge", geo)
+            self.assertNotIn("$x_edge", certhttp)
+            realip, certserver = partial("realip", aop), partial("certserver", aop)
+            self.assertTrue(realip.endswith(certserver), "mêmes lignes ssl_* et access_log que `realip`, sans set_real_ip_from")
+            self.assertFalse(re.search(r"(?m)^\s*(set_real_ip_from|real_ip_header)\b", certserver))
+        for part in ("certhttp", "certserver", "cert"):
+            self.assertEqual(partial(part, {}), "", "sans déclaration : rien")
+            self.assertEqual(partial(part, {"other.example.test": "enforce"}), "")
+        self.assertEqual(partial("cert", {"ctdapi-back.example.test": "observe"}), "")
+
+    def test_a_vhost_that_forgets_a_variable_fails_to_render_as_soon_as_an_entry_declares_the_attribute(self):
+        for kind, spec in OWN_KINDS.items():
+            for aop in ({spec["name"]: "observe"}, {"other.example.test": "enforce"}):
+                for kwargs in (dict(slug=False), dict(name=False)):
+                    with self.subTest(kind=kind, aop=aop, kwargs=kwargs):
+                        with self.assertRaises(jinja2.UndefinedError) as raised:
+                            render_own(kind, aop=aop, **kwargs)
+                        self.assertIn("cf_slug", str(raised.exception))
+        with self.assertRaises(jinja2.UndefinedError) as raised:
+            render_own("back", aop={"ctdapi-back.example.test": "enforced"})
+        self.assertIn("cloudflare_origin_pull_invalide", str(raised.exception))
+        self.assertTrue(render_own("back", aop={"other.example.test": "bogus"}), "le vhost d'un autre nom n'est pas concerné")
+
+    def test_the_real_ansible_engine_gives_the_same_vhost_as_the_plain_jinja_one(self):
+        partials = {name: _text(os.path.join(TEMPLATES, name)) for name in ("_cloudflare_realip.inc", "_cloudflare_untrusted.inc")}
+        for kind, spec in OWN_KINDS.items():
+            for mode in (None, "observe", "enforce"):
+                with self.subTest(kind=kind, mode=mode):
+                    inventory = aop_inventory()
+                    entries = inventory["all"]["children"]["backs"]["hosts"]
+                    for entry in ("back1-prod", "back2-prod", "back1-preprod"):
+                        entries[entry].pop("cloudflare_origin_pull", None)
+                        entries[entry].pop("cloudflare_origin_pull_aliases", None)
+                    if mode:
+                        entries["back1-prod"].update(cloudflare_origin_pull=mode, cloudflare_origin_pull_aliases=[spec["name"]])
+                    play = textwrap.dedent(f"""\
+                        - hosts: proxy1
+                          gather_facts: false
+                          vars_files: ["{os.path.join(ROLES, 'proxy-update', 'defaults', 'main.yml')}"]
+                          vars: {{cloudflare_ips: {json.dumps(CLOUDFLARE_IPS)}, whitelist: {json.dumps(REALIP_WHITELIST)}}}
+                          tasks:
+                            - ansible.builtin.template: {{src: "{{{{ play_tmp }}}}/vhost.conf", dest: "{{{{ play_tmp }}}}/out.conf"}}
+                        """)
+                    code, out, written = run_local_play(play, inventory, dict(partials, **{"vhost.conf": own_source(kind)}), outputs=["out.conf"])
+                    self.assertEqual(code, 0, out[-3000:])
+                    expected = render_own(kind, aop={spec["name"]: mode}) if mode else render_own(kind, declared=False)
+                    self.assertEqual(written["out.conf"].rstrip("\n"), expected.rstrip("\n"))
+                    self.assertEqual(("ssl_verify_client" in written["out.conf"]), mode is not None)
+
+
+class OwnFilterCheckerTests(unittest.TestCase):
+    """`webapp_hardening_check.py vhost --cloudflare-edge` sur ces vhosts : `enforce` passe, `observe` est signalé, chaque morceau retiré aussi."""
+
+    def test_the_enforce_renders_pass_and_the_observe_renders_are_reported(self):
+        for kind, spec in OWN_KINDS.items():
+            with self.subTest(kind=kind):
+                self.assertEqual(edge_errors(render_own(kind, aop={spec["name"]: "enforce"})), [])
+                errors = edge_errors(render_own(kind, aop={spec["name"]: "observe"}))
+                self.assertEqual(len(errors), 2, errors)
+                self.assertTrue(any("ssl_verify_client optional;" in e for e in errors), "`optional_no_ca` ne rejette rien : pas une exigence")
+                self.assertTrue(any("location /" in e and "précéder le filtre d'adresse" in e for e in errors), errors)
+
+    def test_a_vhost_without_any_trace_of_the_certificate_is_not_known_to_be_cloudflare_facing(self):
+        # Sans `real_ip_header`, sans garde et sans vérification, rien ne dit que le vhost est servi par Cloudflare : limite documentée.
+        self.assertEqual(edge_errors(render_own("back", declared=False)), [])
+        # Avec `real_ip_header` (ctdapi.conf d'avant), il est signalé comme tout vhost qui lit CF-Connecting-IP sans certificat.
+        self.assertTrue(edge_errors(render_own("front", declared=False)))
+
+    def test_every_removed_piece_of_the_enforce_renders_is_reported(self):
+        for kind, spec in OWN_KINDS.items():
+            text = render_own(kind, aop={spec["name"]: "enforce"})
+            guard = OWN_GUARD.format(slug=spec["slug"])
+            geo_start = text.index("geo $realip_remote_addr $cf_socket_")
+            mutations = {
+                "garde du certificat": text.replace(guard, "if (0) {", 1),
+                "ssl_verify_client": text.replace("ssl_verify_client optional;", "", 1),
+                "ssl_client_certificate": text.replace("ssl_client_certificate /etc/nginx/cloudflare-origin-pull-ca.pem;", "", 1),
+                "map ouvert par défaut": text.replace("default 1;", "default 0;", 1),
+                "map sans SUCCESS": text.replace('    "1:SUCCESS" 0;\n', '    "~.*" 0;\n', 1),
+                "geo ouvert": text[:geo_start] + text[geo_start:].replace("default 0;", "default 1;", 1),
+                "geo vidé": text[:geo_start] + re.sub(r"(?m)^    [0-9a-f.:/]+ 1;\n", "", text[geo_start:], count=0),
+                "location ouverte en plus": text.replace("  location / {", "  location /open/ {\n    proxy_pass http://192.0.2.30:6101;\n  }\n\n  location / {", 1),
+            }
+            for label, mutated in mutations.items():
+                with self.subTest(kind=kind, mutation=label):
+                    self.assertNotEqual(mutated, text, "la mutation ne change rien")
+                    self.assertTrue(edge_errors(mutated), label)
+
+    def test_a_vhost_without_real_ip_compares_the_geo_with_the_ranges_it_is_given(self):
+        ranges = set(CLOUDFLARE_IPS)
+        text = render_own("back", aop={"ctdapi-back.example.test": "enforce"})
+        self.assertEqual(vhost_errors(text, cloudflare_edge=True, cloudflare_ranges=ranges), [])
+        geo_start = text.index("geo $realip_remote_addr $cf_socket_")
+        missing = text[:geo_start] + text[geo_start:].replace("    198.51.100.128/25 1;\n", "", 1)
+        self.assertEqual(edge_errors(missing), [], "sans la liste des plages du parc, une plage manquante ne se voit pas (limite documentée)")
+        errors = vhost_errors(missing, cloudflare_edge=True, cloudflare_ranges=ranges)
+        self.assertTrue(any("manquantes ['198.51.100.128/25']" in e for e in errors), errors)
+        extra = text[:geo_start] + text[geo_start:].replace("    default 0;\n", "    default 0;\n    203.0.113.0/24 1;\n", 1)
+        errors = vhost_errors(extra, cloudflare_edge=True, cloudflare_ranges=ranges)
+        self.assertTrue(any("en trop ['203.0.113.0/24']" in e for e in errors), errors)
+
+    def test_a_filter_location_written_by_hand_does_not_need_the_no_store_header_but_a_generated_one_still_does(self):
+        text = render_own("front", aop={"ctdapi.example.test": "enforce"})
+        self.assertNotIn("Cloudflare-CDN-Cache-Control", text)
+        self.assertEqual(edge_errors(text), [])
+        # Sans le journal `cf-aop-…` (la marque d'un vhost écrit à la main sur `_cloudflare_realip.inc`), la même location est « privée » :
+        # la politique de cache de l'edge est exigée comme pour un vhost générique.
+        generated = re.sub(r"  access_log /var/log/nginx/cf-aop-\S+ \S+;\n", "", text)
+        errors = edge_errors(generated)
+        self.assertTrue(any("Cloudflare-CDN-Cache-Control" in e for e in errors), errors)
+
+    def test_the_command_line_reads_the_ranges_file(self):
+        text = render_own("back", aop={"ctdapi-back.example.test": "enforce"})
+        with tempfile.TemporaryDirectory() as tmp:
+            vhost, ranges = os.path.join(tmp, "v.conf"), os.path.join(tmp, "ranges.txt")
+            with open(vhost, "w", encoding="utf-8") as f:
+                f.write(text)
+            with open(ranges, "w", encoding="utf-8") as f:
+                f.write("# plages Cloudflare du parc\n198.51.100.128/25, 2001:db8:cf::/48\n")
+            self.assertEqual(check.main(["vhost", vhost, "--cloudflare-edge", "--cloudflare-ranges", ranges]), 0)
+            with open(ranges, "w", encoding="utf-8") as f:
+                f.write("198.51.100.128/25\n")
+            self.assertEqual(check.main(["vhost", vhost, "--cloudflare-edge", "--cloudflare-ranges", ranges]), 1)
+
+
+# ── Plusieurs zones : dérivation (defaults) ───────────────────────────────────────────────────────────────────────────────────
+
+def zone_inventory(domains=("example.test", "other.example", "unused.example"), tk="observe", ct="observe", tk_name="back.other.example",
+                   extra_ct=None, domain_name="example.test", **variables):
+    """Parc factice à deux zones, sur le modèle de web3c : `ctdapi` (deux noms de la zone principale) et `tradekong` (un nom d'une AUTRE zone),
+    tous deux par `cloudflare_origin_pull` + alias. `domains` : la liste de zones du parc (None : variable absente)."""
+    ctdapi = {"ansible_host": "203.0.113.41", "cloudflare_origin_pull": ct,
+              "cloudflare_origin_pull_aliases": ["ctdapi.example.test", "ctdapi-back.example.test"] + list(extra_ct or [])}
+    tradekong = {"ansible_host": "203.0.113.42", "webapp_proxy": "external", "cloudflare_origin_pull": tk, "cloudflare_origin_pull_aliases": [tk_name]}
+    for entry in (ctdapi, tradekong):
+        if entry["cloudflare_origin_pull"] is None:
+            del entry["cloudflare_origin_pull"], entry["cloudflare_origin_pull_aliases"]
+    vars_ = {"domain_name": domain_name, "proxy_hostname": f"proxy.{domain_name}", **variables}
+    if domains is not None:
+        vars_["domains"] = list(domains)
+    return {"all": {"vars": vars_, "children": {
+        "proxies": {"hosts": {"proxy1": {"ansible_host": "192.0.2.10"}}},
+        "vpns": {"hosts": {"vpn1": {"ansible_host": "198.51.100.1"}}},
+        "apps": {"hosts": {"ctdapi": ctdapi, "tradekong": tradekong, "plain": {"ansible_host": "203.0.113.21", "proxy_hostname": "plain.example.test"}}}}}}
+
+
+ZONE_EXPRESSIONS = {"zones": "cfopull_zones", "zone_of": "cfopull_zone_of", "by_zone": "cfopull_hostnames_by_zone",
+                    "unzoned": "cfopull_unzoned_hostnames", "strict": "cfopull_strict_entries", "hostnames": "cfopull_hostnames"}
+
+
+@unittest.skipUnless(shutil.which("ansible-playbook"), "ansible-playbook absent")
+class MultiZoneDerivationTests(unittest.TestCase):
+    """Chaque nom d'hôte appartient à la zone la plus spécifique de `cfopull_zones` (zone principale + `domains`), dérivée, jamais écrite en dur."""
+
+    def test_the_zones_are_the_main_zone_then_the_domains_of_the_parc_without_duplicates(self):
+        self.assertEqual(evaluate_all(zone_inventory(), ZONE_EXPRESSIONS)["zones"], ["example.test", "other.example", "unused.example"])
+        self.assertEqual(evaluate_all(zone_inventory(domains=None), ZONE_EXPRESSIONS)["zones"], ["example.test"], "`domains` absent : la zone principale seule")
+        self.assertEqual(evaluate_all(zone_inventory(domains=("other.example", "example.test")), ZONE_EXPRESSIONS)["zones"], ["example.test", "other.example"])
+
+    def test_every_name_goes_to_its_zone_and_a_zone_without_name_is_never_listed(self):
+        values = evaluate_all(zone_inventory(), ZONE_EXPRESSIONS)
+        self.assertEqual(values["zone_of"], {"ctdapi.example.test": "example.test", "ctdapi-back.example.test": "example.test",
+                                              "back.other.example": "other.example"})
+        self.assertEqual(values["by_zone"], {"example.test": ["ctdapi.example.test", "ctdapi-back.example.test"], "other.example": ["back.other.example"]})
+        self.assertNotIn("unused.example", values["by_zone"])
+        self.assertEqual(values["unzoned"], [])
+
+    def test_the_longest_matching_zone_wins_on_a_label_boundary_and_case_is_ignored(self):
+        # La zone principale est TOUJOURS la première de `cfopull_zones` : avec `sub.example.test` principale, la zone plus courte vient APRÈS dans la
+        # liste, et seul le choix du suffixe le plus long (et non du premier ou du dernier qui convient) donne la bonne zone.
+        for main, domains in (("example.test", ("example.test", "sub.example.test", "other.example")),
+                              ("sub.example.test", ("example.test", "other.example"))):
+            zone_of = evaluate_all(zone_inventory(domains=domains, domain_name=main, tk_name="a.sub.example.test", extra_ct=["a2.sub.example.test"]),
+                                   ZONE_EXPRESSIONS)["zone_of"]
+            self.assertEqual(zone_of["a.sub.example.test"], "sub.example.test", f"le suffixe le plus long (zone principale {main})")
+            self.assertEqual(zone_of["a2.sub.example.test"], "sub.example.test")
+        inventory = zone_inventory(domains=("example.test", "sub.example.test", "other.example"), tk_name="a.sub.example.test",
+                                   extra_ct=["sub.example.test", "b.example.test", "EVIL-other.example", "x.OTHER.example", "notsub.example.test"])
+        zone_of = evaluate_all(inventory, ZONE_EXPRESSIONS)["zone_of"]
+        self.assertEqual(zone_of["a.sub.example.test"], "sub.example.test", "le suffixe le plus long")
+        self.assertEqual(zone_of["sub.example.test"], "sub.example.test", "le sommet d'une zone est dans cette zone")
+        self.assertEqual(zone_of["b.example.test"], "example.test")
+        self.assertEqual(zone_of["notsub.example.test"], "example.test", "`notsub.example.test` n'est PAS dans `sub.example.test` (frontière de libellé)")
+        self.assertEqual(zone_of["EVIL-other.example"], "", "`evil-other.example` n'est dans la zone d'aucun parc")
+        self.assertEqual(zone_of["x.OTHER.example"], "other.example", "casse ignorée")
+        self.assertEqual(evaluate_all(inventory, ZONE_EXPRESSIONS)["unzoned"], ["EVIL-other.example"])
+
+    def test_a_single_zone_parc_keeps_one_zone_and_the_names_of_before(self):
+        values = evaluate_all(aop_inventory(), {**AOP_EXPRESSIONS, **ZONE_EXPRESSIONS})
+        self.assertEqual(values["zones"], ["example.test"])
+        self.assertEqual(values["by_zone"], {"example.test": values["hostnames"]}, "tous les noms, dans le même ordre, sous la seule zone")
+        self.assertEqual(values["unzoned"], [])
+        inventory = edge_inventory()
+        values = evaluate_all(inventory, ZONE_EXPRESSIONS)
+        self.assertEqual(values["by_zone"], {"example.test": values["hostnames"]})
+        self.assertEqual(values["hostnames"], ["pages-app-back.example.test", "ffg.example.test"])
+        self.assertEqual(evaluate_all(zone_inventory(ct=None, tk=None), ZONE_EXPRESSIONS)["by_zone"], {}, "aucune entrée : aucune zone appelée")
+
+    def test_the_names_that_demand_strict_tls_are_counted_per_zone(self):
+        values = evaluate_all(zone_inventory(), ZONE_EXPRESSIONS)
+        self.assertEqual(values["strict"], {"example.test": 2, "other.example": 1})
+        # Même total qu'avant sur une seule zone : `cloudflare_named` (par entrée) + noms observe/enforce.
+        single = evaluate_all(aop_inventory(), ZONE_EXPRESSIONS)["strict"]
+        self.assertEqual(single, {"example.test": 3})
+        named = edge_inventory()
+        self.assertEqual(evaluate_all(named, ZONE_EXPRESSIONS)["strict"], {"example.test": 1})
+        named["all"]["children"]["apps"]["hosts"]["gw"]["cloudflare_origin_pull"] = "observe"
+        named["all"]["children"]["apps"]["hosts"]["gw"]["cloudflare_origin_pull_aliases"] = ["extra.example.test"]
+        self.assertEqual(evaluate_all(named, ZONE_EXPRESSIONS)["strict"], {"example.test": 3}, "gw (named) + ffg + extra, comme le total d'avant")
+
+
+# ── Plusieurs zones : le côté Cloudflare, contre un faux API (aucun réseau) ──────────────────────────────────────────────────
+
+class FakeCloudflare:
+    """API Cloudflare factice, MULTI-ZONES, sur 127.0.0.1 : zones visibles par le jeton, certificats par nom d'hôte, rattachements, mode TLS
+    par zone, refus par zone. `calls` : (méthode, genre, zone, détail) dans l'ordre."""
+    WRITES = ("POST", "PUT", "PATCH")
+
+    def __init__(self, testcase, zones, ssl=None):
+        import http.server
+        import threading
+        self.zones = {name: f"zid-{name}" for name in zones}
+        self.ssl = dict(ssl or {})
+        self.deny_lookup, self.deny_certs, self.deny_ssl, self.rename = set(), set(), set(), {}
+        self.calls, self.certs, self.bindings = [], {}, {}
+        outer = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def respond(self, status, payload):
+                body = json.dumps(payload).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def zone_of(self, zid):
+                return next((n for n, i in outer.zones.items() if i == zid), None)
+
+            def body(self):
+                return json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+
+            def handle_any(self, method):
+                import urllib.parse
+                url = urllib.parse.urlsplit(self.path)
+                data = self.body() if method in ("POST", "PUT", "PATCH") else {}
+                denied = {"success": False, "errors": [{"code": 9109, "message": "Unauthorized"}]}
+                if url.path == "/zones":
+                    name = urllib.parse.parse_qs(url.query)["name"][0]
+                    outer.calls.append((method, "zones", name, None))
+                    if name in outer.deny_lookup:
+                        return self.respond(403, denied)
+                    if name not in outer.zones:
+                        return self.respond(200, {"result": []})
+                    return self.respond(200, {"result": [{"id": outer.zones[name], "name": outer.rename.get(name, name)}]})
+                found = re.fullmatch(r"/zones/([^/]+)/(.*)", url.path)
+                zone = self.zone_of(found.group(1)) if found else None
+                if zone is None:
+                    return self.respond(404, {"success": False, "errors": [{"code": 7003}]})
+                rest = found.group(2)
+                if rest == "origin_tls_client_auth/hostnames/certificates":
+                    outer.calls.append((method, "certs", zone, None))
+                    if zone in outer.deny_certs:
+                        return self.respond(403, denied)
+                    if method == "POST":
+                        outer.certs.setdefault(zone, []).append({"id": f"cid-{zone}", "certificate": data["certificate"]})
+                        return self.respond(201, {"result": {"id": f"cid-{zone}"}})
+                    return self.respond(200, {"result": outer.certs.get(zone, [])})
+                if rest == "origin_tls_client_auth/hostnames" and method == "PUT":
+                    names = [c["hostname"] for c in data["config"]]
+                    outer.calls.append((method, "bindings", zone, names))
+                    outer.bindings[zone] = names
+                    return self.respond(200, {"result": data["config"]})
+                found_name = re.fullmatch(r"origin_tls_client_auth/hostnames/(.+)", rest)
+                if found_name and method == "GET":
+                    outer.calls.append((method, "hostname", zone, found_name.group(1)))
+                    return self.respond(200, {"result": {"status": "active", "cert_status": "active"}})
+                if rest == "settings/ssl":
+                    outer.calls.append((method, "ssl", zone, data.get("value")))
+                    if zone in outer.deny_ssl:
+                        return self.respond(403, denied)
+                    if method == "PATCH":
+                        outer.ssl[zone] = data["value"]
+                    return self.respond(200, {"result": {"id": "ssl", "value": outer.ssl.get(zone, "strict")}})
+                return self.respond(404, {"success": False, "errors": [{"code": 7003}]})
+
+            def do_GET(self):
+                self.handle_any("GET")
+
+            def do_POST(self):
+                self.handle_any("POST")
+
+            def do_PUT(self):
+                self.handle_any("PUT")
+
+            def do_PATCH(self):
+                self.handle_any("PATCH")
+
+        self.server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        testcase.addCleanup(self.server.server_close)
+        testcase.addCleanup(self.server.shutdown)
+        self.url = f"http://127.0.0.1:{self.server.server_port}"
+
+    def writes(self):
+        return [c for c in self.calls if c[0] in self.WRITES]
+
+
+@unittest.skipUnless(shutil.which("ansible-playbook"), "ansible-playbook absent")
+class MultiZoneCloudflareTests(unittest.TestCase):
+    """Le VRAI côté Cloudflare du rôle (cloudflare.yml, zone-check.yml, zone.yml) joué contre un faux API : un seul jeton, une seule autorité,
+    chaque zone activée sur ses seuls noms, chaque refus (zone, permission, mode TLS) NOMMÉ et PAR ZONE."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.keys = os.path.join(self.dir, "keys")
+        os.makedirs(self.keys)
+        pem = "-----BEGIN CERTIFICATE-----\nQUFBQUFBQUE=\n-----END CERTIFICATE-----\n"
+        for name, text in (("ca.pem", pem), ("client.pem", pem), ("ca.key", "key\n"), ("client.key", "key\n"), ("client.csr", "csr\n")):
+            with open(os.path.join(self.keys, name), "w", encoding="utf-8") as f:
+                f.write(text)
+
+    def run_role(self, api, inventory, **variables):
+        play = yaml.safe_dump([{
+            "hosts": "proxy1", "gather_facts": False,
+            "vars": dict({"cfopull_dir": self.keys, "cfopull_api": api.url, "cfopull_token": "FAKE"}, **variables),
+            "tasks": [{"ansible.builtin.include_role": {"name": "cloudflare-origin-pull"}}]}])
+        return run_local_play(play, inventory)
+
+    def witness(self, name):
+        with open(os.path.join(self.keys, "active", name + ".json"), encoding="utf-8") as f:
+            return json.load(f)
+
+    def witnesses(self):
+        directory = os.path.join(self.keys, "active")
+        return sorted(os.listdir(directory)) if os.path.isdir(directory) else []
+
+    ALL = ("example.test", "other.example", "unused.example")
+
+    def test_each_zone_gets_the_certificate_on_its_own_names_only_and_a_zone_without_name_is_never_called(self):
+        api = FakeCloudflare(self, self.ALL)
+        code, out = self.run_role(api, zone_inventory())
+        self.assertEqual(code, 0, out[-3000:])
+        self.assertEqual(api.bindings, {"example.test": ["ctdapi.example.test", "ctdapi-back.example.test"], "other.example": ["back.other.example"]})
+        self.assertEqual([c[2] for c in api.calls if c[1] == "certs" and c[0] == "POST"], ["example.test", "other.example"], "le certificat, une fois par zone")
+        self.assertFalse([c for c in api.calls if c[2] == "unused.example"], "une zone sans nom n'est ni lue ni touchée")
+        self.assertEqual(self.witnesses(), ["back.other.example.json", "ctdapi-back.example.test.json", "ctdapi.example.test.json"])
+        self.assertEqual(self.witness("back.other.example")["zone"], "other.example")
+        self.assertEqual(self.witness("ctdapi.example.test")["zone"], "example.test")
+        self.assertEqual(self.witness("back.other.example")["tls_mode"], "strict")
+        # TOUTES les zones sont lues AVANT la première écriture.
+        kinds = [(c[0], c[1]) for c in api.calls]
+        self.assertLess(max(i for i, c in enumerate(api.calls) if c[1] == "zones"), min(i for i, c in enumerate(api.calls) if c[0] in api.WRITES))
+
+    def test_one_zone_costs_the_same_calls_as_before_the_zones_existed(self):
+        api = FakeCloudflare(self, ("example.test",))
+        inventory = zone_inventory(domains=("example.test",), tk_name="back.example.test")
+        code, out = self.run_role(api, inventory)
+        self.assertEqual(code, 0, out[-3000:])
+        hostnames = ["ctdapi.example.test", "ctdapi-back.example.test", "back.example.test"]
+        self.assertEqual(api.calls, [("GET", "zones", "example.test", None), ("GET", "certs", "example.test", None), ("POST", "certs", "example.test", None),
+                                     ("PUT", "bindings", "example.test", hostnames)]
+                         + [("GET", "hostname", "example.test", h) for h in hostnames] + [("GET", "ssl", "example.test", None)])
+        self.assertEqual(sorted(self.witnesses()), sorted(h + ".json" for h in hostnames))
+        self.assertEqual({self.witness(h)["zone"] for h in hostnames}, {"example.test"})
+
+    def test_a_zone_not_found_or_not_permitted_stops_everything_before_any_write_and_names_the_zone_and_the_permission(self):
+        for label, setup, expected in (
+                ("zone absente du compte", lambda api: api.zones.pop("other.example"), "Zone other.example introuvable ou non autorisée"),
+                ("lecture de zone refusée", lambda api: api.deny_lookup.add("other.example"), "Zone → Zone → Read"),
+                ("nom de zone retourné différent", lambda api: api.rename.update({"other.example": "someone-else.example"}), "introuvable ou non autorisée"),
+                ("certificats de la zone illisibles", lambda api: api.deny_certs.add("other.example"), "Zone → SSL and Certificates → Edit")):
+            with self.subTest(label):
+                shutil.rmtree(os.path.join(self.keys, "active"), ignore_errors=True)
+                api = FakeCloudflare(self, self.ALL)
+                setup(api)
+                code, out = self.run_role(api, zone_inventory())
+                self.assertNotEqual(code, 0, out[-1500:])
+                flat = out.replace("\\n", " ")
+                self.assertIn("other.example", flat)
+                self.assertIn(expected, flat)
+                self.assertIn("Rien n'a été changé chez Cloudflare", flat)
+                self.assertEqual(api.writes(), [], "AUCUNE écriture, pas même sur la zone principale qui était lisible")
+                self.assertEqual(self.witnesses(), [])
+
+    def test_a_name_that_belongs_to_no_zone_of_the_parc_is_refused_before_any_call_and_any_generation(self):
+        for name in ("back.elsewhere.test", "evil-other.example", "other.example.evil.test"):
+            with self.subTest(name):
+                api = FakeCloudflare(self, self.ALL)
+                code, out = self.run_role(api, zone_inventory(tk_name=name))
+                self.assertNotEqual(code, 0, out[-1500:])
+                flat = out.replace("\\n", " ")
+                self.assertIn("hors de toute zone du parc", flat)
+                self.assertIn(name, flat)
+                self.assertIn("example.test, other.example, unused.example", flat)
+                self.assertEqual(api.calls, [], "aucun appel à Cloudflare")
+                self.assertFalse(os.path.exists(os.path.join(self.keys, "client.ext")), "avant toute génération de l'autorité")
+
+    def test_the_strict_tls_refusal_and_its_escape_apply_zone_by_zone(self):
+        def play(ssl, **variables):
+            shutil.rmtree(os.path.join(self.keys, "active"), ignore_errors=True)
+            api = FakeCloudflare(self, self.ALL, ssl)
+            code, out = self.run_role(api, zone_inventory(), **variables)
+            return api, code, out.replace("\\n", " ")
+        api, code, out = play({"example.test": "strict", "other.example": "strict"})
+        self.assertEqual(code, 0, out[-1500:])
+        # Une zone non strict bloque, nommée ; la zone d'avant (déjà traitée, strict) garde ses témoins, la suivante n'en a pas.
+        api, code, out = play({"example.test": "strict", "other.example": "flexible"})
+        self.assertNotEqual(code, 0)
+        self.assertIn("Mode TLS de other.example : « flexible »", out)
+        self.assertNotIn("Mode TLS de example.test : « ", out)
+        self.assertEqual(self.witnesses(), ["ctdapi-back.example.test.json", "ctdapi.example.test.json"], "aucun témoin pour la zone refusée")
+        self.assertEqual(api.writes()[-1][1], "bindings", "activée (comme avant) mais refusée avant son témoin")
+        api, code, out = play({"example.test": "flexible", "other.example": "strict"})
+        self.assertNotEqual(code, 0)
+        self.assertIn("Mode TLS de example.test : « flexible »", out)
+        self.assertEqual(self.witnesses(), [], "la zone principale est refusée d'abord : aucun témoin, la zone suivante n'est pas jouée")
+        # L'échappatoire : toutes les zones (booléen ou chaîne `true` de `-e`), ou LES zones listées seulement.
+        for label, value, passes in (("true", True, True), ("chaîne true", "true", True), ("liste de la zone refusée", ["other.example"], True),
+                                     ("liste d'une AUTRE zone", ["example.test"], False), ("chaîne = nom de zone", "other.example", False),
+                                     ("false", False, False), ("chaîne false", "false", False), ("dictionnaire", {"other.example": True}, False),
+                                     ("liste vide", [], False)):
+            with self.subTest(escape=label):
+                api, code, out = play({"example.test": "strict", "other.example": "flexible"}, cfopull_allow_non_strict_tls=value)
+                self.assertEqual(code == 0, passes, out[-1500:])
+                if passes:
+                    self.assertEqual(self.witness("back.other.example")["tls_mode"], "flexible", "le témoin dit ce qui a été accepté")
+                    self.assertEqual(self.witness("ctdapi.example.test")["tls_mode"], "strict")
+        # `strict` posé : seulement sur la zone qui ne l'est pas, jamais d'écriture sur l'autre.
+        api, code, out = play({"example.test": "strict", "other.example": "flexible"}, cfopull_enforce_tls_strict=True)
+        self.assertEqual(code, 0, out[-1500:])
+        self.assertEqual([c for c in api.calls if c[0] == "PATCH"], [("PATCH", "ssl", "other.example", "strict")])
+        self.assertEqual(self.witness("back.other.example")["tls_mode"], "strict")
+
+    def test_an_unreadable_tls_mode_blocks_only_its_own_zone_and_names_it(self):
+        def play(**variables):
+            shutil.rmtree(os.path.join(self.keys, "active"), ignore_errors=True)
+            api = FakeCloudflare(self, self.ALL)
+            api.deny_ssl.add("other.example")
+            code, out = self.run_role(api, zone_inventory(), **variables)
+            return code, out.replace("\\n", " ")
+        code, out = play()
+        self.assertNotEqual(code, 0)
+        self.assertIn("Mode TLS de other.example ILLISIBLE", out)
+        self.assertIn("Zone → Zone Settings → Read/Edit", out)
+        self.assertEqual(self.witnesses(), ["ctdapi-back.example.test.json", "ctdapi.example.test.json"])
+        self.assertEqual(play(cfopull_allow_non_strict_tls=["other.example"])[0], 0)
+        self.assertNotEqual(play(cfopull_allow_non_strict_tls=["example.test"])[0], 0)
+
+    def test_a_zone_without_any_name_that_demands_strict_is_only_warned_about(self):
+        # Zone principale en `flexible` mais SEULEMENT un nom de front Pages (avertissement, jamais bloquant) ; la zone des API est en strict.
+        inventory = zone_inventory(ct=None)
+        inventory["all"]["children"]["apps"]["hosts"]["pages-app"] = {"ansible_host": "203.0.113.20", "cloudflare_front": True}
+        api = FakeCloudflare(self, self.ALL, {"example.test": "flexible", "other.example": "strict"})
+        code, out = self.run_role(api, inventory)
+        self.assertEqual(code, 0, out[-1500:])
+        self.assertIn("ATTENTION — mode TLS de example.test : flexible", out.replace("\\n", " "))
+        self.assertEqual(self.witnesses(), ["back.other.example.json", "pages-app-back.example.test.json"])
+
+    def test_the_order_is_check_every_zone_then_write_zone_by_zone(self):
+        names = [t["name"] for t in role_tasks("cloudflare.yml")]
+        self.assertLess(names.index("Fail early on a hostname that belongs to no zone of the parc"), names.index("Generate the CA"))
+        self.assertLess(names.index("Fail early on a hostname that belongs to no zone of the parc"), names.index("Check every zone with the token before writing anything"))
+        self.assertLess(names.index("Check every zone with the token before writing anything"), names.index("Activate the certificate on the hostnames of each zone"))
+        check = [t["name"] for t in role_tasks("zone-check.yml")]
+        self.assertEqual(check[:2], ["Look up the zone", "Fail clearly when the zone is not found or not permitted for this token"])
+        for task in role_tasks("zone-check.yml"):
+            if "ansible.builtin.uri" in task:
+                self.assertNotIn(task["ansible.builtin.uri"].get("method", "GET"), ("POST", "PUT", "PATCH"), "la première passe ne fait que lire")
+        self.assertFalse([t for t in role_tasks("zone.yml") if t.get("name") == "Look up the zone"])
+
+
+@unittest.skipUnless(shutil.which("ansible-playbook"), "ansible-playbook absent")
+class MultiZoneProofTests(unittest.TestCase):
+    """`enforce` n'est posé que si le témoin de CE nom existe pour CETTE autorité ET CETTE zone."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.keys = os.path.join(self.dir, "keys")
+        os.makedirs(self.keys)
+        with open(os.path.join(self.keys, "ca.pem"), "w", encoding="utf-8") as f:
+            f.write("-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n")
+
+    def run_tasks(self, filename, names, inventory, **variables):
+        found = {t["name"]: t for t in role_tasks(filename) if t.get("name") in names}
+        play = yaml.safe_dump([{"hosts": "proxy1", "gather_facts": False,
+                                "vars": dict({"cfopull_dir": self.keys, **evaluate_all(inventory, ROLE_DERIVED)}, **variables),
+                                "tasks": [found[n] for n in names]}])
+        return run_local_play(play, inventory)
+
+    def proof(self, inventory):
+        return self.run_tasks("proof.yml", list(PROOF_TASKS), inventory)
+
+    def record(self, inventory, zone, hostnames):
+        return self.run_tasks("zone.yml", list(WITNESS_TASKS), inventory, cfopull_zone_name=zone, cfopull_zone_hostnames=hostnames,
+                              cfopull_tls={"status": 200, "json": {"result": {"value": "strict"}}}, cfopull_tls_set={"skipped": True})
+
+    def write_witness(self, name, **content):
+        os.makedirs(os.path.join(self.keys, "active"), exist_ok=True)
+        with open(os.path.join(self.keys, "active", name + ".json"), "w", encoding="utf-8") as f:
+            json.dump(content, f)
+
+    def recorded(self, inventory):
+        self.assertEqual(self.record(inventory, "example.test", ["ctdapi.example.test", "ctdapi-back.example.test"])[0], 0)
+        self.assertEqual(self.record(inventory, "other.example", ["back.other.example"])[0], 0)
+
+    def test_the_witness_of_each_zone_proves_its_own_names(self):
+        inventory = zone_inventory(ct="enforce", tk="enforce")
+        code, out = self.proof(inventory)
+        self.assertNotEqual(code, 0, "aucun témoin")
+        self.recorded(inventory)
+        code, out = self.proof(inventory)
+        self.assertEqual(code, 0, out[-2000:])
+        self.assertEqual(self.witness_zone("back.other.example"), "other.example")
+
+    def witness_zone(self, name):
+        with open(os.path.join(self.keys, "active", name + ".json"), encoding="utf-8") as f:
+            return json.load(f)["zone"]
+
+    def test_a_witness_written_for_another_zone_or_without_a_zone_proves_nothing(self):
+        import hashlib
+        inventory = zone_inventory(ct="observe", tk="enforce")
+        checksum = hashlib.sha256(_text(os.path.join(self.keys, "ca.pem")).encode()).hexdigest()
+        for label, content in (("autre zone, même autorité", {"hostname": "back.other.example", "zone": "example.test", "ca_sha256": checksum}),
+                               ("sans zone (témoin d'avant)", {"hostname": "back.other.example", "ca_sha256": checksum}),
+                               ("zone vide", {"hostname": "back.other.example", "zone": "", "ca_sha256": checksum}),
+                               ("bonne zone, autre autorité", {"hostname": "back.other.example", "zone": "other.example", "ca_sha256": "0" * 64})):
+            with self.subTest(label):
+                self.write_witness("back.other.example", **content)
+                code, out = self.proof(inventory)
+                self.assertNotEqual(code, 0, out[-1500:])
+                self.assertIn("pas PROUVÉE", out)
+                self.assertIn("other.example", out)
+        self.write_witness("back.other.example", hostname="back.other.example", zone="other.example", ca_sha256=checksum)
+        self.assertEqual(self.proof(inventory)[0], 0, "la bonne zone et la bonne autorité prouvent le nom")
+
+    def test_an_enforced_name_of_no_zone_is_never_proven_even_with_a_witness(self):
+        import hashlib
+        inventory = zone_inventory(ct="observe", tk="enforce", tk_name="back.elsewhere.test")
+        checksum = hashlib.sha256(_text(os.path.join(self.keys, "ca.pem")).encode()).hexdigest()
+        self.write_witness("back.elsewhere.test", hostname="back.elsewhere.test", zone="", ca_sha256=checksum)
+        code, out = self.proof(inventory)
+        self.assertNotEqual(code, 0, out[-1500:])
+        self.assertIn("hors de toute zone du parc", out)
+        self.assertIn("example.test, other.example, unused.example", out)
 
 
 if __name__ == "__main__":

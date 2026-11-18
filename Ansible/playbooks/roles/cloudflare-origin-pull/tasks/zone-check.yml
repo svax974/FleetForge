@@ -1,0 +1,71 @@
+---
+# FleetForge
+#
+# Copyright © 2025 Stéphane VAXELAIRE
+# SPDX-License-Identifier: MIT — see LICENSE
+#
+# Première passe de cloudflare.yml, en LECTURE SEULE, pour UNE zone (`cfopull_zone_name`) : elle est trouvée avec le jeton, son
+# identifiant est retenu (`cfopull_zone_ids`) et, quand le parc a PLUSIEURS zones, la liste de ses certificats par nom d'hôte est lisible. Toute zone refusée arrête
+# le déploiement ICI, avant la première écriture sur n'importe quelle zone : pas de zone activée « à moitié ».
+- name: Look up the zone
+  ansible.builtin.uri:
+    url: "{{ cfopull_api }}/zones?name={{ cfopull_zone_name }}"
+    headers:
+      Authorization: "Bearer {{ cfopull_token }}"
+    status_code: [200, 400, 401, 403, 404]
+  register: cfopull_zone_lookup
+  no_log: true
+  changed_when: false
+  delegate_to: localhost
+  become: false
+
+# Cloudflare répond 200 et une liste VIDE pour une zone que le jeton ne couvre pas (ressources de zone du jeton), et une erreur HTTP
+# pour une permission « Zone → Zone → Read » absente. Le nom retourné doit être celui demandé : jamais l'identifiant d'une autre zone.
+- name: Fail clearly when the zone is not found or not permitted for this token
+  ansible.builtin.assert:
+    that: >-
+      cfopull_zone_lookup.status == 200
+      and ((cfopull_zone_lookup.json | default({})).result | default([], true) | length) > 0
+      and ((cfopull_zone_lookup.json.result[0].name | default('')) | lower) == (cfopull_zone_name | lower)
+    fail_msg: >-
+      Zone {{ cfopull_zone_name }} introuvable ou non autorisée avec le jeton `cloudflare_token` (HTTP {{ cfopull_zone_lookup.status }},
+      {{ ((cfopull_zone_lookup.json | default({})).result | default([], true) | length) }} zone(s) trouvée(s)) :
+      {{ (cfopull_zone_lookup.json | default({})).errors | default([]) | to_json }}. Permissions attendues sur le jeton :
+      « Zone → Zone → Read » et « Zone → SSL and Certificates → Edit » sur {{ cfopull_zone_name }} (ressources de zone du jeton :
+      « Toutes les zones », ou une liste qui contient {{ cfopull_zone_name }}) ; la zone doit exister dans CE compte Cloudflare.
+      Rien n'a été changé chez Cloudflare ni sur les proxies (aucune zone n'est activée tant que toutes ne sont pas lisibles).
+  delegate_to: localhost
+  become: false
+
+- name: Remember the identifier of the zone
+  ansible.builtin.set_fact:
+    cfopull_zone_ids: "{{ cfopull_zone_ids | default({}) | combine({cfopull_zone_name: cfopull_zone_lookup.json.result[0].id}) }}"
+  delegate_to: localhost
+  become: false
+
+# Seulement avec PLUSIEURS zones : la lecture des certificats de la zone est refaite par zone.yml, et un parc à une seule zone n'a aucune
+# écriture partielle à craindre (échec du premier appel = rien d'écrit). Même trafic Cloudflare qu'avant sur une seule zone.
+- name: Read the client certificates uploaded for hostnames in the zone
+  ansible.builtin.uri:
+    url: "{{ cfopull_api }}/zones/{{ cfopull_zone_ids[cfopull_zone_name] }}/origin_tls_client_auth/hostnames/certificates"
+    headers:
+      Authorization: "Bearer {{ cfopull_token }}"
+    status_code: [200, 400, 401, 403, 404]
+  register: cfopull_zone_readable
+  no_log: true
+  changed_when: false
+  delegate_to: localhost
+  become: false
+  when: cfopull_hostnames_by_zone | length > 1
+
+- name: Fail clearly when the zone refuses the listing of its client certificates
+  ansible.builtin.assert:
+    that: cfopull_zone_readable.status == 200
+    fail_msg: >-
+      Cloudflare refuse le listage des certificats par nom d'hôte de la zone {{ cfopull_zone_name }} (HTTP {{ cfopull_zone_readable.status }}) :
+      {{ (cfopull_zone_readable.json | default({})).errors | default([]) | to_json }}.
+      Permission attendue sur le jeton cloudflare_token : « Zone → SSL and Certificates → Edit » sur {{ cfopull_zone_name }}.
+      Rien n'a été changé chez Cloudflare ni sur les proxies (aucune zone n'est activée tant que toutes ne sont pas lisibles).
+  delegate_to: localhost
+  become: false
+  when: cfopull_hostnames_by_zone | length > 1
