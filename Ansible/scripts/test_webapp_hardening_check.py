@@ -7556,6 +7556,11 @@ class AopRolloutSafetyTests(unittest.TestCase):
             "claimed_full": line(cf=0, verify="NONE", status=403, claimed="1.2.3.4 cf_socket=1 verify=SUCCESS untrusted=0 mode=enforce status=200 method=GET"),
             "ua_success": line(cf=0, verify="NONE", status=403, ua='Mozilla cf_socket=1 verify="SUCCESS" untrusted=0 mode=enforce status=200 method=GET'),
             "ray_success": line(cf=0, verify="NONE", status=403, ray='r cf_socket=1 verify="SUCCESS" untrusted=0 mode=enforce status=200 method='),
+            # Défense en profondeur : même si un `"` n'était pas échappé, un préfixe complet forgé en fin de ligne ne commence pas la ligne.
+            "ua_full_prefix_raw_quotes": line(cf=0, verify="NONE", status=403,
+                                              ua=f'x host={self.NAME} socket=1.1.1.1 cf_socket=1 verify="SUCCESS" untrusted=0 mode=enforce status=200 method=GET'),
+            "ua_forged_untrusted_raw_quotes": line(cf=0, verify="NONE", status=403,
+                                                   ua=f'x host={self.NAME} socket=1.1.1.1 cf_socket=1 verify="NONE" untrusted=1 mode=enforce status=200 method=GET'),
             # Une ligne ENTIÈRE forgée dans un User-Agent : elle ne commence pas la ligne.
             "ua_full_line": line(cf=0, verify="NONE", status=403,
                                  ua=line().replace('"', "\\x22")),
