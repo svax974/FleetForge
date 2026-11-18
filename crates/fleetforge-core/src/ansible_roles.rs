@@ -100,6 +100,10 @@ fn extract_description(tasks_main: &Path) -> String {
 /// Falls back to (formatted name, "") for unknown roles.
 fn get_role_metadata(name: &str) -> (String, String) {
     match name {
+        "cloudflare-ddns-install" => ("Installation DDNS Cloudflare".into(), "Construit une image Python Alpine sur le registre du parc et déploie un client IPv4 horaire ; jeton Cloudflare des group_vars monté en lecture seule, état et journal de reprise persistants.".into()),
+        "cloudflare-ddns-monitoring" => ("Supervision DDNS Cloudflare".into(), "Sonde svcprobe du conteneur et métriques des contrôles IPv4, des échecs et de la fraîcheur des réconciliations Cloudflare.".into()),
+        "cloudflare-ddns-remove" => ("Retrait DDNS Cloudflare".into(), "Supprime le conteneur et sa sonde ; configuration, jeton et état conservés. Les records DNS ne sont pas supprimés.".into()),
+        "cloudflare-ddns-purge" => ("Purge DDNS Cloudflare".into(), "Retire le client et sa sonde, puis efface configuration, jeton et état dans /opt/cloudflare-ddns. Exige confirm=yes ; conserve les records DNS.".into()),
         // Sécurité
         "security-ssh" => ("Sécurisation SSH (bootstrap)".into(), "Bascule SSH sur le port du parc et pose les règles UFW restreintes lors du bootstrap. Neutralise au passage le jeu de règles iptables des images cloud qui rendrait UFW décoratif. Pose les clés de keys/<parc>/ sur root. Ajoute aux clés de `keys/<parc>/*.pub` celles de `keys/<parc>/control/*.pub` (machines pilotes comme FleetForge, options `from=` comprises) pour le seul compte de service, jamais root.".into()),
         "sshd-security" => ("Durcissement sshd + cloud-init".into(), "Ferme l'authentification par mot de passe et la connexion root par mot de passe (drop-in prioritaire sur celui de cloud-init) et désactive cloud-init, qui défaisait ce réglage à chaque démarrage.".into()),

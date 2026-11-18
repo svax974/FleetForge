@@ -1,0 +1,16 @@
+---
+- name: Require explicit purge confirmation and a safe service directory
+  ansible.builtin.assert:
+    that:
+      - confirm | default(false) | bool
+      - cloudflare_ddns_dir == '/opt/cloudflare-ddns'
+    fail_msg: "Purge : -e confirm=yes requis ; seul /opt/cloudflare-ddns peut être effacé automatiquement."
+
+- name: Remove the updater and its probe
+  ansible.builtin.include_role:
+    name: cloudflare-ddns-remove
+
+- name: Delete the state, token and configuration (DNS records are retained)
+  ansible.builtin.file:
+    path: "{{ cloudflare_ddns_dir }}"
+    state: absent

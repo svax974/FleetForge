@@ -1,0 +1,14 @@
+---
+# ./play.sh <parc> purge-cloudflare-ddns.yml --limit <machine> -e confirm=yes
+- name: Purge du client Cloudflare DDNS
+  hosts: all
+  remote_user: "{{ remote_username }}"
+  become: true
+  gather_facts: false
+  pre_tasks:
+    - name: Require an explicit target
+      ansible.builtin.assert:
+        that: ansible_limit is defined
+        fail_msg: "Ajouter --limit <machine>."
+      run_once: true
+  roles: [cloudflare-ddns-purge]

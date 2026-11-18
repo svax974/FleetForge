@@ -1,0 +1,18 @@
+---
+- name: Remove the updater container (retain persistent state and configuration)
+  community.docker.docker_container:
+    name: cloudflare-ddns
+    state: absent
+
+- name: Remove the service probe (the shared scrape target serves other services)
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ svcprobe_checks_dir | default('/etc/svcprobe/checks.d') }}/cloudflare-ddns.json"
+    - "{{ svcprobe_lib_dir | default('/usr/local/lib/svcprobe') }}/cloudflare-ddns-metrics.py"
+
+- name: Remove the runnable container definition
+  ansible.builtin.file:
+    path: "{{ cloudflare_ddns_dir }}/compose.yml"
+    state: absent

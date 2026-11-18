@@ -1,0 +1,21 @@
+services:
+  updater:
+    image: {{ (ddns_registry ~ '/cloudflare-ddns:' ~ ddns_source_tag ~ '-' ~ ddns_platform) | to_json }}
+    container_name: cloudflare-ddns
+    restart: unless-stopped
+    user: "65532:65532"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 32
+    mem_limit: 64m
+    cpus: 0.25
+    volumes:
+      - {{ (cloudflare_ddns_dir ~ '/config/config.json:/config/config.json:ro') | to_json }}
+      - {{ (cloudflare_ddns_dir ~ '/config/cloudflare_token:/run/secrets/cloudflare_token:ro') | to_json }}
+      - {{ (cloudflare_ddns_dir ~ '/state:/state') | to_json }}
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"

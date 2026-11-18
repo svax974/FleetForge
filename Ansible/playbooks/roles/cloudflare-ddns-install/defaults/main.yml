@@ -1,0 +1,9 @@
+---
+cloudflare_ddns_dir: /opt/cloudflare-ddns
+# À remplacer si ansible_host est un nom DNS ou si l'IP a déjà changé.
+cloudflare_ddns_initial_ipv4: "{{ ansible_host }}"
+# Liste explicite de zones ; [] signifie TOUTES les zones accessibles au token.
+cloudflare_ddns_zones: ["{{ domain_name }}"]
+cloudflare_ddns_discovery_urls:
+  - https://api4.ipify.org
+  - https://ipv4.icanhazip.com

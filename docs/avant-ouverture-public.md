@@ -261,10 +261,10 @@ Lot 6.1 de la passerelle MCP (`fleetforge-gateway`) ; détail dans RUNNING.md, �
 
 ## Nœud Storj (ajouté le 04/11/2026)
 
-- **Premier déploiement réel à observer** : `deploy-storj.yml` n'a été testé que par
-  morceaux (validation, collecteur, règles) — jamais sur un hôte avec Docker.
-  À jouer d'abord sur une machine de test : génération d'identité, `SETUP`, conteneur,
-  tableau de bord, sonde svcprobe.
+- **Premier déploiement réel** : fait le 07/11/2026 sur `station`. Validé par l'usage au
+  15/11/2026 : identité, conteneur (0 redémarrage), tableau de bord, sonde svcprobe, QUIC et
+  redirection routeur. Reste à valider : règles d'alerte côté Prometheus, fin du vetting,
+  premier versement — voir `docs/suivi-storj.md`.
 - **Sauvegarde hors du poste de contrôle** de `~/.config/fleetforge/storj/<hôte>/`
   (`identity/ca.key`, `identity/identity.key`) : le rôle ne les copie qu'en 0600 sur ce poste.
 - **Paiements** : Storj paie en USDC sur Ethereum L1 depuis octobre 2026 (zkSync arrêté le
@@ -273,8 +273,9 @@ Lot 6.1 de la passerelle MCP (`fleetforge-gateway`) ; détail dans RUNNING.md, �
 - **Watchtower** (`storj_watchtower`, activé par défaut) monte le socket Docker :
   décider de le garder ou de mettre à jour l'image à la main.
 - **Redirection routeur 28967 TCP + UDP** si l'hôte est derrière un NAT (hors Ansible).
-- **Règles d'alerte `storj`** non validées par `promtool` : vérifier le chargement
-  sur la supervision après le premier déploiement (`count(storj_disk_used_bytes)`).
+- **Règles d'alerte `storj`** non validées par `promtool` : `count(storj_disk_used_bytes)` doit
+  valoir 1 sur la supervision web3c (`monitor`) ; non contrôlé au 15/11/2026 (accès Prometheus
+  filtré, mot de passe dans le vault).
 
 ## Nœud Grass (ajouté le 04/11/2026)
 
@@ -347,7 +348,6 @@ Détail : `docs/deploiement-webapp.md`.
   `INFRA_BIND`, `BACK_WORKER`).
 - **Test rouge hérité** : `cargo test -p fleetforge-core --test ansible_quoting` échoue sur `backup-setup` (garde de `delegate_to`) et
   `proxy-update/tasks/resync.yml` (`| quote`, `--`) depuis les commits du 16/11/2026 : à corriger avant d'ouvrir.
-- **Limites de Cloudflare Pages** (sources tierces, non confirmées officiellement) : 100 projets par compte, 500 builds par mois ;
 - **Notes de décision au 17/11/2026** (à relire, aucune n'est urgente) :
   - **ctdapi, exposition de Postgres et Redis** : publiés sur toutes les interfaces et filtrés par DOCKER-USER, conservés tels quels
     (`webapp_db_exposed: true`). Les refermer demande de nommer d'abord les clients distants réels.
@@ -380,4 +380,12 @@ Détail : `docs/deploiement-webapp.md`.
     `agenthub-deploy` / `agenthub-install` (runner du hub), `papanglabs-back-*` (la prod en dépend), `ctdapi-*` et `tradekong-*`
     (supervision et purge).
 - **Sauvegarde hors serveur des clés de chiffrement** des apps (le coffre du parc ne suffit pas à lui seul).
+- **Limites de Cloudflare Pages** (sources tierces, non confirmées officiellement) : 100 projets par compte, 500 builds par mois ;
   à vérifier sur developers.cloudflare.com/pages/platform/limits avant d'y migrer d'autres apps (2 aujourd'hui).
+
+
+## DDNS Cloudflare (18/11/2026)
+
+- Premier déploiement à observer : choisir une machine canonique par IPv4 publique, famille `cloudflare-ddns`, groupes d'alertes `cloudflare-ddns` et `services`, token Zone Read / DNS Edit et registre du parc existants. Aucun serveur réel déployé pour les tests. Détails : `Ansible/docs/cloudflare-ddns.md`.
+- Première rotation IPv4 et reprise après erreur à observer : journaux `Updated A record` puis `IPv4 reconciled`, `cloudflare_ddns_up=1` et progression de `cloudflare_ddns_last_success_timestamp_seconds`. Un échec conserve le journal et produit `Reconciliation failed` / `CloudflareDDNSFailing` ; aucune progression pendant plus de 7500 s produit `CloudflareDDNSStale`.
+- Limite assumée : les IP de l'inventaire, les cibles de supervision et les autorisations réseau ne changent pas automatiquement. `update-cloudflare-dns.yml` peut réintroduire une IP périmée ; le client DDNS ne corrige pas une dérive DNS sans nouveau changement d'IPv4 réelle. Prévoir leur mise à jour lors de la première rotation.

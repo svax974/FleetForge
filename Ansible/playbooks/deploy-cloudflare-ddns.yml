@@ -1,0 +1,51 @@
+---
+# ./play.sh <parc> deploy-cloudflare-ddns.yml --limit <machine>
+# Ajouter cloudflare-ddns à ansible_roles de l'entrée CANONIQUE de la machine,
+# et à prom_alert_groups du parc. Voir docs/cloudflare-ddns.md.
+- name: Sélection des machines portant la famille cloudflare-ddns
+  hosts: all
+  gather_facts: false
+  tags: [always]
+  tasks:
+    - name: Select the DDNS hosts
+      ansible.builtin.group_by:
+        key: "cloudflare_ddns_{{ 'yes' if 'cloudflare-ddns' in (ansible_roles | default([])) else 'no' }}"
+
+    - name: Require a selected machine and the service alert group
+      ansible.builtin.assert:
+        that:
+          - groups['cloudflare_ddns_yes'] | default([]) | length > 0
+          - "'cloudflare-ddns' in (prom_alert_groups | default([]))"
+          - "'services' in (prom_alert_groups | default([]))"
+        fail_msg: "Déclarer ansible_roles: [..., cloudflare-ddns] sur la machine et les groupes cloudflare-ddns et services dans prom_alert_groups du parc."
+      run_once: true
+
+- name: Contrôle préalable des machines DDNS
+  hosts: cloudflare_ddns_yes
+  remote_user: "{{ remote_username }}"
+  roles:
+    - role: host-preflight
+      preflight_require_docker: true
+
+- name: Déploiement du client Cloudflare DDNS
+  hosts: cloudflare_ddns_yes
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - cloudflare-ddns-install
+    - role: cloudflare-ddns-monitoring
+      tags: [monitoring]
+
+  tasks:
+    # Délégation : le --limit de la machine ne doit pas exclure Prometheus.
+    - name: Load the DDNS alerts on the monitoring host
+      ansible.builtin.include_role:
+        name: prometheus-alerts-update
+        apply:
+          delegate_to: "{{ prometheus_host }}"
+          become: true
+          tags: [alerts, monitoring]
+      vars:
+        prom_alerts_target: "{{ prometheus_host }}"
+      when: inventory_hostname == groups['cloudflare_ddns_yes'] | first
+      tags: [alerts, monitoring]

@@ -1,0 +1,44 @@
+---
+- name: Install the shared probe, scrape target and firewall rules
+  ansible.builtin.include_role:
+    name: svcprobe-install
+    public: true
+    apply:
+      tags: [monitoring]
+  tags: [monitoring]
+
+- name: Install the host-side reader for the updater status file
+  ansible.builtin.copy:
+    src: cloudflare-ddns-metrics.py
+    dest: "{{ svcprobe_lib_dir }}/cloudflare-ddns-metrics.py"
+    owner: root
+    group: root
+    mode: '0644'
+  become: true
+  tags: [monitoring]
+
+- name: Register the container probe and reconciliation metrics
+  ansible.builtin.copy:
+    dest: "{{ svcprobe_checks_dir }}/cloudflare-ddns.json"
+    content: >-
+      {{ {'service': 'cloudflare-ddns',
+          'up': {'kind': 'docker', 'container': 'cloudflare-ddns'},
+          'metrics_command': ['python3', svcprobe_lib_dir ~ '/cloudflare-ddns-metrics.py', cloudflare_ddns_dir ~ '/state'],
+          'metrics_timeout': 5} | to_nice_json }}
+    owner: root
+    group: root
+    mode: '0644'
+  become: true
+  tags: [monitoring]
+
+- name: Verify the reconciliation metrics exist
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ svcprobe_listen_port }}/metrics"
+    return_content: true
+  register: ddns_metrics
+  until: "'cloudflare_ddns_last_success_timestamp_seconds' in (ddns_metrics.content | default(''))"
+  retries: 6
+  delay: 10
+  changed_when: false
+  when: not ansible_check_mode
+  tags: [monitoring]

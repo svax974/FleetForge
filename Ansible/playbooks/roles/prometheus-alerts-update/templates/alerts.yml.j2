@@ -6,6 +6,34 @@
   d'alertes de décor — exactement ce qui rend la supervision illisible.
 #}
 groups:
+{% if 'cloudflare-ddns' in prom_alert_groups %}
+  - name: cloudflare-ddns
+    rules:
+      - alert: CloudflareDDNSFailing
+        expr: cloudflare_ddns_up{job="svcprobe"} == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Mise à jour IPv4 Cloudflare en échec sur {{ '{{' }} $labels.instance {{ '}}' }}"
+          description: "Échec de détection IPv4 ou de réconciliation DNS. Consulter docker logs cloudflare-ddns ; l'ancienne adresse reste conservée pour reprise."
+      - alert: CloudflareDDNSStale
+        expr: time() - cloudflare_ddns_last_success_timestamp_seconds{job="svcprobe"} > 7500
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Contrôle IPv4 Cloudflare périmé sur {{ '{{' }} $labels.instance {{ '}}' }}"
+          description: "Aucun contrôle réussi depuis plus de deux heures ; le conteneur peut tourner sans progresser."
+      - alert: CloudflareDDNSMetricsMissing
+        expr: service_up{job="svcprobe", service="cloudflare-ddns"} == 1 unless on (instance) cloudflare_ddns_up{job="svcprobe"}
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Métriques DDNS manquantes sur {{ '{{' }} $labels.instance {{ '}}' }}"
+          description: "Le conteneur est actif mais svcprobe ne peut pas lire ses métriques de réconciliation."
+{% endif %}
 {% if 'availability' in prom_alert_groups %}
 
   # ── Disponibilité générique ────────────────────────────────────────────────
