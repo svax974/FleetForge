@@ -32,7 +32,8 @@ activation chez Cloudflare, `observe` avant `enforce`, `enforce` posé seulement
 (`ctdapi.conf`, `ctdapi-back.conf`, `tradekong-back.conf` : morceaux `certhttp` / `certserver` / `cert` de `_cloudflare_realip.inc`, aucune
 lecture d'IP ni filtre changés) et le rôle `cloudflare-origin-pull` est MULTI-ZONE : chaque nom va à la plus longue zone de `cfopull_zones`
 (zone principale + `domains`), un seul jeton, une seule autorité, chaque zone vérifiée en lecture seule avant la première écriture, mode TLS
-`strict` exigé et échappatoire (`cfopull_allow_non_strict_tls`, `true` ou liste de zones) PAR ZONE, témoin d'activation par nom ET par zone
+`strict` exigé et refusé en lecture seule AVANT toute écriture, échappatoire (`cfopull_allow_non_strict_tls`, `true` ou liste de zones, rien d'autre) PAR ZONE ; un déploiement
+d'application (`deploy-webapp.yml`) ne lit et n'active que les zones de SON entrée (`cfopull_target`), jamais celle d'une autre application, témoin d'activation par nom ET par zone
 (docs/etude-passerelle-sur-webapp.md, « Authenticated Origin Pulls : ctdapi, tradekong et plusieurs zones »). Une entrée `webapp_proxy: external`
 (tradekong) n'a pas le play Cloudflare de `deploy-webapp.yml` : `./play.sh <parc> deploy-cloudflare-origin-pull.yml` active son nom.
 Tout le reste est dérivé et surchargeable

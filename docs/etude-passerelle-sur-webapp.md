@@ -912,16 +912,23 @@ n'est pas dans `tradekong.app`, casse ignorée), dérivée, jamais un domaine é
 toute génération et tout gabarit (`cloudflare.yml`, `proof.yml`). Un seul jeton (`cloudflare_token`, « Toutes les zones » : non vérifiable ici), UNE
 autorité, UN certificat client envoyé à chaque zone qui porte au moins un nom ; une zone sans nom n'est jamais appelée.
 1. `cloudflare.yml` (global : jeton, déclaration, noms sans zone, autorité) puis DEUX passes : `zone-check.yml` pour toutes les zones, en LECTURE
-   SEULE (zone trouvée avec ce jeton et nom retourné identique ; avec plusieurs zones, liste des certificats lisible) — une zone introuvable,
-   non couverte par le jeton ou refusée arrête tout AVANT la moindre écriture, avec la zone et la permission nommées (« Zone → Zone → Read »,
-   « Zone → SSL and Certificates → Edit ») ; puis `zone.yml`, zone après zone : envoi du certificat, activation sur les seuls noms de la zone,
-   attente de l'état `active`, lecture du mode TLS DE CETTE ZONE, témoin de chaque nom.
+   SEULE (zone trouvée avec ce jeton et nom retourné identique ; avec plusieurs zones, liste des certificats lisible ; mode TLS de la zone lu
+   et REFUSÉ s'il n'est pas `strict` pour un nom qui l'exige, voir 2) — une zone introuvable, non couverte par le jeton, refusée ou en mode TLS
+   refusé arrête tout AVANT la moindre écriture sur n'importe quelle zone, avec la zone et la permission nommées (« Zone → Zone → Read »,
+   « Zone → SSL and Certificates → Edit », « Zone → Zone Settings → Read/Edit ») ; puis `zone.yml`, zone après zone : envoi du certificat,
+   activation sur les seuls noms de la zone, attente de l'état `active`, pose de `strict` si `cfopull_enforce_tls_strict`, témoin de chaque nom. Seul
+   un refus de Cloudflare à ces écritures (par exemple `strict` à poser sans « Zone Settings : Edit ») peut encore laisser une zone d'avant écrite.
 2. Le mode TLS `strict` est exigé PAR ZONE (`cfopull_strict_entries` : entrées `cloudflare_named` rattachées à la zone de leur `proxy_hostname`
    + noms `cloudflare_origin_pull` de la zone) ; lisible et non strict, ou illisible : BLOQUANT pour cette zone, message avec la zone. Une zone
-   dont les seuls noms sont un front Pages garde l'avertissement. `cfopull_allow_non_strict_tls` : `true` (toutes les zones, comme avant) ou
-   une LISTE de zones (`-e '{"cfopull_allow_non_strict_tls": ["tradekong.app"]}'`) qui n'ouvre que celles-ci ; toute autre valeur n'ouvre rien.
-   Les zones sont jouées dans l'ordre de `cfopull_zones` : une zone refusée n'écrit pas ses témoins, celles d'avant gardent les leurs (leurs noms
-   sont réellement activés et prouvés).
+   dont les seuls noms sont un front Pages garde l'avertissement. `cfopull_allow_non_strict_tls` : `true` (toutes les zones, comme avant : le
+   booléen ou la chaîne `true`/`True` de `-e`) ou une LISTE de zones (`-e '{"cfopull_allow_non_strict_tls": ["tradekong.app"]}'`) qui n'ouvre
+   que celles-ci ; toute autre valeur (`yes`, `on`, `1`, `false`, un dictionnaire…) n'ouvre rien. Ces refus sont rendus par la première passe, en
+   lecture seule : une zone non strict, même la dernière, n'écrit RIEN, ni certificat ni rattachement ni témoin, sur aucune zone.
+2bis. Un déploiement d'application (`deploy-webapp.yml`, donc `deploy-fleetforge.yml` et `deploy-agenthub.yml`) joue le même rôle avec
+   `cfopull_target` = l'entrée déployée : seules les zones de SES noms sont lues et activées (sur une seule zone : tous les noms de la zone, comme
+   avant). Déployer la passerelle ou agenthub n'appelle donc pas `tradekong.app`, que le jeton n'a pas à lire ni à avoir en `strict` ce jour-là ;
+   l'activation de TOUTES les zones reste celle de `deploy-cloudflare-origin-pull.yml` (aucune cible). Une entrée `webapp_proxy: external`
+   (tradekong) n'a pas ce play du tout.
 3. Le témoin `keys/cloudflare-origin-pull/active/<nom>.json` porte la zone ; `proof.yml` refuse un nom en `enforce` dont le témoin est absent,
    d'une autre autorité, d'une AUTRE zone que celle du nom, sans zone, ou dont le nom n'est dans aucune zone.
 4. Une seule zone (papanglabs ; web3c avant cette entrée) : exactement les mêmes appels à Cloudflare, dans le même ordre (test), mêmes
@@ -941,7 +948,8 @@ tradekong.app : strict » et `ls keys/cloudflare-origin-pull/active/` (trois nou
 trafic réel, puis `--limit proxy2`, `--limit proxy3`. Un proxy qui ne reçoit aucun trafic d'un nom n'apporte aucun signal pour ce nom. (4)
 enforce, nom par nom : `back.tradekong.app` (entrée `tradekong`), puis `ctdapi` (les DEUX noms de l'entrée ensemble), chaque fois `update-proxy.yml
 --limit proxy1`, lecture, puis les autres proxies. `enforce` est refusé avant tout dépôt (avant la sauvegarde de `/etc/nginx`) sans témoin valide de cette
-autorité et de cette zone. Retour arrière : repasser l'attribut à `observe` (le vhost redevient celui de l'observation) ou le retirer (le vhost
+autorité et de cette zone ; la garde de trafic OBSERVÉ qui s'y ajoute (branche papanglabs) doit filtrer le journal sur son champ `host=` (ces journaux
+sont par vhost, mais un `server_name` partagé ou un `Host` d'un autre nom y reste visible), pas seulement choisir le fichier du vhost. Retour arrière : repasser l'attribut à `observe` (le vhost redevient celui de l'observation) ou le retirer (le vhost
 redevient celui d'avant, octet pour octet) et rejouer `update-proxy.yml --limit <proxy>`.
 
 **Signaux (journaux `/var/log/nginx/cf-aop-ctdapi.log`, `cf-aop-ctdapi_back.log`, `cf-aop-tradekong_back.log`).** Même format que papanglabs
@@ -952,9 +960,10 @@ redevient celui d'avant, octet pour octet) et rejouer `update-proxy.yml --limit 
 - `verify="FAILED:…"` : certificat qui ne chaîne pas à notre autorité (origin pulls de zone actifs avec le certificat partagé, mauvaise autorité) : NE PAS
   passer en `enforce`.
 - `cf_socket=0` : VPN, whitelist, apps du parc, appels directs : jamais refusés par le certificat.
-- `status=421` : en vérifiant le certificat client, nginx répond 421 (Misdirected Request) à une requête dont le `Host` ne désigne pas le
-  serveur choisi par le SNI. Cloudflare envoie SNI = Host ; un appelant direct qui joint un proxy par adresse avec un autre `Host` le subirait.
-  Chercher `status=421` dans les journaux `cf-aop-*` et `access.log` AVANT `enforce` comme dès l'observation.
+- `status=421` : en vérifiant le certificat client, nginx répond 421 (Misdirected Request) à une requête dont le `Host` désigne un AUTRE serveur que celui
+  choisi par le SNI : un client qui présente le SNI d'un AUTRE nom (SNI = autre nom, `Host` = le nôtre : domain fronting, certains clients ou sondes qui
+  réutilisent une connexion) le subit. Cloudflare envoie SNI = Host. Un appel direct par adresse SANS SNI ne reçoit PAS de 421 (aucun serveur choisi par le
+  SNI). Chercher `status=421` dans les journaux `cf-aop-*` et `access.log` AVANT `enforce` comme dès l'observation.
 - Après `enforce` : `mode=enforce untrusted=1 status=403` = tentatives refusées.
 
 **Constats (tradekong.conf et DNS).** `tradekong.conf` (`www.tradekong.app`) est un vhost de FRONT sans aucun filtre d'adresse : `proxy_pass`
@@ -963,19 +972,24 @@ Cloudflare Pages (`webapp_front: pages`, projet `tradekong`) et que le VPS est j
 `www.tradekong.app` est un CNAME vers Pages, ce vhost ne sert que celui qui joint un proxy avec ce `Host` et n'est pas du tout un « back ». Ce n'est
 pas une API : laissé inchangé. **À vérifier dans Cloudflare** (non vérifiable ici) : où pointent `www.tradekong.app` ET `back.tradekong.app`. Si
 `back.tradekong.app` pointe directement le VPS (cohérent avec `webapp_proxy: external`), le vhost `tradekong-back.conf` des proxies est
-mort et le certificat client n'y protège rien : l'exposition réelle est celle du VPS (`back-lb`, `TRUST_PROXY` = plages Cloudflare, DOCKER-USER) —
-à traiter à part.
+mort : `enforce` n'y protège RIEN et le journal `cf-aop-tradekong_back.log` d'observation ne montrera AUCUN trafic (c'est le signal : fichier vide ou
+sans ligne `host=back.tradekong.app` après des jours d'usage réel = la prémisse « le nom passe par les proxies » est fausse). L'exposition réelle
+est alors celle du VPS (`back-lb`, `TRUST_PROXY` = plages Cloudflare, DOCKER-USER) — à traiter à part. Cette prémisse N'EST PAS vérifiée ici.
 
 **Non vérifié (aucun nginx, aucun hôte, aucun appel Cloudflare ici).** `nginx -t` ; `ssl_verify_client` par nom (SNI) sur des proxies qui servent d'autres
 vhosts sur 443, et la valeur de `$realip_remote_addr` sans `set_real_ip_from` (ctdapi-back, tradekong-back : si elle valait autre chose que l'adresse
 de la socket, `geo` ne reconnaîtrait aucune socket Cloudflare : `cf_socket=0` partout dans le journal observe, sans effet en enforce
 (`untrusted=0`) mais SANS PROTECTION — à lire dans le journal avant `enforce`) ; le jeton « Toutes les zones » ; l'état `active` ; le certificat
 d'origine de tous les noms proxifiés des DEUX zones avant `strict` ; les clients directs de `ctdapi-back` / `ctdapi` qui joindraient un proxy avec un
-`Host` ≠ SNI (421) ; la rotation `logrotate` de `cf-aop-*.log`. Limite du contrôleur : `webapp_hardening_check.py vhost --cloudflare-edge` ne
+SNI d'un autre nom (421) ; la rotation `logrotate` de `cf-aop-*.log`. Limite du contrôleur : `webapp_hardening_check.py vhost --cloudflare-edge` ne
 reconnaît pas comme servi par Cloudflare un vhost sans `real_ip_header`, sans `$cf_untrusted_…` et sans `ssl_verify_client` ; sur un vhost sans
 `real_ip`, une plage manquante au `geo` ne se voit qu'avec `--cloudflare-ranges <fichier>` (plages du parc). `ctdapi.conf` (front PRIVÉ) envoie désormais
 `Cloudflare-CDN-Cache-Control: no-store` dans sa location (même en-tête que les locations privées des vhosts génériques, `_access.inc`) : sans lui l'edge
 pouvait mettre en cache ses statiques et les servir à tout le monde sans le filtre d'adresse. Cette location n'avait aucun autre `add_header` (celui d'une location
 remplace ceux du `server {}`), le contrôleur l'exige pour tout vhost écrit à la main qui lit CF-Connecting-IP. Les API PUBLIQUES (`ctdapi-back.conf`,
-`tradekong-back.conf`) ne l'ont PAS : le cache y est la politique de l'application, le contrôleur ne l'exige pas. C'est le seul changement de `ctdapi.conf`
-indépendant de l'attribut : son rendu sans déclaration diffère du précédent par cet en-tête, et par lui seul.
+`tradekong-back.conf`) ne l'ont PAS : le cache y est la politique de l'application, le contrôleur ne l'exige pas. Le contrôleur traite une location à
+`deny all;` d'un vhost écrit à la main sur `_cloudflare_realip.inc` comme PRIVÉE (no-store exigé) quand le vhost lit CF-Connecting-IP, et comme gardée par la
+socket (sans no-store) sinon. C'est le seul changement de `ctdapi.conf` indépendant de l'attribut : son rendu sans déclaration diffère du précédent par cet
+en-tête, et par lui seul. **À faire en le déployant (Cloudflare, hors Ansible)** : PURGER le cache de `ctdapi.web3c.cc` (les objets déjà mis en cache avant
+l'en-tête restent servis) et vérifier qu'aucune Cache Rule « ignorer le Cache-Control de l'origine » / « Edge TTL : ignorer l'en-tête » ne s'applique à ce nom : une
+telle règle rendrait l'en-tête sans effet.

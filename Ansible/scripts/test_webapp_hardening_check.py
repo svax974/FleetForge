@@ -1216,16 +1216,29 @@ class CloudflareNamedPlaybookTests(unittest.TestCase):
                  "Fail when Cloudflare refuses to set the TLS mode that was asked for", "Report the TLS mode of the zone")
     TLS_BLOCK = "Refuse a Cloudflare-served name while the TLS mode of the zone is readable and not strict"
     TLS_UNREADABLE = "Refuse a Cloudflare-served name while the TLS mode of the zone cannot be read"
+    # Le mode TLS est LU et REFUSÉ par la première passe (zone-check.yml, lecture seule), POSÉ par zone.yml (`Take` reprend ce qui a été lu).
+    TLS_REMEMBER = "Remember the TLS mode of the zone"
+    TLS_TAKE = "Take the TLS mode read for this zone"
+
+    @classmethod
+    def tls_play(cls, blocks=True):
+        """Les tâches du mode TLS dans l'ordre où le rôle les joue : première passe (lecture, rappel, avertissement, refus) puis zone.yml."""
+        names = ["Read the TLS mode of the zone", cls.TLS_REMEMBER, "Report the TLS mode of the zone"]
+        names += [cls.TLS_BLOCK, cls.TLS_UNREADABLE] if blocks else []
+        names += [cls.TLS_TAKE, "Set the TLS mode of the zone to Full (strict)", "Fail when Cloudflare refuses to set the TLS mode that was asked for"]
+        found = {t["name"]: t for f in ("zone-check.yml", "zone.yml") for t in role_tasks(f) if t.get("name") in names}
+        assert sorted(found) == sorted(names), sorted(set(names) - set(found))
+        return [found[n] for n in names]
 
     def test_the_tls_mode_of_the_zone_is_read_warned_about_and_only_set_on_request(self):
         state, server = self.fake_zone_tls()
-        tasks = [t for t in role_tasks("zone.yml") if t.get("name") in self.TLS_TASKS]
-        self.assertEqual(len(tasks), 4)
+        tasks = self.tls_play(blocks=False)
+        self.assertEqual(len(tasks), 6)
 
         def play(enforce=False):
             document = yaml.safe_dump([{
                 "hosts": "localhost", "gather_facts": False,
-                "vars": {"cfopull_api": f"http://127.0.0.1:{server.server_port}", "cfopull_zone_id": "z", "cfopull_token": "FAKE",
+                "vars": {"cfopull_api": f"http://127.0.0.1:{server.server_port}", "cfopull_zone_ids": {"example.test": "z"}, "cfopull_zone_id": "z", "cfopull_token": "FAKE",
                          "cfopull_zone_name": "example.test", "cfopull_enforce_tls_strict": enforce},
                 "tasks": tasks}])
             return run_local_play(document)
@@ -1251,11 +1264,11 @@ class CloudflareNamedPlaybookTests(unittest.TestCase):
     def test_a_named_entry_blocks_on_a_non_strict_or_unreadable_tls_mode_and_nothing_else_does(self):
         state, server = self.fake_zone_tls()
         blocks = (self.TLS_BLOCK, self.TLS_UNREADABLE)
-        tasks = {t["name"]: t for t in role_tasks("zone.yml") if t.get("name") in self.TLS_TASKS + blocks}
-        self.assertEqual(len(tasks), 6)
+        tasks = {t["name"]: t for t in self.tls_play()}
+        self.assertEqual(len(tasks), 8)
         defaults = yaml.safe_load(open(os.path.join(ROLES, "cloudflare-origin-pull", "defaults", "main.yml"), encoding="utf-8"))
         self.assertIs(defaults["cfopull_allow_non_strict_tls"], False, "l'échappatoire est fermée par défaut")
-        order = [t["name"] for t in role_tasks("zone.yml")]
+        order = [t["name"] for t in role_tasks("zone-check.yml")]
         for block in blocks:
             self.assertLess(order.index("Report the TLS mode of the zone"), order.index(block), "l'avertissement est affiché d'abord")
 
@@ -1265,11 +1278,11 @@ class CloudflareNamedPlaybookTests(unittest.TestCase):
                 "hosts": "proxy1", "gather_facts": False,
                 # `cfopull_aop` : les defaults du rôle ne sont PAS chargés ici (jamais `vars_files` : ils remplaceraient l'API factice
                 # par la vraie) ; sa valeur est celle que le rôle calcule pour cet inventaire.
-                "vars": dict({"cfopull_api": f"http://127.0.0.1:{server.server_port}", "cfopull_zone_id": "z", "cfopull_token": "FAKE",
+                "vars": dict({"cfopull_api": f"http://127.0.0.1:{server.server_port}", "cfopull_zone_ids": {"example.test": "z"}, "cfopull_zone_id": "z", "cfopull_token": "FAKE",
                               "cfopull_zone_name": "example.test", "cfopull_enforce_tls_strict": False,
                               "cfopull_aop": evaluate("cfopull_aop", "cloudflare-origin-pull", inventory),
                               "cfopull_strict_entries": evaluate("cfopull_strict_entries", "cloudflare-origin-pull", inventory)}, **variables),
-                "tasks": [tasks[n] for n in self.TLS_TASKS + blocks]}])
+                "tasks": self.tls_play()}])
             return run_local_play(document, inventory)
         named = edge_inventory()
         front_only = edge_inventory(cloudflare_named=False)
@@ -1338,9 +1351,9 @@ class CloudflareNamedPlaybookTests(unittest.TestCase):
         # En `--check` le côté Cloudflare n'est pas joué du tout (main.yml) et la tâche ne lit jamais un résultat sauté.
         for block in blocks:
             self.assertIn("not ansible_check_mode", tasks[block]["when"])
-        # Jamais de lecture du résultat d'une tâche sautée : `cfopull_tls_set is skipped` est testé AVANT `cfopull_tls.status`.
+        # Le refus ne s'applique pas quand ce déploiement pose `strict` lui-même, et ne lit `cfopull_tls.status` qu'ensuite.
         when = tasks[self.TLS_UNREADABLE]["when"]
-        self.assertLess(when.index("cfopull_tls_set is skipped"), min(i for i, c in enumerate(when) if "cfopull_tls.status" in c))
+        self.assertLess(when.index("not (cfopull_enforce_tls_strict | bool)"), min(i for i, c in enumerate(when) if "cfopull_tls.status" in c))
         main =yaml.safe_load(open(os.path.join(ROLES, "cloudflare-origin-pull", "tasks", "main.yml"), encoding="utf-8"))
         include = next(t for t in main if t.get("name") == "Run the Cloudflare side")
         self.assertIn("not ansible_check_mode", include["when"])
@@ -7380,9 +7393,13 @@ class AopRolloutSafetyTests(unittest.TestCase):
     def test_the_witness_is_written_last_after_the_activation_and_the_tls_checks(self):
         names = [t["name"] for t in role_tasks("zone.yml")]
         record = names.index("Record that Cloudflare presents the certificate on every hostname")
-        for earlier in ("Fail clearly when a hostname is not active", "Report the TLS mode of the zone", CloudflareNamedPlaybookTests.TLS_BLOCK,
-                        CloudflareNamedPlaybookTests.TLS_UNREADABLE, "Fail when Cloudflare refuses to set the TLS mode that was asked for"):
+        for earlier in ("Fail clearly when a hostname is not active", "Fail when Cloudflare refuses to set the TLS mode that was asked for"):
             self.assertLess(names.index(earlier), record, earlier)
+        # La lecture et les deux refus TLS sont dans la première passe (lecture seule, avant toute écriture), pas dans zone.yml.
+        check = [t["name"] for t in role_tasks("zone-check.yml")]
+        for refusal in (CloudflareNamedPlaybookTests.TLS_BLOCK, CloudflareNamedPlaybookTests.TLS_UNREADABLE, "Read the TLS mode of the zone"):
+            self.assertIn(refusal, check)
+            self.assertNotIn(refusal, names)
         self.assertLess(record, names.index("Say what is left to do"))
         self.assertEqual(names.index("Say what is left to do"), len(names) - 1)
 
@@ -7393,14 +7410,12 @@ class AopRolloutSafetyTests(unittest.TestCase):
 
     def test_the_zone_tls_mode_blocks_an_aop_name_like_a_named_one_and_the_witness_is_not_written_then(self):
         server_state, server = CloudflareNamedPlaybookTests.fake_zone_tls(self)
-        names = (*CloudflareNamedPlaybookTests.TLS_TASKS, CloudflareNamedPlaybookTests.TLS_BLOCK, CloudflareNamedPlaybookTests.TLS_UNREADABLE,
-                 *WITNESS_TASKS)
-        tasks = self.tasks("zone.yml", names)
+        tasks = CloudflareNamedPlaybookTests.tls_play() + self.tasks("zone.yml", WITNESS_TASKS)
 
         def play(inventory, mode="flexible", deny=False, **variables):
             server_state["ssl"], server_state["deny"] = mode, deny
             shutil.rmtree(os.path.join(self.keys, "active"), ignore_errors=True)
-            settings = {"cfopull_api": f"http://127.0.0.1:{server.server_port}", "cfopull_zone_id": "z", "cfopull_token": "FAKE",
+            settings = {"cfopull_api": f"http://127.0.0.1:{server.server_port}", "cfopull_zone_ids": {"example.test": "z"}, "cfopull_zone_id": "z", "cfopull_token": "FAKE",
                         "cfopull_zone_name": "example.test", "cfopull_enforce_tls_strict": False,
                         "cfopull_zone_hostnames": ["back-prod.example.test"]}
             settings.update(variables)
@@ -7990,15 +8005,16 @@ class MultiZoneCloudflareTests(unittest.TestCase):
         kinds = [(c[0], c[1]) for c in api.calls]
         self.assertLess(max(i for i, c in enumerate(api.calls) if c[1] == "zones"), min(i for i, c in enumerate(api.calls) if c[0] in api.WRITES))
 
-    def test_one_zone_costs_the_same_calls_as_before_the_zones_existed(self):
+    def test_one_zone_costs_the_same_calls_as_before_the_zones_existed(self):  # même ensemble d'appels, lecture TLS avancée
         api = FakeCloudflare(self, ("example.test",))
         inventory = zone_inventory(domains=("example.test",), tk_name="back.example.test")
         code, out = self.run_role(api, inventory)
         self.assertEqual(code, 0, out[-3000:])
         hostnames = ["ctdapi.example.test", "ctdapi-back.example.test", "back.example.test"]
-        self.assertEqual(api.calls, [("GET", "zones", "example.test", None), ("GET", "certs", "example.test", None), ("POST", "certs", "example.test", None),
-                                     ("PUT", "bindings", "example.test", hostnames)]
-                         + [("GET", "hostname", "example.test", h) for h in hostnames] + [("GET", "ssl", "example.test", None)])
+        # Les mêmes appels qu'avant ; seule la LECTURE du mode TLS (GET) est avancée dans la première passe, avant toute écriture.
+        self.assertEqual(api.calls, [("GET", "zones", "example.test", None), ("GET", "ssl", "example.test", None), ("GET", "certs", "example.test", None),
+                                     ("POST", "certs", "example.test", None), ("PUT", "bindings", "example.test", hostnames)]
+                         + [("GET", "hostname", "example.test", h) for h in hostnames])
         self.assertEqual(sorted(self.witnesses()), sorted(h + ".json" for h in hostnames))
         self.assertEqual({self.witness(h)["zone"] for h in hostnames}, {"example.test"})
 
@@ -8042,25 +8058,30 @@ class MultiZoneCloudflareTests(unittest.TestCase):
             return api, code, out.replace("\\n", " ")
         api, code, out = play({"example.test": "strict", "other.example": "strict"})
         self.assertEqual(code, 0, out[-1500:])
-        # Une zone non strict bloque, nommée ; la zone d'avant (déjà traitée, strict) garde ses témoins, la suivante n'en a pas.
+        # Une zone non strict bloque, nommée, dans la PREMIÈRE PASSE (lecture seule) : RIEN n'est écrit, ni sur elle ni sur la zone d'avant (strict).
         api, code, out = play({"example.test": "strict", "other.example": "flexible"})
         self.assertNotEqual(code, 0)
         self.assertIn("Mode TLS de other.example : « flexible »", out)
         self.assertNotIn("Mode TLS de example.test : « ", out)
-        self.assertEqual(self.witnesses(), ["ctdapi-back.example.test.json", "ctdapi.example.test.json"], "aucun témoin pour la zone refusée")
-        self.assertEqual(api.writes()[-1][1], "bindings", "activée (comme avant) mais refusée avant son témoin")
+        self.assertEqual(api.writes(), [], "une zone refusée plus loin ne laisse AUCUNE zone écrite (ni certificat, ni rattachement)")
+        self.assertEqual(self.witnesses(), [])
+        self.assertIn("Rien n'a été changé chez Cloudflare", out)
         api, code, out = play({"example.test": "flexible", "other.example": "strict"})
         self.assertNotEqual(code, 0)
         self.assertIn("Mode TLS de example.test : « flexible »", out)
-        self.assertEqual(self.witnesses(), [], "la zone principale est refusée d'abord : aucun témoin, la zone suivante n'est pas jouée")
+        self.assertEqual((api.writes(), self.witnesses()), ([], []))
         # L'échappatoire : toutes les zones (booléen ou chaîne `true` de `-e`), ou LES zones listées seulement.
-        for label, value, passes in (("true", True, True), ("chaîne true", "true", True), ("liste de la zone refusée", ["other.example"], True),
+        for label, value, passes in (("true", True, True), ("chaîne true", "true", True), ("chaîne True", "True", True),
+                                     ("yes", "yes", False), ("on", "on", False), ("chaîne 1", "1", False), ("entier 1", 1, False), ("y", "y", False),
+                                     ("liste de la zone refusée", ["other.example"], True),
                                      ("liste d'une AUTRE zone", ["example.test"], False), ("chaîne = nom de zone", "other.example", False),
                                      ("false", False, False), ("chaîne false", "false", False), ("dictionnaire", {"other.example": True}, False),
                                      ("liste vide", [], False)):
             with self.subTest(escape=label):
                 api, code, out = play({"example.test": "strict", "other.example": "flexible"}, cfopull_allow_non_strict_tls=value)
                 self.assertEqual(code == 0, passes, out[-1500:])
+                if not passes:
+                    self.assertEqual(api.writes(), [], "refusé : rien d'écrit")
                 if passes:
                     self.assertEqual(self.witness("back.other.example")["tls_mode"], "flexible", "le témoin dit ce qui a été accepté")
                     self.assertEqual(self.witness("ctdapi.example.test")["tls_mode"], "strict")
@@ -8076,14 +8097,15 @@ class MultiZoneCloudflareTests(unittest.TestCase):
             api = FakeCloudflare(self, self.ALL)
             api.deny_ssl.add("other.example")
             code, out = self.run_role(api, zone_inventory(), **variables)
-            return code, out.replace("\\n", " ")
-        code, out = play()
+            return code, out.replace("\\n", " "), api
+        code, out, api = play()
         self.assertNotEqual(code, 0)
         self.assertIn("Mode TLS de other.example ILLISIBLE", out)
         self.assertIn("Zone → Zone Settings → Read/Edit", out)
-        self.assertEqual(self.witnesses(), ["ctdapi-back.example.test.json", "ctdapi.example.test.json"])
+        self.assertEqual((api.writes(), self.witnesses()), ([], []), "refusé en lecture seule : aucune zone n'est écrite")
         self.assertEqual(play(cfopull_allow_non_strict_tls=["other.example"])[0], 0)
         self.assertNotEqual(play(cfopull_allow_non_strict_tls=["example.test"])[0], 0)
+        self.assertNotEqual(play(cfopull_allow_non_strict_tls="yes")[0], 0)
 
     def test_a_zone_without_any_name_that_demands_strict_is_only_warned_about(self):
         # Zone principale en `flexible` mais SEULEMENT un nom de front Pages (avertissement, jamais bloquant) ; la zone des API est en strict.
@@ -8106,6 +8128,63 @@ class MultiZoneCloudflareTests(unittest.TestCase):
             if "ansible.builtin.uri" in task:
                 self.assertNotIn(task["ansible.builtin.uri"].get("method", "GET"), ("POST", "PUT", "PATCH"), "la première passe ne fait que lire")
         self.assertFalse([t for t in role_tasks("zone.yml") if t.get("name") == "Look up the zone"])
+
+
+    # ── Déployer UNE application : seules les zones de SES noms sont appelées (`cfopull_target`, posé par deploy-webapp.yml) ──
+    @staticmethod
+    def with_gateway(inventory):
+        """Ajoute une passerelle `cloudflare_named` (nom de la zone principale), comme `fleetforge-gateway` / agenthub sur web3c."""
+        inventory["all"]["children"]["apps"]["hosts"]["gw"] = {"ansible_host": "203.0.113.50", "cloudflare_named": True,
+                                                                  "proxy_hostname": "ffg.example.test", "ansible_roles": ["webapp"]}
+        return inventory
+
+    def test_deploying_an_entry_only_calls_and_requires_the_zones_of_its_own_names(self):
+        for target, zones, bound in (
+                ("gw", {"example.test"}, {"example.test": ["ctdapi.example.test", "ctdapi-back.example.test", "ffg.example.test"]}),
+                ("ctdapi", {"example.test"}, {"example.test": ["ctdapi.example.test", "ctdapi-back.example.test", "ffg.example.test"]}),
+                ("tradekong", {"other.example"}, {"other.example": ["back.other.example"]})):
+            with self.subTest(target=target):
+                shutil.rmtree(os.path.join(self.keys, "active"), ignore_errors=True)
+                other = ({"example.test", "other.example"} - zones).pop()
+                api = FakeCloudflare(self, self.ALL, {z: "strict" if z in zones else "flexible" for z in ("example.test", "other.example")})
+                # L'AUTRE zone est illisible pour le jeton et non strict : elle ne doit être ni appelée ni exigée.
+                api.deny_lookup.add(other)
+                api.deny_ssl.add(other)
+                code, out = self.run_role(api, self.with_gateway(zone_inventory()), cfopull_target=target)
+                self.assertEqual(code, 0, out[-3000:])
+                self.assertEqual({c[2] for c in api.calls}, zones, "aucun appel à la zone d'une autre entrée")
+                self.assertEqual({z: sorted(v) for z, v in api.bindings.items()}, {z: sorted(v) for z, v in bound.items()})
+                self.assertEqual(sorted(h[:-5] for h in self.witnesses()), sorted(n for names in bound.values() for n in names))
+        # Témoin : SANS cible (deploy-cloudflare-origin-pull.yml), la même zone illisible bloque tout, comme il se doit.
+        api = FakeCloudflare(self, self.ALL)
+        api.deny_lookup.add("other.example")
+        code, out = self.run_role(api, self.with_gateway(zone_inventory()))
+        self.assertNotEqual(code, 0, out[-1500:])
+        self.assertEqual(api.writes(), [])
+        # Une entrée sans aucun nom activable n'active rien (aucun appel).
+        api = FakeCloudflare(self, self.ALL)
+        code, out = self.run_role(api, self.with_gateway(zone_inventory()), cfopull_target="plain")
+        self.assertEqual(code, 0, out[-1500:])
+        self.assertEqual(api.calls, [])
+
+    def test_on_a_single_zone_a_deployment_activates_the_same_names_as_without_a_target(self):
+        calls = {}
+        for label, variables in (("sans cible", {}), ("cible", {"cfopull_target": "gw"})):
+            shutil.rmtree(os.path.join(self.keys, "active"), ignore_errors=True)
+            api = FakeCloudflare(self, ("example.test",))
+            code, out = self.run_role(api, self.with_gateway(zone_inventory(domains=("example.test",), tk_name="back.example.test")), **variables)
+            self.assertEqual(code, 0, out[-3000:])
+            calls[label] = (api.calls, self.witnesses())
+        self.assertEqual(calls["cible"], calls["sans cible"], "une seule zone : tous les noms de la zone, comme avant")
+        self.assertEqual(len(calls["cible"][1]), 4)
+
+    def test_the_application_deployment_passes_its_own_entry_as_the_target_and_the_full_playbook_does_not(self):
+        plays = yaml.safe_load(_text(os.path.join(PLAYBOOKS, "deploy-webapp.yml")))
+        pull = next(p for p in plays if p.get("name") == "Authenticated Origin Pulls côté Cloudflare")["tasks"][0]
+        self.assertEqual(pull["vars"]["cfopull_target"], "{{ inventory_hostname }}")
+        for play in yaml.safe_load(_text(os.path.join(PLAYBOOKS, "deploy-cloudflare-origin-pull.yml"))):
+            for task in play["tasks"]:
+                self.assertNotIn("cfopull_target", task.get("vars", {}), "l'activation complète est celle du parc entier")
 
 
 @unittest.skipUnless(shutil.which("ansible-playbook"), "ansible-playbook absent")

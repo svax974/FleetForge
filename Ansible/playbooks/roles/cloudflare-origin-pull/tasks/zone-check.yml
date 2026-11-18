@@ -69,3 +69,111 @@
   delegate_to: localhost
   become: false
   when: cfopull_hostnames_by_zone | length > 1
+
+# Mode TLS de la zone : « Full (strict) » (Cloudflare → origine en HTTPS, certificat vérifié). Un autre mode (Flexible : HTTP
+# vers le port 80, qui redirige vers https = boucle) casserait un nom proxifié. Lecture seule par défaut : signalé, jamais bloquant ;
+# `cfopull_enforce_tls_strict: true` le pose (réglage de toute la zone). Aucune valeur secrète ici.
+- name: Read the TLS mode of the zone
+  ansible.builtin.uri:
+    url: "{{ cfopull_api }}/zones/{{ cfopull_zone_ids[cfopull_zone_name] }}/settings/ssl"
+    headers:
+      Authorization: "Bearer {{ cfopull_token }}"
+    status_code: [200, 400, 401, 403, 404]
+  register: cfopull_tls
+  no_log: true
+  changed_when: false
+  delegate_to: localhost
+  become: false
+
+- name: Remember the TLS mode of the zone
+  ansible.builtin.set_fact:
+    cfopull_tls_by_zone: "{{ cfopull_tls_by_zone | default({}) | combine({cfopull_zone_name: {'status': cfopull_tls.status, 'json': (cfopull_tls.json | default({}))}}) }}"
+  delegate_to: localhost
+  become: false
+
+- name: Report the TLS mode of the zone
+  ansible.builtin.debug:
+    msg: >-
+      {{ 'Mode TLS de ' ~ cfopull_zone_name ~ ' : strict (attendu).'
+         if ((cfopull_enforce_tls_strict | bool) or (cfopull_tls.status == 200 and cfopull_tls.json.result.value | default('') == 'strict'))
+         else ('ATTENTION — mode TLS de ' ~ cfopull_zone_name ~ ' : '
+               ~ ((cfopull_tls.json.result.value | default('illisible')) if cfopull_tls.status == 200
+                  else 'illisible (HTTP ' ~ cfopull_tls.status ~ ', jeton sans « Zone Settings : Read »)')
+               ~ ' — « Full (strict) » est exigé pour les noms proxifiés ; `cfopull_enforce_tls_strict: true` le pose.') }}
+  delegate_to: localhost
+  become: false
+
+# Un nom `cloudflare_named` porte `/mcp` et OAuth : en « Full » (non strict) Cloudflare joint l'origine en HTTPS SANS vérifier son
+# certificat, donc le segment Cloudflare → origine n'est pas authentifié (un tiers sur le chemin se fait passer pour l'origine). Mode
+# lisible et non strict : BLOQUANT. Mode illisible (jeton sans « Zone Settings : Read ») : BLOQUANT aussi, tâche suivante.
+# `cfopull_allow_non_strict_tls` : échappatoire explicite (décision du propriétaire, faux par défaut ; `true` pour toutes les zones, une liste
+# de zones pour celles-ci seulement). Le refus et l'échappatoire s'appliquent ZONE PAR ZONE (`cfopull_strict_entries`). Pas pour `cloudflare_front`
+# seul : l'avertissement d'avant, inchangé.
+# Jamais en `--check` : tout le côté Cloudflare y est sauté (tasks/main.yml), ses résultats
+# n'ont ni `status` ni `json`. MÊME exigence pour un nom `cloudflare_origin_pull` (observe comme enforce : la décision du propriétaire est
+# « zone en strict » pour les API publiques papanglabs) : il compte dans `cfopull_strict_entries` de SA zone, et ces refus sont rendus ICI, en lecture seule, AVANT toute écriture sur n'importe quelle zone : une zone refusée ne laisse aucune zone
+# activée à moitié, ni aucun témoin (sauf échappatoire explicite).
+- name: Refuse a Cloudflare-served name while the TLS mode of the zone is readable and not strict
+  vars:
+    _named_entries: "{{ cfopull_strict_entries.get(cfopull_zone_name, 0) }}"
+    _zone_escape: >-
+      {%- set allowed = cfopull_allow_non_strict_tls | default(false) -%}
+      {%- if allowed is sequence and allowed is not string and allowed is not mapping -%}
+      {{ cfopull_zone_name in allowed }}
+      {%- else -%}
+      {{ allowed is sameas true or (allowed is string and (allowed | lower) == 'true') }}
+      {%- endif -%}
+  ansible.builtin.assert:
+    that: false
+    fail_msg: >-
+      Mode TLS de {{ cfopull_zone_name }} : « {{ cfopull_tls.json.result.value | default('?') }} » — « Full (strict) » est EXIGÉ pour un nom
+      `cloudflare_named` : sans lui Cloudflare ne vérifie pas le certificat de l'origine (segment Cloudflare → proxy non authentifié).
+      Rejouer avec `-e cfopull_enforce_tls_strict=true` (pose `strict` pour TOUTE la zone, jeton « Zone Settings : Edit ») ou le poser à
+      la main (SSL/TLS → Overview → Full (strict)). Échappatoire explicite, à assumer : `-e cfopull_allow_non_strict_tls=true` (toutes les zones) ou
+      `-e '{"cfopull_allow_non_strict_tls": ["{{ cfopull_zone_name }}"]}'` (cette zone seulement).
+      Rien n'a été changé chez Cloudflare ni sur les proxies (aucune zone n'est activée tant que toutes ne sont pas lisibles et acceptées).
+    quiet: true
+  delegate_to: localhost
+  become: false
+  when:
+    - not ansible_check_mode
+    - (_named_entries | int) > 0
+    - not (cfopull_enforce_tls_strict | bool)
+    - cfopull_tls.status | default(0) == 200
+    - (cfopull_tls.json.result.value | default('')) != 'strict'
+    - not (_zone_escape | bool)
+
+# Mode ILLISIBLE (jeton sans « Zone → Zone Settings → Read », HTTP 401/403/404) : même refus pour un nom `cloudflare_named`. Ne pas
+# pouvoir lire le mode n'est pas la preuve qu'il est `strict` : le déploiement ne doit pas poser un vhost OAuth/MCP public sur une
+# hypothèse. Mêmes règles que le refus ci-dessus (échappatoire `cfopull_allow_non_strict_tls`, jamais en `--check`, jamais de lecture
+# du `.json` d'une tâche sautée : `cfopull_tls.status` est lu seulement quand le mode n'est pas posé par ce déploiement). `cloudflare_front`
+# seul : l'avertissement d'avant, octet pour octet.
+- name: Refuse a Cloudflare-served name while the TLS mode of the zone cannot be read
+  vars:
+    _named_entries: "{{ cfopull_strict_entries.get(cfopull_zone_name, 0) }}"
+    _zone_escape: >-
+      {%- set allowed = cfopull_allow_non_strict_tls | default(false) -%}
+      {%- if allowed is sequence and allowed is not string and allowed is not mapping -%}
+      {{ cfopull_zone_name in allowed }}
+      {%- else -%}
+      {{ allowed is sameas true or (allowed is string and (allowed | lower) == 'true') }}
+      {%- endif -%}
+  ansible.builtin.assert:
+    that: false
+    fail_msg: >-
+      Mode TLS de {{ cfopull_zone_name }} ILLISIBLE (HTTP {{ cfopull_tls.status | default('?') }}) : le jeton `cloudflare_token` n'a pas la
+      permission « Zone → Zone Settings → Read/Edit » sur {{ cfopull_zone_name }}. « Full (strict) » est EXIGÉ pour un nom `cloudflare_named` et
+      ne peut pas être vérifié. Deux remèdes : (1) ajouter « Zone → Zone Settings → Read » (ou « Edit », pour que
+      `-e cfopull_enforce_tls_strict=true` pose `strict`) au jeton, puis rejouer ; (2) assumer explicitement l'absence de contrôle avec
+      `-e cfopull_allow_non_strict_tls=true` (toutes les zones) ou `-e '{"cfopull_allow_non_strict_tls": ["{{ cfopull_zone_name }}"]}'`
+      (cette zone seulement), après avoir vérifié à la main SSL/TLS → Overview → Full (strict).
+      Rien n'a été changé chez Cloudflare ni sur les proxies (aucune zone n'est activée tant que toutes ne sont pas lisibles et acceptées).
+    quiet: true
+  delegate_to: localhost
+  become: false
+  when:
+    - not ansible_check_mode
+    - (_named_entries | int) > 0
+    - not (cfopull_enforce_tls_strict | bool)
+    - cfopull_tls.status | default(0) != 200
+    - not (_zone_escape | bool)

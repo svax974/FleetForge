@@ -7,8 +7,8 @@
 # Authenticated Origin Pulls pour UNE zone Cloudflare : `cfopull_zone_name` (la zone), `cfopull_zone_hostnames` (ses noms d'hôte,
 # `cfopull_hostnames_by_zone`) et `cfopull_zone_id` (lu par zone-check.yml), posés par cloudflare.yml qui l'inclut une fois par zone
 # qui porte au moins un nom, avec le MÊME jeton, la MÊME autorité et le MÊME certificat client. Le certificat est envoyé à CHAQUE
-# zone (magasin par nom d'hôte de la zone), activé sur ses seuls noms, attendu `active`, le mode TLS de CETTE zone est lu (et refusé
-# s'il n'est pas `strict` pour un nom qui l'exige), puis le témoin de CHAQUE nom de la zone est écrit — avec la zone dans le témoin.
+# zone (magasin par nom d'hôte de la zone), activé sur ses seuls noms, attendu `active`, puis (le mode TLS de CETTE zone, lu et refusé s'il n'est pas `strict` pour un nom
+# qui l'exige par zone-check.yml, est posé à `strict` si `cfopull_enforce_tls_strict`)  le témoin de CHAQUE nom de la zone est écrit — avec la zone dans le témoin.
 # Authenticated Origin Pulls PER HOSTNAME (only the -back names of the cloudflare_front entries): the certificate lives in
 # the per-hostname store (`origin_tls_client_auth/hostnames/certificates`), NOT the zone-level one (`origin_tls_client_auth`),
 # whose certificates the hostname binding below does not know (fixed 2026-10-30). Every call accepts the error statuses so
@@ -167,18 +167,12 @@
   delegate_to: localhost
   become: false
 
-# Mode TLS de la zone : « Full (strict) » (Cloudflare → origine en HTTPS, certificat vérifié). Un autre mode (Flexible : HTTP
-# vers le port 80, qui redirige vers https = boucle) casserait un nom proxifié. Lecture seule par défaut : signalé, jamais bloquant ;
-# `cfopull_enforce_tls_strict: true` le pose (réglage de toute la zone). Aucune valeur secrète ici.
-- name: Read the TLS mode of the zone
-  ansible.builtin.uri:
-    url: "{{ cfopull_api }}/zones/{{ cfopull_zone_id }}/settings/ssl"
-    headers:
-      Authorization: "Bearer {{ cfopull_token }}"
-    status_code: [200, 400, 401, 403, 404]
-  register: cfopull_tls
-  no_log: true
-  changed_when: false
+# Mode TLS de la zone : lu et REFUSÉ par zone-check.yml (première passe, lecture seule, avant la moindre écriture sur n'importe quelle zone).
+# Ici seulement `cfopull_enforce_tls_strict: true` le POSE (réglage de toute la zone), s'il ne l'est pas déjà. Aucune valeur secrète.
+# Le mode TLS de CETTE zone a été lu (et, s'il le faut, REFUSÉ) par la première passe, zone-check.yml, avant toute écriture : il est repris ici.
+- name: Take the TLS mode read for this zone
+  ansible.builtin.set_fact:
+    cfopull_tls: "{{ cfopull_tls_by_zone[cfopull_zone_name] }}"
   delegate_to: localhost
   become: false
 
@@ -210,84 +204,6 @@
   delegate_to: localhost
   become: false
   when: cfopull_tls_set is not skipped
-
-- name: Report the TLS mode of the zone
-  ansible.builtin.debug:
-    msg: >-
-      {{ 'Mode TLS de ' ~ cfopull_zone_name ~ ' : strict (attendu).'
-         if (cfopull_tls_set is not skipped or (cfopull_tls.status == 200 and cfopull_tls.json.result.value | default('') == 'strict'))
-         else ('ATTENTION — mode TLS de ' ~ cfopull_zone_name ~ ' : '
-               ~ ((cfopull_tls.json.result.value | default('illisible')) if cfopull_tls.status == 200
-                  else 'illisible (HTTP ' ~ cfopull_tls.status ~ ', jeton sans « Zone Settings : Read »)')
-               ~ ' — « Full (strict) » est exigé pour les noms proxifiés ; `cfopull_enforce_tls_strict: true` le pose.') }}
-  delegate_to: localhost
-  become: false
-
-# Un nom `cloudflare_named` porte `/mcp` et OAuth : en « Full » (non strict) Cloudflare joint l'origine en HTTPS SANS vérifier son
-# certificat, donc le segment Cloudflare → origine n'est pas authentifié (un tiers sur le chemin se fait passer pour l'origine). Mode
-# lisible et non strict : BLOQUANT. Mode illisible (jeton sans « Zone Settings : Read ») : BLOQUANT aussi, tâche suivante.
-# `cfopull_allow_non_strict_tls` : échappatoire explicite (décision du propriétaire, faux par défaut ; `true` pour toutes les zones, une liste
-# de zones pour celles-ci seulement). Le refus et l'échappatoire s'appliquent ZONE PAR ZONE (`cfopull_strict_entries`). Pas pour `cloudflare_front`
-# seul : l'avertissement d'avant, inchangé. Jamais en `--check` : tout le côté Cloudflare y est sauté (tasks/main.yml), ses résultats
-# n'ont ni `status` ni `json`. MÊME exigence pour un nom `cloudflare_origin_pull` (observe comme enforce : la décision du propriétaire est
-# « zone en strict » pour les API publiques papanglabs) : il compte dans `cfopull_strict_entries` de SA zone, et le témoin d'activation de la fin de ce
-# fichier n'est écrit qu'APRÈS ces refus, donc jamais pour un nom dont la zone n'est pas en strict (sauf échappatoire explicite).
-- name: Refuse a Cloudflare-served name while the TLS mode of the zone is readable and not strict
-  vars:
-    _named_entries: "{{ cfopull_strict_entries.get(cfopull_zone_name, 0) }}"
-    _zone_escape: >-
-      {%- set allowed = cfopull_allow_non_strict_tls | default(false) -%}
-      {{ (cfopull_zone_name in allowed) if (allowed is sequence and allowed is not string and allowed is not mapping) else (allowed | bool) }}
-  ansible.builtin.assert:
-    that: false
-    fail_msg: >-
-      Mode TLS de {{ cfopull_zone_name }} : « {{ cfopull_tls.json.result.value | default('?') }} » — « Full (strict) » est EXIGÉ pour un nom
-      `cloudflare_named` : sans lui Cloudflare ne vérifie pas le certificat de l'origine (segment Cloudflare → proxy non authentifié).
-      Rejouer avec `-e cfopull_enforce_tls_strict=true` (pose `strict` pour TOUTE la zone, jeton « Zone Settings : Edit ») ou le poser à
-      la main (SSL/TLS → Overview → Full (strict)). Échappatoire explicite, à assumer : `-e cfopull_allow_non_strict_tls=true` (toutes les zones) ou
-      `-e '{"cfopull_allow_non_strict_tls": ["{{ cfopull_zone_name }}"]}'` (cette zone seulement).
-      Les noms sont activés chez Cloudflare mais aucun vhost n'est encore posé sur les proxies.
-    quiet: true
-  delegate_to: localhost
-  become: false
-  when:
-    - not ansible_check_mode
-    - (_named_entries | int) > 0
-    - cfopull_tls_set is skipped
-    - cfopull_tls.status | default(0) == 200
-    - (cfopull_tls.json.result.value | default('')) != 'strict'
-    - not (_zone_escape | bool)
-
-# Mode ILLISIBLE (jeton sans « Zone → Zone Settings → Read », HTTP 401/403/404) : même refus pour un nom `cloudflare_named`. Ne pas
-# pouvoir lire le mode n'est pas la preuve qu'il est `strict` : le déploiement ne doit pas poser un vhost OAuth/MCP public sur une
-# hypothèse. Mêmes règles que le refus ci-dessus (échappatoire `cfopull_allow_non_strict_tls`, jamais en `--check`, jamais de lecture
-# du `.json` d'une tâche sautée : `cfopull_tls_set is skipped` est testé AVANT d'aller lire `cfopull_tls.status`). `cloudflare_front`
-# seul : l'avertissement d'avant, octet pour octet.
-- name: Refuse a Cloudflare-served name while the TLS mode of the zone cannot be read
-  vars:
-    _named_entries: "{{ cfopull_strict_entries.get(cfopull_zone_name, 0) }}"
-    _zone_escape: >-
-      {%- set allowed = cfopull_allow_non_strict_tls | default(false) -%}
-      {{ (cfopull_zone_name in allowed) if (allowed is sequence and allowed is not string and allowed is not mapping) else (allowed | bool) }}
-  ansible.builtin.assert:
-    that: false
-    fail_msg: >-
-      Mode TLS de {{ cfopull_zone_name }} ILLISIBLE (HTTP {{ cfopull_tls.status | default('?') }}) : le jeton `cloudflare_token` n'a pas la
-      permission « Zone → Zone Settings → Read/Edit » sur {{ cfopull_zone_name }}. « Full (strict) » est EXIGÉ pour un nom `cloudflare_named` et
-      ne peut pas être vérifié. Deux remèdes : (1) ajouter « Zone → Zone Settings → Read » (ou « Edit », pour que
-      `-e cfopull_enforce_tls_strict=true` pose `strict`) au jeton, puis rejouer ; (2) assumer explicitement l'absence de contrôle avec
-      `-e cfopull_allow_non_strict_tls=true` (toutes les zones) ou `-e '{"cfopull_allow_non_strict_tls": ["{{ cfopull_zone_name }}"]}'`
-      (cette zone seulement), après avoir vérifié à la main SSL/TLS → Overview → Full (strict).
-      Les noms sont activés chez Cloudflare mais aucun vhost n'est encore posé sur les proxies.
-    quiet: true
-  delegate_to: localhost
-  become: false
-  when:
-    - not ansible_check_mode
-    - (_named_entries | int) > 0
-    - cfopull_tls_set is skipped
-    - cfopull_tls.status | default(0) != 200
-    - not (_zone_escape | bool)
 
 # Témoin d'activation, LOCAL (`keys/*` est gitignoré : jamais versionné, propre à ce poste de contrôle). Écrit seulement ici, une fois
 # TOUT prouvé : noms `active` chez Cloudflare (attente ci-dessus), mode TLS de la zone accepté. Il porte l'empreinte de l'autorité :

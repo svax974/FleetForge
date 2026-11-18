@@ -59,11 +59,49 @@ cfopull_zone_of: >-
   {%- endfor -%}
   {{ ns.out }}
 
-# Noms d'hôte à activer, par zone : { zone: [noms] } (zones SANS nom absentes : elles ne sont ni lues ni touchées chez Cloudflare), dans
+# Entrée VISÉE par un déploiement d'application (`deploy-webapp.yml`, donc `deploy-fleetforge.yml` et `deploy-agenthub.yml`) : son nom d'inventaire.
+# Vide (défaut, et `deploy-cloudflare-origin-pull.yml`) : tout le parc, comme avant. Posé, il RESTREINT l'activation aux zones de ses propres noms
+# (`-back` de `cloudflare_front`, `proxy_hostname` de `cloudflare_named`, noms de `cloudflare_origin_pull` : `cfopull_target_zones`) : déployer la
+# passerelle n'appelle ni ne dépend de la zone d'une AUTRE entrée (tradekong.app lisible par le jeton et en strict). Sur une seule zone, rien ne change
+# (tous les noms de la zone, comme avant). L'activation complète de TOUTES les zones reste le travail de `deploy-cloudflare-origin-pull.yml`.
+cfopull_target: ""
+
+# Noms de l'entrée visée (`cfopull_target`) et zones de ces noms.
+cfopull_target_names: >-
+  {%- set ns = namespace(out=[]) -%}
+  {%- if cfopull_target != '' and cfopull_target in groups['all'] -%}
+  {%- set e = hostvars[cfopull_target] -%}
+  {%- if e.cloudflare_front | default(false) | bool -%}
+  {%- set ns.out = ns.out + [(cfopull_target | lower | replace('_', '-')) ~ '-back.' ~ domain_name] -%}
+  {%- endif -%}
+  {%- if (e.cloudflare_named | default(false) | bool) and e.proxy_hostname is defined -%}
+  {%- set ns.out = ns.out + [e.proxy_hostname] -%}
+  {%- endif -%}
+  {%- if e.cloudflare_origin_pull is defined -%}
+  {%- if e.proxy_hostname is defined and e.proxy_hostname != 'proxy.' ~ domain_name -%}
+  {%- set ns.out = ns.out + [e.proxy_hostname] -%}
+  {%- endif -%}
+  {%- set aliases = e.cloudflare_origin_pull_aliases | default([], true) -%}
+  {%- if aliases is sequence and aliases is not string and aliases is not mapping -%}
+  {%- set ns.out = ns.out + aliases -%}
+  {%- endif -%}
+  {%- endif -%}
+  {%- endif -%}
+  {{ ns.out }}
+
+cfopull_target_zones: >-
+  {%- set ns = namespace(out=[]) -%}
+  {%- for n in cfopull_target_names if n is string and cfopull_zone_of.get(n, '') != '' and cfopull_zone_of.get(n) not in ns.out -%}
+  {%- set ns.out = ns.out + [cfopull_zone_of.get(n)] -%}
+  {%- endfor -%}
+  {{ ns.out }}
+
+# Noms d'hôte à activer, par zone : { zone: [noms] } (zones SANS nom absentes : elles ne sont ni lues ni touchées chez Cloudflare ; avec `cfopull_target`,
+# seulement les zones de l'entrée visée), dans
 # l'ordre de `cfopull_zones` puis de `cfopull_hostnames`. Un nom sans zone n'y figure pas : `cfopull_unzoned_hostnames`.
 cfopull_hostnames_by_zone: >-
   {%- set ns = namespace(out={}) -%}
-  {%- for z in cfopull_zones -%}
+  {%- for z in cfopull_zones if cfopull_target == '' or z in cfopull_target_zones -%}
   {%- set mine = namespace(l=[]) -%}
   {%- for n in cfopull_hostnames if cfopull_zone_of.get(n, '') == z -%}
   {%- set mine.l = mine.l + [n] -%}
@@ -135,9 +173,10 @@ cfopull_enforce_tls_strict: false
 # ou réglage manuel). Un mode ILLISIBLE (jeton sans « Zone → Zone Settings → Read ») bloque de même : on ne pose pas un vhost public sur
 # une hypothèse (message : la zone, la permission manquante et les deux remèdes). Le refus s'applique ZONE PAR ZONE.
 # Échappatoire explicite aux deux refus, jamais par défaut :
-#   • `true` : toutes les zones (comportement historique, aussi sous la forme de la chaîne `true` passée par `-e`) ;
+#   • `true` : toutes les zones (comportement historique : le booléen `true` ou la chaîne `true` / `True` passée par `-e`, RIEN d'autre :
+#     `yes`, `on`, `1`, `false`… n'ouvrent rien) ;
 #   • une LISTE de zones (`["tradekong.app"]`, `-e '{"cfopull_allow_non_strict_tls": ["tradekong.app"]}'`) : ces zones seulement, les
-#     autres gardent le refus. Toute autre valeur (`false`, une chaîne autre que `true`, un dictionnaire) n'ouvre rien.
+#     autres gardent le refus. Toute autre valeur (`false`, une chaîne autre que `true`, un entier, un dictionnaire) n'ouvre rien.
 # Aucun effet sur une zone sans entrée `cloudflare_named` ni `cloudflare_origin_pull` (le front Pages garde son avertissement).
 cfopull_allow_non_strict_tls: false
 
