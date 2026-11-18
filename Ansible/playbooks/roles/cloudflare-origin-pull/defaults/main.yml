@@ -15,9 +15,12 @@ cfopull_api: "https://api.cloudflare.com/client/v4"
 #     (front sur Pages ; même dérivation que `cfpages_api_domain`, cloudflare-pages-setup) ;
 #   • le nom PUBLIC (`proxy_hostname`, ex. `ffg.<domaine>`, jamais `-back`) de CHAQUE
 #     entrée `cloudflare_named: true` (nom proxifié, front en conteneur).
-# Ce sont les seuls noms dont le vhost inclut `_cloudflare_front.inc` et dont
-# `_access.inc` exige le certificat en mode public. Une entrée sans l'un ni l'autre
-# attribut n'est jamais listée : son vhost ne vérifie rien.
+#   • chaque nom de `cfopull_aop` en mode `observe` ou `enforce` : vhost écrit à la main sur
+#     `_cloudflare_realip.inc` (papanglabs : back-prod, back-preprod, backindicators-prod), opté par
+#     `cloudflare_origin_pull` sur l'entrée qui porte le nom (`proxy_hostname`, `cloudflare_origin_pull_aliases`).
+# Ce sont les seuls noms dont le vhost inclut `_cloudflare_front.inc` ou `_cloudflare_realip.inc` en mode AOP et dont
+# `_access.inc` exige le certificat en mode public. Une entrée sans aucun de ces attributs
+# n'est jamais listée : son vhost ne vérifie rien.
 cfopull_hostnames: >-
   {%- set pages = groups['all'] | map('extract', hostvars)
      | selectattr('cloudflare_front', 'defined') | selectattr('cloudflare_front')
@@ -28,7 +31,34 @@ cfopull_hostnames: >-
         and hostvars[h].proxy_hostname not in ns.named -%}
   {%- set ns.named = ns.named + [hostvars[h].proxy_hostname] -%}
   {%- endfor -%}
-  {{ pages + ns.named }}
+  {%- set aop = cfopull_aop | dict2items | selectattr('value', 'in', ['observe', 'enforce']) | map(attribute='key')
+     | reject('in', pages + ns.named) | list -%}
+  {{ pages + ns.named + aop }}
+
+# Authenticated Origin Pulls des vhosts écrits à la main sur `_cloudflare_realip.inc` : { nom public: mode }. Une entrée l'opte par
+# `cloudflare_origin_pull: observe | enforce` pour son `proxy_hostname` ET pour chaque nom de `cloudflare_origin_pull_aliases` (un nom
+# servi sans entrée propre : backindicators-prod). Le `proxy_hostname` hérité du parc (`proxy.<domaine>`) n'est jamais un nom d'entrée.
+#   observe : Cloudflare présente le certificat, nginx le vérifie et le journalise, rien n'est refusé de plus ;
+#   enforce : en plus le vhost refuse (403) une socket Cloudflare sans certificat — posé seulement si l'activation chez Cloudflare est
+#             PROUVÉE (tasks/proof.yml : témoin local écrit à la fin de tasks/cloudflare.yml).
+# FERMÉ : toute valeur autre que observe/enforce vaut `invalid` ; deux entrées en désaccord sur un même nom valent `conflict` ; les deux
+# sont refusées (tasks/cloudflare.yml, tasks/proof.yml) avant tout appel à Cloudflare ou tout gabarit. Vide : comportement d'avant.
+# MÊME calcul que `proxy_update_aop` (rôle proxy-update : ses defaults ne sont pas chargés ici ; un test les compare).
+cfopull_aop: >-
+  {%- set ns = namespace(out={}) -%}
+  {%- for h in groups['all'] | sort if hostvars[h].cloudflare_origin_pull is defined -%}
+  {%- set e = hostvars[h] -%}
+  {%- set mode = e.cloudflare_origin_pull if (e.cloudflare_origin_pull is string and e.cloudflare_origin_pull in ['observe', 'enforce']) else 'invalid' -%}
+  {%- set own = [e.proxy_hostname] if (e.proxy_hostname is defined and e.proxy_hostname != 'proxy.' ~ domain_name) else [] -%}
+  {%- set aliases = e.cloudflare_origin_pull_aliases | default([], true) -%}
+  {%- set names = own + (aliases if (aliases is sequence and aliases is not string and aliases is not mapping) else ['?aliases-' ~ h]) -%}
+  {%- for n in (names if names | length > 0 else ['?entry-' ~ h]) -%}
+  {%- set key = (n | string) if (n is string and n | length > 0 and not n.startswith('?')) else ('?name-' ~ h) -%}
+  {%- set seen = ns.out.get(key) -%}
+  {%- set _ = ns.out.update({key: (mode if (seen is none or seen == mode) else 'conflict') if key[0] != '?' else 'invalid'}) -%}
+  {%- endfor -%}
+  {%- endfor -%}
+  {{ ns.out }}
 
 # Mode TLS de la zone (« Full (strict) » exigé : Cloudflare joint l'origine en HTTPS et vérifie son certificat). Lu après l'activation
 # des noms ; un autre mode ou une lecture refusée (jeton sans « Zone Settings : Read ») est SIGNALÉ, jamais bloquant. `true` : le

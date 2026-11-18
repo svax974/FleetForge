@@ -19,6 +19,16 @@
 # `proxy_update_restore_pending` (une restauration est en cours : la sauvegarde est alors CONSERVÉE, c'est la seule copie).
 # Le répertoire de sauvegarde (clés et htpasswd, créé par root dans /tmp) est supprimé dans `always`, sauf restauration
 # inachevée.
+# Authenticated Origin Pulls des vhosts écrits à la main (`cloudflare_origin_pull`, papanglabs) : déclaration valide, et `enforce` seulement
+# si l'activation chez Cloudflare est prouvée — refusé ICI, avant la sauvegarde et le vidage de /etc/nginx (un refus ne passe jamais par
+# la restauration). Le même contrôle, rejoué par nginx.yml, couvre `deploy-one-site` et `deploy-webapp-site`. Aucune entrée ne déclare
+# l'attribut : `proxy_update_cloudflare_edge` ne s'en occupe pas, rien ne change.
+- name: Check the Authenticated Origin Pulls declarations before touching /etc/nginx
+  ansible.builtin.include_role:
+    name: cloudflare-origin-pull
+    tasks_from: proof
+  when: proxy_update_cloudflare_edge | bool
+
 - name: Resynchronise the nginx tree, restoring the previous one when a check fails
   block:
     - name: Start from no backup and no restoration pending

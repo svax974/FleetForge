@@ -70,6 +70,12 @@ Sous-commandes, chacune code 1 avec la liste des écarts :
       refuse (403) une socket d'une plage Cloudflare sans certificat vérifié (`geo` + `map` exacts, mêmes plages que
       `set_real_ip_from`, garde `if ($cf_untrusted_…)`) et envoie `Cloudflare-CDN-Cache-Control: no-store`. Un vhost qui
       ne lit pas CF-Connecting-IP n'a rien à contrôler ; une location FERMÉE (`deny all;` sans aucun `allow`) n'exige rien.
+      Troisième forme, les vhosts écrits à la main sur `_cloudflare_realip.inc` (papanglabs : back-prod, back-preprod,
+      backindicators-prod ; filtre de SOCKET sans `deny all;`) : une location gardée par `if ($cf_untrusted_…) { return 403; }`
+      (mode `cloudflare_origin_pull: enforce`) est contrôlée comme une location privée (`geo` + `map` exacts, mêmes plages que
+      `set_real_ip_from`) SANS l'exigence de no-store ; la seule location ouverte admise est `/api/v1/inline-image/` (liste
+      blanche exacte, `limit_req` obligatoire). Le rendu du mode `observe` n'est PAS protecteur (il vérifie et journalise, ne
+      refuse rien de plus) : `location /` y est signalée ouverte, à dessein.
       Pas de liste blanche de locations publiques ici (c'est `--public`). S'ajoute aux autres contrôles de `vhost`
       (liste nommée, `--public`), ne les remplace pas ; seul, il n'exige pas de location à liste nommée. Rien ne le lance au
       déploiement : à jouer à la main sur le rendu d'un vhost qui lit CF-Connecting-IP.
@@ -1243,12 +1249,21 @@ def check_public(where, text):
 CF_MAP_BODY = 'default 1; "~^0:" 0; "1:SUCCESS" 0;'
 # Et rien d'une location privée ne doit être mis en cache par l'edge (le front sert ses statiques `public, immutable`).
 CF_NO_STORE = 'add_header Cloudflare-CDN-Cache-Control "no-store" always;'
+# Location « gardée par la socket » (API publique derrière Cloudflare, vhost écrit à la main sur `_cloudflare_realip.inc` en mode
+# `enforce`) : ni `deny all;` ni test de `$ssl_client_verify` (les appelants directs, VPN et whitelist n'ont pas de certificat), mais la
+# garde `$cf_untrusted_…` — vérifiée contre le `geo` + `map` exacts comme pour une location privée, sans l'exigence de no-store.
+SOCKET_GUARD = re.compile(r"if \(\$cf_untrusted_[A-Za-z0-9_]+\) \{ return 403; \}")
+# Locations qu'un tel vhost laisse OUVERTES volontairement (liste blanche exacte, avec `limit_req` obligatoire) : l'image publique d'un
+# e-mail est jointe par le client mail du destinataire, sans certificat ni compte. Toute autre location sans garde est refusée.
+CF_OPEN_LOCATIONS = ("/api/v1/inline-image/",)
 
 
-def _check_untrusted_socket(where, text, outside, private_blocks, ordered=True):
+def _check_untrusted_socket(where, text, outside, private_blocks, ordered=True, no_store=True):
     """`ordered=False` (`--cloudflare-edge`) : la garde n'a pas à PRÉCÉDER le premier `allow` du texte, seulement à exister dans la
     location — le `return` d'un `if` est lu en phase rewrite, avant la phase d'accès (`allow`/`deny`), quel que soit l'ordre
-    du texte (agenthub.conf pose un `allow` du pont Docker avant l'include de `_access.inc`)."""
+    du texte (agenthub.conf pose un `allow` du pont Docker avant l'include de `_access.inc`).
+    `no_store=False` : locations « gardées par la socket » (API publique derrière Cloudflare, `_cloudflare_realip.inc`) — la politique
+    de cache de l'edge n'est pas celle d'un objet privé et n'est pas imposée ici."""
     errors = []
     geo = re.search(r"\bgeo\s+\$realip_remote_addr\s+\$(cf_socket_[A-Za-z0-9_]+)\s*\{([^{}]*)\}", text)
     mapping = re.search(r'\bmap\s+"\$(cf_socket_[A-Za-z0-9_]+):\$ssl_client_verify"\s+\$(cf_untrusted_[A-Za-z0-9_]+)\s*\{([^{}]*)\}', text)
@@ -1269,7 +1284,7 @@ def _check_untrusted_socket(where, text, outside, private_blocks, ordered=True):
     guard = f"if (${mapping.group(2)}) {{ return 403; }}"
     for head, body in private_blocks:
         code = _code(body)
-        if CF_NO_STORE not in code:
+        if no_store and CF_NO_STORE not in code:
             errors.append(f"{where} : location {head} : `{CF_NO_STORE}` absent (l'edge pourrait mettre en cache un objet privé)")
         cut = min([i for i in (code.find("allow "), code.find("deny all;")) if i >= 0], default=-1)
         if guard not in code or (ordered and code.index(guard) > cut):
@@ -1292,20 +1307,29 @@ def check_cloudflare_edge(where, text):
             errors.append(f"{where} : `{directive}` absent du server {{}} (le certificat client de Cloudflare n'est pas vérifié)")
     if not re.search(r"ssl_client_certificate\s+\S+;", outside):
         errors.append(f"{where} : `ssl_client_certificate` absent du server {{}}")
-    private, open_locations = [], []
+    private, guarded, open_locations = [], [], []
     for head, body in _blocks_with_heads(text):
         code = _code(body)
         if "deny all;" in code and not re.search(r"(^|[\s;{}])allow\s", code):
             continue  # fermée (mode inconnu, `restricted-linked` sans serveur) : personne n'y entre, ni garde ni no-store à exiger
         if "deny all;" in code:
             private.append((head, body))
-        elif "if ($ssl_client_verify != SUCCESS) {" not in code or "return 403;" not in code.split("if ($ssl_client_verify != SUCCESS) {", 1)[1].split("}", 1)[0]:
+        elif SOCKET_GUARD.search(code):
+            guarded.append((head, body))  # gardée par la socket (`_cloudflare_realip.inc`, mode enforce)
+        elif "if ($ssl_client_verify != SUCCESS) {" in code and "return 403;" in code.split("if ($ssl_client_verify != SUCCESS) {", 1)[1].split("}", 1)[0]:
+            continue  # publique, certificat client exigé
+        elif head in CF_OPEN_LOCATIONS and "limit_req zone=" in code:
+            continue  # ouverte VOLONTAIREMENT (liste blanche exacte) et limitée en débit
+        else:
             open_locations.append(head)
     for head in open_locations:
-        errors.append(f"{where} : location {head} : ni privée (`deny all;`) ni protégée par le certificat client (`if ($ssl_client_verify != SUCCESS) {{ return 403; }}`) : "
+        errors.append(f"{where} : location {head} : ni privée (`deny all;`) ni protégée par le certificat client (`if ($ssl_client_verify != SUCCESS) {{ return 403; }}`) "
+                      "ni par la garde de socket (`if ($cf_untrusted_…) { return 403; }`, mode `enforce` de `_cloudflare_realip.inc`) : "
                       "n'importe quel client Cloudflare l'atteint")
     if private:
         errors += _check_untrusted_socket(where, text, outside, private, ordered=False)
+    if guarded:
+        errors += _check_untrusted_socket(where, text, outside, guarded, ordered=False, no_store=False)
     return errors
 
 

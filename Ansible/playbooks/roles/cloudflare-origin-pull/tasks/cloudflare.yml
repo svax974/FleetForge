@@ -11,6 +11,23 @@
   delegate_to: localhost
   become: false
 
+# `cloudflare_origin_pull` : seules les valeurs `observe` et `enforce` existent (cfopull_aop, defaults), et deux entrées ne se
+# contredisent pas sur un même nom. Refusé AVANT tout appel à Cloudflare : une faute de frappe ne doit pas laisser croire qu'un nom
+# est protégé (le vhost, lui, refuse aussi de se rendre, mais personne ne l'aurait encore posé).
+- name: Fail early on an invalid or contradictory Authenticated Origin Pulls declaration
+  ansible.builtin.assert:
+    that: cfopull_aop | dict2items | rejectattr('value', 'in', ['observe', 'enforce']) | list | length == 0
+    fail_msg: >-
+      `cloudflare_origin_pull` invalide ou contradictoire : {{ cfopull_aop | dict2items | rejectattr('value', 'in', ['observe', 'enforce'])
+      | map(attribute='key') | map('regex_replace', '[^A-Za-z0-9_.?-]', '#') | list | join(', ') }}. Valeurs admises : `observe`
+      (le certificat est vérifié et journalisé, rien n'est refusé) ou `enforce` (une socket Cloudflare sans certificat est refusée) ;
+      toutes les entrées qui portent un même nom (`proxy_hostname`, `cloudflare_origin_pull_aliases`) doivent déclarer la même.
+      Rien n'a été changé chez Cloudflare ni sur les proxies.
+    quiet: true
+  delegate_to: localhost
+  become: false
+  run_once: true
+
 # ── Autorité + certificat client, générés UNE fois sur le poste de contrôle ──
 # `creates:` rend chaque étape idempotente : relancer le playbook ne régénère
 # rien. Pour renouveler, supprimer le répertoire puis rejouer — l'ancien
@@ -361,12 +378,15 @@
 # lisible et non strict : BLOQUANT. Mode illisible (jeton sans « Zone Settings : Read ») : BLOQUANT aussi, tâche suivante.
 # `cfopull_allow_non_strict_tls: true` : échappatoire explicite (décision du propriétaire, faux par défaut). Pas pour `cloudflare_front`
 # seul : l'avertissement d'avant, inchangé. Jamais en `--check` : tout le côté Cloudflare y est sauté (tasks/main.yml), ses résultats
-# n'ont ni `status` ni `json`.
+# n'ont ni `status` ni `json`. MÊME exigence pour un nom `cloudflare_origin_pull` (observe comme enforce : la décision du propriétaire est
+# « zone en strict » pour les API publiques papanglabs) : il compte dans `_named_entries`, et le témoin d'activation de la fin de ce
+# fichier n'est écrit qu'APRÈS ces refus, donc jamais pour un nom dont la zone n'est pas en strict (sauf échappatoire explicite).
 - name: Refuse a Cloudflare-served name while the TLS mode of the zone is readable and not strict
   vars:
     _named_entries: >-
-      {{ groups['all'] | map('extract', hostvars) | selectattr('cloudflare_named', 'defined') | map(attribute='cloudflare_named')
-         | map('bool') | select | list | length }}
+      {{ (groups['all'] | map('extract', hostvars) | selectattr('cloudflare_named', 'defined') | map(attribute='cloudflare_named')
+         | map('bool') | select | list | length)
+         + (cfopull_aop | dict2items | selectattr('value', 'in', ['observe', 'enforce']) | list | length) }}
   ansible.builtin.assert:
     that: false
     fail_msg: >-
@@ -394,8 +414,9 @@
 - name: Refuse a Cloudflare-served name while the TLS mode of the zone cannot be read
   vars:
     _named_entries: >-
-      {{ groups['all'] | map('extract', hostvars) | selectattr('cloudflare_named', 'defined') | map(attribute='cloudflare_named')
-         | map('bool') | select | list | length }}
+      {{ (groups['all'] | map('extract', hostvars) | selectattr('cloudflare_named', 'defined') | map(attribute='cloudflare_named')
+         | map('bool') | select | list | length)
+         + (cfopull_aop | dict2items | selectattr('value', 'in', ['observe', 'enforce']) | list | length) }}
   ansible.builtin.assert:
     that: false
     fail_msg: >-
@@ -415,12 +436,47 @@
     - cfopull_tls.status | default(0) != 200
     - not (cfopull_allow_non_strict_tls | default(false) | bool)
 
+# Témoin d'activation, LOCAL (`keys/*` est gitignoré : jamais versionné, propre à ce poste de contrôle). Écrit seulement ici, une fois
+# TOUT prouvé : noms `active` chez Cloudflare (attente ci-dessus), mode TLS de la zone accepté. Il porte l'empreinte de l'autorité :
+# un renouvellement (nouvelle autorité) l'invalide jusqu'à ce que ce fichier de tâches soit rejoué. `proof.yml` le lit avant tout gabarit
+# et refuse un vhost en mode `enforce` sans lui : exiger le certificat avant l'activation répondrait 403 à TOUT le trafic légitime.
+# Il prouve que l'activation a EU LIEU depuis ce poste, pas qu'elle l'est encore (un réglage retiré à la main ensuite) : le journal
+# `cf-aop-<nom>.log` des vhosts (`verify=SUCCESS`) est la preuve sur le trafic réel.
+- name: Hash the origin-pull authority the proxies will trust
+  ansible.builtin.stat:
+    path: "{{ cfopull_dir }}/ca.pem"
+    checksum_algorithm: sha256
+  register: cfopull_ca_stat
+  delegate_to: localhost
+  become: false
+
+- name: Create the activation witness directory
+  ansible.builtin.file:
+    path: "{{ cfopull_dir }}/active"
+    state: directory
+    mode: "0700"
+  delegate_to: localhost
+  become: false
+
+- name: Record that Cloudflare presents the certificate on every hostname
+  ansible.builtin.copy:
+    dest: "{{ cfopull_dir }}/active/{{ item }}.json"
+    mode: "0600"
+    content: >-
+      {{ {'hostname': item, 'zone': cfopull_zone, 'ca_sha256': cfopull_ca_stat.stat.checksum,
+          'tls_mode': ('strict' if cfopull_tls_set is not skipped
+                       else ((cfopull_tls.json.result.value | default('unreadable')) if cfopull_tls.status == 200 else 'unreadable'))
+         } | to_nice_json }}
+  loop: "{{ cfopull_hostnames }}"
+  delegate_to: localhost
+  become: false
+
 - name: Say what is left to do
   ansible.builtin.debug:
     msg: >-
       Cloudflare présente désormais le certificat client de {{ cfopull_zone }} sur
       {{ cfopull_hostnames | join(', ') }}. Reste à déployer l'autorité sur les
       proxies (play suivant) puis le vhost qui la vérifie. Autorité :
-      {{ cfopull_dir }}/ca.pem.
+      {{ cfopull_dir }}/ca.pem. Témoins d'activation : {{ cfopull_dir }}/active/.
   delegate_to: localhost
   become: false

@@ -44,10 +44,38 @@ proxy_update_backup_items: "{{ proxy_update_subdirs + ['certs', 'auth', 'nginx.c
 # `cloudflare_named: true` (nom proxifié, front en conteneur) : son vhost inclut `_cloudflare_front.inc`, qui référence l'autorité
 # des Authenticated Origin Pulls (`nginx -t` refuse un fichier absent). Les trois points d'entrée (resync.yml, deploy-one-site.yml,
 # deploy-webapp-site.yml) la déposent AVANT tout gabarit quand c'est vrai. Aucune entrée : rien n'est déposé.
+#
+# Troisième déclencheur : une entrée qui porte `cloudflare_origin_pull` (VALEUR quelconque : une valeur invalide doit passer par
+# proof.yml, qui la refuse avant tout gabarit). C'est le cas des vhosts papanglabs écrits à la main sur `_cloudflare_realip.inc`.
 proxy_update_cloudflare_edge: >-
   {{ (groups['all'] | map('extract', hostvars) | selectattr('cloudflare_front', 'defined') | selectattr('cloudflare_front') | list | length > 0)
      or (groups['all'] | map('extract', hostvars) | selectattr('cloudflare_named', 'defined') | map(attribute='cloudflare_named')
-         | map('bool') | select | list | length > 0) }}
+         | map('bool') | select | list | length > 0)
+     or (groups['all'] | map('extract', hostvars) | selectattr('cloudflare_origin_pull', 'defined') | list | length > 0) }}
+
+# Authenticated Origin Pulls des vhosts écrits à la main sur `_cloudflare_realip.inc` (papanglabs : back-prod, back-preprod,
+# backindicators-prod) : { nom public: mode }, lu par ce partiel. Une entrée l'opte par `cloudflare_origin_pull: observe | enforce`
+# pour son `proxy_hostname` ET pour chaque nom de `cloudflare_origin_pull_aliases` (un nom servi sans entrée propre :
+# backindicators-prod). Le `proxy_hostname` hérité du parc (`proxy.<domaine>`, le front lui-même) n'est jamais un nom d'entrée.
+# Vide (aucune entrée ne le déclare) : tout rend comme avant, octet pour octet. FERMÉ : toute valeur autre que observe/enforce
+# vaut `invalid`, deux entrées en désaccord sur un même nom valent `conflict` — le partiel refuse alors de rendre le vhost de ce nom
+# et proof.yml refuse avant tout gabarit. MÊME calcul que `cfopull_aop` (rôle cloudflare-origin-pull : ses defaults ne sont pas
+# chargés ici ; un test les compare).
+proxy_update_aop: >-
+  {%- set ns = namespace(out={}) -%}
+  {%- for h in groups['all'] | sort if hostvars[h].cloudflare_origin_pull is defined -%}
+  {%- set e = hostvars[h] -%}
+  {%- set mode = e.cloudflare_origin_pull if (e.cloudflare_origin_pull is string and e.cloudflare_origin_pull in ['observe', 'enforce']) else 'invalid' -%}
+  {%- set own = [e.proxy_hostname] if (e.proxy_hostname is defined and e.proxy_hostname != 'proxy.' ~ domain_name) else [] -%}
+  {%- set aliases = e.cloudflare_origin_pull_aliases | default([], true) -%}
+  {%- set names = own + (aliases if (aliases is sequence and aliases is not string and aliases is not mapping) else ['?aliases-' ~ h]) -%}
+  {%- for n in (names if names | length > 0 else ['?entry-' ~ h]) -%}
+  {%- set key = (n | string) if (n is string and n | length > 0 and not n.startswith('?')) else ('?name-' ~ h) -%}
+  {%- set seen = ns.out.get(key) -%}
+  {%- set _ = ns.out.update({key: (mode if (seen is none or seen == mode) else 'conflict') if key[0] != '?' else 'invalid'}) -%}
+  {%- endfor -%}
+  {%- endfor -%}
+  {{ ns.out }}
 
 # Jeton d'écriture Prometheus (remote-write relayé par les proxies). Seul
 # papanglabs en a l'usage : `true` dans group_vars/papanglabs.yml.

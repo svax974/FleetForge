@@ -729,7 +729,8 @@ sémantique documentée, et par `nginx -t` au déploiement).
   = exactement les `set_real_ip_from`), le `map` exact et la garde dans chaque location privée. Noms de variables propres au vhost
   (deux noms proxifiés ne redéfinissent pas la même). **`cloudflare_front` (agenthub…) : corrigé par le même
   mécanisme que `cloudflare_named`** (le `geo` + `map` ci-dessus ; `_cloudflare_realip.inc`, utilisé par les vhosts papanglabs
-  `back-prod`/`back-preprod`/`backindicators-prod`, est un AUTRE partiel, un filtre de socket sur les plages Cloudflare, non concerné) : `geo` + `map`
+  `back-prod`/`back-preprod`/`backindicators-prod`, est un AUTRE partiel, un filtre de socket sur les plages Cloudflare : même
+  faiblesse, traitée par le même mécanisme mais à part, voir « Authenticated Origin Pulls des vhosts papanglabs » en fin de document) : `geo` + `map`
   extraits dans le partiel `_cloudflare_untrusted.inc`, inclus par `webapp.conf.j2` pour les deux attributs ET par un
   vhost écrit à la main (agenthub.conf : `cf_slug` + `cf_untrusted_var` puis include, avant le `server {}`) ; les locations PRIVÉES
   (agenthub : `hooks/`, appelant Alertmanager) refusent la socket Cloudflare sans certificat et envoient `no-store`, les publiques gardent leur
@@ -742,7 +743,7 @@ sémantique documentée, et par `nginx -t` au déploiement).
   Contrôle MANUEL en plus : `webapp_hardening_check.py vhost <rendu> --cloudflare-edge`, qui s'ajoute aux autres contrôles de `vhost` sans les
   remplacer (certificat client vérifié au `server {}`, locations sans `deny all;` protégées par le certificat, locations privées gardées +
   `no-store`, `geo`/`map` exacts ; une location fermée, sans `allow`, n'exige rien). RIEN ne le lance au déploiement (il refuserait aujourd'hui
-  openclaw.conf, ctdapi.conf et les vhosts papanglabs ci-dessous) : un test de rendu le joue sur le vhost générique et sur un vhost écrit à la
+  openclaw.conf, ctdapi.conf et les vhosts papanglabs tant qu'ils ne sont pas en `cloudflare_origin_pull: enforce`) : un test de rendu le joue sur le vhost générique et sur un vhost écrit à la
   main de même forme. Limite nginx, NON vérifiée (aucun nginx ici) : le nom de variable `cf_untrusted_<slug>` doit rester sous la taille par
   défaut `variables_hash_bucket_size` (64) ; le plafond probable est d'environ 46 caractères (celui d'agenthub fait 35).
   **Non corrigés** (autre mécanisme, décision du propriétaire) : `openclaw.conf` (web3c, papanglabs) et `ctdapi.conf` lisent
@@ -781,3 +782,97 @@ sémantique documentée, et par `nginx -t` au déploiement).
   Sans antislash la question ne se pose plus. Prouvé pour chaque site : équivalence exhaustive avec `\Z` (chaînes jusqu'à 3 caractères
   et valeurs réalistes, dont `x\n`), balayage Jinja sous `-W error` de tous les gabarits de ces rôles, refus de `x\n` joué par Ansible dans le contexte réel,
   mutation `(?!(?s:.))` → `$` site par site tuée (`EndOfStringGrammarTests`).
+
+### Authenticated Origin Pulls des vhosts papanglabs (`cloudflare_origin_pull`, 18/11/2026)
+
+**Faiblesse.** `back-prod`, `back-preprod` et `backindicators-prod` (`parcs/papanglabs/nginx/sites-enabled/`, écrits à la main sur
+`_cloudflare_realip.inc`) restaurent l'IP cliente depuis `CF-Connecting-IP` quand la SOCKET vient d'une plage Cloudflare, et refusent
+toute socket qui n'est ni Cloudflare, ni VPN, ni whitelist. Ces plages sont communes à TOUS les clients Cloudflare : n'importe quel compte
+y ouvre une socket et forge l'en-tête, donc les limiteurs par IP (celui de l'application, `limit_req`) voient une adresse choisie par
+l'appelant (évasion, ou adresse d'une victime). Décision du propriétaire : exiger, sur toute socket d'une plage Cloudflare qui atteint ces
+trois vhosts, le certificat client de NOTRE zone (Authenticated Origin Pulls, autorité PROPRE au parc, jamais le certificat partagé).
+
+**Même mécanisme que `cloudflare_named`, pas un second.** Autorité, envoi à Cloudflare, activation par nom d'hôte, lecture du mode TLS,
+dépôt sur les proxies : rôle `cloudflare-origin-pull`, `deploy-cloudflare-origin-pull.yml`, `proxy-update` (dépôt avant tout gabarit).
+`$cf_untrusted_<slug>` (`geo` + `map` FERMÉ par défaut de `_cloudflare_untrusted.inc`) est réutilisé tel quel : `_cloudflare_realip.inc`
+l'inclut dans sa partie `geo` ; sa partie `guard` ajoute `if ($cf_untrusted_<slug>) { return 403; }` APRÈS le filtre d'adresse d'avant.
+VPN, whitelist et appelants directs (sockets hors plage Cloudflare) ne sont pas concernés (`cf_socket=0`).
+
+**Déclaration (inventaire, par ENTRÉE, comme `cloudflare_front`/`cloudflare_named`).** `cloudflare_origin_pull: observe | enforce` sur
+l'entrée qui porte le nom public : activé chez Cloudflare pour son `proxy_hostname` et pour chaque nom de
+`cloudflare_origin_pull_aliases` (un nom servi sans entrée propre : `backindicators-prod`, mêmes destinations que `back-prod`). Valeur
+quelconque autre, entrées d'un même nom en désaccord, entrée sans nom propre : `invalid`/`conflict`, refusé AVANT tout appel à Cloudflare
+(`cloudflare.yml`), avant tout gabarit (`proof.yml`) et au rendu du vhost de ce nom (`proxy_update_aop`, `cfopull_aop`, même calcul dans
+les defaults des deux rôles, un test les compare). Absente partout : TOUT rend comme avant, octet pour octet (prouvé, voir plus bas).
+- `observe` : Cloudflare présente le certificat, le `server {}` le VÉRIFIE (`ssl_verify_client optional_no_ca` : un certificat présenté qui
+  ne chaîne pas à notre autorité, par exemple le certificat PARTAGÉ de Cloudflare si les origin pulls de zone sont actifs, n'est jamais
+  rejeté — `optional` répondrait 400 à TOUT le trafic) et un journal dédié `/var/log/nginx/cf-aop-<slug>.log` (en plus de `access.log`,
+  répété car un `access_log` de `server {}` remplace celui de `http {}`) l'enregistre. RIEN n'est refusé de plus.
+- `enforce` : `ssl_verify_client optional` et `guard` refuse (403) la socket Cloudflare sans certificat vérifié. Le rendu n'est posé
+  que si l'activation chez Cloudflare est PROUVÉE (voir ci-dessous).
+
+**Sûreté du déploiement (le risque : exiger le certificat AVANT l'activation répond 403 à TOUT le trafic légitime des API publiques).**
+1. Deux états, dans cet ordre : `observe` d'abord (aucune exigence, le journal prouve que Cloudflare présente le certificat), `enforce`
+   ensuite, par un second changement d'une ligne par entrée.
+2. `cloudflare.yml` écrit en TOUT DERNIER (après l'attente de l'état `active` de chaque nom et après les refus liés au mode TLS) un
+   témoin local `keys/cloudflare-origin-pull/active/<nom>.json` (nom, zone, mode TLS accepté, empreinte SHA-256 de `ca.pem` ; `keys/*` est
+   gitignoré). `proof.yml`, joué par `proxy-update` AVANT tout gabarit et tout dépôt (`resync.yml` en tout premier, avant sa sauvegarde et le vidage de
+   /etc/nginx : un refus ne passe jamais par la restauration ; puis `nginx.yml` pour `deploy-one-site`,
+   `deploy-webapp-site`), REFUSE une entrée en `enforce` dont le témoin manque ou porte l'empreinte d'une autre autorité (renouvellement,
+   autre poste de contrôle). Le témoin prouve que l'activation a EU LIEU depuis ce poste, pas qu'elle l'est encore : c'est le journal qui
+   prouve le présent.
+3. Mode TLS de la zone : un nom `cloudflare_origin_pull` (observe comme enforce) compte comme un nom `cloudflare_named` pour le refus
+   BLOQUANT « lisible et non `strict` » / « illisible » de `cloudflare.yml` (`-e cfopull_enforce_tls_strict=true` ou réglage manuel ;
+   échappatoire explicite `cfopull_allow_non_strict_tls`). Ce refus précède le témoin : pas de preuve pour une zone non `strict`.
+4. Fermé : dès qu'UNE entrée déclare l'attribut, un vhost qui inclut `_cloudflare_realip.inc` sans avoir posé `cf_slug` et `cf_aop_name`
+   ne se rend pas (variable non définie dont le nom dit quoi ajouter) ; `deploy-webapp.yml` joue aussi le côté Cloudflare pour une entrée
+   qui déclare l'attribut (préproduction papanglabs).
+
+**Ordre exact (papanglabs).** (0) jeton `cloudflare_token` de la zone : « Zone → SSL and Certificates → Edit » et « Zone → Zone Settings →
+Read » (« Edit » si `-e cfopull_enforce_tls_strict=true`) ; vérifier que les noms proxifiés de la zone ont tous un certificat d'origine
+valide AVANT de passer la zone en `strict` (réglage de TOUTE la zone) ; vérifier que les origin pulls GLOBAUX de la zone (certificat
+partagé de Cloudflare) sont désactivés. (1) appliquer le correctif privé (inventaire en `observe`, trois vhosts). (2)
+`./play.sh papanglabs deploy-cloudflare-origin-pull.yml` : Cloudflare d'abord, puis l'autorité sur proxy1 et proxy2 ; aucun vhost ne la
+référence encore. (3) `./play.sh papanglabs update-proxy.yml --limit proxy1` (canari, `--limit` : sans lui les deux proxies sont
+resynchronisés), puis `--limit proxy2` après lecture du journal. (4) lire les signaux ci-dessous sur du trafic réel. (5) `enforce`,
+entrée `back1-preprod` d'abord, puis `back1-prod` ET `back2-prod` ensemble (un désaccord est refusé), chaque fois `update-proxy.yml
+--limit proxy1` puis `proxy2`. Retour arrière : repasser l'attribut en `observe` (ou le retirer) et rejouer `update-proxy.yml`.
+
+**Observabilité (la règle « testing as it comes »).** Format du journal (champs `clé=valeur`, `$uri` sans chaîne de requête, aucun
+en-tête d'authentification) : `$time_iso8601 host socket claimed client cf_socket verify untrusted mode status method uri ray ua`.
+Comptage : `grep -oE 'cf_socket=[01] verify="[^"]*" untrusted=[01]' /var/log/nginx/cf-aop-back_prod.log | sort | uniq -c | sort -rn`.
+- `cf_socket=1 verify="SUCCESS" untrusted=0` : Cloudflare présente le certificat de NOTRE zone et notre autorité le valide. C'est le
+  signal « go » : l'activation, le dépôt et la chaîne fonctionnent sur le trafic réel, pour chacun des trois noms.
+- `cf_socket=1 verify="NONE" untrusted=1` : exactement ce que `enforce` refuserait. Avant l'activation, tout le trafic légitime ; après,
+  ne doivent rester que des sondes ou des adresses forgées (`claimed` ≠ `socket` ne prouve rien : lire `ua`, `uri`, `status`). Aucun client
+  légitime ne doit y figurer avant de passer en `enforce`.
+- `verify="FAILED:…"` : un certificat qui ne chaîne pas à notre autorité (origin pulls de zone actifs avec le certificat partagé, mauvaise
+  autorité déposée) : NE PAS passer en `enforce`.
+- `cf_socket=0` : VPN, whitelist, appelants directs, jamais refusés par le certificat.
+- Après `enforce` : `mode=enforce untrusted=1 status=403` = tentatives refusées ; `status=400` avec `verify="FAILED:…"` = rejet de `optional`.
+
+**`inline-image/` : laissé tel quel.** Cette location est « volontairement HORS du filtre VPN/whitelist/Cloudflare » : image d'en-tête ou de
+pied d'un sujet, image d'une communication (`@Public()`), jointe par le client mail du destinataire (relais d'images de Gmail/Outlook) ou
+l'aperçu de l'administrateur (iframe sandbox), donc par Cloudflare (le nom est proxifié), plus d'éventuels appelants directs. Exiger le
+certificat des seules sockets d'une plage Cloudflare (`cf_part = 'cert'`, la garde `$cf_untrusted_<slug>` sans le filtre d'adresse) ne
+casserait AUCUN appelant direct (`cf_socket=0`) et fermerait l'évasion de `limit_req` par adresse forgée sur ce point d'entrée — mais
+rien ici ne prouve qu'aucun appelant légitime n'arrive par un edge Cloudflare SANS notre certificat, et un refus coupe les images de tous
+les e-mails envoyés, sans alerte. Défaut retenu : inchangée. Le journal couvre cette location (`uri="/api/v1/inline-image/…"`) : si, après
+une période d'observation, aucune ligne `cf_socket=1 verify!="SUCCESS"` n'est légitime, inclure dans la location le partiel avec
+`cf_part = 'cert'` (le contrôleur `--cloudflare-edge` accepte les deux formes ; il n'admet la location ouverte que si elle est limitée en
+débit et s'appelle exactement `/api/v1/inline-image/`).
+
+**Contrôle manuel.** `webapp_hardening_check.py vhost <rendu> --cloudflare-edge` (rien ne le lance au déploiement) reconnaît une troisième
+forme de location, gardée par la socket (`if ($cf_untrusted_…) { return 403; }`, contrôlée comme une location privée sans l'exigence de
+`no-store`). Il PASSE sur les trois vhosts rendus en `enforce` et signale le rendu `observe` (qui ne protège pas encore) : `ssl_verify_client
+optional` absent et `location /` ouverte, à dessein.
+
+**Non vérifié (aucun nginx, aucun hôte, aucun appel Cloudflare ici).** Syntaxe vue par nginx lui-même (`nginx -t`) ; comportement de
+`ssl_verify_client` par nom (SNI) sur des proxies qui servent d'autres vhosts sur 443 ; l'état `active` de Cloudflare ; les droits du jeton
+papanglabs ; le certificat d'origine de TOUS les noms proxifiés de la zone avant le passage en `strict` ; la rotation par logrotate de
+`/var/log/nginx/cf-aop-*.log` ; qui appelle réellement `inline-image/`. L'autorité (`keys/cloudflare-origin-pull/`) est UNIQUE pour tous les
+parcs de ce poste : papanglabs réutilise celle de web3c ; la renouveler touche les deux (surcharger `cfopull_dir` dans
+`group_vars/papanglabs.yml` donne une autorité propre au parc). Constat hors périmètre (rendus locaux, non vérifié sur les proxies) : une resynchronisation COMPLÈTE rend aussi un vhost
+générique `webapp-back-preprod.<zone>.conf` (l'entrée `back1-preprod` est de la famille `webapp` et son vhost écrit à la main ne porte pas
+le nom de son projet) : son bloc 443 est ignoré par nginx (nom en conflit, le fichier écrit à la main est lu d'abord), son bloc 80
+redirige vers https.

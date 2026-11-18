@@ -15,6 +15,15 @@
 # playbook ne sert qu'au premier passage sans redéployer l'application, au
 # renouvellement et à l'ajout d'une entrée.
 #
+# Vhosts écrits à la main sur `_cloudflare_realip.inc` (papanglabs : back-prod, back-preprod, backindicators-prod) : l'entrée qui porte le
+# nom déclare `cloudflare_origin_pull: observe | enforce` (+ `cloudflare_origin_pull_aliases`) et ses noms entrent dans `cfopull_hostnames`.
+# C'est CE playbook qui doit passer AVANT `update-proxy.yml` : il active le certificat chez Cloudflare (attend `active`, lit le mode TLS de
+# la zone) puis écrit le témoin local `keys/cloudflare-origin-pull/active/<nom>.json` que `enforce` exige (sinon `update-proxy.yml` refuse
+# de poser le vhost : exiger le certificat avant l'activation répondrait 403 à tout le trafic légitime). Ordre complet et signaux à lire
+# (journal `cf-aop-<slug>.log`) : docs/etude-passerelle-sur-webapp.md, « Authenticated Origin Pulls des vhosts papanglabs ».
+#   ./play.sh papanglabs deploy-cloudflare-origin-pull.yml        # Cloudflare, puis l'autorité sur chaque proxy
+#   ./play.sh papanglabs update-proxy.yml --limit proxy1          # observe (puis proxy2), ensuite enforce
+#
 # Côté vhost, rien à écrire : `_cloudflare_front.inc` pose `ssl_verify_client
 # optional`, `_access.inc` exige le certificat dans les locations en mode public.
 # Les `deploy-<app>.yml` concernés (modèle : deploy-agenthub.yml) jouent eux-mêmes

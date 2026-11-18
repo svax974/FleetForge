@@ -1,0 +1,57 @@
+---
+# FleetForge
+#
+# Copyright © 2025 Stéphane VAXELAIRE
+# SPDX-License-Identifier: MIT — see LICENSE
+#
+# Contrôles des Authenticated Origin Pulls des vhosts écrits à la main sur `_cloudflare_realip.inc` (`cloudflare_origin_pull`, papanglabs),
+# joués AVANT que quoi que ce soit soit écrit sur un proxy : au tout début de la resynchronisation complète (proxy-update/tasks/resync.yml,
+# avant la sauvegarde et le vidage de /etc/nginx : un refus ne passe jamais par la restauration) et, par nginx.yml, avant tout gabarit
+# de `deploy-one-site`, `deploy-webapp-site` et du play « côté proxies » de deploy-cloudflare-origin-pull.yml.
+# Aucune entrée ne déclare `cloudflare_origin_pull` : `cfopull_aop` est vide, aucune de ces tâches ne fait rien.
+- name: Fail on an invalid or contradictory Authenticated Origin Pulls declaration
+  ansible.builtin.assert:
+    that: cfopull_aop | dict2items | rejectattr('value', 'in', ['observe', 'enforce']) | list | length == 0
+    fail_msg: >-
+      `cloudflare_origin_pull` invalide ou contradictoire : {{ cfopull_aop | dict2items | rejectattr('value', 'in', ['observe', 'enforce'])
+      | map(attribute='key') | map('regex_replace', '[^A-Za-z0-9_.?-]', '#') | list | join(', ') }}. Valeurs admises : `observe` ou
+      `enforce` ; toutes les entrées qui portent un même nom (`proxy_hostname`, `cloudflare_origin_pull_aliases`) doivent déclarer la même.
+      Aucun gabarit n'a été posé.
+    quiet: true
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+# `enforce` = le vhost refuse (403) une socket Cloudflare sans certificat client vérifié : TOUT le trafic légitime reçoit 403 tant que
+# Cloudflare ne présente pas le certificat sur ce nom (constat attendu si on pose le vhost AVANT l'activation). La preuve est le
+# témoin local que `cloudflare.yml` n'écrit qu'après l'activation constatée `active` et le mode TLS de la zone accepté, au nom de CETTE
+# autorité (empreinte de ca.pem) : absent ou périmé (autorité renouvelée, autre poste de contrôle), le dépôt est refusé ICI, avant
+# tout gabarit. `observe` n'exige rien : rien n'est refusé, le journal dit ce que Cloudflare présente.
+- name: Hash the origin-pull authority that enforced names must have been activated with
+  ansible.builtin.stat:
+    path: "{{ cfopull_dir }}/ca.pem"
+    checksum_algorithm: sha256
+  register: cfopull_ca_stat
+  delegate_to: localhost
+  become: false
+  run_once: true
+  when: cfopull_aop | dict2items | selectattr('value', 'equalto', 'enforce') | list | length > 0
+
+- name: Fail when Cloudflare has not been proven to present the certificate on an enforced name
+  ansible.builtin.assert:
+    that: >-
+      (cfopull_dir ~ '/active/' ~ item ~ '.json') is file
+      and ((lookup('ansible.builtin.file', cfopull_dir ~ '/active/' ~ item ~ '.json') | from_json).ca_sha256 | default(''))
+      == (cfopull_ca_stat.stat.checksum | default('no-authority'))
+    fail_msg: >-
+      {{ item }} est en `cloudflare_origin_pull: enforce` mais l'activation des Authenticated Origin Pulls chez Cloudflare n'est pas
+      PROUVÉE depuis ce poste ({{ cfopull_dir }}/active/{{ item }}.json absent, ou écrit pour une autre autorité). Poser ce vhost
+      maintenant répondrait 403 à TOUT le trafic légitime de ce nom. Jouer d'abord
+      `./play.sh <parc> deploy-cloudflare-origin-pull.yml` (active le certificat sur les noms, attend `active`, lit le mode TLS de la
+      zone, écrit le témoin), contrôler le journal `cf-aop-*.log` en mode `observe` (verify=SUCCESS), puis rejouer. Aucun gabarit
+      n'a été posé.
+    quiet: true
+  loop: "{{ cfopull_aop | dict2items | selectattr('value', 'equalto', 'enforce') | map(attribute='key') | list }}"
+  delegate_to: localhost
+  become: false
+  run_once: true

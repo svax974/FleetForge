@@ -184,6 +184,8 @@
 # (autorité propre au parc générée une fois, envoyée à Cloudflare, activée sur les noms de `cfopull_hostnames`, mode TLS de la zone
 # lu). Le DNS (CNAME proxifié pour `cloudflare_named`) est posé par le play précédent (webapp-install) ; l'autorité est déposée
 # sur les proxies par proxy-update avant tout gabarit. Un seul passage : rien à jouer à la main.
+# `cloudflare_origin_pull` (vhost écrit à la main sur `_cloudflare_realip.inc`, papanglabs : back-preprod) joue le même play : il active
+# les noms de `cfopull_hostnames` (TOUS ceux du parc, pas seulement ceux de l'entrée) et écrit le témoin d'activation que `enforce` exige.
 - name: Authenticated Origin Pulls côté Cloudflare
   hosts: webapp_target
   gather_facts: false
@@ -196,7 +198,7 @@
       vars:
         cfopull_part: cloudflare
       when:
-        - (cloudflare_front | default(false) | bool) or (cloudflare_named | default(false) | bool)
+        - (cloudflare_front | default(false) | bool) or (cloudflare_named | default(false) | bool) or (cloudflare_origin_pull is defined)
         - (webapp_proxy | default('internal')) != 'external'
 
 # Reload seul, jamais les autres vhosts. Un vhost écrit à la main `<projet>.conf` (parcs/<parc>/nginx/sites-enabled/) a
