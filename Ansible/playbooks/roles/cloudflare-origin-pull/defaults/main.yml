@@ -164,9 +164,10 @@ cfopull_aop: >-
 
 # Mode TLS de CHAQUE zone dont un nom est activé (« Full (strict) » exigé : Cloudflare joint l'origine en HTTPS et vérifie son
 # certificat). Lu après l'activation des noms de la zone ; un autre mode ou une lecture refusée (jeton sans « Zone Settings : Read ») est
-# SIGNALÉ, jamais bloquant pour une zone sans nom qui l'exige. `true` : le mode est posé à `strict` (réglage de TOUTE la zone, jeton
-# « Zone Settings : Edit »), seulement quand il ne l'est pas déjà — décision explicite, faux par défaut.
-cfopull_enforce_tls_strict: false
+# SIGNALÉ, jamais bloquant pour une zone sans nom qui l'exige. `true` (DÉFAUT) : le mode est posé à `strict` pour toute zone qui porte un
+# nom qui l'exige (réglage de TOUTE la zone, jeton « Zone Settings : Edit »), seulement quand il ne l'est pas déjà — c'est une conséquence
+# du parc, pas une option à passer à la main. `false` : jamais posé ; le refus ci-dessous s'applique alors (échappatoire ci-dessous).
+cfopull_enforce_tls_strict: true
 
 # Un nom `cloudflare_named` (OAuth/MCP publics) ou `cloudflare_origin_pull` EXIGE le mode `strict` de SA zone : un autre mode (« Full »)
 # laisse le segment Cloudflare → origine sans authentification et BLOQUE le déploiement (message : la zone, `cfopull_enforce_tls_strict`

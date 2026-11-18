@@ -95,7 +95,8 @@
   ansible.builtin.debug:
     msg: >-
       {{ 'Mode TLS de ' ~ cfopull_zone_name ~ ' : strict (attendu).'
-         if ((cfopull_enforce_tls_strict | bool) or (cfopull_tls.status == 200 and cfopull_tls.json.result.value | default('') == 'strict'))
+         if (((cfopull_enforce_tls_strict | bool) and ((cfopull_strict_entries | default({})).get(cfopull_zone_name, 0) | int > 0))
+             or (cfopull_tls.status == 200 and cfopull_tls.json.result.value | default('') == 'strict'))
          else ('ATTENTION — mode TLS de ' ~ cfopull_zone_name ~ ' : '
                ~ ((cfopull_tls.json.result.value | default('illisible')) if cfopull_tls.status == 200
                   else 'illisible (HTTP ' ~ cfopull_tls.status ~ ', jeton sans « Zone Settings : Read »)')
@@ -127,9 +128,11 @@
     that: false
     fail_msg: >-
       Mode TLS de {{ cfopull_zone_name }} : « {{ cfopull_tls.json.result.value | default('?') }} » — « Full (strict) » est EXIGÉ pour un nom
-      `cloudflare_named` : sans lui Cloudflare ne vérifie pas le certificat de l'origine (segment Cloudflare → proxy non authentifié).
-      Rejouer avec `-e cfopull_enforce_tls_strict=true` (pose `strict` pour TOUTE la zone, jeton « Zone Settings : Edit ») ou le poser à
-      la main (SSL/TLS → Overview → Full (strict)). Échappatoire explicite, à assumer : `-e cfopull_allow_non_strict_tls=true` (toutes les zones) ou
+      `cloudflare_named` ou `cloudflare_origin_pull` : sans lui Cloudflare ne vérifie pas le certificat de l'origine (segment Cloudflare → proxy
+      non authentifié). Ce passage le POSE normalement tout seul (`cfopull_enforce_tls_strict` vaut `true` par défaut : `strict` pour TOUTE la
+      zone, jeton « Zone Settings : Edit ») ; s'il ne l'a pas fait, c'est que l'opt-out `-e cfopull_enforce_tls_strict=false` a été demandé.
+      Rejouer sans cet opt-out, ou poser le mode à la main (SSL/TLS → Overview → Full (strict)).
+      Échappatoire explicite, à assumer : `-e cfopull_allow_non_strict_tls=true` (toutes les zones) ou
       `-e '{"cfopull_allow_non_strict_tls": ["{{ cfopull_zone_name }}"]}'` (cette zone seulement).
       Rien n'a été changé chez Cloudflare ni sur les proxies (aucune zone n'est activée tant que toutes ne sont pas lisibles et acceptées).
     quiet: true
@@ -163,8 +166,10 @@
     fail_msg: >-
       Mode TLS de {{ cfopull_zone_name }} ILLISIBLE (HTTP {{ cfopull_tls.status | default('?') }}) : le jeton `cloudflare_token` n'a pas la
       permission « Zone → Zone Settings → Read/Edit » sur {{ cfopull_zone_name }}. « Full (strict) » est EXIGÉ pour un nom `cloudflare_named` et
-      ne peut pas être vérifié. Deux remèdes : (1) ajouter « Zone → Zone Settings → Read » (ou « Edit », pour que
-      `-e cfopull_enforce_tls_strict=true` pose `strict`) au jeton, puis rejouer ; (2) assumer explicitement l'absence de contrôle avec
+      ne peut pas être vérifié. Ce passage le pose normalement tout seul (`cfopull_enforce_tls_strict` vaut `true` par défaut) ; s'il ne
+      l'a pas fait, c'est que l'opt-out `-e cfopull_enforce_tls_strict=false` a été demandé. Deux remèdes : (1) ajouter
+      « Zone → Zone Settings → Read » (ou « Edit », pour que le passage pose `strict` tout seul) au jeton, puis rejouer ; (2) assumer
+      explicitement l'absence de contrôle avec
       `-e cfopull_allow_non_strict_tls=true` (toutes les zones) ou `-e '{"cfopull_allow_non_strict_tls": ["{{ cfopull_zone_name }}"]}'`
       (cette zone seulement), après avoir vérifié à la main SSL/TLS → Overview → Full (strict).
       Rien n'a été changé chez Cloudflare ni sur les proxies (aucune zone n'est activée tant que toutes ne sont pas lisibles et acceptées).

@@ -1239,7 +1239,8 @@ class CloudflareNamedPlaybookTests(unittest.TestCase):
             document = yaml.safe_dump([{
                 "hosts": "localhost", "gather_facts": False,
                 "vars": {"cfopull_api": f"http://127.0.0.1:{server.server_port}", "cfopull_zone_ids": {"example.test": "z"}, "cfopull_zone_id": "z", "cfopull_token": "FAKE",
-                         "cfopull_zone_name": "example.test", "cfopull_enforce_tls_strict": enforce},
+                         "cfopull_zone_name": "example.test", "cfopull_enforce_tls_strict": enforce,
+                         "cfopull_strict_entries": {"example.test": 1}},
                 "tasks": tasks}])
             return run_local_play(document)
         code, out = play()
@@ -1290,7 +1291,7 @@ class CloudflareNamedPlaybookTests(unittest.TestCase):
             with self.subTest(mode=mode):
                 code, out = play(named, mode)
                 self.assertNotEqual(code, 0, out[-1500:])
-                self.assertIn("cfopull_enforce_tls_strict=true", out)
+                self.assertIn("cfopull_enforce_tls_strict=false", out)
                 self.assertIn("cfopull_allow_non_strict_tls=true", out)
                 self.assertIn("ATTENTION", out, "l'avertissement reste affiché avant le refus")
         code, out = play(named, "strict")
@@ -1312,7 +1313,7 @@ class CloudflareNamedPlaybookTests(unittest.TestCase):
                 code, out = play(named, deny=denied)
                 self.assertNotEqual(code, 0, out[-1500:])
                 self.assertIn("Zone → Zone Settings → Read/Edit", out)
-                self.assertIn("cfopull_enforce_tls_strict=true", out)
+                self.assertIn("cfopull_enforce_tls_strict=false", out)
                 self.assertIn("cfopull_allow_non_strict_tls=true", out)
                 self.assertIn("ILLISIBLE", out)
                 self.assertIn("illisible", out, "l'avertissement d'avant reste affiché")
@@ -7491,6 +7492,7 @@ class AopRolloutSafetyTests(unittest.TestCase):
             shutil.rmtree(os.path.join(self.keys, "active"), ignore_errors=True)
             settings = {"cfopull_api": f"http://127.0.0.1:{server.server_port}", "cfopull_zone_ids": {"example.test": "z"}, "cfopull_zone_id": "z", "cfopull_token": "FAKE",
                         "cfopull_zone_name": "example.test", "cfopull_enforce_tls_strict": False,
+                        "cfopull_strict_entries": {"example.test": 1},
                         "cfopull_zone_hostnames": ["back-prod.example.test"]}
             settings.update(variables)
             return self.run_tasks(tasks, inventory, **settings)
@@ -7499,7 +7501,7 @@ class AopRolloutSafetyTests(unittest.TestCase):
             for mode in ("flexible", "full", "off"):
                 code, out = play(inventory, mode)
                 self.assertNotEqual(code, 0, f"{mode} : " + out[-1500:])
-                self.assertIn("cfopull_enforce_tls_strict=true", out)
+                self.assertIn("cfopull_enforce_tls_strict=false", out)
                 self.assertFalse(os.path.exists(os.path.join(self.keys, "active")), "aucun témoin quand le mode TLS est refusé")
             for denied in (True, 401, 404):
                 code, out = play(inventory, deny=denied)
@@ -8442,14 +8444,15 @@ class MultiZoneCloudflareTests(unittest.TestCase):
         api, code, out = play({"example.test": "strict", "other.example": "strict"})
         self.assertEqual(code, 0, out[-1500:])
         # Une zone non strict bloque, nommée, dans la PREMIÈRE PASSE (lecture seule) : RIEN n'est écrit, ni sur elle ni sur la zone d'avant (strict).
-        api, code, out = play({"example.test": "strict", "other.example": "flexible"})
+        # Refus quand le passage ne pose PAS `strict` (opt-out explicite) : le défaut le pose désormais tout seul.
+        api, code, out = play({"example.test": "strict", "other.example": "flexible"}, cfopull_enforce_tls_strict=False)
         self.assertNotEqual(code, 0)
         self.assertIn("Mode TLS de other.example : « flexible »", out)
         self.assertNotIn("Mode TLS de example.test : « ", out)
         self.assertEqual(api.writes(), [], "une zone refusée plus loin ne laisse AUCUNE zone écrite (ni certificat, ni rattachement)")
         self.assertEqual(self.witnesses(), [])
         self.assertIn("Rien n'a été changé chez Cloudflare", out)
-        api, code, out = play({"example.test": "flexible", "other.example": "strict"})
+        api, code, out = play({"example.test": "flexible", "other.example": "strict"}, cfopull_enforce_tls_strict=False)
         self.assertNotEqual(code, 0)
         self.assertIn("Mode TLS de example.test : « flexible »", out)
         self.assertEqual((api.writes(), self.witnesses()), ([], []))
@@ -8461,7 +8464,8 @@ class MultiZoneCloudflareTests(unittest.TestCase):
                                      ("false", False, False), ("chaîne false", "false", False), ("dictionnaire", {"other.example": True}, False),
                                      ("liste vide", [], False)):
             with self.subTest(escape=label):
-                api, code, out = play({"example.test": "strict", "other.example": "flexible"}, cfopull_allow_non_strict_tls=value)
+                api, code, out = play({"example.test": "strict", "other.example": "flexible"},
+                                      cfopull_enforce_tls_strict=False, cfopull_allow_non_strict_tls=value)
                 self.assertEqual(code == 0, passes, out[-1500:])
                 if not passes:
                     self.assertEqual(api.writes(), [], "refusé : rien d'écrit")
@@ -8474,6 +8478,22 @@ class MultiZoneCloudflareTests(unittest.TestCase):
         self.assertEqual([c for c in api.calls if c[0] == "PATCH"], [("PATCH", "ssl", "other.example", "strict")])
         self.assertEqual(self.witness("back.other.example")["tls_mode"], "strict")
 
+    def test_a_zone_that_demands_strict_is_switched_automatically(self):
+        """Défaut : le passage POSE `strict` sur la zone qui porte un nom qui l'exige — plus rien à passer à la main."""
+        shutil.rmtree(os.path.join(self.keys, "active"), ignore_errors=True)
+        api = FakeCloudflare(self, self.ALL, {"example.test": "strict", "other.example": "flexible"})
+        code, out = self.run_role(api, zone_inventory())
+        self.assertEqual(code, 0, out.replace("\\n", " ")[-1500:])
+        self.assertEqual([c for c in api.calls if c[0] == "PATCH"], [("PATCH", "ssl", "other.example", "strict")],
+                         "seule la zone qui ne l'était pas est écrite")
+        self.assertEqual(self.witness("back.other.example")["tls_mode"], "strict")
+        # Déjà `strict` : aucune écriture. Et l'opt-out explicite rend le refus (test suivant).
+        shutil.rmtree(os.path.join(self.keys, "active"), ignore_errors=True)
+        api = FakeCloudflare(self, self.ALL, {"example.test": "strict", "other.example": "strict"})
+        code, out = self.run_role(api, zone_inventory())
+        self.assertEqual(code, 0, out.replace("\\n", " ")[-1500:])
+        self.assertEqual([c for c in api.calls if c[0] == "PATCH"], [], "rien à poser : aucune écriture")
+
     def test_an_unreadable_tls_mode_blocks_only_its_own_zone_and_names_it(self):
         def play(**variables):
             shutil.rmtree(os.path.join(self.keys, "active"), ignore_errors=True)
@@ -8481,14 +8501,14 @@ class MultiZoneCloudflareTests(unittest.TestCase):
             api.deny_ssl.add("other.example")
             code, out = self.run_role(api, zone_inventory(), **variables)
             return code, out.replace("\\n", " "), api
-        code, out, api = play()
+        code, out, api = play(cfopull_enforce_tls_strict=False)
         self.assertNotEqual(code, 0)
         self.assertIn("Mode TLS de other.example ILLISIBLE", out)
         self.assertIn("Zone → Zone Settings → Read/Edit", out)
         self.assertEqual((api.writes(), self.witnesses()), ([], []), "refusé en lecture seule : aucune zone n'est écrite")
-        self.assertEqual(play(cfopull_allow_non_strict_tls=["other.example"])[0], 0)
-        self.assertNotEqual(play(cfopull_allow_non_strict_tls=["example.test"])[0], 0)
-        self.assertNotEqual(play(cfopull_allow_non_strict_tls="yes")[0], 0)
+        self.assertEqual(play(cfopull_enforce_tls_strict=False, cfopull_allow_non_strict_tls=["other.example"])[0], 0)
+        self.assertNotEqual(play(cfopull_enforce_tls_strict=False, cfopull_allow_non_strict_tls=["example.test"])[0], 0)
+        self.assertNotEqual(play(cfopull_enforce_tls_strict=False, cfopull_allow_non_strict_tls="yes")[0], 0)
 
     def test_a_zone_without_any_name_that_demands_strict_is_only_warned_about(self):
         # Zone principale en `flexible` mais SEULEMENT un nom de front Pages (avertissement, jamais bloquant) ; la zone des API est en strict.
