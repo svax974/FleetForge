@@ -55,7 +55,7 @@ Sous-commandes, chacune code 1 avec la liste des écarts :
       `--docker` : refait l'interpolation par `docker compose config` (aucun hôte contacté) et compare le résultat —
       sans Docker, ou en cas d'écart, le contrôle échoue (fermé).
 
-  vhost <rendu.conf> [--v6-min-prefix N] [--forbid <adresse>]… [--public] [--cloudflare-edge]
+  vhost <rendu.conf> [--v6-min-prefix N] [--forbid <adresse>]… [--public] [--cloudflare-edge] [--cloudflare-ranges <fichier>]
       Vhost RENDU : chaque bloc à liste NOMMÉE (marqueur `# named-access`, proxy-update/_named_access.inc) n'a que des
       `allow` d'IPv4 seules (ou /32) ou d'IPv6 de préfixe ≥ N (128 par défaut), aucune des adresses `--forbid` (VPN),
       puis `deny all` en dernier. Aucun bloc nommé : écart (sauf avec `--public`).
@@ -77,6 +77,15 @@ Sous-commandes, chacune code 1 avec la liste des écarts :
       blanche exacte, `limit_req` obligatoire, et les contrôles de `cf_part = 'inline'` : l'URI brute commence par
       `/api/v1/inline-image/`, aucun `%2f`/`%5c`/`%2e`/`..`/`//` avant le `?`, `limit_except GET HEAD { deny all; }`). Le rendu du mode `observe` n'est PAS protecteur (il vérifie et journalise, ne
       refuse rien de plus) : `location /` y est signalée ouverte, à dessein.
+      Quatrième forme, les vhosts écrits à la main qui GARDENT leur filtre d'adresse (`ctdapi.conf`, `ctdapi-back.conf`,
+      `tradekong-back.conf`, morceaux `certhttp`/`certserver`/`cert` de `_cloudflare_realip.inc`, reconnus à leur journal `cf-aop-…`) :
+      avec ou sans `real_ip_header CF-Connecting-IP` (sans : la socket est l'adresse cliente), une location à `allow`/`deny all` y est
+      contrôlée comme une location gardée par la socket (sans no-store) quand le vhost ne lit pas CF-Connecting-IP (API publique), comme une
+      location privée (no-store exigé) quand il le lit (front privé : ctdapi.conf). Un vhost sans `real_ip_header` est contrôlé dès qu'il porte une
+      trace de l'authentification (`$cf_untrusted_…`, `ssl_verify_client`, `ssl_client_certificate`) ; sans aucune trace il n'est pas
+      reconnu comme servi par Cloudflare (rien à contrôler). `--cloudflare-ranges <fichier>` (plages Cloudflare du parc, séparées par
+      espaces, virgules ou lignes, `#` commente) : le `geo` doit les contenir EXACTEMENT — seul moyen de voir une plage manquante sur un
+      vhost sans `set_real_ip_from`.
       Pas de liste blanche de locations publiques ici (c'est `--public`). S'ajoute aux autres contrôles de `vhost`
       (liste nommée, `--public`), ne les remplace pas ; seul, il n'exige pas de location à liste nommée. Rien ne le lance au
       déploiement : à jouer à la main sur le rendu d'un vhost qui lit CF-Connecting-IP.
@@ -1265,12 +1274,15 @@ CF_OPEN_PATH_CHECKS = ('if ($request_uri !~ "^/api/v1/inline-image/") { return 4
 LIMIT_EXCEPT = re.compile(r"limit_except [^{}]*\{[^{}]*\}")
 
 
-def _check_untrusted_socket(where, text, outside, private_blocks, ordered=True, no_store=True):
+def _check_untrusted_socket(where, text, outside, private_blocks, ordered=True, no_store=True, reads_ip=True, expected=None):
     """`ordered=False` (`--cloudflare-edge`) : la garde n'a pas à PRÉCÉDER le premier `allow` du texte, seulement à exister dans la
     location — le `return` d'un `if` est lu en phase rewrite, avant la phase d'accès (`allow`/`deny`), quel que soit l'ordre
     du texte (agenthub.conf pose un `allow` du pont Docker avant l'include de `_access.inc`).
     `no_store=False` : locations « gardées par la socket » (API publique derrière Cloudflare, `_cloudflare_realip.inc`) — la politique
-    de cache de l'edge n'est pas celle d'un objet privé et n'est pas imposée ici."""
+    de cache de l'edge n'est pas celle d'un objet privé et n'est pas imposée ici.
+    `reads_ip=False` : vhost SANS `real_ip_header CF-Connecting-IP;` (la socket est l'adresse cliente : ctdapi-back, tradekong-back) — pas de
+    `set_real_ip_from` à comparer ; `expected` (`--cloudflare-ranges`) : les plages EXACTES du parc, comparées au `geo` dans tous les cas
+    (sans elles, un vhost sans `real_ip` ne permet pas de savoir quelle plage manque au `geo`)."""
     errors = []
     geo = re.search(r"\bgeo\s+\$realip_remote_addr\s+\$(cf_socket_[A-Za-z0-9_]+)\s*\{([^{}]*)\}", text)
     mapping = re.search(r'\bmap\s+"\$(cf_socket_[A-Za-z0-9_]+):\$ssl_client_verify"\s+\$(cf_untrusted_[A-Za-z0-9_]+)\s*\{([^{}]*)\}', text)
@@ -1283,9 +1295,15 @@ def _check_untrusted_socket(where, text, outside, private_blocks, ordered=True, 
     ranges = {e.split()[0] for e in entries if e.endswith(" 1") and len(e.split()) == 2}
     if "default 0" not in entries or len(ranges) != len(entries) - 1:
         errors.append(f"{where} : le `geo` doit valoir `default 0;` puis `<plage> 1;` seulement")
-    declared = set(re.findall(r"set_real_ip_from\s+(\S+);", outside))
-    if not ranges or ranges != declared:
-        errors.append(f"{where} : les plages du `geo` ne sont pas exactement celles de `set_real_ip_from` (une plage de confiance hors du `geo` échapperait au contrôle)")
+    if reads_ip:
+        declared = set(re.findall(r"set_real_ip_from\s+(\S+);", outside))
+        if not ranges or ranges != declared:
+            errors.append(f"{where} : les plages du `geo` ne sont pas exactement celles de `set_real_ip_from` (une plage de confiance hors du `geo` échapperait au contrôle)")
+    elif not ranges:
+        errors.append(f"{where} : le `geo` ne contient aucune plage Cloudflare (aucune socket ne serait jamais jugée sans certificat)")
+    if expected is not None and ranges != expected:
+        errors.append(f"{where} : les plages du `geo` ne sont pas exactement les plages Cloudflare du parc données (`--cloudflare-ranges`) : "
+                      f"manquantes {sorted(expected - ranges)}, en trop {sorted(ranges - expected)}")
     if _code(mapping.group(3)) != CF_MAP_BODY:
         errors.append(f"{where} : le `map` doit être exactement `{CF_MAP_BODY}` (fermé par défaut)")
     guard = f"if (${mapping.group(2)}) {{ return 403; }}"
@@ -1299,15 +1317,25 @@ def _check_untrusted_socket(where, text, outside, private_blocks, ordered=True, 
     return errors
 
 
-def check_cloudflare_edge(where, text):
+def check_cloudflare_edge(where, text, expected=None):
     """Vhost RENDU qui lit l'adresse cliente dans CF-Connecting-IP (`cloudflare_front` ou `cloudflare_named`, vhost générique OU
     écrit à la main : agenthub.conf). N'importe quel client Cloudflare peut ouvrir une socket depuis une plage Cloudflare et forger cet
     en-tête : seul le certificat client de NOTRE zone (Authenticated Origin Pulls) prouve que la requête vient d'elle. Donc : le
     `server {}` le vérifie ; toute location SANS `deny all;` l'exige (403) ; toute location PRIVÉE refuse la socket Cloudflare sans
-    certificat (`geo` + `map` exacts, garde) et interdit le cache de l'edge. Sans `real_ip_header CF-Connecting-IP;`, rien à contrôler."""
+    certificat (`geo` + `map` exacts, garde) et interdit le cache de l'edge.
+    Aussi un vhost qui NE lit PAS CF-Connecting-IP mais porte des traces de l'authentification (`$cf_untrusted_…`, `ssl_verify_client`,
+    `ssl_client_certificate`) : un vhost à filtre de socket qui laisse entrer les plages Cloudflare (ctdapi-back, tradekong-back) — la
+    socket est alors l'adresse cliente, et c'est le certificat qui distingue NOTRE zone de tout autre client Cloudflare. Sans
+    aucune de ces traces (ni `real_ip_header`, ni garde, ni vérification), rien n'est reconnu comme servi par Cloudflare : rien à contrôler.
+    Vhost écrit à la main sur `_cloudflare_realip.inc` (reconnu à son journal `cf-aop-…`) SANS `real_ip_header` (API publique à filtre de
+    socket : ctdapi-back, tradekong-back) : une location à filtre d'adresse (`deny all;`) est contrôlée comme une location gardée par la
+    socket, sans l'exigence de no-store (le cache est la politique de l'application). AVEC `real_ip_header` (front privé : ctdapi.conf) elle
+    est PRIVÉE : no-store exigé comme pour une location privée générée."""
     outside = _code(_without_locations(text))
-    if "real_ip_header CF-Connecting-IP;" not in outside:
+    reads_ip = "real_ip_header CF-Connecting-IP;" in outside
+    if not reads_ip and not re.search(r"\$cf_untrusted_|\bssl_verify_client\b|\bssl_client_certificate\b", text):
         return []
+    hand_written = re.search(r"access_log\s+\S*cf-aop-", outside) is not None
     errors = []
     for directive in ("ssl_verify_client optional;",):
         if directive not in outside:
@@ -1327,7 +1355,9 @@ def check_cloudflare_edge(where, text):
         if "deny all;" in code and not re.search(r"(^|[\s;{}])allow\s", code):
             continue  # fermée (mode inconnu, `restricted-linked` sans serveur) : personne n'y entre, ni garde ni no-store à exiger
         if "deny all;" in code:
-            private.append((head, body))
+            # Public API (filtre de socket, pas de real_ip) : le cache est la politique de l'application. Front PRIVÉ (adresse remplacée par
+            # CF-Connecting-IP, puis filtre) : l'edge ne doit rien en conserver, comme pour une location privée générée.
+            (guarded if (hand_written and not reads_ip) else private).append((head, body))
         elif SOCKET_GUARD.search(code):
             guarded.append((head, body))  # gardée par la socket (`_cloudflare_realip.inc`, mode enforce)
         elif "if ($ssl_client_verify != SUCCESS) {" in code and "return 403;" in code.split("if ($ssl_client_verify != SUCCESS) {", 1)[1].split("}", 1)[0]:
@@ -1341,13 +1371,13 @@ def check_cloudflare_edge(where, text):
                       "ni par la garde de socket (`if ($cf_untrusted_…) { return 403; }`, mode `enforce` de `_cloudflare_realip.inc`) : "
                       "n'importe quel client Cloudflare l'atteint")
     if private:
-        errors += _check_untrusted_socket(where, text, outside, private, ordered=False)
+        errors += _check_untrusted_socket(where, text, outside, private, ordered=False, reads_ip=reads_ip, expected=expected)
     if guarded:
-        errors += _check_untrusted_socket(where, text, outside, guarded, ordered=False, no_store=False)
+        errors += _check_untrusted_socket(where, text, outside, guarded, ordered=False, no_store=False, reads_ip=reads_ip, expected=expected)
     return errors
 
 
-def check_vhost(path, v6_min_prefix=128, forbidden=(), public=False, cloudflare_edge=False):
+def check_vhost(path, v6_min_prefix=128, forbidden=(), public=False, cloudflare_edge=False, cloudflare_ranges=None):
     with open(path, encoding="utf-8") as f:
         text = f.read()
     blocks = named_blocks(text)
@@ -1359,7 +1389,7 @@ def check_vhost(path, v6_min_prefix=128, forbidden=(), public=False, cloudflare_
     if public:
         errors += check_public(path, text)
     if cloudflare_edge:  # EN PLUS des autres contrôles, jamais à leur place
-        errors += check_cloudflare_edge(path, text)
+        errors += check_cloudflare_edge(path, text, cloudflare_ranges)
     return errors
 
 
@@ -1510,8 +1540,12 @@ def main(argv):
         errors = check_compose(argv[1], hardened, _option_values(argv, "--allow-bind"), use_docker="--docker" in argv)
     elif len(argv) >= 2 and argv[0] == "vhost":
         v6 = int(argv[argv.index("--v6-min-prefix") + 1]) if "--v6-min-prefix" in argv else 128
+        ranges = None
+        for path in _option_values(argv, "--cloudflare-ranges"):
+            with open(path, encoding="utf-8") as f:
+                ranges = (ranges or set()) | {r for line in f for r in re.split(r"[\s,]+", line.split("#", 1)[0]) if r}
         errors = check_vhost(argv[1], v6, _option_values(argv, "--forbid"), public="--public" in argv,
-                             cloudflare_edge="--cloudflare-edge" in argv)
+                             cloudflare_edge="--cloudflare-edge" in argv, cloudflare_ranges=ranges)
     elif len(argv) >= 2 and argv[0] == "dedicated":
         errors = check_dedicated(argv[1], _listener_options(argv))
     else:

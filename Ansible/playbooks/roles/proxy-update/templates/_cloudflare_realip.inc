@@ -1,5 +1,6 @@
 {# ── IP client réelle derrière Cloudflare (nom « proxifié », nuage orange) ───
-   Fichier PARTIEL, jamais déployé seul (préfixe `_`). Quatre morceaux, un par
+   Fichier PARTIEL, jamais déployé seul (préfixe `_`). Quatre morceaux (plus deux pour un
+   vhost qui garde son propre filtre d'adresse, voir plus bas), un par
    contexte nginx, choisis par `cf_part` ; poser `cf_edge_var` (nom de variable
    nginx propre au vhost) avant chaque include :
 
@@ -68,6 +69,23 @@
    Marqueur `# cf-aop: <nom> <mode>` : posé dans le rendu de chaque vhost déclaré, relu par la resynchronisation complète
    (proxy-update/tasks/resync.yml) qui refuse un nom déclaré qu'AUCUN vhost rendu ne porte.
 
+   ── Vhost qui garde SON PROPRE filtre d'adresse (ctdapi.conf, ctdapi-back.conf, tradekong-back.conf) ─────────────────────────────
+   Deux morceaux de plus (`certhttp`, `certserver`), avec `cert`, pour un vhost qui ne veut AJOUTER que l'exigence du certificat client aux sockets d'une plage Cloudflare,
+   sans toucher à ses `allow`/`deny`, ni à sa façon de lire l'adresse cliente (avec ou sans `real_ip`, avec ou sans `real_ip_recursive`) :
+       {% set cf_slug = 'ctdapi_back' %}  {% set cf_aop_name = 'ctdapi-back.' ~ domain_name %}
+       {% set cf_part = 'certhttp' %}{% include '_cloudflare_realip.inc' %}     ← hors server {} : `geo` + `map` + journal
+       server {
+           {% set cf_part = 'certserver' %}{% include '_cloudflare_realip.inc' %}  ← server {} : ssl_client_certificate, ssl_verify_client
+           location / {
+               {% set cf_part = 'cert' %}{% include '_cloudflare_realip.inc' %}     ← garde `if ($cf_untrusted_<slug>) { return 403; }`
+               allow … ; deny all;                                                  ← filtre d'adresse du vhost, INCHANGÉ
+           }
+       }
+   `certhttp` et `certserver` sont EXACTEMENT les morceaux d'authentification de `geo` et de `realip` (mêmes octets), sans le filtre
+   d'adresse (`geo` d'edge) ni `set_real_ip_from` : un vhost sans `real_ip` garde sa socket comme adresse. `$realip_remote_addr` y vaut
+   l'adresse de la socket (nginx la renseigne même sans `set_real_ip_from`). Poser les trois include À LA COLONNE 0 : sans déclaration
+   pour ce nom ils ne rendent rien et leur ligne disparaît (`trim_blocks`), le vhost est alors rendu octet pour octet comme avant.
+
    FERMÉ : dès qu'UNE entrée du parc déclare `cloudflare_origin_pull`, un vhost qui inclut ce partiel DOIT avoir posé `cf_slug` ET
    `cf_aop_name` : le rendu échoue sinon (variable non définie, dont le nom dit quoi ajouter), au lieu de laisser un vhost sans
    la protection que l'inventaire déclare. Une valeur inconnue, ou deux entrées en désaccord sur un même nom, refusent aussi, de
@@ -91,10 +109,11 @@ geo $realip_remote_addr ${{ cf_edge_var }} {
     {{ ip }} 1;
 {% endfor %}
 }
-{% if _mode != '' %}
+{% endif %}
+{% if cf_part in ['geo', 'certhttp'] and _mode != '' %}
 # cf-aop: {{ cf_aop_name }} {{ _mode }}
 {% include '_cloudflare_untrusted.inc' %}{{ '\n' -}}
-# Journal dédié (en plus de access.log) : ce que nginx a lu du certificat client de CHAQUE requête de ce vhost, inline-image comprise.
+# Journal dédié (en plus de access.log) : ce que nginx a lu du certificat client de CHAQUE requête de ce vhost{{ ', inline-image comprise' if cf_part == 'geo' else '' }}.
 # `cf_socket=1` : socket d'une plage Cloudflare ; `verify` : $ssl_client_verify (SUCCESS, NONE, FAILED:…) ; `untrusted=1` : socket
 # Cloudflare SANS certificat vérifié, ce que `enforce` refuse (mode={{ _mode }}). `claimed` : CF-Connecting-IP tel que reçu (forgeable),
 # `client` : adresse retenue. Jamais la chaîne de requête ($uri), jamais d'en-tête d'authentification.
@@ -105,12 +124,13 @@ log_format cf_aop_{{ cf_slug }} '$time_iso8601 host=$host socket=$realip_remote_
     'untrusted=$cf_untrusted_{{ cf_slug }} mode={{ _mode }} status=$status method=$request_method client=$remote_addr '
     'claimed="$http_cf_connecting_ip" uri="$uri" ray="$http_cf_ray" ua="$http_user_agent"';
 {% endif %}
-{% elif cf_part == 'realip' %}
+{% if cf_part == 'realip' %}
 {% for ip in cloudflare_ips %}
   set_real_ip_from {{ ip }};
 {% endfor %}
   real_ip_header CF-Connecting-IP;
-{% if _mode != '' %}
+{% endif %}
+{% if cf_part in ['realip', 'certserver'] and _mode != '' %}
 {% if _mode == 'enforce' %}
   # Certificat client de NOTRE zone Cloudflare (Authenticated Origin Pulls, mode enforce) : vérifié ici, exigé par la garde du repli `/`.
 {% else %}
@@ -122,7 +142,7 @@ log_format cf_aop_{{ cf_slug }} '$time_iso8601 host=$host socket=$realip_remote_
   access_log /var/log/nginx/access.log;
   access_log /var/log/nginx/cf-aop-{{ cf_slug }}.log cf_aop_{{ cf_slug }};
 {% endif %}
-{% elif cf_part == 'guard' %}
+{% if cf_part == 'guard' %}
     if (${{ cf_edge_var }} = 0) {
         return 403;
     }
@@ -131,7 +151,8 @@ log_format cf_aop_{{ cf_slug }} '$time_iso8601 host=$host socket=$realip_remote_
         return 403;
     }
 {% endif %}
-{% elif cf_part == 'cert' %}
+{% endif %}
+{% if cf_part == 'cert' %}
 {% if _mode == 'enforce' %}
     if ($cf_untrusted_{{ cf_slug }}) {
         return 403;
