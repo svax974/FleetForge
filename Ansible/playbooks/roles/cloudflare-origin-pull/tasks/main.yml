@@ -1,5 +1,6 @@
 ---
-# Authenticated Origin Pulls PAR ZONE avec un certificat client PROPRE au parc.
+# Authenticated Origin Pulls PAR ZONE avec un certificat client PROPRE au parc (dossier `cfopull_dir`, surchargé par
+# `group_vars/<parc>.yml` : voir defaults/main.yml — le défaut est l'autorité de web3c).
 #
 # Pourquoi pas le certificat d'origine par défaut de Cloudflare : il est
 # commun à TOUS les clients Cloudflare — quiconque ouvre un compte gratuit et

@@ -33,7 +33,9 @@
    Faiblesse restante du filtre ci-dessus : ses plages sont communes à TOUS les clients Cloudflare. N'importe quel compte peut
    ouvrir une socket depuis une plage Cloudflare et forger CF-Connecting-IP : les limiteurs par IP (celui de l'application,
    `limit_req`) voient alors une adresse choisie par l'appelant (évasion, ou adresse d'une victime). Seul le certificat client
-   de NOTRE zone (autorité PROPRE au parc, deploy-cloudflare-origin-pull.yml, jamais le certificat partagé de Cloudflare) prouve
+   de NOTRE zone (autorité du parc générée par deploy-cloudflare-origin-pull.yml dans `cfopull_dir` : le dossier de
+   web3c par défaut (EN PRODUCTION, jamais déplacé), un sous-dossier `papanglabs/` pour papanglabs, fixé dans `group_vars/papanglabs.yml` ;
+   jamais le certificat partagé de Cloudflare) prouve
    que la requête vient d'elle. Même mécanisme que `_cloudflare_untrusted.inc` (`geo` + `map` fermé par défaut, ce partiel
    l'inclut) : `$cf_untrusted_<cf_slug>` vaut 1 pour une socket d'une plage Cloudflare SANS certificat client vérifié.
 
@@ -51,16 +53,29 @@
                       avant l'activation répondrait 403 à TOUT le trafic légitime.
    `cf_part = 'cert'` : seulement la garde du certificat (sans le filtre d'adresse), pour une location volontairement hors
    du filtre VPN/whitelist/Cloudflare (`inline-image/`) qui voudrait l'exiger des sockets Cloudflare — non posée aujourd'hui.
+   `cf_part = 'inline'` (enforce seulement) : à inclure DANS la location `/api/v1/inline-image/` (au début d'une ligne, pour que
+   l'absence de déclaration ne rende pas un octet de plus). nginx choisit la location sur l'URI NORMALISÉE (`%2F` décodé, segments
+   `..` résolus) mais `proxy_pass http://amont` (sans partie URI) transmet l'URI BRUTE : sans ce contrôle,
+   `/api/v1/<ressource>/x%2F..%2F..%2Finline-image/<f>` choisit la location ouverte et atteint, sans filtre de socket ni certificat,
+   une route du back de forme `/api/v1/<ressource>/:param/<littéral>`. Le contrôle ne retient que l'URI brute qui commence
+   littéralement par `/api/v1/inline-image/` (la route réelle est `GET /api/v1/inline-image/:filename`, un seul segment) et refuse
+   (404) un `%2f`/`%5c` (barre oblique ou antislash encodés), un `%2e` (point encodé : nginx résout aussi `%2e%2e`), un `..` ou un
+   `//` dans la partie chemin (avant le `?`) — rien d'autre.
+   Marqueur `# cf-aop: <nom> <mode>` : posé dans le rendu de chaque vhost déclaré, relu par la resynchronisation complète
+   (proxy-update/tasks/resync.yml) qui refuse un nom déclaré qu'AUCUN vhost rendu ne porte.
 
    FERMÉ : dès qu'UNE entrée du parc déclare `cloudflare_origin_pull`, un vhost qui inclut ce partiel DOIT avoir posé `cf_slug` ET
    `cf_aop_name` : le rendu échoue sinon (variable non définie, dont le nom dit quoi ajouter), au lieu de laisser un vhost sans
-   la protection que l'inventaire déclare. Une valeur inconnue, ou deux entrées en désaccord sur un même nom, refusent aussi.
+   la protection que l'inventaire déclare. Une valeur inconnue, ou deux entrées en désaccord sur un même nom, refusent aussi, de
+   même qu'un vhost dont le nom n'est déclaré par AUCUNE entrée (faute de frappe dans `proxy_hostname` ou un alias : sinon il
+   serait rendu sans protection alors que le nom, lui, est activé chez Cloudflare).
    `cf_slug` : `[a-z0-9_]`, court (variable nginx `cf_untrusted_<cf_slug>`, limite `variables_hash_bucket_size` ~46 caractères,
    non vérifiée) et PROPRE au vhost (deux vhosts ne déclarent pas deux fois la même variable). #}
 {% set _aop = proxy_update_aop | default({}) %}
 {% if _aop | length > 0 and (cf_slug is not defined or cf_aop_name is not defined) %}{{ ERREUR_rendu_refuse__un_vhost_qui_inclut__cloudflare_realip_inc__doit_poser__cf_slug__et__cf_aop_name__des_qu_une_entree_declare__cloudflare_origin_pull }}{% endif %}
 {% set _mode = _aop.get(cf_aop_name, '') if _aop | length > 0 else '' %}
 {% if _mode not in ['', 'observe', 'enforce'] %}{{ ERREUR_rendu_refuse__cloudflare_origin_pull_invalide_ou_en_desaccord_entre_entrees__attendu_observe_ou_enforce }}{% endif %}
+{% if _aop | length > 0 and _mode == '' %}{{ ERREUR_rendu_refuse__le_nom_de_ce_vhost_n_est_declare_par_aucune_entree__proxy_hostname_ou_cloudflare_origin_pull_aliases_absent_ou_mal_ecrit }}{% endif %}
 {% if cf_part == 'geo' %}
 {# Dédupliqué : une adresse en double dans un `geo` est un avertissement nginx. #}
 {% set cf_edge_sources = (cloudflare_ips
@@ -73,6 +88,7 @@ geo $realip_remote_addr ${{ cf_edge_var }} {
 {% endfor %}
 }
 {% if _mode != '' %}
+# cf-aop: {{ cf_aop_name }} {{ _mode }}
 {% include '_cloudflare_untrusted.inc' %}{{ '\n' -}}
 # Journal dédié (en plus de access.log) : ce que nginx a lu du certificat client de CHAQUE requête de ce vhost, inline-image comprise.
 # `cf_socket=1` : socket d'une plage Cloudflare ; `verify` : $ssl_client_verify (SUCCESS, NONE, FAILED:…) ; `untrusted=1` : socket
@@ -112,6 +128,15 @@ log_format cf_aop_{{ cf_slug }} '$time_iso8601 host=$host socket=$realip_remote_
 {% if _mode == 'enforce' %}
     if ($cf_untrusted_{{ cf_slug }}) {
         return 403;
+    }
+{% endif %}
+{% elif cf_part == 'inline' %}
+{% if _mode == 'enforce' %}
+    if ($request_uri !~ "^/api/v1/inline-image/") {
+        return 404;
+    }
+    if ($request_uri ~* "^[^?]*(%2f|%5c|%2e|[.][.]|//)") {
+        return 404;
     }
 {% endif %}
 {% endif %}

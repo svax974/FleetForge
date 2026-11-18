@@ -15,7 +15,7 @@
       l'inventaire porte `cloudflare_front: true`, `cloudflare_named: true` ou `cloudflare_origin_pull` : son vhost
       vérifie le certificat client de Cloudflare. Le play « Authenticated Origin Pulls côté Cloudflare » de deploy-webapp.yml (ou
       ./play.sh <parc> deploy-cloudflare-origin-pull.yml) le génère et l'envoie à Cloudflare ; sinon reprendre
-      keys/cloudflare-origin-pull/ depuis le poste qui l'a générée.
+      le répertoire `cfopull_dir` du parc depuis le poste qui l'a générée.
   delegate_to: localhost
   become: false
   run_once: true

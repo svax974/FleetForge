@@ -72,8 +72,21 @@ cfopull_enforce_tls_strict: false
 # (le front Pages garde son avertissement).
 cfopull_allow_non_strict_tls: false
 
-# Autorité et certificat client propres à CE parc, générés une fois sur le poste
-# de contrôle. `keys/*` est gitignoré : la clé privée de l'autorité n'est jamais
+# Preuve sur le proxy exigée d'un nom `cloudflare_origin_pull: enforce` (tasks/proof.yml) : sur les `cfopull_evidence_hours` dernières
+# heures, le journal `cf-aop-*.log` de `cfopull_log_dir` (courant et `.1`) porte au moins `cfopull_evidence_min_success` lignes
+# `cf_socket=1 verify="SUCCESS"` du nom et AUCUNE ligne `cf_socket=1 untrusted=1` de statut < 400. `cfopull_allow_unobserved: true` :
+# échappatoire EXPLICITE pour un premier déploiement où aucun trafic ne peut être observé (le témoin d'activation reste exigé) ; faux
+# par défaut. Un nom à très faible trafic (préproduction) : baisser `cfopull_evidence_min_success`, jamais à 0.
+cfopull_evidence_hours: 24
+cfopull_evidence_min_success: 5
+cfopull_allow_unobserved: false
+cfopull_log_dir: /var/log/nginx
+
+# Autorité et certificat client, générés une fois sur le poste de contrôle, dans `cfopull_dir`.
+# ATTENTION : ce DÉFAUT (`keys/cloudflare-origin-pull/`) est l'autorité de web3c.cc, utilisée EN PRODUCTION (passerelle, agenthub) : ne
+# jamais la déplacer ni la régénérer. Un autre parc n'en hérite pas : il surcharge `cfopull_dir` dans son `group_vars/<parc>.yml`
+# (papanglabs : `keys/cloudflare-origin-pull/papanglabs/`, sujet `/CN=papanglabs.com …`) — sinon il réutiliserait l'autorité d'un autre parc.
+# Le témoin d'activation (`active/`) et tout ce qui lit l'autorité suivent `cfopull_dir`. `keys/*` est gitignoré : la clé privée de l'autorité n'est jamais
 # versionnée (convention : keys/README.md). Le certificat client (+ sa clé) est
 # ce que Cloudflare présente aux origines ; l'autorité, elle, est ce que nginx
 # fait confiance (`ssl_client_certificate`) — un compte Cloudflare tiers ne

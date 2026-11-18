@@ -74,7 +74,8 @@ Sous-commandes, chacune code 1 avec la liste des écarts :
       backindicators-prod ; filtre de SOCKET sans `deny all;`) : une location gardée par `if ($cf_untrusted_…) { return 403; }`
       (mode `cloudflare_origin_pull: enforce`) est contrôlée comme une location privée (`geo` + `map` exacts, mêmes plages que
       `set_real_ip_from`) SANS l'exigence de no-store ; la seule location ouverte admise est `/api/v1/inline-image/` (liste
-      blanche exacte, `limit_req` obligatoire). Le rendu du mode `observe` n'est PAS protecteur (il vérifie et journalise, ne
+      blanche exacte, `limit_req` obligatoire, et les deux contrôles de l'URI brute de `cf_part = 'inline'` : l'URI brute commence par
+      `/api/v1/inline-image/`, aucun `%2f`/`%5c`/`%2e`/`..`/`//` avant le `?`). Le rendu du mode `observe` n'est PAS protecteur (il vérifie et journalise, ne
       refuse rien de plus) : `location /` y est signalée ouverte, à dessein.
       Pas de liste blanche de locations publiques ici (c'est `--public`). S'ajoute aux autres contrôles de `vhost`
       (liste nommée, `--public`), ne les remplace pas ; seul, il n'exige pas de location à liste nommée. Rien ne le lance au
@@ -1256,6 +1257,9 @@ SOCKET_GUARD = re.compile(r"if \(\$cf_untrusted_[A-Za-z0-9_]+\) \{ return 403; \
 # Locations qu'un tel vhost laisse OUVERTES volontairement (liste blanche exacte, avec `limit_req` obligatoire) : l'image publique d'un
 # e-mail est jointe par le client mail du destinataire, sans certificat ni compte. Toute autre location sans garde est refusée.
 CF_OPEN_LOCATIONS = ("/api/v1/inline-image/",)
+# Et ces deux contrôles de l'URI BRUTE sont exigés dans cette location, ouverte ou gardée par le certificat (`cf_part = 'inline'`, mode enforce).
+CF_OPEN_PATH_CHECKS = ('if ($request_uri !~ "^/api/v1/inline-image/") { return 404; }',
+                       'if ($request_uri ~* "^[^?]*(%2f|%5c|%2e|[.][.]|//)") { return 404; }')
 
 
 def _check_untrusted_socket(where, text, outside, private_blocks, ordered=True, no_store=True):
@@ -1310,6 +1314,12 @@ def check_cloudflare_edge(where, text):
     private, guarded, open_locations = [], [], []
     for head, body in _blocks_with_heads(text):
         code = _code(body)
+        if head in CF_OPEN_LOCATIONS and not all(check in code for check in CF_OPEN_PATH_CHECKS):
+            # Ouverte ou gardée par le certificat seul : nginx la choisit sur l'URI normalisée, `proxy_pass` transmet l'URI brute.
+            errors.append(f"{where} : location {head} : URI brute non contrôlée (`{CF_OPEN_PATH_CHECKS[0]}` et `{CF_OPEN_PATH_CHECKS[1]}` "
+                          "exigés : sans eux `/api/v1/<ressource>/x%2F..%2Finline-image/<f>` choisit cette location et atteint une autre route du back "
+                          "sans filtre de socket ni certificat)")
+            continue
         if "deny all;" in code and not re.search(r"(^|[\s;{}])allow\s", code):
             continue  # fermée (mode inconnu, `restricted-linked` sans serveur) : personne n'y entre, ni garde ni no-store à exiger
         if "deny all;" in code:

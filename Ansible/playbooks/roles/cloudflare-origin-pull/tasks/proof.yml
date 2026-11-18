@@ -8,7 +8,24 @@
 # joués AVANT que quoi que ce soit soit écrit sur un proxy : au tout début de la resynchronisation complète (proxy-update/tasks/resync.yml,
 # avant la sauvegarde et le vidage de /etc/nginx : un refus ne passe jamais par la restauration) et, par nginx.yml, avant tout gabarit
 # de `deploy-one-site`, `deploy-webapp-site` et du play « côté proxies » de deploy-cloudflare-origin-pull.yml.
-# Aucune entrée ne déclare `cloudflare_origin_pull` : `cfopull_aop` est vide, aucune de ces tâches ne fait rien.
+# Aucune entrée ne déclare `cloudflare_origin_pull` : `cfopull_aop` est vide, aucune de ces tâches ne fait rien
+# (hors la première : proof.yml n'est joué que lorsqu'une entrée du parc porte un nom servi par Cloudflare).
+#
+# Trois preuves pour `enforce`, dans cet ordre : le témoin d'activation local (ci-dessous), puis la preuve SUR LE PROXY (journal
+# `cf-aop-*.log` récent) — le témoin ne dit pas que Cloudflare présente encore le certificat, le trafic réel le dit.
+- name: Fail when the origin-pull authority is missing, before anything is touched
+  ansible.builtin.assert:
+    that: (cfopull_dir ~ '/ca.pem') is file
+    fail_msg: >-
+      {{ cfopull_dir }}/ca.pem est absent sur ce poste alors qu'une entrée de l'inventaire porte un nom servi par Cloudflare : le vhost
+      vérifie le certificat client. Jouer d'abord `./play.sh <parc> deploy-cloudflare-origin-pull.yml` (génère l'autorité de CE parc dans
+      `cfopull_dir`, l'envoie à Cloudflare, l'active sur les noms), ou reprendre le répertoire depuis le poste qui l'a générée. Rien n'a
+      été touché sur les proxies.
+    quiet: true
+  delegate_to: localhost
+  become: false
+  run_once: true
+
 - name: Fail on an invalid or contradictory Authenticated Origin Pulls declaration
   ansible.builtin.assert:
     that: cfopull_aop | dict2items | rejectattr('value', 'in', ['observe', 'enforce']) | list | length == 0
@@ -55,3 +72,55 @@
   delegate_to: localhost
   become: false
   run_once: true
+
+# Preuve SUR LE PROXY (jouée sur chaque proxy ciblé par `--limit`, sans délégation) : le témoin ci-dessus prouve que l'activation a eu
+# lieu depuis ce poste, pas que Cloudflare présente ENCORE le certificat (réglage retiré dans le tableau de bord, origin pulls de zone avec
+# le certificat partagé, nom derrière un Load Balancer non éprouvé). Seul le trafic réel le dit : pour chaque nom `enforce`, le journal
+# `cf-aop-*.log` (courant et `.1`) du proxy doit porter, sur les `cfopull_evidence_hours` dernières heures (24 h par défaut), au moins
+# `cfopull_evidence_min_success` lignes `cf_socket=1 verify="SUCCESS"` du nom (`host=`, vhost en mode observe ou enforce) ET AUCUNE
+# ligne `cf_socket=1 untrusted=1` de statut < 400 (trafic accepté que `enforce` refuserait). La commande est en LECTURE SEULE (cat, awk,
+# date) et n'imprime que trois compteurs : jamais d'URI, d'adresse ni de User-Agent. nginx échappe `"` et les caractères de contrôle des
+# champs journalisés : une ligne ne peut pas en forger une autre. En `--check` elle est jouée quand même (lecture seule).
+# Premier déploiement sur une machine où aucun trafic ne peut être observé : `-e cfopull_allow_unobserved=true`, explicite, faux par défaut
+# (le témoin reste exigé).
+- name: Read, on the proxy, what the dedicated Authenticated Origin Pulls log says about each enforced name
+  ansible.builtin.shell:
+    executable: /bin/sh
+    cmd: |
+      set -u
+      cutoff=$(date -d "-${AOP_HOURS} hours" +%Y-%m-%dT%H:%M:%S 2>/dev/null || date -v-${AOP_HOURS}H +%Y-%m-%dT%H:%M:%S)
+      cat "$AOP_LOG_DIR"/cf-aop-*.log "$AOP_LOG_DIR"/cf-aop-*.log.1 2>/dev/null | awk -v n="$AOP_NAME" -v c="$cutoff" '
+        substr($1, 1, 19) < c { next }
+        index($0, " host=" n " ") == 0 { next }
+        index($0, " mode=observe ") == 0 && index($0, " mode=enforce ") == 0 { next }
+        { lines++ }
+        index($0, " cf_socket=1 ") && index($0, " verify=\"SUCCESS\" ") { ok++ }
+        index($0, " cf_socket=1 ") && index($0, " untrusted=1 ") { match($0, / status=[0-9]+/); if (substr($0, RSTART + 8, RLENGTH - 8) + 0 < 400) bad++ }
+        END { printf "{\"lines\": %d, \"success\": %d, \"untrusted_ok\": %d}\n", lines, ok, bad }'
+  environment:
+    AOP_NAME: "{{ item }}"
+    AOP_HOURS: "{{ cfopull_evidence_hours | int }}"
+    AOP_LOG_DIR: "{{ cfopull_log_dir }}"
+  register: cfopull_evidence
+  changed_when: false
+  check_mode: false
+  loop: "{{ [] if (cfopull_allow_unobserved | bool) else (cfopull_aop | dict2items | selectattr('value', 'equalto', 'enforce') | map(attribute='key') | list) }}"
+
+- name: Fail when the proxy holds no recent proof that Cloudflare presents the certificate on an enforced name
+  ansible.builtin.assert:
+    that:
+      - (item.stdout | from_json).success | int >= cfopull_evidence_min_success | int
+      - (item.stdout | from_json).untrusted_ok | int == 0
+    fail_msg: >-
+      {{ inventory_hostname }} : {{ item.item }} est en `cloudflare_origin_pull: enforce` mais le journal {{ cfopull_log_dir }}/cf-aop-*.log
+      ne prouve pas que Cloudflare présente le certificat de notre zone sur ce nom, sur les {{ cfopull_evidence_hours }} dernières heures :
+      lignes du nom = {{ (item.stdout | from_json).lines }}, `cf_socket=1 verify="SUCCESS"` = {{ (item.stdout | from_json).success }}
+      (minimum {{ cfopull_evidence_min_success }}), `cf_socket=1 untrusted=1` acceptées (statut < 400) = {{ (item.stdout | from_json).untrusted_ok }}
+      (attendu 0 : `enforce` les refuserait). Poser `enforce` maintenant risque de répondre 403 à tout le trafic légitime. Étapes : jouer
+      `./play.sh <parc> deploy-cloudflare-origin-pull.yml`, poser `observe` (`update-proxy.yml --limit <proxy>`), laisser passer du trafic,
+      relire ce journal, puis rejouer. Premier déploiement sans trafic observable : `-e cfopull_allow_unobserved=true` (assumé). Aucun
+      gabarit n'a été posé.
+    quiet: true
+  loop: "{{ cfopull_evidence.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item }}"

@@ -4759,11 +4759,19 @@ class FullResyncRollbackTests(unittest.TestCase):
     def test_an_enforced_origin_pull_without_proof_is_refused_before_the_backup_and_the_delete(self):
         # `cloudflare_origin_pull: enforce` sans témoin d'activation : refus au TOUT PREMIER pas (proof.yml, avant la sauvegarde) — l'arbre
         # n'est pas touché, aucune sauvegarde n'est créée, la restauration (et son rechargement de nginx) n'est jamais jouée.
-        for label, attribute, expect in (("enforce", "enforce", "n'est pas PROUVÉE"), ("faute de frappe", "enforced", "invalide ou contradictoire"),
-                                         ("booléen", True, "invalide ou contradictoire")):
+        keys = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, keys, ignore_errors=True)
+        with open(os.path.join(keys, "ca.pem"), "w") as f:
+            f.write("CA\n")
+        # Le premier contrôle est l'AUTORITÉ locale : absente, refus avant la sauvegarde (jusqu'ici elle n'était relevée qu'APRÈS le vidage).
+        for label, attribute, expect, directory in (
+                ("enforce", "enforce", "n'est pas PROUVÉE", keys), ("faute de frappe", "enforced", "invalide ou contradictoire", keys),
+                ("booléen", True, "invalide ou contradictoire", keys),
+                ("autorité absente, observe", "observe", "ca.pem est absent sur ce poste", "/nonexistent/keys/cloudflare-origin-pull"),
+                ("autorité absente, enforce", "enforce", "ca.pem est absent sur ce poste", "/nonexistent/keys/cloudflare-origin-pull")):
             with self.subTest(label):
                 code, out, tree, leftovers = self.resync(webapp=True, entry_changes={"cloudflare_origin_pull": attribute},
-                                                         extra_vars={"cfopull_dir": "/nonexistent/keys/cloudflare-origin-pull"})
+                                                         extra_vars={"cfopull_dir": directory})
                 self.assertNotEqual(code, 0, out[-2500:])
                 self.assertIn(expect, out)
                 self.assertEqual(tree, self.PREVIOUS, "aucun fichier de /etc/nginx touché")
@@ -6861,7 +6869,7 @@ REALIP_VHOST = (
     "  {% set cf_part = 'realip' %}{% include '@@INC@@' %}\n\n"
     "  server_name           {{ back_public }};\n\n"
     "  location /api/v1/inline-image/ {\n    limit_req          zone=inline_image_limit burst=40 nodelay;\n"
-    "    @@INLINE@@\n"
+    "@@INLINE@@\n"
     "    proxy_pass         http://back_prod_cluster;\n  }\n\n"
     "  location / {\n    proxy_pass         http://back_prod_cluster;\n"
     "    {% set cf_part = 'guard' %}{% include '@@INC@@' %}\n"
@@ -6876,12 +6884,14 @@ def realip_env():
     return env
 
 
-def render_realip(aop=None, include="_cloudflare_realip.inc", slug=True, name=True, inline_part=None, whitelist=None,
+def render_realip(aop=None, include="_cloudflare_realip.inc", slug=True, name=True, inline_part="inline", whitelist=None,
                   slug_value="back_prod"):
     """Vhost sur le modèle de back-prod.conf rendu par le partiel. `aop` : `proxy_update_aop` (None : variable absente) ; `slug` / `name` :
-    le vhost pose `cf_slug` / `cf_aop_name` ; `inline_part` : un `cf_part` inclus dans inline-image (`cert`)."""
+    le vhost pose `cf_slug` / `cf_aop_name` ; `inline_part` : `cf_part` (ou tuple de `cf_part`) inclus dans inline-image, au début d'une
+    ligne comme dans les vhosts réels (`inline` par défaut, `cert` pour la garde du certificat) ; None : aucune inclusion."""
     sets = (("{% set cf_slug = '" + slug_value + "' %}\n") if slug else "") + ("{% set cf_aop_name = back_public %}\n" if name else "")
-    inline = ("{% set cf_part = '" + inline_part + "' %}{% include '" + include + "' %}") if inline_part else ""
+    parts = (inline_part,) if isinstance(inline_part, str) else (inline_part or ())
+    inline = "".join("{% set cf_part = '" + part + "' %}{% include '" + include + "' %}" for part in parts)
     source = REALIP_VHOST.replace("@@SETS@@", sets).replace("@@INC@@", include).replace("@@INLINE@@", inline)
     variables = dict(hostvars=copy.deepcopy(INVENTORY), groups={"vpns": ["vpn1"]}, whitelist=REALIP_WHITELIST if whitelist is None else whitelist,
                      cloudflare_ips=CLOUDFLARE_IPS)
@@ -6922,11 +6932,11 @@ class RealipAopRenderTests(unittest.TestCase):
         for label, kwargs in (("variable absente, vhost patché", dict()), ("aucune entrée", dict(aop={})),
                               ("aucune entrée, vhost non patché", dict(aop={}, slug=False, name=False)),
                               ("variable absente, vhost non patché", dict(slug=False, name=False)),
-                              ("un AUTRE nom déclaré, ce vhost patché", dict(aop={"other.example.test": "enforce"})),
-                              ("un autre nom déclaré, mode observe", dict(aop={"other.example.test": "observe"}))):
+                              ("sans la ligne `inline` (vhost d'avant)", dict(inline_part=None))):
             with self.subTest(label):
-                self.assertEqual(render_realip(**kwargs), legacy)
-        for marker in ("ssl_verify_client", "ssl_client_certificate", "cf_untrusted", "cf_socket", "log_format", "access_log"):
+                self.assertEqual(render_realip(**kwargs), legacy if "inline_part" not in kwargs else
+                                 render_realip(include="_legacy_realip.inc", slug=False, name=False, inline_part=None))
+        for marker in ("cf-aop", "request_uri", "ssl_verify_client", "ssl_client_certificate", "cf_untrusted", "cf_socket", "log_format", "access_log"):
             self.assertNotIn(marker, legacy)
 
     def test_observe_verifies_and_logs_the_client_certificate_and_refuses_nothing_more(self):
@@ -7004,10 +7014,12 @@ class RealipAopRenderTests(unittest.TestCase):
         for aop in (None, {}, AOP_OBSERVE):
             with self.subTest(aop=aop):
                 self.assertNotIn("return 403", inline(render_realip(aop=aop, inline_part="cert")), "rien tant que ce n'est pas enforce")
-        text = render_realip(aop=AOP_ENFORCE, inline_part="cert")
+        text = render_realip(aop=AOP_ENFORCE, inline_part=("cert", "inline"))
         self.assertIn(CERT_GUARD, inline(text))
         self.assertNotIn("$back_prod_edge", inline(text), "pas de filtre d'adresse : les clients directs restent admis")
         self.assertEqual(edge_errors(text), [])
+        # Gardée par le certificat SEUL (sans le contrôle de l'URI brute), la location resterait joignable par détour de normalisation.
+        self.assertTrue(edge_errors(render_realip(aop=AOP_ENFORCE, inline_part="cert")))
 
     def test_a_vhost_that_forgets_a_variable_fails_to_render_as_soon_as_an_entry_declares_the_attribute(self):
         for aop in (AOP_OBSERVE, AOP_ENFORCE, {"other.example.test": "observe"}):
@@ -7027,7 +7039,45 @@ class RealipAopRenderTests(unittest.TestCase):
                 with self.assertRaises(jinja2.UndefinedError) as raised:
                     render_realip(aop={"back-prod.example.test": value})
                 self.assertIn("cloudflare_origin_pull_invalide", str(raised.exception))
-                self.assertTrue(render_realip(aop={"other.example.test": value}), "le vhost d'un autre nom n'est pas concerné")
+
+    def test_a_vhost_whose_name_no_entry_declares_is_refused_as_soon_as_one_entry_does(self):
+        # Faute de frappe dans `proxy_hostname` ou un alias : le nom (activé chez Cloudflare) n'est pas celui du vhost, qui serait rendu
+        # SANS protection — même en `enforce` pour les autres noms.
+        for aop in ({"other.example.test": "enforce"}, {"other.example.test": "observe"}, {"Back-Prod.example.test": "enforce"}):
+            with self.subTest(aop):
+                with self.assertRaises(jinja2.UndefinedError) as raised:
+                    render_realip(aop=aop)
+                self.assertIn("aucune_entree", str(raised.exception))
+        self.assertTrue(render_realip(aop={}), "aucune déclaration : le rendu d'avant")
+
+    def test_each_declared_vhost_carries_its_name_and_mode_in_a_marker_the_full_resync_reads_back(self):
+        for aop, mode in ((AOP_OBSERVE, "observe"), (AOP_ENFORCE, "enforce")):
+            text = render_realip(aop=aop)
+            self.assertEqual(re.findall(r"^# cf-aop: (.*)$", text, re.M), [f"back-prod.example.test {mode}"])
+            self.assertLess(text.index("# cf-aop:"), text.index("server {"), "au niveau http, avec le geo")
+        self.assertNotIn("cf-aop:", render_realip(aop={}), "aucune déclaration : aucun marqueur")
+
+    def test_the_inline_part_refuses_the_raw_uris_nginx_would_normalise_into_the_open_location_and_nothing_else(self):
+        body = lambda text: location_body(text, "/api/v1/inline-image/")  # noqa: E731
+        for aop in (None, {}, AOP_OBSERVE):
+            with self.subTest(aop=aop):
+                self.assertNotIn("request_uri", body(render_realip(aop=aop)), "rien tant que ce n'est pas enforce")
+        code = body(render_realip(aop=AOP_ENFORCE))
+        prefix = re.search(r'if \(\$request_uri !~ "(.*?)"\) \{\s*return 404;\s*\}', code)
+        bad = re.search(r'if \(\$request_uri ~\* "(.*?)"\) \{\s*return 404;\s*\}', code)
+        self.assertTrue(prefix and bad, code)
+        # Lecture des deux regex comme nginx : `!~` sensible à la casse, `~*` insensible.
+        refused = lambda uri: not re.search(prefix.group(1), uri) or bool(re.search(bad.group(1), uri, re.I))  # noqa: E731
+        for uri in ("/api/v1/inline-image/1730000000-123456789.png", "/api/v1/inline-image/1730000000-123456789.png?v=2",
+                    "/api/v1/inline-image/a-b_c.WEBP", "/api/v1/inline-image/x?next=a/../b", "/api/v1/inline-image/x?u=%2F"):
+            self.assertFalse(refused(uri), uri)
+        for uri in ("/api/v1/admin/x%2F..%2F..%2Finline-image/1.png", "/api/v1/admin/x%2f..%2f..%2finline-image/1.png",
+                    "/api/v1/x/..%2Finline-image/f", "/api/v1/x/%2e%2e/inline-image/f", "/api/v1/x/%2E%2e%2Finline-image/f",
+                    "/api/v1/x/../inline-image/f", "/api/v1/inline-image/..%2Fadmin/inline-image", "/api/v1/inline-image/a%5cb",
+                    "/api/v1/inline-image/a%5Cb", "/api/v1/inline-image//f", "/api/v1//inline-image/f", "/api/v1/inline-image/a/../b",
+                    "/API/v1/inline-image/f", "/api/v1/inline-image", "/x/api/v1/inline-image/f"):
+            self.assertTrue(refused(uri), uri)
+        self.assertEqual(edge_errors(render_realip(aop=AOP_ENFORCE)), [])
 
     def test_the_slug_names_the_nginx_variables_of_each_vhost(self):
         text = render_realip(aop=AOP_ENFORCE, slug_value="back_preprod")
@@ -7043,7 +7093,8 @@ class RealipAopCheckerTests(unittest.TestCase):
     def test_the_enforce_render_passes_and_the_observe_render_reports_the_unguarded_location(self):
         self.assertEqual(edge_errors(render_realip(aop=AOP_ENFORCE)), [])
         errors = edge_errors(render_realip(aop=AOP_OBSERVE))
-        self.assertEqual(len(errors), 2, errors)
+        self.assertEqual(len(errors), 3, errors)
+        self.assertTrue(any("inline-image" in e and "URI brute non contrôlée" in e for e in errors), "le contrôle de l'URI brute n'est posé qu'en enforce")
         self.assertTrue(any("ssl_verify_client optional;" in e for e in errors), "`optional_no_ca` ne rejette rien : pas une exigence")
         self.assertTrue(any("location /" in e and "n'importe quel client Cloudflare l'atteint" in e for e in errors))
         self.assertTrue(edge_errors(render_realip(aop={})), "sans déclaration : lit CF-Connecting-IP sans certificat client")
@@ -7063,6 +7114,9 @@ class RealipAopCheckerTests(unittest.TestCase):
             "location ouverte en plus": text.replace("  location / {", "  location /open/ {\n    proxy_pass http://back_prod_cluster;\n  }\n\n  location / {", 1),
             "inline-image sans limit_req": text.replace("limit_req          zone=inline_image_limit burst=40 nodelay;", "", 1),
             "autre location sans limit_req": text.replace("location /api/v1/inline-image/", "location /api/v1/other/", 1),
+            "inline-image sans contrôle du préfixe brut": text.replace('if ($request_uri !~ "^/api/v1/inline-image/") {', "if (0) {", 1),
+            "inline-image sans contrôle d'encodage": text.replace('if ($request_uri ~* "^[^?]*(%2f|%5c|%2e|[.][.]|//)") {', "if (0) {", 1),
+            "contrôle d'encodage amputé de %2f": text.replace("(%2f|%5c|%2e|[.][.]|//)", "(%5c|%2e|[.][.]|//)", 1),
         }
         for label, mutated in mutations.items():
             with self.subTest(label):
@@ -7072,7 +7126,7 @@ class RealipAopCheckerTests(unittest.TestCase):
     def test_the_inline_image_exemption_is_exact_and_the_cert_guard_is_accepted_there(self):
         text = render_realip(aop=AOP_ENFORCE)
         self.assertEqual(edge_errors(text), [], "inline-image ouverte, limit_req présent : admise")
-        guarded = render_realip(aop=AOP_ENFORCE, inline_part="cert")
+        guarded = render_realip(aop=AOP_ENFORCE, inline_part=("cert", "inline"))
         self.assertEqual(edge_errors(guarded), [], "gardée par le certificat : admise aussi")
         self.assertTrue(edge_errors(guarded.replace(CERT_GUARD, "if (0) {", 2)), "garde retirée des DEUX locations")
 
@@ -7203,7 +7257,7 @@ class AopDerivationTests(unittest.TestCase):
                 for entry in ("back1-prod", "back2-prod"):
                     inventory["all"]["children"]["backs"]["hosts"][entry]["cloudflare_origin_pull"] = mode
                 vhost = REALIP_VHOST.replace("@@SETS@@", "{% set cf_slug = 'back_prod' %}\n{% set cf_aop_name = back_public %}\n").replace(
-                    "@@INC@@", "_cloudflare_realip.inc").replace("@@INLINE@@", "")
+                    "@@INC@@", "_cloudflare_realip.inc").replace("@@INLINE@@", "{% set cf_part = 'inline' %}{% include '_cloudflare_realip.inc' %}")
                 play = textwrap.dedent(f"""\
                     - hosts: proxy1
                       gather_facts: false
@@ -7238,6 +7292,9 @@ INVALID_TASK = "Fail on an invalid or contradictory Authenticated Origin Pulls d
 EARLY_INVALID_TASK = "Fail early on an invalid or contradictory Authenticated Origin Pulls declaration"
 PROOF_TASKS = ("Hash the origin-pull authority that enforced names must have been activated with",
                "Fail when Cloudflare has not been proven to present the certificate on an enforced name")
+AUTHORITY_TASK = "Fail when the origin-pull authority is missing, before anything is touched"
+EVIDENCE_TASKS = ("Read, on the proxy, what the dedicated Authenticated Origin Pulls log says about each enforced name",
+                  "Fail when the proxy holds no recent proof that Cloudflare presents the certificate on an enforced name")
 WITNESS_TASKS = ("Hash the origin-pull authority the proxies will trust", "Create the activation witness directory",
                  "Record that Cloudflare presents the certificate on every hostname")
 
@@ -7313,7 +7370,8 @@ class AopRolloutSafetyTests(unittest.TestCase):
         self.assertEqual(early["when"], "proxy_update_cloudflare_edge | bool")
         self.assertIn("block", resync[1], "le bloc destructif vient APRÈS le contrôle, hors de son `rescue`")
         proof = role_tasks("proof.yml")
-        self.assertEqual([t["name"] for t in proof], [INVALID_TASK, *PROOF_TASKS])
+        self.assertEqual([t["name"] for t in proof], [AUTHORITY_TASK, INVALID_TASK, *PROOF_TASKS, *EVIDENCE_TASKS],
+                         "l'autorité, la déclaration, le témoin, PUIS le journal du proxy")
 
     def test_the_witness_written_by_the_cloudflare_side_lets_the_enforced_name_through(self):
         inventory = aop_inventory()
@@ -7441,6 +7499,184 @@ class AopRolloutSafetyTests(unittest.TestCase):
                          "une valeur invalide joue le play, dont la première garde la refuse")
         apps["plain"]["webapp_proxy"] = "external"
         self.assertEqual(CloudflareNamedPlaybookTests.hosts_running(pull, inventory), ["pages-app"], "webapp_proxy: external : aucun vhost")
+
+    # ── Preuve SUR LE PROXY : le journal cf-aop-*.log récent (journaux factices) ──────────────────────────────────────────────────
+    NAME = "back-preprod.example.test"
+
+    @staticmethod
+    def log_line(minutes_ago=5, name=NAME, cf=1, verify="SUCCESS", untrusted=0, status=200, mode="enforce", uri="/secret-path", ua="secret-ua"):
+        import datetime
+        stamp = (datetime.datetime.now() - datetime.timedelta(minutes=minutes_ago)).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+        return (f'{stamp} host={name} socket=198.51.100.130 claimed="203.0.113.5" client=203.0.113.5 cf_socket={cf} verify="{verify}" '
+                f'untrusted={untrusted} mode={mode} status={status} method=GET uri="{uri}" ray="r" ua="{ua}"')
+
+    def evidence(self, files, **variables):
+        """(code, sortie) des deux tâches de preuve jouées sur `back1-preprod` (enforce) avec `files` : {nom: [lignes]} sous un journal factice."""
+        logdir = os.path.join(self.dir, "log")
+        shutil.rmtree(logdir, ignore_errors=True)
+        if files is not None:
+            os.makedirs(logdir)
+            for name, lines in files.items():
+                with open(os.path.join(logdir, name), "w", encoding="utf-8") as f:
+                    f.write("\n".join(lines) + "\n")
+        defaults = yaml.safe_load(_text(os.path.join(ROLES, "cloudflare-origin-pull", "defaults", "main.yml")))
+        settings = {key: defaults[key] for key in ("cfopull_evidence_hours", "cfopull_evidence_min_success", "cfopull_allow_unobserved")}
+        settings.update(cfopull_log_dir=logdir)
+        settings.update(variables)
+        inventory = aop_inventory(**{"back1-prod": {"cloudflare_origin_pull": "observe"}, "back2-prod": {"cloudflare_origin_pull": "observe"}})
+        return self.run_tasks(self.tasks("proof.yml", EVIDENCE_TASKS), inventory, **settings)
+
+    def test_the_log_of_the_proxy_must_hold_recent_successful_certificates_and_no_accepted_untrusted_request(self):
+        good = [self.log_line(minutes_ago=m) for m in range(1, 8)]
+        code, out = self.evidence({"cf-aop-back_preprod.log": good})
+        self.assertEqual(code, 0, out[-2500:])
+        # Journal tourné (`.1`), plusieurs fichiers, d'autres noms et d'autres modes : seuls comptent les lignes du nom, récentes.
+        code, out = self.evidence({"cf-aop-back_preprod.log": good[:3], "cf-aop-back_preprod.log.1": good[3:],
+                                   "cf-aop-back_prod.log": [self.log_line(name="back-prod.example.test", verify="NONE", untrusted=1, status=200)]})
+        self.assertEqual(code, 0, "un autre nom n'entre pas dans le compte : " + out[-2500:])
+        # Les statuts d'une socket non fiable < 400 sont seuls bloquants : un refus (403), une erreur de l'app (401) sont ce que enforce fait.
+        refused = good + [self.log_line(verify="NONE", untrusted=1, status=403), self.log_line(verify="NONE", untrusted=1, status=401)]
+        self.assertEqual(self.evidence({"cf-aop-back_preprod.log": refused})[0], 0)
+        # Une ligne accepté ancienne (hors fenêtre) ou d'une socket hors Cloudflare ne bloque pas.
+        old = good + [self.log_line(minutes_ago=60 * 30, verify="NONE", untrusted=1, status=200),
+                      self.log_line(cf=0, verify="NONE", untrusted=0, status=200)]
+        self.assertEqual(self.evidence({"cf-aop-back_preprod.log": old})[0], 0)
+
+    def test_stale_missing_or_insufficient_logs_and_accepted_untrusted_requests_refuse_with_the_counts_and_never_print_a_uri(self):
+        good = [self.log_line(minutes_ago=m) for m in range(1, 8)]
+        cases = {
+            "périmé (hors fenêtre)": ({"cf-aop-back_preprod.log": [self.log_line(minutes_ago=60 * 30 + m) for m in range(8)]}, "= 0"),
+            "aucun SUCCESS": ({"cf-aop-back_preprod.log": [self.log_line(verify="NONE", untrusted=1, status=401) for _ in range(9)]}, "= 0"),
+            "SUCCESS insuffisants": ({"cf-aop-back_preprod.log": good[:4]}, "= 4"),
+            "FAILED": ({"cf-aop-back_preprod.log": [self.log_line(verify="FAILED:unable to get local issuer certificate") for _ in range(9)]}, "= 0"),
+            "socket hors Cloudflare": ({"cf-aop-back_preprod.log": [self.log_line(cf=0) for _ in range(9)]}, "= 0"),
+            "un autre nom seulement": ({"cf-aop-back_prod.log": [self.log_line(name="back-prod.example.test") for _ in range(9)]}, "lignes du nom = 0"),
+            "mode absent du journal": ({"cf-aop-back_preprod.log": [self.log_line().replace(" mode=enforce", "") for _ in range(9)]}, "= 0"),
+            "untrusted accepté": ({"cf-aop-back_preprod.log": good + [self.log_line(verify="NONE", untrusted=1, status=200)]}, "(attendu 0"),
+            "untrusted redirigé": ({"cf-aop-back_preprod.log": good + [self.log_line(verify="NONE", untrusted=1, status=302)]}, "(attendu 0"),
+            "fichier absent": ({}, "lignes du nom = 0"),
+            "répertoire absent": (None, "lignes du nom = 0"),
+        }
+        for label, (files, expect) in cases.items():
+            with self.subTest(label):
+                code, out = self.evidence(files)
+                self.assertNotEqual(code, 0, label + " : " + out[-1500:])
+                self.assertIn(expect, out)
+                self.assertIn("deploy-cloudflare-origin-pull.yml", out, "le message nomme l'étape")
+                self.assertIn("cfopull_allow_unobserved=true", out, "et l'échappatoire explicite")
+                for secret in ("/secret-path", "secret-ua", "203.0.113.5", "198.51.100.130"):
+                    self.assertNotIn(secret, out, "jamais d'URI, d'adresse ni de User-Agent")
+        # Le minimum se règle, jamais à 0 par défaut ; l'échappatoire est EXPLICITE (booléen ou chaîne `true` passée par -e).
+        defaults = yaml.safe_load(_text(os.path.join(ROLES, "cloudflare-origin-pull", "defaults", "main.yml")))
+        self.assertGreater(defaults["cfopull_evidence_min_success"], 0)
+        self.assertIs(defaults["cfopull_allow_unobserved"], False)
+        self.assertEqual(self.evidence({"cf-aop-back_preprod.log": good[:4]}, cfopull_evidence_min_success=4)[0], 0)
+        for value, ok in ((True, True), ("true", True), (False, False), ("false", False), ("no", False)):
+            with self.subTest(escape=value):
+                self.assertEqual(self.evidence({}, cfopull_allow_unobserved=value)[0] == 0, ok)
+
+    def test_the_proxy_log_is_read_only_runs_in_check_mode_too_and_changes_nothing(self):
+        good = [self.log_line(minutes_ago=m) for m in range(1, 8)]
+        logdir = os.path.join(self.dir, "log")
+        self.evidence({"cf-aop-back_preprod.log": good})
+        before = sorted(os.listdir(logdir))
+        task = self.tasks("proof.yml", EVIDENCE_TASKS)[0]
+        self.assertIs(task["check_mode"], False, "lecture seule : jouée aussi en simulation")
+        script = task["ansible.builtin.shell"]["cmd"]
+        for destructive in ("rm ", "mv ", "tee", ">>", "> /", "truncate", "sed -i", "systemctl", "nginx"):
+            self.assertNotIn(destructive, script)
+        code, out = self.evidence({"cf-aop-back_preprod.log": good})
+        self.assertEqual(code, 0)
+        self.assertEqual(sorted(os.listdir(logdir)), before)
+
+    def test_the_proxy_evidence_comes_after_the_witness_and_before_any_write_in_every_entry_point(self):
+        names = [t["name"] for t in role_tasks("proof.yml")]
+        self.assertLess(names.index(PROOF_TASKS[1]), names.index(EVIDENCE_TASKS[0]))
+        self.assertLess(names.index(AUTHORITY_TASK), names.index(INVALID_TASK))
+        for task in role_tasks("proof.yml"):
+            if task["name"] in EVIDENCE_TASKS[:1]:
+                self.assertNotIn("delegate_to", task, "sur CHAQUE proxy ciblé, pas sur le poste de contrôle")
+                self.assertNotIn("run_once", task)
+
+    # ── Réciproque et noms orphelins après le rendu ──────────────────────────────────────────────────────────────────────────────
+    RENDERED_TASKS = ("List the Authenticated Origin Pulls names the rendered vhosts declare",
+                      "Fail when a declared Authenticated Origin Pulls name is served by no rendered vhost")
+
+    def rendered_check(self, markers, inventory=None, files=True, **variables):
+        sites = os.path.join(self.dir, "nginx", "sites-enabled")
+        shutil.rmtree(os.path.join(self.dir, "nginx"), ignore_errors=True)
+        os.makedirs(sites)
+        if files:
+            for i, group in enumerate(markers):
+                with open(os.path.join(sites, f"v{i}.conf"), "w", encoding="utf-8") as f:
+                    f.write("server {\n}\n" + "".join(f"# cf-aop: {m}\n" for m in group))
+        inventory = inventory or aop_inventory()
+        resync = yaml.safe_load(_text(os.path.join(ROLES, "proxy-update", "tasks", "resync.yml")))
+        found = {t["name"]: t for t in check._tasks_in(resync) if t.get("name") in self.RENDERED_TASKS}
+        self.assertEqual(sorted(found), sorted(self.RENDERED_TASKS))
+        play = yaml.safe_dump([{
+            "hosts": "proxy1", "gather_facts": False,
+            "vars": dict({"proxy_update_nginx_dir": os.path.join(self.dir, "nginx"),
+                          "proxy_update_aop": evaluate("proxy_update_aop", "proxy-update", inventory)}, **variables),
+            "tasks": [found[n] for n in self.RENDERED_TASKS]}])
+        return run_local_play(play, inventory)
+
+    def test_a_declared_name_that_no_rendered_vhost_carries_is_refused_and_so_is_a_marker_nobody_declared(self):
+        every = ["back-prod.example.test observe", "backind.example.test observe", "back-preprod.example.test enforce"]
+        code, out = self.rendered_check([every[:2], every[2:]])
+        self.assertEqual(code, 0, out[-2000:])
+        for label, markers in (("alias sans vhost", [every[:1], every[2:]]), ("rien de rendu", []),
+                               ("marqueur d'un nom non déclaré", [every, ["typo.example.test observe"]])):
+            with self.subTest(label):
+                code, out = self.rendered_check(markers)
+                self.assertNotEqual(code, 0, out[-1500:])
+                self.assertIn("Un nom déclaré qu'aucun vhost ne porte", out)
+        # Aucune déclaration : ces tâches ne font rien (les parcs sans l'attribut sont inchangés).
+        inventory = aop_inventory()
+        for entry in ("back1-prod", "back2-prod", "back1-preprod"):
+            inventory["all"]["children"]["backs"]["hosts"][entry].pop("cloudflare_origin_pull")
+        code, out = self.rendered_check([], inventory)
+        self.assertEqual(code, 0, out[-1500:])
+        self.assertGreaterEqual(out.count("skipping:"), 2, "les deux tâches sont sautées sans déclaration")
+
+    def test_the_resync_reads_the_rendered_names_after_the_vhosts_and_before_nginx_t(self):
+        resync = yaml.safe_load(_text(os.path.join(ROLES, "proxy-update", "tasks", "resync.yml")))
+        names = [t.get("name") for t in check._tasks_in(resync)]
+        for task in self.RENDERED_TASKS:
+            self.assertGreater(names.index(task), names.index("Render the generic webapp vhosts"))
+            self.assertLess(names.index(task), names.index("Validate nginx configuration"))
+
+    # ── Autorité propre à chaque parc ────────────────────────────────────────────────────────────────────────────────────────────
+    def test_the_authority_directory_is_a_per_parc_group_variable_and_the_default_stays_the_web3c_one(self):
+        defaults = yaml.safe_load(_text(os.path.join(ROLES, "cloudflare-origin-pull", "defaults", "main.yml")))
+        self.assertEqual(defaults["cfopull_dir"], "{{ playbook_dir }}/../keys/cloudflare-origin-pull",
+                         "le défaut est l'autorité de web3c, en production : jamais déplacée")
+        # Aucun autre fichier du dépôt (rôles, playbooks) ne code le chemin en dur : tout suit `cfopull_dir`.
+        offenders = []
+        for base, _, files in os.walk(PLAYBOOKS):
+            for name in files:
+                if name.endswith((".yml", ".inc", ".j2")):
+                    path = os.path.join(base, name)
+                    for number, line in enumerate(_text(path).splitlines(), 1):
+                        if "keys/cloudflare-origin-pull" in line.split("#", 1)[0] and not path.endswith("cloudflare-origin-pull/defaults/main.yml"):
+                            offenders.append(f"{path}:{number}")
+        self.assertEqual(offenders, [])
+        # Une variable de groupe surcharge le défaut du rôle, pour CHAQUE tâche qui lit l'autorité (proof.yml en est un témoin).
+        papang = os.path.join(self.dir, "keys-papanglabs")
+        os.makedirs(papang)
+        with open(os.path.join(papang, "ca.pem"), "w") as f:
+            f.write("CA\n")
+        play = yaml.safe_dump([{"hosts": "proxy1", "gather_facts": False, "tasks": [
+            {"ansible.builtin.include_role": {"name": "cloudflare-origin-pull", "tasks_from": "proof"}}]}])
+        inventory = aop_inventory()
+        for entry in ("back1-prod", "back2-prod", "back1-preprod"):
+            inventory["all"]["children"]["backs"]["hosts"][entry].pop("cloudflare_origin_pull")
+        code, out = run_local_play(play, inventory)
+        self.assertNotEqual(code, 0, "sans surcharge : le défaut, absent ici")
+        self.assertIn("keys/cloudflare-origin-pull/ca.pem est absent", out)
+        inventory["all"]["vars"]["cfopull_dir"] = papang
+        code, out = run_local_play(play, inventory)
+        self.assertEqual(code, 0, "la variable de groupe l'emporte sur le défaut : " + out[-1500:])
 
 
 if __name__ == "__main__":
