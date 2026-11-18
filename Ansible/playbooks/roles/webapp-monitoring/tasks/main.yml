@@ -106,6 +106,7 @@
   register: wa_version_probe
   failed_when: false
   changed_when: false
+  become: true
   when: not ansible_check_mode
   tags: [monitoring]
 

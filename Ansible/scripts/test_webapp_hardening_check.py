@@ -1256,7 +1256,7 @@ class CloudflareNamedPlaybookTests(unittest.TestCase):
         code, out = play(enforce=True)
         self.assertEqual(code, 0, out[-2000:])
         self.assertIn(("PATCH", {"value": "strict"}), state["calls"])
-        self.assertIn("strict (attendu)", out)
+        self.assertIn("strict (lu)", out)
         calls = len(state["calls"])
         code, out = play(enforce=True)
         self.assertEqual(code, 0)
@@ -8522,7 +8522,8 @@ class MultiZoneCloudflareTests(unittest.TestCase):
         api = FakeCloudflare(self, self.ALL, {"example.test": "flexible", "other.example": "strict"})
         code, out = self.run_role(api, inventory)
         self.assertEqual(code, 0, out[-1500:])
-        self.assertIn("ATTENTION — mode TLS de example.test : flexible", out.replace("\\n", " "))
+        self.assertIn("Mode TLS de example.test : « flexible »", out.replace("\\n", " "))
+        self.assertIn("aucun nom de cette zone n'exige", out.replace("\\n", " "), "lu, et dit que rien n'est posé")
         self.assertEqual(self.witnesses(), ["back.other.example.json", "pages-app-back.example.test.json"])
 
     def test_the_order_is_check_every_zone_then_write_zone_by_zone(self):

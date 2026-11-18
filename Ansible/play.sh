@@ -101,7 +101,27 @@ export OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES
 # run par `--limit` (il s'applique à CHAQUE play). Un second `--limit` REMPLACE le
 # premier, donc celui de l'appelant est repris et complété des exclusions, jamais
 # écrasé.
-disabled_hosts="$(scripts/disabled-hosts.sh "${inventories[@]}" 2>/dev/null || true)"
+#
+# DEUX PIÈGES vérifiés :
+#   • le motif `all` n'inclut PAS l'hôte implicite `localhost` : sans lui, tout play
+#     `hosts: localhost` (sélection des apps, contrôles de périmètre…) serait sauté
+#     et un déploiement d'application deviendrait un no-op silencieux ;
+#   • `-l` est le MÊME option qu'`--limit` (dernière occurrence gagnante) : la
+#     laisser passer annulerait l'exclusion.
+helper_rc=0
+disabled_hosts="$(scripts/disabled-hosts.sh "${inventories[@]}" 2>/dev/null)" || helper_rc=$?
+if [ "${helper_rc}" -ne 0 ]; then
+  # Fail-open assumé (le déploiement reste possible), mais VISIBLE : sans ce
+  # message, un inventaire illisible ou un coffre verrouillé déploierait les
+  # hôtes désactivés en silence.
+  echo "play.sh: ATTENTION — hôtes \`disabled\` non calculés (code ${helper_rc}) : ils seront déployés." >&2
+  disabled_hosts=""
+fi
+# `remove-*`/`purge-*` : retirer un hôte désactivé est LÉGITIME (mise au rebut) — et
+# `--limit proxy2` y deviendrait `proxy2:!proxy2`. L'exclusion ne s'y applique pas.
+case "$(basename "$playbook" .yml)" in
+  remove-*|purge-*) disabled_hosts="" ;;
+esac
 if [ -n "${disabled_hosts}" ]; then
   caller_limit=""
   kept=()
@@ -109,14 +129,19 @@ if [ -n "${disabled_hosts}" ]; then
     case "$1" in
       # La virgule et les deux-points sont deux séparateurs d'union : on n'en garde
       # qu'un (le mélange des deux fait perdre des motifs à Ansible).
-      --limit) caller_limit="${caller_limit:+$caller_limit:}${2//,/:}"; shift 2 ;;
+      --limit|-l) [ $# -ge 2 ] || { echo "play.sh: $1 attend une valeur" >&2; exit 2; }
+                  caller_limit="${caller_limit:+$caller_limit:}${2//,/:}"; shift 2 ;;
       --limit=*) caller_limit="${caller_limit:+$caller_limit:}${1#--limit=}"; caller_limit="${caller_limit//,/:}"; shift ;;
+      -l?*) caller_limit="${caller_limit:+$caller_limit:}${1#-l}"; caller_limit="${caller_limit//,/:}"; shift ;;
       *) kept+=("$1"); shift ;;
     esac
   done
   set -- ${kept[@]+"${kept[@]}"}
-  for h in ${disabled_hosts}; do caller_limit="${caller_limit:-all}:!$h"; done
-  args+=(--limit "${caller_limit}")
+  # Sans limite de l'appelant : tous les hôtes réels ET `localhost` (les plays
+  # locaux doivent continuer à tourner), moins les désactivés.
+  pattern="${caller_limit:-all:localhost}"
+  for h in ${disabled_hosts}; do pattern="${pattern}:!$h"; done
+  args+=(--limit "${pattern}")
   echo "play.sh: hôte(s) disabled ignoré(s) : ${disabled_hosts}" >&2
 fi
 

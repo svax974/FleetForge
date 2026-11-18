@@ -71,8 +71,9 @@
   when: cfopull_hostnames_by_zone | length > 1
 
 # Mode TLS de la zone : « Full (strict) » (Cloudflare → origine en HTTPS, certificat vérifié). Un autre mode (Flexible : HTTP
-# vers le port 80, qui redirige vers https = boucle) casserait un nom proxifié. Lecture seule par défaut : signalé, jamais bloquant ;
-# `cfopull_enforce_tls_strict: true` le pose (réglage de toute la zone). Aucune valeur secrète ici.
+# vers le port 80, qui redirige vers https = boucle) casserait un nom proxifié. LECTURE seule ici (la première passe n'écrit rien) ;
+# `strict` est POSÉ par zone.yml, avant tout envoi de certificat, pour toute zone qui porte un nom qui l'exige
+# (`cfopull_enforce_tls_strict`, vrai par défaut ; `false` rétablit le refus ci-dessous). Aucune valeur secrète ici.
 - name: Read the TLS mode of the zone
   ansible.builtin.uri:
     url: "{{ cfopull_api }}/zones/{{ cfopull_zone_ids[cfopull_zone_name] }}/settings/ssl"
@@ -93,14 +94,23 @@
 
 - name: Report the TLS mode of the zone
   ansible.builtin.debug:
+    # Dit ce qui est LU, puis ce qui va être FAIT — jamais le souhait à la place de l'observation.
     msg: >-
-      {{ 'Mode TLS de ' ~ cfopull_zone_name ~ ' : strict (attendu).'
-         if (((cfopull_enforce_tls_strict | bool) and ((cfopull_strict_entries | default({})).get(cfopull_zone_name, 0) | int > 0))
-             or (cfopull_tls.status == 200 and cfopull_tls.json.result.value | default('') == 'strict'))
-         else ('ATTENTION — mode TLS de ' ~ cfopull_zone_name ~ ' : '
-               ~ ((cfopull_tls.json.result.value | default('illisible')) if cfopull_tls.status == 200
-                  else 'illisible (HTTP ' ~ cfopull_tls.status ~ ', jeton sans « Zone Settings : Read »)')
-               ~ ' — « Full (strict) » est exigé pour les noms proxifiés ; `cfopull_enforce_tls_strict: true` le pose.') }}
+      {%- set _mode = ((cfopull_tls.json.result.value | default('illisible')) if cfopull_tls.status == 200
+                       else 'illisible (HTTP ' ~ cfopull_tls.status ~ ', jeton sans « Zone Settings : Read »)') -%}
+      {%- set _demanded = ((cfopull_strict_entries | default({})).get(cfopull_zone_name, 0) | int > 0) -%}
+      {%- set _will_set = (cfopull_enforce_tls_strict | bool) and _demanded -%}
+      {%- if _mode == 'strict' -%}
+      Mode TLS de {{ cfopull_zone_name }} : strict (lu).
+      {%- elif _will_set -%}
+      Mode TLS de {{ cfopull_zone_name }} : « {{ _mode }} » — « Full (strict) » est EXIGÉ par un nom de cette zone : ce passage
+      le POSE pour TOUTE la zone (jeton « Zone Settings : Edit »), avant tout envoi de certificat.
+      {%- elif (cfopull_enforce_tls_strict | bool) -%}
+      Mode TLS de {{ cfopull_zone_name }} : « {{ _mode }} » — aucun nom de cette zone n'exige « Full (strict) » : rien n'est posé.
+      {%- else -%}
+      ATTENTION — mode TLS de {{ cfopull_zone_name }} : « {{ _mode }} » — « Full (strict) » est exigé pour les noms proxifiés, et
+      ce passage ne le pose pas (`cfopull_enforce_tls_strict: false`).
+      {%- endif -%}
   delegate_to: localhost
   become: false
 

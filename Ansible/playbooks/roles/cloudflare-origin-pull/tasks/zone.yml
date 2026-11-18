@@ -13,6 +13,55 @@
 # the per-hostname store (`origin_tls_client_auth/hostnames/certificates`), NOT the zone-level one (`origin_tls_client_auth`),
 # whose certificates the hostname binding below does not know (fixed 2026-10-30). Every call accepts the error statuses so
 # that Cloudflare's own `errors` (code + message, never the token) are shown: the uri module's error is hidden by no_log.
+# Mode TLS de la zone : lu et REFUSÉ par zone-check.yml (première passe, lecture seule, avant la moindre écriture sur n'importe
+# quelle zone). Ici `strict` est POSÉ — et AVANT tout envoi de certificat ou rattachement : un jeton sans « Zone Settings : Edit »
+# échoue alors sans laisser la zone à moitié écrite. L'échappatoire `cfopull_allow_non_strict_tls` vaut aussi ici : l'assumer
+# n'a de sens que si rien n'est posé. Aucune valeur secrète.
+- name: Take the TLS mode read for this zone
+  ansible.builtin.set_fact:
+    cfopull_zone_tls: "{{ cfopull_tls_by_zone[cfopull_zone_name] }}"
+  delegate_to: localhost
+  become: false
+
+- name: Set the TLS mode of the zone to Full (strict)
+  ansible.builtin.uri:
+    url: "{{ cfopull_api }}/zones/{{ cfopull_zone_id }}/settings/ssl"
+    method: PATCH
+    headers:
+      Authorization: "Bearer {{ cfopull_token }}"
+    body_format: json
+    body: {value: strict}
+    status_code: [200, 400, 401, 403, 404]
+  register: cfopull_tls_set
+  no_log: true
+  changed_when: cfopull_tls_set.status == 200
+  delegate_to: localhost
+  become: false
+  vars:
+    _zone_escape: >-
+      {%- set allowed = cfopull_allow_non_strict_tls | default(false) -%}
+      {%- if allowed is sequence and allowed is not string and allowed is not mapping -%}
+      {{ cfopull_zone_name in allowed }}
+      {%- else -%}
+      {{ allowed is sameas true or (allowed is string and (allowed | lower) == 'true') }}
+      {%- endif -%}
+  when:
+    - cfopull_enforce_tls_strict | bool
+    - (cfopull_strict_entries | default({})).get(cfopull_zone_name, 0) | int > 0
+    - cfopull_zone_tls.status != 200 or (cfopull_zone_tls.json.result.value | default('')) != 'strict'
+    - not (_zone_escape | bool)
+
+- name: Fail when Cloudflare refuses to set the TLS mode that was asked for
+  ansible.builtin.assert:
+    that: cfopull_tls_set.status == 200
+    fail_msg: >-
+      Cloudflare refuse de poser le mode TLS « strict » de {{ cfopull_zone_name }} (HTTP {{ cfopull_tls_set.status }}) :
+      {{ (cfopull_tls_set.json | default({})).errors | default([]) | to_json }}. Permission « Zone → Zone Settings → Edit »
+      requise sur le jeton, ou poser le mode à la main (SSL/TLS → Overview → Full (strict)).
+  delegate_to: localhost
+  become: false
+  when: cfopull_tls_set is not skipped
+
 - name: List the client certificates already uploaded for hostnames
   ansible.builtin.uri:
     url: "{{ cfopull_api }}/zones/{{ cfopull_zone_id }}/origin_tls_client_auth/hostnames/certificates"
@@ -166,45 +215,6 @@
     label: "{{ item.item }}"
   delegate_to: localhost
   become: false
-
-# Mode TLS de la zone : lu et REFUSÉ par zone-check.yml (première passe, lecture seule, avant la moindre écriture sur n'importe quelle zone).
-# Ici seulement `cfopull_enforce_tls_strict: true` le POSE (réglage de toute la zone), s'il ne l'est pas déjà. Aucune valeur secrète.
-# Le mode TLS de CETTE zone a été lu (et, s'il le faut, REFUSÉ) par la première passe, zone-check.yml, avant toute écriture : il est repris ici.
-- name: Take the TLS mode read for this zone
-  ansible.builtin.set_fact:
-    cfopull_zone_tls: "{{ cfopull_tls_by_zone[cfopull_zone_name] }}"
-  delegate_to: localhost
-  become: false
-
-- name: Set the TLS mode of the zone to Full (strict)
-  ansible.builtin.uri:
-    url: "{{ cfopull_api }}/zones/{{ cfopull_zone_id }}/settings/ssl"
-    method: PATCH
-    headers:
-      Authorization: "Bearer {{ cfopull_token }}"
-    body_format: json
-    body: {value: strict}
-    status_code: [200, 400, 401, 403, 404]
-  register: cfopull_tls_set
-  no_log: true
-  changed_when: cfopull_tls_set.status == 200
-  delegate_to: localhost
-  become: false
-  when:
-    - cfopull_enforce_tls_strict | bool
-    - (cfopull_strict_entries | default({})).get(cfopull_zone_name, 0) | int > 0
-    - cfopull_zone_tls.status != 200 or (cfopull_zone_tls.json.result.value | default('')) != 'strict'
-
-- name: Fail when Cloudflare refuses to set the TLS mode that was asked for
-  ansible.builtin.assert:
-    that: cfopull_tls_set.status == 200
-    fail_msg: >-
-      Cloudflare refuse de poser le mode TLS « strict » de {{ cfopull_zone_name }} (HTTP {{ cfopull_tls_set.status }}) :
-      {{ (cfopull_tls_set.json | default({})).errors | default([]) | to_json }}. Permission « Zone → Zone Settings → Edit »
-      requise sur le jeton, ou poser le mode à la main (SSL/TLS → Overview → Full (strict)).
-  delegate_to: localhost
-  become: false
-  when: cfopull_tls_set is not skipped
 
 # Témoin d'activation, LOCAL (`keys/*` est gitignoré : jamais versionné, propre à ce poste de contrôle). Écrit seulement ici, une fois
 # TOUT prouvé : noms `active` chez Cloudflare (attente ci-dessus), mode TLS de la zone accepté. Il porte l'empreinte de l'autorité :

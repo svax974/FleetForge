@@ -208,9 +208,12 @@ fn limit_pattern(selection: Option<&[String]>, disabled: &[String]) -> Option<St
     if selection.is_none() && disabled.is_empty() {
         return None;
     }
+    // `all` n'inclut PAS l'hôte implicite `localhost` : sans lui, tout play
+    // `hosts: localhost` (sélection des apps, contrôles de périmètre…) serait sauté
+    // et un déploiement deviendrait un no-op silencieux.
     let mut parts: Vec<String> = selection
         .map(<[String]>::to_vec)
-        .unwrap_or_else(|| vec!["all".to_string()]);
+        .unwrap_or_else(|| vec!["all".to_string(), "localhost".to_string()]);
     parts.extend(disabled.iter().map(|host| format!("!{host}")));
     if parts.is_empty() {
         return None;
@@ -265,8 +268,17 @@ where
     };
 
     // Hôtes `disabled: true` : retirés de la sélection, et exclus du run même
-    // quand un play cible un groupe qui les contient.
-    let disabled = disabled_hosts(parc, env);
+    // quand un play cible un groupe qui les contient. Sauf pour `remove-*`/`purge-*` :
+    // retirer un hôte désactivé est légitime (mise au rebut).
+    let removal = Path::new(playbook_path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .is_some_and(|stem| stem.starts_with("remove-") || stem.starts_with("purge-"));
+    let disabled = if removal {
+        Vec::new()
+    } else {
+        disabled_hosts(parc, env)
+    };
     let selected = limit_hosts.as_ref().map(|hosts| {
         hosts
             .iter()
@@ -523,10 +535,11 @@ mod tests {
     fn a_disabled_host_is_excluded_from_every_pattern() {
         // Rien à restreindre : aucun `--limit`, le comportement d'avant.
         assert_eq!(limit_pattern(None, &[]), None);
-        // Sans sélection : tous les hôtes, moins les désactivés.
+        // Sans sélection : tous les hôtes ET `localhost` (les plays locaux doivent
+        // continuer à tourner), moins les désactivés.
         assert_eq!(
             limit_pattern(None, &["proxy2".to_string()]).as_deref(),
-            Some("all:!proxy2")
+            Some("all:localhost:!proxy2")
         );
         // Une sélection garde son motif et gagne l'exclusion (un play peut cibler un groupe).
         let selected = vec!["proxy1".to_string()];

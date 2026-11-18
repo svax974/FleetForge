@@ -125,6 +125,8 @@
     wa_h_user: __wa_internal_probe__
     wa_h_volumes: __wa_internal_probe__
     wa_h_vpn_addresses: __wa_internal_probe__
+    wa_textfile_dir: __wa_internal_probe__
+    wa_version_probe: __wa_internal_probe__
     wa_health_url: __wa_internal_probe__
     wa_images: __wa_internal_probe__
     wa_infra_listen: __wa_internal_probe__
@@ -428,6 +430,8 @@
       - lookup('ansible.builtin.vars', 'wa_h_user') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', 'wa_h_volumes') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', 'wa_h_vpn_addresses') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'wa_textfile_dir') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'wa_version_probe') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', 'wa_health_url') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', 'wa_images') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', 'wa_infra_listen') | string == '__wa_internal_probe__'
