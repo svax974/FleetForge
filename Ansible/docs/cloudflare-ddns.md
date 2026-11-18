@@ -33,7 +33,7 @@ permettre Zone Read et DNS Edit sur les zones visées. Il reste dans un fichier
 
 | Variable | Défaut | Sens |
 | --- | --- | --- |
-| `cloudflare_ddns_initial_ipv4` | **aucun — obligatoire** | IPv4 que les records portent AUJOURD'HUI, avant le premier passage. Sans défaut : la déduire d'`ansible_host` rendait le premier passage no-op (DNS faux, sonde verte) dès que l'inventaire était déjà à jour |
+| `cloudflare_ddns_initial_ipv4` | aucun — **obligatoire au PREMIER passage** | IPv4 que les records portent AUJOURD'HUI. Sans défaut : la déduire d'`ansible_host` rendait le premier passage no-op (DNS faux, sonde verte) dès que l'inventaire était déjà à jour. Inutile ensuite : l'état local (`state/state.json`) fait foi, et le rôle ne l'exige plus |
 | `cloudflare_ddns_records` | **aucun — obligatoire** | Noms EXACTS que ce client a le droit de réécrire (`["proxy.web3c.cc", …]`). Aucun autre enregistrement n'est touché, même s'il porte la même adresse. Liste vide = refus au démarrage |
 | `cloudflare_ddns_zones` | `["{{ domain_name }}"]` | Zones visées ; `[]` signifie toutes les zones accessibles au token |
 | `cloudflare_ddns_dir` | `/opt/cloudflare-ddns` | Configuration et état persistant |

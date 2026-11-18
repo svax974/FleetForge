@@ -218,8 +218,10 @@ def main():
     # ceux d'un voisin qui portent la même adresse.
     if not config.get("records"):
         raise SystemExit("cloudflare_ddns_records is required: the explicit names this client may update")
-    if not config.get("initial_ipv4"):
-        raise SystemExit("cloudflare_ddns_initial_ipv4 is required: the IP the records still carry today")
+    # `initial_ipv4` ne sert QU'AU PREMIER passage (état absent) : une machine déjà déployée garde son état et
+    # n'en a plus besoin. Vérifié ici, au plus près de l'usage.
+    if not config.get("initial_ipv4") and not (directory / "state.json").exists():
+        raise SystemExit("cloudflare_ddns_initial_ipv4 is required on a first run: the IP the records carry today")
     api = Cloudflare(Path("/run/secrets/cloudflare_token").read_text().strip())
     while True:
         cycle(config, api, directory)
