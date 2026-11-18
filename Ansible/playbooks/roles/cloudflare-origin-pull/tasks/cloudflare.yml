@@ -4,12 +4,46 @@
     that:
       - cfopull_token | length > 0
     fail_msg: >-
-      `cloudflare_token` est vide. Le jeton du parc doit porter « Zone → SSL and
-      Certificates → Edit » en plus de « Edit zone DNS », limité à la zone
-      {{ cfopull_zone }} (My Profile → API Tokens).
-    success_msg: "Jeton présent, zone {{ cfopull_zone }}."
+      `cloudflare_token` est vide. Le jeton du parc doit porter « Zone → Zone → Read » et « Zone → SSL and
+      Certificates → Edit » en plus de « Edit zone DNS », sur CHAQUE zone dont un nom est activé
+      ({{ cfopull_hostnames_by_zone.keys() | list | join(', ') }} ; un seul jeton pour toutes : ressources de zone « Toutes les zones »
+      ou la liste de ces zones) (My Profile → API Tokens).
+    success_msg: "Jeton présent, zones {{ cfopull_hostnames_by_zone.keys() | list | join(', ') }}."
   delegate_to: localhost
   become: false
+
+# `cloudflare_origin_pull` : seules les valeurs `observe` et `enforce` existent (cfopull_aop, defaults), et deux entrées ne se
+# contredisent pas sur un même nom. Refusé AVANT tout appel à Cloudflare : une faute de frappe ne doit pas laisser croire qu'un nom
+# est protégé (le vhost, lui, refuse aussi de se rendre, mais personne ne l'aurait encore posé).
+- name: Fail early on an invalid or contradictory Authenticated Origin Pulls declaration
+  ansible.builtin.assert:
+    that: cfopull_aop | dict2items | rejectattr('value', 'in', ['observe', 'enforce']) | list | length == 0
+    fail_msg: >-
+      `cloudflare_origin_pull` invalide ou contradictoire : {{ cfopull_aop | dict2items | rejectattr('value', 'in', ['observe', 'enforce'])
+      | map(attribute='key') | map('regex_replace', '[^A-Za-z0-9_.?-]', '#') | list | join(', ') }}. Valeurs admises : `observe`
+      (le certificat est vérifié et journalisé, rien n'est refusé) ou `enforce` (une socket Cloudflare sans certificat est refusée) ;
+      toutes les entrées qui portent un même nom (`proxy_hostname`, `cloudflare_origin_pull_aliases`) doivent déclarer la même.
+      Rien n'a été changé chez Cloudflare ni sur les proxies.
+    quiet: true
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+# Chaque nom doit appartenir à une zone du parc (`cfopull_zones` : zone principale + `domains`, suffixe le plus long). Refusé AVANT tout appel
+# à Cloudflare et toute génération : activer un nom sous une zone qui ne le contient pas ne peut que échouer chez Cloudflare, ou (pire)
+# réussir sur la mauvaise zone si le même nom y existe.
+- name: Fail early on a hostname that belongs to no zone of the parc
+  ansible.builtin.assert:
+    that: cfopull_unzoned_hostnames | length == 0
+    fail_msg: >-
+      Nom(s) d'hôte hors de toute zone du parc : {{ cfopull_unzoned_hostnames | map('regex_replace', '[^A-Za-z0-9_.?-]', '#') | list | join(', ') }}.
+      Zones connues : {{ cfopull_zones | join(', ') }} (zone principale `cfopull_zone` = `domain_name`, puis `domains` du parc ; un nom est
+      rattaché à la plus longue zone dont il est le sommet ou un sous-domaine). Ajouter la zone à `domains` (group_vars du parc) ou
+      corriger le nom. Rien n'a été changé chez Cloudflare ni sur les proxies.
+    quiet: true
+  delegate_to: localhost
+  become: false
+  run_once: true
 
 # ── Autorité + certificat client, générés UNE fois sur le poste de contrôle ──
 # `creates:` rend chaque étape idempotente : relancer le playbook ne régénère
@@ -110,31 +144,12 @@
   delegate_to: localhost
   become: false
 
-# ── Cloudflare ─────────────────────────────────────────────────────────────
-- name: Look up the zone
-  ansible.builtin.uri:
-    url: "{{ cfopull_api }}/zones?name={{ cfopull_zone }}"
-    headers:
-      Authorization: "Bearer {{ cfopull_token }}"
-  register: cfopull_zone_lookup
-  no_log: true
-  changed_when: false
-  delegate_to: localhost
-  become: false
-
-- name: Fail when the zone is not found
-  ansible.builtin.assert:
-    that: cfopull_zone_lookup.json.result | length > 0
-    fail_msg: "Zone {{ cfopull_zone }} introuvable avec ce jeton."
-  delegate_to: localhost
-  become: false
-
-- name: Set the zone identifier
-  ansible.builtin.set_fact:
-    cfopull_zone_id: "{{ cfopull_zone_lookup.json.result[0].id }}"
-  delegate_to: localhost
-  become: false
-
+# ── Cloudflare, ZONE PAR ZONE ──────────────────────────────────────────────
+# Un seul jeton (`cfopull_token`) pour toutes les zones, UNE autorité et UN certificat client (envoyé à chaque zone qui porte au moins un
+# nom). Les zones sans nom ne sont jamais appelées. Deux passes, la première en LECTURE SEULE : (1) chaque zone est trouvée avec ce jeton
+# et, avec PLUSIEURS zones, la liste de ses certificats par nom d'hôte est lisible (permissions « Zone → Zone → Read » et « Zone → SSL and Certificates » : une
+# zone introuvable ou refusée arrête tout AVANT la moindre écriture, avec la zone et la permission nommées) ; (2) activation, attente,
+# mode TLS et témoin, zone après zone (tasks/zone.yml).
 - name: Read the client certificate
   ansible.builtin.slurp:
     src: "{{ cfopull_dir }}/client.pem"
@@ -142,285 +157,22 @@
   delegate_to: localhost
   become: false
 
-# Authenticated Origin Pulls PER HOSTNAME (only the -back names of the cloudflare_front entries): the certificate lives in
-# the per-hostname store (`origin_tls_client_auth/hostnames/certificates`), NOT the zone-level one (`origin_tls_client_auth`),
-# whose certificates the hostname binding below does not know (fixed 2026-10-30). Every call accepts the error statuses so
-# that Cloudflare's own `errors` (code + message, never the token) are shown: the uri module's error is hidden by no_log.
-- name: List the client certificates already uploaded for hostnames
-  ansible.builtin.uri:
-    url: "{{ cfopull_api }}/zones/{{ cfopull_zone_id }}/origin_tls_client_auth/hostnames/certificates"
-    headers:
-      Authorization: "Bearer {{ cfopull_token }}"
-    status_code: [200, 400, 401, 403, 404]
-  register: cfopull_uploaded
-  no_log: true
-  changed_when: false
-  delegate_to: localhost
-  become: false
-
-- name: Fail clearly when Cloudflare refuses the listing
-  ansible.builtin.assert:
-    that: cfopull_uploaded.status == 200
-    fail_msg: >-
-      Cloudflare refuse le listage des certificats par nom d'hôte (HTTP {{ cfopull_uploaded.status }}) :
-      {{ (cfopull_uploaded.json | default({})).errors | default([]) | to_json }}.
-      Permission attendue sur le jeton cloudflare_token : « Zone → SSL and Certificates → Edit » sur {{ cfopull_zone }}.
-      Rien n'a encore été changé chez Cloudflare ni sur les proxies (le vhost ne se pose qu'après cette étape).
-  delegate_to: localhost
-  become: false
-
-# Comparaison sur la première ligne de base64 du PEM (la ligne 0 est l'en-tête
-# BEGIN, identique pour tous) : Cloudflare renvoie le certificat avec ses propres
-# retours à la ligne, une égalité stricte du bloc ne tiendrait pas.
-- name: Find the certificate that matches ours
-  ansible.builtin.set_fact:
-    cfopull_pem_marker: "{{ (cfopull_client_cert.content | b64decode | trim).split('\n')[1] }}"
-  delegate_to: localhost
-  become: false
-
-- name: Keep the identifier of the matching uploaded certificate
-  ansible.builtin.set_fact:
-    cfopull_cert_id: >-
-      {{ cfopull_uploaded.json.result | default([], true)
-         | selectattr('certificate', 'defined')
-         | selectattr('certificate', 'search', cfopull_pem_marker | regex_escape)
-         | map(attribute='id') | list | first | default('') }}
-  delegate_to: localhost
-  become: false
-
-- name: Upload the client certificate for hostnames
-  ansible.builtin.uri:
-    url: "{{ cfopull_api }}/zones/{{ cfopull_zone_id }}/origin_tls_client_auth/hostnames/certificates"
-    method: POST
-    headers:
-      Authorization: "Bearer {{ cfopull_token }}"
-    body_format: json
-    body:
-      certificate: "{{ cfopull_client_cert.content | b64decode }}"
-      private_key: "{{ lookup('ansible.builtin.file', cfopull_dir ~ '/client.key') }}"
-      bundle_method: ubiquitous
-    status_code: [200, 201, 202, 400, 401, 403, 404, 409]
-  register: cfopull_upload
-  no_log: true
-  changed_when: cfopull_upload.status in [200, 201, 202]
-  delegate_to: localhost
-  become: false
-  when: cfopull_cert_id | length == 0
-
-- name: Fail clearly when Cloudflare refuses the upload
-  ansible.builtin.assert:
-    that: cfopull_upload.status in [200, 201, 202]
-    fail_msg: >-
-      Cloudflare refuse le certificat (HTTP {{ cfopull_upload.status }}) :
-      {{ (cfopull_upload.json | default({})).errors | default([]) | to_json }}.
-      Rien n'est rattaché aux noms d'hôte ni posé sur les proxies.
-  delegate_to: localhost
-  become: false
-  when: cfopull_cert_id | length == 0
-
-- name: Keep the identifier of the uploaded certificate
-  ansible.builtin.set_fact:
-    cfopull_cert_id: "{{ cfopull_upload.json.result.id }}"
-  delegate_to: localhost
-  become: false
-  when: cfopull_cert_id | length == 0
-
-# Association nom → certificat : c'est elle qui fait que Cloudflare présente le
-# certificat sur ce nom. Le PUT ne porte que les noms de `cfopull_hostnames` ;
-# les autres noms de la zone ne sont pas touchés.
-- name: Build the hostname bindings
-  ansible.builtin.set_fact:
-    cfopull_bindings: >-
-      {%- set out = [] -%}
-      {%- for h in cfopull_hostnames -%}
-      {%- set _ = out.append({'hostname': h, 'cert_id': cfopull_cert_id, 'enabled': true}) -%}
-      {%- endfor -%}
-      {{ out }}
-  delegate_to: localhost
-  become: false
-
-- name: Enable Authenticated Origin Pulls on the hostnames
-  ansible.builtin.uri:
-    url: "{{ cfopull_api }}/zones/{{ cfopull_zone_id }}/origin_tls_client_auth/hostnames"
-    method: PUT
-    headers:
-      Authorization: "Bearer {{ cfopull_token }}"
-    body_format: json
-    body:
-      config: "{{ cfopull_bindings }}"
-    status_code: [200, 202, 400, 401, 403, 404]
-  register: cfopull_binding
-  no_log: true
-  changed_when: cfopull_binding.status in [200, 202]
-  delegate_to: localhost
-  become: false
-
-- name: Fail clearly when Cloudflare refuses the hostname binding
-  ansible.builtin.assert:
-    that: cfopull_binding.status in [200, 202]
-    fail_msg: >-
-      Cloudflare refuse le rattachement de {{ cfopull_hostnames | join(', ') }} (HTTP {{ cfopull_binding.status }}) :
-      {{ (cfopull_binding.json | default({})).errors | default([]) | to_json }}.
-      Le vhost des proxies n'est pas encore posé : la prod est inchangée.
-  delegate_to: localhost
-  become: false
-
-# Cloudflare accepte l'association (202) puis la déploie en quelques minutes (initializing → pending_deployment → active).
-# Le vhost qui exige le certificat ne doit être posé qu'ensuite, sinon les requêtes via Cloudflare échouent le temps du
-# déploiement. `ignore_errors` : à court d'essais, Ansible marque l'élément en échec quoi que dise failed_when, et no_log
-# en masque le détail ; l'assertion suivante donne alors le statut lisible.
-- name: Wait until Cloudflare presents the certificate on every hostname
-  ansible.builtin.uri:
-    url: "{{ cfopull_api }}/zones/{{ cfopull_zone_id }}/origin_tls_client_auth/hostnames/{{ item }}"
-    headers:
-      Authorization: "Bearer {{ cfopull_token }}"
-    status_code: [200, 400, 401, 403, 404]
-  register: cfopull_hostname_status
-  until: ((cfopull_hostname_status.json | default({})).result | default({}, true)).status | default('') == 'active'
-  retries: 36
-  delay: 10
-  loop: "{{ cfopull_hostnames }}"
-  no_log: true
-  changed_when: false
-  ignore_errors: true
-  delegate_to: localhost
-  become: false
-
-- name: Fail clearly when a hostname is not active
-  ansible.builtin.assert:
-    that: ((item.json | default({})).result | default({}, true)).status | default('') == 'active'
-    fail_msg: >-
-      {{ item.item }} n'est pas actif chez Cloudflare après 6 minutes (HTTP {{ item.status }},
-      statut {{ ((item.json | default({})).result | default({}, true)).status | default('?') }},
-      certificat {{ ((item.json | default({})).result | default({}, true)).cert_status | default('?') }}) :
-      {{ (item.json | default({})).errors | default([]) | to_json }}. Rejouer plus tard : le vhost n'est pas encore posé.
-  loop: "{{ cfopull_hostname_status.results }}"
+- name: Check every zone with the token before writing anything
+  ansible.builtin.include_tasks: zone-check.yml
+  loop: "{{ cfopull_hostnames_by_zone | dict2items }}"
   loop_control:
-    label: "{{ item.item }}"
-  delegate_to: localhost
-  become: false
-
-# Mode TLS de la zone : « Full (strict) » (Cloudflare → origine en HTTPS, certificat vérifié). Un autre mode (Flexible : HTTP
-# vers le port 80, qui redirige vers https = boucle) casserait un nom proxifié. Lecture seule par défaut : signalé, jamais bloquant ;
-# `cfopull_enforce_tls_strict: true` le pose (réglage de toute la zone). Aucune valeur secrète ici.
-- name: Read the TLS mode of the zone
-  ansible.builtin.uri:
-    url: "{{ cfopull_api }}/zones/{{ cfopull_zone_id }}/settings/ssl"
-    headers:
-      Authorization: "Bearer {{ cfopull_token }}"
-    status_code: [200, 400, 401, 403, 404]
-  register: cfopull_tls
-  no_log: true
-  changed_when: false
-  delegate_to: localhost
-  become: false
-
-- name: Set the TLS mode of the zone to Full (strict)
-  ansible.builtin.uri:
-    url: "{{ cfopull_api }}/zones/{{ cfopull_zone_id }}/settings/ssl"
-    method: PATCH
-    headers:
-      Authorization: "Bearer {{ cfopull_token }}"
-    body_format: json
-    body: {value: strict}
-    status_code: [200, 400, 401, 403, 404]
-  register: cfopull_tls_set
-  no_log: true
-  changed_when: cfopull_tls_set.status == 200
-  delegate_to: localhost
-  become: false
-  when:
-    - cfopull_enforce_tls_strict | bool
-    - cfopull_tls.status != 200 or (cfopull_tls.json.result.value | default('')) != 'strict'
-
-- name: Fail when Cloudflare refuses to set the TLS mode that was asked for
-  ansible.builtin.assert:
-    that: cfopull_tls_set.status == 200
-    fail_msg: >-
-      Cloudflare refuse de poser le mode TLS « strict » de {{ cfopull_zone }} (HTTP {{ cfopull_tls_set.status }}) :
-      {{ (cfopull_tls_set.json | default({})).errors | default([]) | to_json }}. Permission « Zone → Zone Settings → Edit »
-      requise sur le jeton, ou poser le mode à la main (SSL/TLS → Overview → Full (strict)).
-  delegate_to: localhost
-  become: false
-  when: cfopull_tls_set is not skipped
-
-- name: Report the TLS mode of the zone
-  ansible.builtin.debug:
-    msg: >-
-      {{ 'Mode TLS de ' ~ cfopull_zone ~ ' : strict (attendu).'
-         if (cfopull_tls_set is not skipped or (cfopull_tls.status == 200 and cfopull_tls.json.result.value | default('') == 'strict'))
-         else ('ATTENTION — mode TLS de ' ~ cfopull_zone ~ ' : '
-               ~ ((cfopull_tls.json.result.value | default('illisible')) if cfopull_tls.status == 200
-                  else 'illisible (HTTP ' ~ cfopull_tls.status ~ ', jeton sans « Zone Settings : Read »)')
-               ~ ' — « Full (strict) » est exigé pour les noms proxifiés ; `cfopull_enforce_tls_strict: true` le pose.') }}
-  delegate_to: localhost
-  become: false
-
-# Un nom `cloudflare_named` porte `/mcp` et OAuth : en « Full » (non strict) Cloudflare joint l'origine en HTTPS SANS vérifier son
-# certificat, donc le segment Cloudflare → origine n'est pas authentifié (un tiers sur le chemin se fait passer pour l'origine). Mode
-# lisible et non strict : BLOQUANT. Mode illisible (jeton sans « Zone Settings : Read ») : BLOQUANT aussi, tâche suivante.
-# `cfopull_allow_non_strict_tls: true` : échappatoire explicite (décision du propriétaire, faux par défaut). Pas pour `cloudflare_front`
-# seul : l'avertissement d'avant, inchangé. Jamais en `--check` : tout le côté Cloudflare y est sauté (tasks/main.yml), ses résultats
-# n'ont ni `status` ni `json`.
-- name: Refuse a Cloudflare-served name while the TLS mode of the zone is readable and not strict
+    loop_var: cfopull_zone_item
+    label: "{{ cfopull_zone_item.key }}"
   vars:
-    _named_entries: >-
-      {{ groups['all'] | map('extract', hostvars) | selectattr('cloudflare_named', 'defined') | map(attribute='cloudflare_named')
-         | map('bool') | select | list | length }}
-  ansible.builtin.assert:
-    that: false
-    fail_msg: >-
-      Mode TLS de {{ cfopull_zone }} : « {{ cfopull_tls.json.result.value | default('?') }} » — « Full (strict) » est EXIGÉ pour un nom
-      `cloudflare_named` : sans lui Cloudflare ne vérifie pas le certificat de l'origine (segment Cloudflare → proxy non authentifié).
-      Rejouer avec `-e cfopull_enforce_tls_strict=true` (pose `strict` pour TOUTE la zone, jeton « Zone Settings : Edit ») ou le poser à
-      la main (SSL/TLS → Overview → Full (strict)). Échappatoire explicite, à assumer : `-e cfopull_allow_non_strict_tls=true`.
-      Les noms sont activés chez Cloudflare mais aucun vhost n'est encore posé sur les proxies.
-    quiet: true
-  delegate_to: localhost
-  become: false
-  when:
-    - not ansible_check_mode
-    - (_named_entries | int) > 0
-    - cfopull_tls_set is skipped
-    - cfopull_tls.status | default(0) == 200
-    - (cfopull_tls.json.result.value | default('')) != 'strict'
-    - not (cfopull_allow_non_strict_tls | default(false) | bool)
+    cfopull_zone_name: "{{ cfopull_zone_item.key }}"
 
-# Mode ILLISIBLE (jeton sans « Zone → Zone Settings → Read », HTTP 401/403/404) : même refus pour un nom `cloudflare_named`. Ne pas
-# pouvoir lire le mode n'est pas la preuve qu'il est `strict` : le déploiement ne doit pas poser un vhost OAuth/MCP public sur une
-# hypothèse. Mêmes règles que le refus ci-dessus (échappatoire `cfopull_allow_non_strict_tls`, jamais en `--check`, jamais de lecture
-# du `.json` d'une tâche sautée : `cfopull_tls_set is skipped` est testé AVANT d'aller lire `cfopull_tls.status`). `cloudflare_front`
-# seul : l'avertissement d'avant, octet pour octet.
-- name: Refuse a Cloudflare-served name while the TLS mode of the zone cannot be read
+- name: Activate the certificate on the hostnames of each zone
+  ansible.builtin.include_tasks: zone.yml
+  loop: "{{ cfopull_hostnames_by_zone | dict2items }}"
+  loop_control:
+    loop_var: cfopull_zone_item
+    label: "{{ cfopull_zone_item.key }}"
   vars:
-    _named_entries: >-
-      {{ groups['all'] | map('extract', hostvars) | selectattr('cloudflare_named', 'defined') | map(attribute='cloudflare_named')
-         | map('bool') | select | list | length }}
-  ansible.builtin.assert:
-    that: false
-    fail_msg: >-
-      Mode TLS de {{ cfopull_zone }} ILLISIBLE (HTTP {{ cfopull_tls.status | default('?') }}) : le jeton `cloudflare_token` n'a pas la
-      permission « Zone → Zone Settings → Read/Edit » sur {{ cfopull_zone }}. « Full (strict) » est EXIGÉ pour un nom `cloudflare_named` et
-      ne peut pas être vérifié. Deux remèdes : (1) ajouter « Zone → Zone Settings → Read » (ou « Edit », pour que
-      `-e cfopull_enforce_tls_strict=true` pose `strict`) au jeton, puis rejouer ; (2) assumer explicitement l'absence de contrôle avec
-      `-e cfopull_allow_non_strict_tls=true` (après avoir vérifié à la main SSL/TLS → Overview → Full (strict)).
-      Les noms sont activés chez Cloudflare mais aucun vhost n'est encore posé sur les proxies.
-    quiet: true
-  delegate_to: localhost
-  become: false
-  when:
-    - not ansible_check_mode
-    - (_named_entries | int) > 0
-    - cfopull_tls_set is skipped
-    - cfopull_tls.status | default(0) != 200
-    - not (cfopull_allow_non_strict_tls | default(false) | bool)
-
-- name: Say what is left to do
-  ansible.builtin.debug:
-    msg: >-
-      Cloudflare présente désormais le certificat client de {{ cfopull_zone }} sur
-      {{ cfopull_hostnames | join(', ') }}. Reste à déployer l'autorité sur les
-      proxies (play suivant) puis le vhost qui la vérifie. Autorité :
-      {{ cfopull_dir }}/ca.pem.
-  delegate_to: localhost
-  become: false
+    cfopull_zone_name: "{{ cfopull_zone_item.key }}"
+    cfopull_zone_hostnames: "{{ cfopull_zone_item.value }}"
+    cfopull_zone_id: "{{ cfopull_zone_ids[cfopull_zone_item.key] }}"

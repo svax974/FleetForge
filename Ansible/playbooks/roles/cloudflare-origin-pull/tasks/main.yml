@@ -1,5 +1,6 @@
 ---
-# Authenticated Origin Pulls PAR ZONE avec un certificat client PROPRE au parc.
+# Authenticated Origin Pulls PAR ZONE avec un certificat client PROPRE au parc (dossier `cfopull_dir`, surchargé par
+# `group_vars/<parc>.yml` : voir defaults/main.yml — le défaut est l'autorité de web3c).
 #
 # Pourquoi pas le certificat d'origine par défaut de Cloudflare : il est
 # commun à TOUS les clients Cloudflare — quiconque ouvre un compte gratuit et
@@ -7,8 +8,9 @@
 # Cloudflare détient le certificat client, ne laisse passer que NOTRE zone.
 #
 # Deux temps, deux plays dans deploy-cloudflare-origin-pull.yml :
-#   cloudflare.yml  (localhost)  autorité + certificat client, envoi à Cloudflare,
-#                                activation sur les noms de `cfopull_hostnames`
+#   cloudflare.yml  (localhost)  autorité + certificat client, puis, ZONE PAR ZONE (`cfopull_hostnames_by_zone` : zone principale
+#                                + `domains`, un seul jeton) : zone-check.yml (lecture seule, toutes les zones d'abord) et zone.yml
+#                                (envoi à Cloudflare, activation sur les noms de `cfopull_hostnames` de la zone, mode TLS, témoin)
 #   nginx.yml       (proxies)    dépôt de l'autorité que nginx vérifie
 #
 # Rien ici ne FERME un vhost : `_cloudflare_front.inc` pose `ssl_verify_client

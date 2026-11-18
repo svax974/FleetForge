@@ -1,7 +1,8 @@
 ---
 # Dépose l'AUTORITÉ (jamais la clé) que nginx utilise pour vérifier le
 # certificat client présenté par Cloudflare (`ssl_client_certificate`, posé par
-# `_cloudflare_front.inc` pour toute entrée `cloudflare_front: true`). Inclus par
+# `_cloudflare_front.inc` pour toute entrée `cloudflare_front: true`, ou par `_cloudflare_realip.inc` pour une entrée
+# `cloudflare_origin_pull`). Inclus par
 # proxy-update (main et deploy-one-site) AVANT tout gabarit de vhost : `nginx -t`
 # refuse un fichier absent, et deploy-one-site laisserait sur le disque un vhost
 # qui casserait le prochain redémarrage de nginx. Pas de reload ici : le vhost
@@ -11,13 +12,19 @@
     that: (cfopull_dir ~ '/ca.pem') is file
     fail_msg: >-
       {{ cfopull_dir }}/ca.pem est absent sur ce poste alors qu'une entrée de
-      l'inventaire porte `cloudflare_front: true` ou `cloudflare_named: true` : son vhost exige le certificat
-      client de Cloudflare. Le play « Authenticated Origin Pulls côté Cloudflare » de deploy-webapp.yml (ou
+      l'inventaire porte `cloudflare_front: true`, `cloudflare_named: true` ou `cloudflare_origin_pull` : son vhost
+      vérifie le certificat client de Cloudflare. Le play « Authenticated Origin Pulls côté Cloudflare » de deploy-webapp.yml (ou
       ./play.sh <parc> deploy-cloudflare-origin-pull.yml) le génère et l'envoie à Cloudflare ; sinon reprendre
-      keys/cloudflare-origin-pull/ depuis le poste qui l'a générée.
+      le répertoire `cfopull_dir` du parc depuis le poste qui l'a générée.
   delegate_to: localhost
   become: false
   run_once: true
+
+# Authenticated Origin Pulls des vhosts écrits à la main sur `_cloudflare_realip.inc` : déclaration valide, et `enforce` seulement si
+# l'activation chez Cloudflare est prouvée (proof.yml). Avant tout dépôt et tout gabarit ; la resynchronisation complète les joue
+# aussi en tout premier (avant sa sauvegarde), ce passage-ci couvre `deploy-one-site`, `deploy-webapp-site` et le play côté proxies.
+- name: Check the Authenticated Origin Pulls declarations and the proof that Cloudflare presents the certificate
+  ansible.builtin.include_tasks: proof.yml
 
 - name: Install the Cloudflare origin-pull CA on the proxy
   ansible.builtin.copy:

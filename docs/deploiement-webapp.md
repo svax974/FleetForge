@@ -25,6 +25,18 @@ ou `cloudflare_named` (nom proxifié par Cloudflare, front en conteneur : CNAME 
 posés par le même `deploy-webapp.yml`), `webapp_db_engine` (sqlite | postgres | selfhosted | supabase | cloud | neon). Avec
 `cloudflare_front` comme avec `cloudflare_named`, les locations PRIVÉES du vhost refusent (403) une socket d'une plage Cloudflare sans
 certificat client vérifié (CF-Connecting-IP serait forgeable) et interdisent le cache de l'edge (`_cloudflare_untrusted.inc`).
+Un vhost écrit à la main sur `_cloudflare_realip.inc` (papanglabs : back-prod, back-preprod, backindicators-prod) s'opte par
+`cloudflare_origin_pull: observe | enforce` (+ `cloudflare_origin_pull_aliases` pour un nom sans entrée propre) : même autorité, même
+activation chez Cloudflare, `observe` avant `enforce`, `enforce` posé seulement sur l'activation prouvée (témoin local ET journal récent du
+proxy) ; l'autorité est celle du parc (`cfopull_dir` : le dossier `keys/cloudflare-origin-pull/` de web3c par défaut, un dossier frère
+`keys/cloudflare-origin-pull-papanglabs/` pour papanglabs). Même attribut pour les vhosts web3c qui gardent leur propre filtre d'adresse
+(`ctdapi.conf`, `ctdapi-back.conf`, `tradekong-back.conf` : morceaux `certhttp` / `certserver` / `cert` de `_cloudflare_realip.inc`, aucune
+lecture d'IP ni filtre changés) et le rôle `cloudflare-origin-pull` est MULTI-ZONE : chaque nom va à la plus longue zone de `cfopull_zones`
+(zone principale + `domains`), un seul jeton, une seule autorité, chaque zone vérifiée en lecture seule avant la première écriture, mode TLS
+`strict` exigé et refusé en lecture seule AVANT toute écriture, échappatoire (`cfopull_allow_non_strict_tls`, `true` ou liste de zones, rien d'autre) PAR ZONE ; un déploiement
+d'application (`deploy-webapp.yml`) ne lit et n'active que les zones de SON entrée (`cfopull_target`), jamais celle d'une autre application, témoin d'activation par nom ET par zone
+(docs/etude-passerelle-sur-webapp.md, « Authenticated Origin Pulls des vhosts papanglabs » et « Authenticated Origin Pulls : ctdapi, tradekong et plusieurs zones »). Une entrée `webapp_proxy: external`
+(tradekong) n'a pas le play Cloudflare de `deploy-webapp.yml` : `./play.sh <parc> deploy-cloudflare-origin-pull.yml` active son nom.
 Tout le reste est dérivé et surchargeable
 (`roles/webapp-setup/defaults/main.yml`) : `back_port` = app+1, Postgres = app+2, Redis = app+3 (un bloc de 4 ports par app,
 collision refusée sur une même machine), `webapp_machine` (entrée canonique qui porte `host_vars/<machine>.yml`),

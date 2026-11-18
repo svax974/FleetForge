@@ -19,6 +19,16 @@
 # `proxy_update_restore_pending` (une restauration est en cours : la sauvegarde est alors CONSERVÉE, c'est la seule copie).
 # Le répertoire de sauvegarde (clés et htpasswd, créé par root dans /tmp) est supprimé dans `always`, sauf restauration
 # inachevée.
+# Authenticated Origin Pulls des vhosts écrits à la main (`cloudflare_origin_pull`, papanglabs) : déclaration valide, et `enforce` seulement
+# si l'activation chez Cloudflare est prouvée — refusé ICI, avant la sauvegarde et le vidage de /etc/nginx (un refus ne passe jamais par
+# la restauration). Le même contrôle, rejoué par nginx.yml, couvre `deploy-one-site` et `deploy-webapp-site`. Aucune entrée ne déclare
+# l'attribut : `proxy_update_cloudflare_edge` ne s'en occupe pas, rien ne change.
+- name: Check the Authenticated Origin Pulls declarations before touching /etc/nginx
+  ansible.builtin.include_role:
+    name: cloudflare-origin-pull
+    tasks_from: proof
+  when: proxy_update_cloudflare_edge | bool
+
 - name: Resynchronise the nginx tree, restoring the previous one when a check fails
   block:
     - name: Start from no backup and no restoration pending
@@ -150,6 +160,40 @@
       ansible.builtin.include_tasks: webapp-sites.yml
       vars:
         proxy_update_full_resync: true
+
+    # Authenticated Origin Pulls : chaque nom déclaré par `cloudflare_origin_pull` doit être porté par un vhost RENDU (marqueur
+    # `# cf-aop: <nom> <mode>` de _cloudflare_realip.inc). Un nom activé chez Cloudflare que AUCUN vhost ne porte (faute de frappe d'un
+    # alias) n'est protégé par personne ; la réciproque (un vhost dont le nom n'est déclaré par aucune entrée) est refusée au rendu par
+    # le partiel lui-même. Un échec ici passe par la restauration, comme tout contrôle posé après l'écriture.
+    - name: List the Authenticated Origin Pulls names the rendered vhosts declare
+      ansible.builtin.command:
+        argv: [grep, -rhE, "^# cf-aop: ", "{{ proxy_update_nginx_dir }}/sites-enabled"]
+      register: proxy_update_aop_rendered
+      changed_when: false
+      failed_when: proxy_update_aop_rendered.rc > 1
+      when:
+        - not ansible_check_mode
+        - proxy_update_aop | length > 0
+
+    - name: Fail when a declared Authenticated Origin Pulls name is served by no rendered vhost
+      vars:
+        _rendered: >-
+          {%- set ns = namespace(names=[]) -%}
+          {%- for line in proxy_update_aop_rendered.stdout_lines -%}
+          {%- set ns.names = ns.names + [line.split(' ')[2]] -%}
+          {%- endfor -%}
+          {{ ns.names | unique | sort | list }}
+        _declared: "{{ proxy_update_aop | dict2items | selectattr('value', 'in', ['observe', 'enforce']) | map(attribute='key') | list | sort }}"
+      ansible.builtin.assert:
+        that: _rendered == _declared
+        fail_msg: >-
+          Noms déclarés par `cloudflare_origin_pull` (proxy_hostname, cloudflare_origin_pull_aliases) : {{ _declared | join(', ') }} ; noms
+          portés par un vhost rendu : {{ _rendered | join(', ') or '(aucun)' }}. Un nom déclaré qu'aucun vhost ne porte est activé chez
+          Cloudflare mais protégé par personne : corriger la faute de frappe (alias, proxy_hostname) ou le vhost.
+        quiet: true
+      when:
+        - not ansible_check_mode
+        - proxy_update_aop | length > 0
 
     # Vhost de santé du front (sonde du Load Balancer Cloudflare), posé APRÈS les
     # vhosts du parc : le répertoire sites-enabled vient d'être vidé, il faut donc le
