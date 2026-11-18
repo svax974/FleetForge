@@ -7521,7 +7521,8 @@ class AopRolloutSafetyTests(unittest.TestCase):
         inventory = aop_inventory()
         for entry in ("back1-prod", "back2-prod", "back1-preprod"):
             inventory["all"]["children"]["backs"]["hosts"][entry].pop("cloudflare_origin_pull")
-        code, out = play(inventory, "flexible")
+        # Plus aucun nom n'exige `strict` : rien à refuser, ni à poser.
+        code, out = play(inventory, "flexible", cfopull_strict_entries={})
         self.assertEqual(code, 0, out[-1500:])
         self.assertIn("ATTENTION", out)
 
@@ -7816,7 +7817,11 @@ class AopRolloutSafetyTests(unittest.TestCase):
                 if name.endswith((".yml", ".inc", ".j2")):
                     path = os.path.join(base, name)
                     for number, line in enumerate(_text(path).splitlines(), 1):
-                        if "keys/cloudflare-origin-pull" in line.split("#", 1)[0] and not path.endswith("cloudflare-origin-pull/defaults/main.yml"):
+                        # `group_vars/` EST l'endroit où un parc déclare SA propre autorité (`cfopull_dir`) : c'est la
+                        # surcharge voulue, pas un chemin en dur dans un rôle.
+                        if ("keys/cloudflare-origin-pull" in line.split("#", 1)[0]
+                                and not path.endswith("cloudflare-origin-pull/defaults/main.yml")
+                                and os.path.basename(os.path.dirname(path)) != "group_vars"):
                             offenders.append(f"{path}:{number}")
         self.assertEqual(offenders, [])
         # Une variable de groupe surcharge le défaut du rôle, pour CHAQUE tâche qui lit l'autorité (proof.yml en est un témoin).
