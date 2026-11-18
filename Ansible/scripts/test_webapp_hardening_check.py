@@ -7460,12 +7460,15 @@ OWN_REALIP = ("{% for ip in cloudflare_ips %}\n  set_real_ip_from {{ ip }};\n{% 
               "  real_ip_recursive on;\n\n")
 OWN_KINDS = {
     # ctdapi.conf : IP lue dans CF-Connecting-IP, filtre = flotte + whitelist (adresse APRÈS remplacement).
-    "front": dict(slug="ctdapi", name="ctdapi.example.test", realip=True, allows=["192.0.2.20", "203.0.113.50"]),
+    "front": dict(slug="ctdapi", name="ctdapi.example.test", realip=True, allows=["192.0.2.20", "203.0.113.50"], no_store=True),
     # ctdapi-back.conf / tradekong-back.conf : pas de real_ip, filtre = vpns + whitelist + plages Cloudflare + apps (adresse de la socket).
     "back": dict(slug="ctdapi_back", name="ctdapi-back.example.test", realip=False,
                  allows=["198.51.100.1", "203.0.113.50", "@CF@", "192.0.2.20"]),
 }
 OWN_GUARD = "if ($cf_untrusted_{slug}) {{"
+# Front PRIVÉ (ctdapi.conf) : jamais mis en cache par l'edge. Les API publiques (ctdapi-back, tradekong-back) ne l'ont PAS : le cache est
+# la politique de l'application.
+NO_STORE_LINE = '    add_header         Cloudflare-CDN-Cache-Control "no-store" always;\n'
 
 
 def own_source(kind, declared=True, slug=True, name=True):
@@ -7483,6 +7486,7 @@ def own_source(kind, declared=True, slug=True, name=True):
             + (OWN_REALIP if spec["realip"] else "")
             + include("certserver")
             + "  location / {\n" + include("cert")
+            + (NO_STORE_LINE if spec.get("no_store") else "")
             + "    proxy_pass         http://192.0.2.30:6101;\n    proxy_set_header   X-Real-IP $remote_addr;\n"
               "    proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;\n"
             + allows + "    deny all;\n  }\n  ssl_certificate /etc/letsencrypt/live/example.test/fullchain.pem;\n}\n")
@@ -7700,6 +7704,8 @@ class OwnFilterCheckerTests(unittest.TestCase):
                 "geo vidé": text[:geo_start] + re.sub(r"(?m)^    [0-9a-f.:/]+ 1;\n", "", text[geo_start:], count=0),
                 "location ouverte en plus": text.replace("  location / {", "  location /open/ {\n    proxy_pass http://192.0.2.30:6101;\n  }\n\n  location / {", 1),
             }
+            if spec.get("no_store"):
+                mutations["no-store du front privé retiré"] = text.replace(NO_STORE_LINE, "", 1)
             for label, mutated in mutations.items():
                 with self.subTest(kind=kind, mutation=label):
                     self.assertNotEqual(mutated, text, "la mutation ne change rien")
@@ -7718,15 +7724,24 @@ class OwnFilterCheckerTests(unittest.TestCase):
         errors = vhost_errors(extra, cloudflare_edge=True, cloudflare_ranges=ranges)
         self.assertTrue(any("en trop ['203.0.113.0/24']" in e for e in errors), errors)
 
-    def test_a_filter_location_written_by_hand_does_not_need_the_no_store_header_but_a_generated_one_still_does(self):
-        text = render_own("front", aop={"ctdapi.example.test": "enforce"})
-        self.assertNotIn("Cloudflare-CDN-Cache-Control", text)
-        self.assertEqual(edge_errors(text), [])
-        # Sans le journal `cf-aop-…` (la marque d'un vhost écrit à la main sur `_cloudflare_realip.inc`), la même location est « privée » :
-        # la politique de cache de l'edge est exigée comme pour un vhost générique.
-        generated = re.sub(r"  access_log /var/log/nginx/cf-aop-\S+ \S+;\n", "", text)
-        errors = edge_errors(generated)
-        self.assertTrue(any("Cloudflare-CDN-Cache-Control" in e for e in errors), errors)
+    def test_the_private_front_must_send_no_store_and_the_public_apis_must_not_be_made_to(self):
+        # ctdapi.conf : front PRIVÉ derrière Cloudflare (adresse remplacée par CF-Connecting-IP, puis filtre). Jamais mis en cache par l'edge : ses
+        # statiques seraient servis à tout le monde sans le filtre. `add_header` d'une location remplace ceux du `server {}` : celui-ci est le seul.
+        front = render_own("front", aop={"ctdapi.example.test": "enforce"})
+        self.assertEqual(front.count("add_header"), 1)
+        self.assertIn(NO_STORE_LINE, location_body(front, "/") + "\n")
+        self.assertEqual(edge_errors(front), [])
+        errors = edge_errors(front.replace(NO_STORE_LINE, ""))
+        self.assertTrue(any("Cloudflare-CDN-Cache-Control" in e and "location /" in e for e in errors), errors)
+        # ctdapi-back / tradekong-back : API PUBLIQUES, le cache est la politique de l'application : aucun en-tête, et le contrôleur ne l'exige pas.
+        back = render_own("back", aop={"ctdapi-back.example.test": "enforce"})
+        self.assertNotIn("Cloudflare-CDN-Cache-Control", back)
+        self.assertNotIn("add_header", back)
+        self.assertEqual(edge_errors(back), [])
+        # Sans le journal `cf-aop-…` (la marque d'un vhost écrit à la main sur `_cloudflare_realip.inc`), la même location est « privée »
+        # générée : la politique de cache est exigée, avec ou sans real_ip.
+        generated = re.sub(r"  access_log /var/log/nginx/cf-aop-\S+ \S+;\n", "", back)
+        self.assertTrue(any("Cloudflare-CDN-Cache-Control" in e for e in edge_errors(generated)), edge_errors(generated))
 
     def test_the_command_line_reads_the_ranges_file(self):
         text = render_own("back", aop={"ctdapi-back.example.test": "enforce"})

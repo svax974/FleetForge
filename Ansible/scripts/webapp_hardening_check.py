@@ -79,7 +79,8 @@ Sous-commandes, chacune code 1 avec la liste des écarts :
       Quatrième forme, les vhosts écrits à la main qui GARDENT leur filtre d'adresse (`ctdapi.conf`, `ctdapi-back.conf`,
       `tradekong-back.conf`, morceaux `certhttp`/`certserver`/`cert` de `_cloudflare_realip.inc`, reconnus à leur journal `cf-aop-…`) :
       avec ou sans `real_ip_header CF-Connecting-IP` (sans : la socket est l'adresse cliente), une location à `allow`/`deny all` y est
-      contrôlée comme une location gardée par la socket (sans no-store). Un vhost sans `real_ip_header` est contrôlé dès qu'il porte une
+      contrôlée comme une location gardée par la socket (sans no-store) quand le vhost ne lit pas CF-Connecting-IP (API publique), comme une
+      location privée (no-store exigé) quand il le lit (front privé : ctdapi.conf). Un vhost sans `real_ip_header` est contrôlé dès qu'il porte une
       trace de l'authentification (`$cf_untrusted_…`, `ssl_verify_client`, `ssl_client_certificate`) ; sans aucune trace il n'est pas
       reconnu comme servi par Cloudflare (rien à contrôler). `--cloudflare-ranges <fichier>` (plages Cloudflare du parc, séparées par
       espaces, virgules ou lignes, `#` commente) : le `geo` doit les contenir EXACTEMENT — seul moyen de voir une plage manquante sur un
@@ -1319,9 +1320,10 @@ def check_cloudflare_edge(where, text, expected=None):
     `ssl_client_certificate`) : un vhost à filtre de socket qui laisse entrer les plages Cloudflare (ctdapi-back, tradekong-back) — la
     socket est alors l'adresse cliente, et c'est le certificat qui distingue NOTRE zone de tout autre client Cloudflare. Sans
     aucune de ces traces (ni `real_ip_header`, ni garde, ni vérification), rien n'est reconnu comme servi par Cloudflare : rien à contrôler.
-    Vhost écrit à la main sur `_cloudflare_realip.inc` (reconnu à son journal `cf-aop-…`) : une location à filtre d'adresse (`deny all;`)
-    est contrôlée comme une location gardée par la socket, sans l'exigence de no-store (ses `allow` sont ceux du vhost, la politique de
-    cache n'est pas celle du vhost générique)."""
+    Vhost écrit à la main sur `_cloudflare_realip.inc` (reconnu à son journal `cf-aop-…`) SANS `real_ip_header` (API publique à filtre de
+    socket : ctdapi-back, tradekong-back) : une location à filtre d'adresse (`deny all;`) est contrôlée comme une location gardée par la
+    socket, sans l'exigence de no-store (le cache est la politique de l'application). AVEC `real_ip_header` (front privé : ctdapi.conf) elle
+    est PRIVÉE : no-store exigé comme pour une location privée générée."""
     outside = _code(_without_locations(text))
     reads_ip = "real_ip_header CF-Connecting-IP;" in outside
     if not reads_ip and not re.search(r"\$cf_untrusted_|\bssl_verify_client\b|\bssl_client_certificate\b", text):
@@ -1339,7 +1341,9 @@ def check_cloudflare_edge(where, text, expected=None):
         if "deny all;" in code and not re.search(r"(^|[\s;{}])allow\s", code):
             continue  # fermée (mode inconnu, `restricted-linked` sans serveur) : personne n'y entre, ni garde ni no-store à exiger
         if "deny all;" in code:
-            (guarded if hand_written else private).append((head, body))
+            # Public API (filtre de socket, pas de real_ip) : le cache est la politique de l'application. Front PRIVÉ (adresse remplacée par
+            # CF-Connecting-IP, puis filtre) : l'edge ne doit rien en conserver, comme pour une location privée générée.
+            (guarded if (hand_written and not reads_ip) else private).append((head, body))
         elif SOCKET_GUARD.search(code):
             guarded.append((head, body))  # gardée par la socket (`_cloudflare_realip.inc`, mode enforce)
         elif "if ($ssl_client_verify != SUCCESS) {" in code and "return 403;" in code.split("if ($ssl_client_verify != SUCCESS) {", 1)[1].split("}", 1)[0]:

@@ -903,7 +903,7 @@ morceaux existants rendent les mêmes octets qu'avant dans tous les modes (prouv
   `tradekong` est `webapp_proxy: external` : `deploy-webapp.yml` ne joue pas pour elle le play Cloudflare, c'est
   `deploy-cloudflare-origin-pull.yml` qui active le nom.
 - Aucune autre location : chacun des trois vhosts n'a que `location /` (aucune location exemptée du filtre, aucun préfixe non gardé : rien de
-  semblable à `inline-image/`). Rendu SANS déclaration : octet pour octet celui d'avant (prouvé sur les rendus réels, voir plus bas).
+  semblable à `inline-image/`). Rendu SANS déclaration : octet pour octet celui d'avant (prouvé sur les rendus réels), sauf l'en-tête no-store de `ctdapi.conf` (voir « Non vérifié »).
 
 **Plusieurs zones (`cfopull_zones`, `cfopull_zone_of`, `cfopull_hostnames_by_zone`).** web3c a deux zones Cloudflare (`web3c.cc`, `tradekong.app`),
 déjà listées par `domains` (group_vars, celle de certbot). `cfopull_zones` = la zone principale (`domain_name`) puis `domains`. Un nom d'hôte
@@ -973,6 +973,9 @@ de la socket, `geo` ne reconnaîtrait aucune socket Cloudflare : `cf_socket=0` p
 d'origine de tous les noms proxifiés des DEUX zones avant `strict` ; les clients directs de `ctdapi-back` / `ctdapi` qui joindraient un proxy avec un
 `Host` ≠ SNI (421) ; la rotation `logrotate` de `cf-aop-*.log`. Limite du contrôleur : `webapp_hardening_check.py vhost --cloudflare-edge` ne
 reconnaît pas comme servi par Cloudflare un vhost sans `real_ip_header`, sans `$cf_untrusted_…` et sans `ssl_verify_client` ; sur un vhost sans
-`real_ip`, une plage manquante au `geo` ne se voit qu'avec `--cloudflare-ranges <fichier>` (plages du parc). `ctdapi.conf` n'envoie pas
-`Cloudflare-CDN-Cache-Control: no-store` (contrairement aux locations privées des vhosts génériques) : les statiques de ce front privé pourraient être mis en cache par
-l'edge et servis sans passer par le filtre ; non traité ici (changement d'en-têtes).
+`real_ip`, une plage manquante au `geo` ne se voit qu'avec `--cloudflare-ranges <fichier>` (plages du parc). `ctdapi.conf` (front PRIVÉ) envoie désormais
+`Cloudflare-CDN-Cache-Control: no-store` dans sa location (même en-tête que les locations privées des vhosts génériques, `_access.inc`) : sans lui l'edge
+pouvait mettre en cache ses statiques et les servir à tout le monde sans le filtre d'adresse. Cette location n'avait aucun autre `add_header` (celui d'une location
+remplace ceux du `server {}`), le contrôleur l'exige pour tout vhost écrit à la main qui lit CF-Connecting-IP. Les API PUBLIQUES (`ctdapi-back.conf`,
+`tradekong-back.conf`) ne l'ont PAS : le cache y est la politique de l'application, le contrôleur ne l'exige pas. C'est le seul changement de `ctdapi.conf`
+indépendant de l'attribut : son rendu sans déclaration diffère du précédent par cet en-tête, et par lui seul.
