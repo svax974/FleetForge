@@ -33,7 +33,8 @@ permettre Zone Read et DNS Edit sur les zones visées. Il reste dans un fichier
 
 | Variable | Défaut | Sens |
 | --- | --- | --- |
-| `cloudflare_ddns_initial_ipv4` | `ansible_host` | Ancienne IPv4 publique, utilisée seulement si l'état persistant est absent |
+| `cloudflare_ddns_initial_ipv4` | **aucun — obligatoire** | IPv4 que les records portent AUJOURD'HUI, avant le premier passage. Sans défaut : la déduire d'`ansible_host` rendait le premier passage no-op (DNS faux, sonde verte) dès que l'inventaire était déjà à jour |
+| `cloudflare_ddns_records` | **aucun — obligatoire** | Noms EXACTS que ce client a le droit de réécrire (`["proxy.web3c.cc", …]`). Aucun autre enregistrement n'est touché, même s'il porte la même adresse. Liste vide = refus au démarrage |
 | `cloudflare_ddns_zones` | `["{{ domain_name }}"]` | Zones visées ; `[]` signifie toutes les zones accessibles au token |
 | `cloudflare_ddns_dir` | `/opt/cloudflare-ddns` | Configuration et état persistant |
 | `cloudflare_ddns_discovery_urls` | ipify IPv4 + icanhazip IPv4 | Au moins deux services HTTPS qui doivent répondre et s'accorder |
@@ -43,8 +44,7 @@ adresse présente dans les records : `-e cloudflare_ddns_initial_ipv4=1.2.3.4`.
 
 ## Réconciliation
 
-Seuls les records **A** contenant **exactement** l'ancienne IPv4 sont changés,
-dans les zones configurées. Aucun changement des TXT/SPF, AAAA, MX, TTL,
+Seuls les records **A** dont le NOM est dans `cloudflare_ddns_records` sont changés, dans les zones configurées — un voisin qui porte la même adresse n'est jamais touché. À chaque cycle, les records autorisés sont RELUS : une dérive (DNS remis à une ancienne valeur) est réparée même si l'IP n'a pas bougé, et le premier passage vérifie au lieu de supposer. Aucun changement des TXT/SPF, AAAA, MX, TTL,
 proxy ou commentaire. Toutes les pages sont lues avant le premier PATCH
 (`content` seul), y compris pour les records proxifiés.
 
@@ -66,6 +66,15 @@ de réconciliation dans `state/status.json` depuis l'hôte. Le rejeu avec
 `--tags monitoring` installe ce collecteur sur un déploiement existant.
 Sa cible et son ouverture de scrape sont partagées avec
 les autres services de la machine.
+
+**Le groupe d'alertes `cloudflare-ddns` n'est chargé que si Prometheus SCRAPE vraiment cette machine.**
+Sur `station` (92.130.213.98, NAT domestique partagé avec hub, nuc, proxy2 et vpn1), le routeur ne redirige
+que 9100 : svcprobe n'est pas joignable, donc `cloudflare_ddns_up` n'arrive jamais dans Prometheus et une règle
+chargée y serait indiscernable d'une règle qui veille. Le groupe est donc absent de `prom_alert_groups` sur
+web3c, et le déploiement le signale sans bloquer. Pour l'armer : ajouter la redirection du port svcprobe de la
+machine côté routeur (hors Ansible), vérifier `count(cloudflare_ddns_up)` non nul dans Prometheus, PUIS
+réajouter `cloudflare-ddns` à `prom_alert_groups`. Le déploiement échoue désormais si le PREMIER cycle du
+client n'aboutit pas (jeton, zone ou liste de noms) : un déploiement vert prouve que Cloudflare a répondu.
 
 ```sh
 ./play.sh <parc> deploy-cloudflare-ddns.yml --limit <machine> --tags monitoring

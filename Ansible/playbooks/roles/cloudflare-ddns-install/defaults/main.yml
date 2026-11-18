@@ -1,7 +1,12 @@
 ---
 cloudflare_ddns_dir: /opt/cloudflare-ddns
-# À remplacer si ansible_host est un nom DNS ou si l'IP a déjà changé.
-cloudflare_ddns_initial_ipv4: "{{ ansible_host }}"
+# OBLIGATOIRE, sans défaut : l'adresse que les enregistrements portent AUJOURD'HUI, avant le premier
+# passage. La déduire d'`ansible_host` rendait le premier passage no-op (et le DNS faux) dès que
+# l'inventaire était déjà à jour.
+cloudflare_ddns_initial_ipv4: ""
+# OBLIGATOIRE, sans défaut : les noms exacts que ce client a le droit de réécrire. Aucun enregistrement
+# hors de cette liste n'est touché, même s'il porte la même adresse.
+cloudflare_ddns_records: []
 # Liste explicite de zones ; [] signifie TOUTES les zones accessibles au token.
 cloudflare_ddns_zones: ["{{ domain_name }}"]
 cloudflare_ddns_discovery_urls:

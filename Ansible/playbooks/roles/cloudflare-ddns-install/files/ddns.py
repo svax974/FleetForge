@@ -109,27 +109,47 @@ def discover(urls):
     return addresses.pop()
 
 
+def owned_records(api, zones, config, content=None):
+    """Enregistrements A que CE client a le droit de toucher : `config["records"]`, jamais tout ce qui
+    porte une adresse. Sans cette liste, un nom voisin (ou `zones: []`) serait réécrit en silence."""
+    names = {str(name) for name in config["records"]}
+    found = []
+    for zone in zones:
+        # Collect ALL pages before patching: edits otherwise shift pagination.
+        params = {"type": "A"}
+        if content is not None:
+            params["content.exact"] = content
+        for record in api.pages(f"/zones/{zone['id']}/dns_records", **params):
+            if record.get("type") == "A" and record.get("name") in names and (content is None or record.get("content") == content):
+                found.append({"zone": zone["id"], "id": record["id"], "content": record["content"]})
+    return found
+
+
 def reconcile(config, api, directory, current):
     path = directory / "state.json"
     state = json.loads(path.read_text()) if path.exists() else {"ip": public_ipv4(config["initial_ipv4"])}
     old = public_ipv4(state["ip"])
     zones = api.zones(config["zones"])
     allowed_zones = {z["id"] for z in zones}
-    if "pending" not in state and old == current:
-        atomic_json(path, state)
-        LOG.info("IPv4 unchanged: %s", current)
-        return 0
-
     if "pending" not in state:
-        records = []
-        for zone in zones:
-            # Collect ALL pages before patching: edits otherwise shift pagination.
-            for record in api.pages(f"/zones/{zone['id']}/dns_records", type="A", **{"content.exact": old}):
-                if record["type"] == "A" and record["content"] == old:
-                    records.append({"zone": zone["id"], "id": record["id"]})
-        if not records:
-            raise RuntimeError("IPv4 changed but no A record matches the previous IPv4; baseline retained")
-        state["pending"] = {"addresses": [old], "records": records}
+        if old == current:
+            # Aucun changement d'IP ne dispense de VÉRIFIER : un premier passage dont l'IP initiale était
+            # déjà à jour, ou une dérive externe (DNS remis à une ancienne valeur), laisseraient sinon le
+            # DNS faux avec une sonde verte.
+            stale = [record for record in owned_records(api, zones, config) if record["content"] != current]
+            if not stale:
+                atomic_json(path, state)
+                LOG.info("IPv4 unchanged and every owned record is current: %s", current)
+                return 0
+            state["pending"] = {
+                "addresses": sorted({record["content"] for record in stale} | {current}),
+                "records": [{"zone": record["zone"], "id": record["id"]} for record in stale],
+            }
+        else:
+            records = owned_records(api, zones, config, content=old)
+            if not records:
+                raise RuntimeError("IPv4 changed but no owned A record matches the previous IPv4; baseline retained")
+            state["pending"] = {"addresses": [old], "records": [{"zone": r["zone"], "id": r["id"]} for r in records]}
 
     pending = state["pending"]
     if current not in pending["addresses"]:
@@ -194,6 +214,12 @@ def main():
         host, port, socket.AF_INET, type, proto, flags)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     config = json.loads(Path("/config/config.json").read_text())
+    # Fail closed: sans liste de noms autorisés, ce client ne peut pas distinguer SES enregistrements de
+    # ceux d'un voisin qui portent la même adresse.
+    if not config.get("records"):
+        raise SystemExit("cloudflare_ddns_records is required: the explicit names this client may update")
+    if not config.get("initial_ipv4"):
+        raise SystemExit("cloudflare_ddns_initial_ipv4 is required: the IP the records still carry today")
     api = Cloudflare(Path("/run/secrets/cloudflare_token").read_text().strip())
     while True:
         cycle(config, api, directory)

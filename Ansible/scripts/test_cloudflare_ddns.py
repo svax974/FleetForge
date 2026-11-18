@@ -28,6 +28,8 @@ class FakeCloudflare(ddns.Cloudflare):
                         for i in range(count)}
         self.records["txt"] = {"id": "txt", "type": "TXT", "content": OLD}
         self.records["other"] = {"id": "other", "type": "A", "content": THIRD}
+        # Même adresse, nom VOISIN : hors de `cloudflare_ddns_records`, il ne doit jamais être touché.
+        self.records["neighbour"] = {"id": "neighbour", "type": "A", "name": "neighbour.example.com", "content": OLD}
         self.fail_id = None
         self.patches = []
         self.read_pages = []
@@ -39,8 +41,11 @@ class FakeCloudflare(ddns.Cloudflare):
             return {"result": [{"id": "z1", "name": "example.com"}], "result_info": {"total_pages": 1}}
         if parsed.path == "/zones/z1/dns_records":
             self.read_pages.append(int(query["page"][0]))
+            # `content.exact` est FACULTATIF : le client lit aussi tous ses enregistrements (vérification
+            # de dérive) et filtre lui-même sur la liste des noms autorisés.
+            exact = query.get("content.exact", [None])[0]
             records = [copy.deepcopy(r) for r in self.records.values()
-                       if r["type"] == "A" and r["content"] == query["content.exact"][0]]
+                       if r["type"] == "A" and (exact is None or r["content"] == exact)]
             # Deliberately one record/page, even though caller requests 100.
             page = int(query["page"][0])
             return {"result": records[page-1:page], "result_info": {"total_pages": max(1, len(records))}}
@@ -57,7 +62,8 @@ class ReconciliationTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.directory = Path(self.tmp.name)
-        self.config = {"initial_ipv4": OLD, "zones": ["example.com"], "discovery_urls": ["https://one", "https://two"]}
+        self.config = {"initial_ipv4": OLD, "records": [f"host{i}.example.com" for i in range(3)],
+                       "zones": ["example.com"], "discovery_urls": ["https://one", "https://two"]}
         self.api = FakeCloudflare()
 
     def tearDown(self):
@@ -71,7 +77,7 @@ class ReconciliationTests(unittest.TestCase):
 
     def test_all_pages_before_edits_and_metadata_preserved(self):
         self.assertEqual(self.run_sync(), 3)
-        self.assertEqual(self.api.read_pages, [1, 2, 3])
+        self.assertEqual(self.api.read_pages, [1, 2, 3, 4], "la vérification lit AUSSI le voisin (filtré côté client)")
         self.assertEqual(self.state(), {"ip": NEW})
         self.assertTrue(all(body == {"content": NEW} for _, body in self.api.patches))
         self.assertEqual(self.api.records["0"]["ttl"], 120)
@@ -79,6 +85,22 @@ class ReconciliationTests(unittest.TestCase):
         self.assertEqual(self.api.records["0"]["comment"], "preserve")
         self.assertEqual(self.api.records["txt"]["content"], OLD)
         self.assertEqual(self.api.records["other"]["content"], THIRD)
+
+    def test_a_record_of_a_neighbour_name_is_never_touched(self):
+        """Même adresse, nom hors de `cloudflare_ddns_records` : jamais réécrit (c'était le défaut grave)."""
+        self.run_sync()
+        self.assertEqual(self.api.records["neighbour"]["content"], OLD)
+        self.assertNotIn("neighbour", [path for path, _ in self.api.patches])
+
+    def test_a_drift_is_repaired_even_when_the_ip_did_not_change(self):
+        """DNS remis à une ancienne valeur alors que l'IP n'a pas bougé : réparé, pas ignoré."""
+        (self.directory / "state.json").write_text(json.dumps({"ip": NEW}))
+        for i in (1, 2):
+            self.api.records[str(i)]["content"] = NEW
+        self.api.records["0"]["content"] = OLD
+        self.assertEqual(self.run_sync(NEW), 1, "un seul enregistrement dérivé, réparé")
+        self.assertEqual(self.api.records["0"]["content"], NEW)
+        self.assertEqual(self.api.records["neighbour"]["content"], OLD, "le voisin reste hors de portée")
 
     def test_unchanged_and_restarts_make_no_dns_writes(self):
         self.assertEqual(self.run_sync(OLD), 0)
@@ -129,7 +151,7 @@ class ReconciliationTests(unittest.TestCase):
 
     def test_zero_matches_does_not_forget_old_ip(self):
         self.api = FakeCloudflare(count=0)
-        with self.assertRaisesRegex(RuntimeError, "no A record"):
+        with self.assertRaisesRegex(RuntimeError, "no owned A record"):
             self.run_sync()
         self.assertFalse((self.directory / "state.json").exists())
 

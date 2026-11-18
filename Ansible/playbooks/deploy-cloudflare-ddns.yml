@@ -15,9 +15,19 @@
       ansible.builtin.assert:
         that:
           - groups['cloudflare_ddns_yes'] | default([]) | length > 0
-          - "'cloudflare-ddns' in (prom_alert_groups | default([]))"
           - "'services' in (prom_alert_groups | default([]))"
-        fail_msg: "Déclarer ansible_roles: [..., cloudflare-ddns] sur la machine et les groupes cloudflare-ddns et services dans prom_alert_groups du parc."
+        fail_msg: "Déclarer ansible_roles: [..., cloudflare-ddns] sur la machine et le groupe services dans prom_alert_groups du parc."
+      run_once: true
+
+    # Le groupe `cloudflare-ddns` n'est PAS exigé : sur une machine dont svcprobe n'est pas scrapable (routeur),
+    # une règle chargée serait indiscernable d'une règle qui veille. On le signale, sans bloquer.
+    - name: Say when the DDNS alerts are not loaded
+      ansible.builtin.debug:
+        msg: >-
+          ATTENTION — le groupe d'alertes `cloudflare-ddns` n'est pas dans prom_alert_groups : le client est déployé
+          SANS alerte. L'ajouter dès que la sonde svcprobe de cette machine est scrapée par Prometheus
+          (voir docs/cloudflare-ddns.md, « Supervision »).
+      when: "'cloudflare-ddns' not in (prom_alert_groups | default([]))"
       run_once: true
 
 - name: Contrôle préalable des machines DDNS
