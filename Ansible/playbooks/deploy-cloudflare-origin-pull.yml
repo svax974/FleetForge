@@ -1,7 +1,8 @@
 ---
 # Authenticated Origin Pulls par nom d'hôte, avec une autorité propre au parc (dans `cfopull_dir` : le défaut du rôle, `keys/
 # cloudflare-origin-pull/`, est l'autorité de web3c EN PRODUCTION, jamais à régénérer ; papanglabs a la sienne, un sous-dossier
-# `papanglabs/` fixé dans group_vars/papanglabs.yml — le premier passage du parc la génère).
+# dossier FRÈRE `keys/cloudflare-origin-pull-papanglabs/` fixé dans group_vars/papanglabs.yml — jamais imbriqué, car renouveler =
+# supprimer le dossier puis rejouer ; le premier passage du parc la génère).
 #
 #   ./play.sh web3c deploy-cloudflare-origin-pull.yml
 #

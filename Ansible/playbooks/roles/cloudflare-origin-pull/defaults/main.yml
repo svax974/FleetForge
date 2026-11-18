@@ -79,13 +79,19 @@ cfopull_allow_non_strict_tls: false
 # par défaut. Un nom à très faible trafic (préproduction) : baisser `cfopull_evidence_min_success`, jamais à 0.
 cfopull_evidence_hours: 24
 cfopull_evidence_min_success: 5
+# Seuil PAR NOM (`{ <nom public>: <entier >= 1> }`), à défaut `cfopull_evidence_min_success` : un nom à faible trafic (préproduction)
+# n'oblige pas à baisser le seuil des autres. Un seuil < 1 est refusé. Un PROXY qui ne reçoit aucun trafic d'un nom (secours du Load
+# Balancer Cloudflare) doit être EXCLU par `--limit` (il garde alors l'ancien rendu), ou le seuil du nom abaissé à 1 le temps d'y envoyer une
+# requête de test réelle — jamais en coupant la preuve (`cfopull_allow_unobserved` n'est que pour un premier déploiement).
+cfopull_evidence_min_success_by_name: {}
 cfopull_allow_unobserved: false
 cfopull_log_dir: /var/log/nginx
 
 # Autorité et certificat client, générés une fois sur le poste de contrôle, dans `cfopull_dir`.
 # ATTENTION : ce DÉFAUT (`keys/cloudflare-origin-pull/`) est l'autorité de web3c.cc, utilisée EN PRODUCTION (passerelle, agenthub) : ne
 # jamais la déplacer ni la régénérer. Un autre parc n'en hérite pas : il surcharge `cfopull_dir` dans son `group_vars/<parc>.yml`
-# (papanglabs : `keys/cloudflare-origin-pull/papanglabs/`, sujet `/CN=papanglabs.com …`) — sinon il réutiliserait l'autorité d'un autre parc.
+# (papanglabs : le dossier FRÈRE `keys/cloudflare-origin-pull-papanglabs/`, sujet `/CN=papanglabs.com …`, JAMAIS imbriqué dans celui de web3c :
+# « supprimer le dossier puis rejouer » pour renouveler web3c emporterait la clé de papanglabs) — sinon il réutiliserait l'autorité d'un autre parc.
 # Le témoin d'activation (`active/`) et tout ce qui lit l'autorité suivent `cfopull_dir`. `keys/*` est gitignoré : la clé privée de l'autorité n'est jamais
 # versionnée (convention : keys/README.md). Le certificat client (+ sa clé) est
 # ce que Cloudflare présente aux origines ; l'autorité, elle, est ce que nginx

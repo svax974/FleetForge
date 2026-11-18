@@ -80,7 +80,11 @@
 # `cfopull_evidence_min_success` lignes `cf_socket=1 verify="SUCCESS"` du nom (`host=`, vhost en mode observe ou enforce) ET AUCUNE
 # ligne `cf_socket=1 untrusted=1` de statut < 400 (trafic accepté que `enforce` refuserait). La commande est en LECTURE SEULE (cat, awk,
 # date) et n'imprime que trois compteurs : jamais d'URI, d'adresse ni de User-Agent. nginx échappe `"` et les caractères de contrôle des
-# champs journalisés : une ligne ne peut pas en forger une autre. En `--check` elle est jouée quand même (lecture seule).
+# champs journalisés (une ligne ne peut pas en forger une autre) mais PAS les espaces : `claimed` (CF-Connecting-IP), `uri` (`$uri`
+# décode `%20`), `ray` et `ua` sont écrits par le CLIENT. Ils sont donc à la FIN du format (partiel `_cloudflare_realip.inc`) et chaque
+# expression est ANCRÉE au début de ligne sur le préfixe que nginx détermine seul (`<date> host= socket= cf_socket= verify="…"
+# untrusted= mode= status= method=`) : aucun champ forgé dans la fin d'une ligne ne compte. Une fenêtre qui ne peut pas être calculée
+# (ni `date -d` GNU ni `date -v` BSD) REFUSE, au lieu de lire tout le journal. En `--check` la lecture est jouée quand même (lecture seule).
 # Premier déploiement sur une machine où aucun trafic ne peut être observé : `-e cfopull_allow_unobserved=true`, explicite, faux par défaut
 # (le témoin reste exigé).
 - name: Read, on the proxy, what the dedicated Authenticated Origin Pulls log says about each enforced name
@@ -88,14 +92,21 @@
     executable: /bin/sh
     cmd: |
       set -u
-      cutoff=$(date -d "-${AOP_HOURS} hours" +%Y-%m-%dT%H:%M:%S 2>/dev/null || date -v-${AOP_HOURS}H +%Y-%m-%dT%H:%M:%S)
+      cutoff=$(date -d "-${AOP_HOURS} hours" +%Y-%m-%dT%H:%M:%S 2>/dev/null || date -v-${AOP_HOURS}H +%Y-%m-%dT%H:%M:%S 2>/dev/null)
+      [ -n "$cutoff" ] || { echo "cannot compute the start of the window: refusing rather than reading the whole log" >&2; exit 1; }
       cat "$AOP_LOG_DIR"/cf-aop-*.log "$AOP_LOG_DIR"/cf-aop-*.log.1 2>/dev/null | awk -v n="$AOP_NAME" -v c="$cutoff" '
+        BEGIN {
+          gsub(/[^A-Za-z0-9-]/, "[&]", n)
+          head = "^[^ ]+ host=" n " socket=[^ ]+ cf_socket="
+          tail = " mode=(observe|enforce) status="
+          any = head "[01] verify=\"[^\"]*\" untrusted=[01]" tail "[0-9]+ method="
+          good = head "1 verify=\"SUCCESS\" untrusted=0" tail "[0-9]+ method="
+          accepted = head "1 verify=\"[^\"]*\" untrusted=1" tail "[123][0-9][0-9] method="
+        }
         substr($1, 1, 19) < c { next }
-        index($0, " host=" n " ") == 0 { next }
-        index($0, " mode=observe ") == 0 && index($0, " mode=enforce ") == 0 { next }
-        { lines++ }
-        index($0, " cf_socket=1 ") && index($0, " verify=\"SUCCESS\" ") { ok++ }
-        index($0, " cf_socket=1 ") && index($0, " untrusted=1 ") { match($0, / status=[0-9]+/); if (substr($0, RSTART + 8, RLENGTH - 8) + 0 < 400) bad++ }
+        $0 ~ any { lines++ }
+        $0 ~ good { ok++ }
+        $0 ~ accepted { bad++ }
         END { printf "{\"lines\": %d, \"success\": %d, \"untrusted_ok\": %d}\n", lines, ok, bad }'
   environment:
     AOP_NAME: "{{ item }}"
@@ -107,19 +118,24 @@
   loop: "{{ [] if (cfopull_allow_unobserved | bool) else (cfopull_aop | dict2items | selectattr('value', 'equalto', 'enforce') | map(attribute='key') | list) }}"
 
 - name: Fail when the proxy holds no recent proof that Cloudflare presents the certificate on an enforced name
+  vars:
+    # Seuil du NOM : `cfopull_evidence_min_success_by_name[<nom>]` sinon `cfopull_evidence_min_success`. Toujours >= 1 (voir ci-dessous).
+    _min_success: "{{ (cfopull_evidence_min_success_by_name | default({})).get(item.item, cfopull_evidence_min_success) | int }}"
   ansible.builtin.assert:
     that:
-      - (item.stdout | from_json).success | int >= cfopull_evidence_min_success | int
+      - _min_success | int >= 1
+      - (item.stdout | from_json).success | int >= _min_success | int
       - (item.stdout | from_json).untrusted_ok | int == 0
     fail_msg: >-
       {{ inventory_hostname }} : {{ item.item }} est en `cloudflare_origin_pull: enforce` mais le journal {{ cfopull_log_dir }}/cf-aop-*.log
       ne prouve pas que Cloudflare présente le certificat de notre zone sur ce nom, sur les {{ cfopull_evidence_hours }} dernières heures :
       lignes du nom = {{ (item.stdout | from_json).lines }}, `cf_socket=1 verify="SUCCESS"` = {{ (item.stdout | from_json).success }}
-      (minimum {{ cfopull_evidence_min_success }}), `cf_socket=1 untrusted=1` acceptées (statut < 400) = {{ (item.stdout | from_json).untrusted_ok }}
+      (minimum {{ _min_success }}{{ ' — plancher : un seuil < 1 est refusé' if (_min_success | int) < 1 else '' }}), `cf_socket=1 untrusted=1` acceptées (statut < 400) = {{ (item.stdout | from_json).untrusted_ok }}
       (attendu 0 : `enforce` les refuserait). Poser `enforce` maintenant risque de répondre 403 à tout le trafic légitime. Étapes : jouer
       `./play.sh <parc> deploy-cloudflare-origin-pull.yml`, poser `observe` (`update-proxy.yml --limit <proxy>`), laisser passer du trafic,
-      relire ce journal, puis rejouer. Premier déploiement sans trafic observable : `-e cfopull_allow_unobserved=true` (assumé). Aucun
-      gabarit n'a été posé.
+      relire ce journal, puis rejouer. Nom à faible trafic : `cfopull_evidence_min_success_by_name` (seuil du nom, jamais < 1). Proxy qui ne
+      reçoit AUCUN trafic de ce nom (secours du Load Balancer) : l'exclure par `--limit`, jamais en coupant la preuve. Premier déploiement
+      sans trafic observable : `-e cfopull_allow_unobserved=true` (assumé). Aucun gabarit n'a été posé.
     quiet: true
   loop: "{{ cfopull_evidence.results | default([]) }}"
   loop_control:

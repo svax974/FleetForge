@@ -29,7 +29,7 @@ Un vhost écrit à la main sur `_cloudflare_realip.inc` (papanglabs : back-prod,
 `cloudflare_origin_pull: observe | enforce` (+ `cloudflare_origin_pull_aliases` pour un nom sans entrée propre) : même autorité, même
 activation chez Cloudflare, `observe` avant `enforce`, `enforce` posé seulement sur l'activation prouvée (témoin local ET journal récent du
 proxy) ; l'autorité est celle du parc (`cfopull_dir` : le dossier `keys/cloudflare-origin-pull/` de web3c par défaut, un sous-dossier
-`papanglabs/` pour papanglabs) (docs/etude-passerelle-sur-webapp.md,
+`keys/cloudflare-origin-pull-papanglabs/`, dossier frère, pour papanglabs) (docs/etude-passerelle-sur-webapp.md,
 « Authenticated Origin Pulls des vhosts papanglabs »).
 Tout le reste est dérivé et surchargeable
 (`roles/webapp-setup/defaults/main.yml`) : `back_port` = app+1, Postgres = app+2, Redis = app+3 (un bloc de 4 ports par app,

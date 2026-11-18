@@ -6956,6 +6956,10 @@ class RealipAopRenderTests(unittest.TestCase):
                       "socket=$realip_remote_addr", 'claimed="$http_cf_connecting_ip"', "client=$remote_addr", 'ray="$http_cf_ray"',
                       "status=$status", 'uri="$uri"'):
             self.assertIn(field, log)
+        # Ordre : tout ce que nginx détermine seul AVANT tout ce que le client écrit (la preuve de proof.yml ancre son préfixe là-dessus).
+        for client in ("claimed=", "uri=", "ray=", "ua="):
+            for server in ("host=", "socket=", "cf_socket=", "verify=", "untrusted=", "mode=", "status=", "method=", "client="):
+                self.assertLess(log.index(server), log.index(client), (server, client))
         for forbidden in ("$request_uri", "$args", "$query_string", "$http_authorization", "$http_cookie", "$request "):
             self.assertNotIn(forbidden, log, "ni chaîne de requête ni en-tête d'authentification dans le journal")
         self.assertLess(text.index("log_format"), text.index("server {"), "au niveau http, avant le server {}")
@@ -7059,9 +7063,16 @@ class RealipAopRenderTests(unittest.TestCase):
 
     def test_the_inline_part_refuses_the_raw_uris_nginx_would_normalise_into_the_open_location_and_nothing_else(self):
         body = lambda text: location_body(text, "/api/v1/inline-image/")  # noqa: E731
-        for aop in (None, {}, AOP_OBSERVE):
+        for aop in (None, {}):
             with self.subTest(aop=aop):
-                self.assertNotIn("request_uri", body(render_realip(aop=aop)), "rien tant que ce n'est pas enforce")
+                self.assertNotIn("request_uri", body(render_realip(aop=aop)), "aucune déclaration : rien")
+                self.assertNotIn("limit_except", body(render_realip(aop=aop)))
+        # Le contrôle n'a rien à voir avec le certificat : posé aussi en observe (dès que l'attribut est déclaré).
+        observed = body(render_realip(aop=AOP_OBSERVE))
+        self.assertEqual(observed, body(render_realip(aop=AOP_ENFORCE)), "même location en observe et en enforce")
+        self.assertIn("limit_except GET HEAD {\n        deny all;\n    }", observed)
+        self.assertLess(observed.index("limit_req"), observed.index("if ($request_uri"), "composé avec limit_req et proxy_pass")
+        self.assertLess(observed.index("limit_except"), observed.index("proxy_pass"))
         code = body(render_realip(aop=AOP_ENFORCE))
         prefix = re.search(r'if \(\$request_uri !~ "(.*?)"\) \{\s*return 404;\s*\}', code)
         bad = re.search(r'if \(\$request_uri ~\* "(.*?)"\) \{\s*return 404;\s*\}', code)
@@ -7093,8 +7104,8 @@ class RealipAopCheckerTests(unittest.TestCase):
     def test_the_enforce_render_passes_and_the_observe_render_reports_the_unguarded_location(self):
         self.assertEqual(edge_errors(render_realip(aop=AOP_ENFORCE)), [])
         errors = edge_errors(render_realip(aop=AOP_OBSERVE))
-        self.assertEqual(len(errors), 3, errors)
-        self.assertTrue(any("inline-image" in e and "URI brute non contrôlée" in e for e in errors), "le contrôle de l'URI brute n'est posé qu'en enforce")
+        self.assertEqual(len(errors), 2, errors)
+        self.assertFalse(any("URI brute non contrôlée" in e for e in errors), "le contrôle de l'URI brute est posé aussi en observe")
         self.assertTrue(any("ssl_verify_client optional;" in e for e in errors), "`optional_no_ca` ne rejette rien : pas une exigence")
         self.assertTrue(any("location /" in e and "n'importe quel client Cloudflare l'atteint" in e for e in errors))
         self.assertTrue(edge_errors(render_realip(aop={})), "sans déclaration : lit CF-Connecting-IP sans certificat client")
@@ -7116,7 +7127,12 @@ class RealipAopCheckerTests(unittest.TestCase):
             "autre location sans limit_req": text.replace("location /api/v1/inline-image/", "location /api/v1/other/", 1),
             "inline-image sans contrôle du préfixe brut": text.replace('if ($request_uri !~ "^/api/v1/inline-image/") {', "if (0) {", 1),
             "inline-image sans contrôle d'encodage": text.replace('if ($request_uri ~* "^[^?]*(%2f|%5c|%2e|[.][.]|//)") {', "if (0) {", 1),
-            "contrôle d'encodage amputé de %2f": text.replace("(%2f|%5c|%2e|[.][.]|//)", "(%5c|%2e|[.][.]|//)", 1),
+            "inline-image sans limit_except": text.replace("limit_except GET HEAD {", "if (0) {", 1),
+            "inline-image limit_except trop large": text.replace("limit_except GET HEAD {", "limit_except GET HEAD POST {", 1),
+            # Le `deny all;` d'un `limit_except` ne ferme pas une location : elle reste ouverte, donc signalée.
+            "limite_except ne ferme pas une autre location": text.replace(
+                "  location / {", "  location /other/ {\n    limit_except GET { deny all; }\n    proxy_pass http://back_prod_cluster;\n  }\n\n  location / {", 1),
+            "contrôle d'encodage amputé de %2f":text.replace("(%2f|%5c|%2e|[.][.]|//)", "(%5c|%2e|[.][.]|//)", 1),
         }
         for label, mutated in mutations.items():
             with self.subTest(label):
@@ -7504,11 +7520,124 @@ class AopRolloutSafetyTests(unittest.TestCase):
     NAME = "back-preprod.example.test"
 
     @staticmethod
-    def log_line(minutes_ago=5, name=NAME, cf=1, verify="SUCCESS", untrusted=0, status=200, mode="enforce", uri="/secret-path", ua="secret-ua"):
+    def log_line(minutes_ago=5, name=NAME, cf=1, verify="SUCCESS", untrusted=0, status=200, mode="enforce", uri="/secret-path", ua="secret-ua",
+                 claimed="203.0.113.5", ray="r"):
+        """Une ligne du format de `_cloudflare_realip.inc` : nginx détermine seul le préfixe jusqu'à `method`, le CLIENT écrit la fin
+        (`claimed`, `uri`, `ray`, `ua` — espaces non échappés, `"` échappé en \\x22 par nginx)."""
         import datetime
         stamp = (datetime.datetime.now() - datetime.timedelta(minutes=minutes_ago)).strftime("%Y-%m-%dT%H:%M:%S+00:00")
-        return (f'{stamp} host={name} socket=198.51.100.130 claimed="203.0.113.5" client=203.0.113.5 cf_socket={cf} verify="{verify}" '
-                f'untrusted={untrusted} mode={mode} status={status} method=GET uri="{uri}" ray="r" ua="{ua}"')
+        return (f'{stamp} host={name} socket=198.51.100.130 cf_socket={cf} verify="{verify}" untrusted={untrusted} mode={mode} '
+                f'status={status} method=GET client=203.0.113.5 claimed="{claimed}" uri="{uri}" ray="{ray}" ua="{ua}"')
+
+    def script_counts(self, lines, name=NAME, hours=24, runner=None):
+        """Compteurs `{lines, success, untrusted_ok}` du script de preuve (extrait de proof.yml) joué par `sh` sur `lines`, SANS Ansible.
+        `runner` : préfixe de commande (docker) ; sinon `sh` de la machine."""
+        task = self.tasks("proof.yml", EVIDENCE_TASKS)[0]
+        logdir = os.path.join(self.dir, "scriptlog")
+        shutil.rmtree(logdir, ignore_errors=True)
+        os.makedirs(logdir)
+        with open(os.path.join(logdir, "cf-aop-x.log"), "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+        env = dict(os.environ, AOP_NAME=name, AOP_HOURS=str(hours), AOP_LOG_DIR=logdir)
+        run = subprocess.run(["/bin/sh", "-c", task["ansible.builtin.shell"]["cmd"]], capture_output=True, text=True, env=env, timeout=60)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        return json.loads(run.stdout)
+
+    def forged_lines(self):
+        """Les requêtes hostiles, telles que nginx les journalise, et ce qu'elles ne doivent PAS faire compter."""
+        line = self.log_line
+        return {
+            # Requête VÉRIFIÉE vers `/api/v1/x%20untrusted=1%20` (`$uri` décode %20) : ne devient pas une ligne `untrusted=1`.
+            "uri": line(uri="/api/v1/x untrusted=1 "),
+            "uri_cf_socket_status": line(uri="/a cf_socket=1 untrusted=1 status=200 method=", status=200),
+            # Requête DIRECTE refusée (403), en-tête `CF-Connecting-IP` hostile : ni untrusted accepté, ni SUCCESS.
+            "claimed_untrusted": line(cf=0, verify="NONE", status=403, claimed="x cf_socket=1 untrusted=1 status=200"),
+            "claimed_success": line(cf=0, verify="NONE", status=403, claimed='x cf_socket=1 verify=\\x22SUCCESS\\x22 untrusted=0'),
+            "claimed_full": line(cf=0, verify="NONE", status=403, claimed="1.2.3.4 cf_socket=1 verify=SUCCESS untrusted=0 mode=enforce status=200 method=GET"),
+            "ua_success": line(cf=0, verify="NONE", status=403, ua='Mozilla cf_socket=1 verify="SUCCESS" untrusted=0 mode=enforce status=200 method=GET'),
+            "ray_success": line(cf=0, verify="NONE", status=403, ray='r cf_socket=1 verify="SUCCESS" untrusted=0 mode=enforce status=200 method='),
+            # Une ligne ENTIÈRE forgée dans un User-Agent : elle ne commence pas la ligne.
+            "ua_full_line": line(cf=0, verify="NONE", status=403,
+                                 ua=line().replace('"', "\\x22")),
+        }
+
+    def test_nothing_a_client_writes_into_the_log_can_forge_a_counted_field(self):
+        hostile = self.forged_lines()
+        counts = self.script_counts(list(hostile.values()))
+        self.assertEqual(counts["success"], 2, "seules les deux requêtes VÉRIFIÉES (uri*) comptent, jamais un SUCCESS écrit par un client : " + str(counts))
+        self.assertEqual(counts["untrusted_ok"], 0, counts)
+        for label, forged in hostile.items():
+            with self.subTest(label):
+                counts = self.script_counts([forged])
+                self.assertEqual(counts["untrusted_ok"], 0, forged)
+                self.assertEqual(counts["success"], 1 if label.startswith("uri") else 0, forged)
+        # Les vraies lignes comptent toujours (le préfixe ancré ne les perd pas) : SUCCESS vérifié, untrusted accepté de statut < 400.
+        real = [self.log_line(minutes_ago=m, uri="/a b", ua="x y") for m in range(1, 4)] + [
+            self.log_line(verify="NONE", untrusted=1, status=200, claimed="9.9.9.9 z", uri="/a  b"),
+            self.log_line(verify="FAILED:unable to get local issuer certificate", untrusted=1, status=200),
+            self.log_line(verify="NONE", untrusted=1, status=403), self.log_line(cf=0, verify="NONE", untrusted=0, status=200)]
+        self.assertEqual(self.script_counts(real), {"lines": 7, "success": 3, "untrusted_ok": 2})
+        # Le nom est une valeur, pas une expression régulière : le point ne joue pas pour n'importe quel caractère.
+        self.assertEqual(self.script_counts([self.log_line(name="back-preprodXexample.test")])["lines"], 0)
+        # L'ancien ordre des champs (`claimed` avant `status`) ne compte plus : ce n'est plus le format du partiel.
+        old = self.log_line().replace(' cf_socket=1', ' claimed="1" client=1 cf_socket=1', 1)
+        self.assertEqual(self.script_counts([old])["success"], 0)
+
+    def test_the_awk_part_gives_the_same_counts_under_mawk_and_gnu_date_in_a_container_without_network(self):
+        image = "flutter-termux-builder:ubuntu24.04"
+        if not shutil.which("docker") or subprocess.run(["docker", "image", "inspect", image], capture_output=True).returncode != 0:
+            self.skipTest("docker ou l'image ubuntu 24.04 (mawk, GNU date, dash) absents")
+        lines = list(self.forged_lines().values()) + [self.log_line(minutes_ago=m) for m in range(1, 4)] + [
+            self.log_line(verify="NONE", untrusted=1, status=200), self.log_line(minutes_ago=60 * 30)]
+        expected = self.script_counts(lines)
+        logdir = os.path.join(self.dir, "scriptlog")
+        task = self.tasks("proof.yml", EVIDENCE_TASKS)[0]
+        run = subprocess.run(
+            ["docker", "run", "--rm", "--network", "none", "--pull", "never", "--platform", "linux/amd64", "-v", f"{logdir}:/log:ro",
+             "-e", f"AOP_NAME={self.NAME}", "-e", "AOP_HOURS=24", "-e", "AOP_LOG_DIR=/log", "--entrypoint", "sh", image,
+             "-c", task["ansible.builtin.shell"]["cmd"]], capture_output=True, text=True, timeout=300)
+        self.assertEqual(run.returncode, 0, run.stderr[-800:])
+        self.assertEqual(json.loads(run.stdout), expected, "mawk + date GNU = awk BSD + date BSD de cette machine")
+
+    def test_a_window_that_cannot_be_computed_refuses_instead_of_reading_the_whole_log(self):
+        task = self.tasks("proof.yml", EVIDENCE_TASKS)[0]
+        logdir = os.path.join(self.dir, "scriptlog")
+        os.makedirs(logdir, exist_ok=True)
+        with open(os.path.join(logdir, "cf-aop-x.log"), "w", encoding="utf-8") as f:
+            f.write(self.log_line(minutes_ago=60 * 30) + "\n")  # hors fenêtre : ne doit JAMAIS compter
+        fakebin = os.path.join(self.dir, "fakebin")
+        os.makedirs(fakebin, exist_ok=True)
+        with open(os.path.join(fakebin, "date"), "w") as f:
+            f.write("#!/bin/sh\nexit 1\n")
+        os.chmod(os.path.join(fakebin, "date"), 0o755)
+        env = dict(os.environ, AOP_NAME=self.NAME, AOP_HOURS="24", AOP_LOG_DIR=logdir, PATH=fakebin + os.pathsep + os.environ["PATH"])
+        run = subprocess.run(["/bin/sh", "-c", task["ansible.builtin.shell"]["cmd"]], capture_output=True, text=True, env=env, timeout=60)
+        self.assertEqual(run.returncode, 1)
+        self.assertEqual(run.stdout, "", "aucun compteur : le refus ne ressemble pas à `0`")
+        self.assertIn("refusing", run.stderr)
+        # Dans Ansible la tâche échoue (le jeu s'arrête) : un script qui sort en erreur n'est jamais lu comme des compteurs.
+        self.assertNotIn("ignore_errors", task)
+        self.assertNotIn("failed_when", task)
+
+    def test_the_threshold_can_be_set_per_name_never_below_one_and_a_standby_proxy_is_excluded_by_limit_not_by_the_check(self):
+        good = [self.log_line(minutes_ago=m) for m in range(1, 4)]  # 3 lignes
+        files = {"cf-aop-back_preprod.log": good}
+        self.assertNotEqual(self.evidence(files)[0], 0, "3 < 5 par défaut")
+        self.assertEqual(self.evidence(files, cfopull_evidence_min_success_by_name={self.NAME: 3})[0], 0)
+        self.assertNotEqual(self.evidence(files, cfopull_evidence_min_success_by_name={self.NAME: 4})[0], 0)
+        self.assertNotEqual(self.evidence(files, cfopull_evidence_min_success_by_name={"other.example.test": 1})[0], 0,
+                            "le seuil d'un AUTRE nom ne s'applique pas")
+        # Le plancher : 0, négatif ou vide sont refusés, même avec 0 ligne de SUCCESS qui « satisferait » 0.
+        for floor in (0, -1, "0"):
+            with self.subTest(floor=floor):
+                code, out = self.evidence({"cf-aop-back_preprod.log": [self.log_line(verify="NONE", untrusted=1, status=401)]},
+                                          cfopull_evidence_min_success_by_name={self.NAME: floor})
+                self.assertNotEqual(code, 0, out[-800:])
+        code, out = self.evidence({}, cfopull_evidence_min_success=0)
+        self.assertNotEqual(code, 0, "le seuil global à 0 est refusé aussi")
+        defaults = yaml.safe_load(_text(os.path.join(ROLES, "cloudflare-origin-pull", "defaults", "main.yml")))
+        self.assertEqual(defaults["cfopull_evidence_min_success_by_name"], {})
+        self.assertIn("--limit", _text(os.path.join(ROLES, "cloudflare-origin-pull", "defaults", "main.yml")), "le cas du proxy de secours est documenté")
 
     def evidence(self, files, **variables):
         """(code, sortie) des deux tâches de preuve jouées sur `back1-preprod` (enforce) avec `files` : {nom: [lignes]} sous un journal factice."""
@@ -7552,6 +7681,7 @@ class AopRolloutSafetyTests(unittest.TestCase):
             "socket hors Cloudflare": ({"cf-aop-back_preprod.log": [self.log_line(cf=0) for _ in range(9)]}, "= 0"),
             "un autre nom seulement": ({"cf-aop-back_prod.log": [self.log_line(name="back-prod.example.test") for _ in range(9)]}, "lignes du nom = 0"),
             "mode absent du journal": ({"cf-aop-back_preprod.log": [self.log_line().replace(" mode=enforce", "") for _ in range(9)]}, "= 0"),
+            "mode inconnu": ({"cf-aop-back_preprod.log": [self.log_line(mode="debug") for _ in range(9)]}, "= 0"),
             "untrusted accepté": ({"cf-aop-back_preprod.log": good + [self.log_line(verify="NONE", untrusted=1, status=200)]}, "(attendu 0"),
             "untrusted redirigé": ({"cf-aop-back_preprod.log": good + [self.log_line(verify="NONE", untrusted=1, status=302)]}, "(attendu 0"),
             "fichier absent": ({}, "lignes du nom = 0"),

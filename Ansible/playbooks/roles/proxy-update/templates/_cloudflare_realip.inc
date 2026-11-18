@@ -34,7 +34,7 @@
    ouvrir une socket depuis une plage Cloudflare et forger CF-Connecting-IP : les limiteurs par IP (celui de l'application,
    `limit_req`) voient alors une adresse choisie par l'appelant (évasion, ou adresse d'une victime). Seul le certificat client
    de NOTRE zone (autorité du parc générée par deploy-cloudflare-origin-pull.yml dans `cfopull_dir` : le dossier de
-   web3c par défaut (EN PRODUCTION, jamais déplacé), un sous-dossier `papanglabs/` pour papanglabs, fixé dans `group_vars/papanglabs.yml` ;
+   web3c par défaut (EN PRODUCTION, jamais déplacé), un dossier FRÈRE (jamais imbriqué : renouveler l'un ne touche pas l'autre) pour papanglabs, fixé dans `group_vars/papanglabs.yml` ;
    jamais le certificat partagé de Cloudflare) prouve
    que la requête vient d'elle. Même mécanisme que `_cloudflare_untrusted.inc` (`geo` + `map` fermé par défaut, ce partiel
    l'inclut) : `$cf_untrusted_<cf_slug>` vaut 1 pour une socket d'une plage Cloudflare SANS certificat client vérifié.
@@ -53,14 +53,18 @@
                       avant l'activation répondrait 403 à TOUT le trafic légitime.
    `cf_part = 'cert'` : seulement la garde du certificat (sans le filtre d'adresse), pour une location volontairement hors
    du filtre VPN/whitelist/Cloudflare (`inline-image/`) qui voudrait l'exiger des sockets Cloudflare — non posée aujourd'hui.
-   `cf_part = 'inline'` (enforce seulement) : à inclure DANS la location `/api/v1/inline-image/` (au début d'une ligne, pour que
+   `cf_part = 'inline'` (observe ET enforce : elle n'a rien à voir avec le certificat, seulement avec les vhosts qui déclarent l'attribut ;
+   sans déclaration : rien) : à inclure DANS la location `/api/v1/inline-image/` (au début d'une ligne, pour que
    l'absence de déclaration ne rende pas un octet de plus). nginx choisit la location sur l'URI NORMALISÉE (`%2F` décodé, segments
    `..` résolus) mais `proxy_pass http://amont` (sans partie URI) transmet l'URI BRUTE : sans ce contrôle,
    `/api/v1/<ressource>/x%2F..%2F..%2Finline-image/<f>` choisit la location ouverte et atteint, sans filtre de socket ni certificat,
    une route du back de forme `/api/v1/<ressource>/:param/<littéral>`. Le contrôle ne retient que l'URI brute qui commence
    littéralement par `/api/v1/inline-image/` (la route réelle est `GET /api/v1/inline-image/:filename`, un seul segment) et refuse
    (404) un `%2f`/`%5c` (barre oblique ou antislash encodés), un `%2e` (point encodé : nginx résout aussi `%2e%2e`), un `..` ou un
-   `//` dans la partie chemin (avant le `?`) — rien d'autre.
+   `//` dans la partie chemin (avant le `?`) — rien d'autre (un nom de fichier légitime qui contiendrait `..` répond désormais 404 ; les
+   noms réels sont `<horodatage>-<aléa>.<ext>`). `limit_except GET HEAD { deny all; }` : la seule route sous ce préfixe est
+   `GET /api/v1/inline-image/:filename` (InlineImageController ; l'envoi est `POST /api/v1/admin/inline-image`, et le CMS
+   `/api/v1/cms/articles/…`, d'autres préfixes) ; les images sont chargées par `<img>`, sans préflight CORS : un `OPTIONS` répond 403.
    Marqueur `# cf-aop: <nom> <mode>` : posé dans le rendu de chaque vhost déclaré, relu par la resynchronisation complète
    (proxy-update/tasks/resync.yml) qui refuse un nom déclaré qu'AUCUN vhost rendu ne porte.
 
@@ -94,9 +98,12 @@ geo $realip_remote_addr ${{ cf_edge_var }} {
 # `cf_socket=1` : socket d'une plage Cloudflare ; `verify` : $ssl_client_verify (SUCCESS, NONE, FAILED:…) ; `untrusted=1` : socket
 # Cloudflare SANS certificat vérifié, ce que `enforce` refuse (mode={{ _mode }}). `claimed` : CF-Connecting-IP tel que reçu (forgeable),
 # `client` : adresse retenue. Jamais la chaîne de requête ($uri), jamais d'en-tête d'authentification.
-log_format cf_aop_{{ cf_slug }} '$time_iso8601 host=$host socket=$realip_remote_addr claimed="$http_cf_connecting_ip" client=$remote_addr '
-    'cf_socket=$cf_socket_{{ cf_slug }} verify="$ssl_client_verify" untrusted=$cf_untrusted_{{ cf_slug }} mode={{ _mode }} '
-    'status=$status method=$request_method uri="$uri" ray="$http_cf_ray" ua="$http_user_agent"';
+# ORDRE : les champs jusqu'à `method` sont déterminés par nginx ; `claimed`, `uri`, `ray` et `ua` viennent du CLIENT (nginx échappe `"` et
+# les caractères de contrôle, PAS les espaces : `$uri` décode `%20`) et sont à la FIN. La preuve de proof.yml ne lit que le préfixe,
+# ancré au début de ligne : rien de ce qu'un client envoie ne peut y forger un champ.
+log_format cf_aop_{{ cf_slug }} '$time_iso8601 host=$host socket=$realip_remote_addr cf_socket=$cf_socket_{{ cf_slug }} verify="$ssl_client_verify" '
+    'untrusted=$cf_untrusted_{{ cf_slug }} mode={{ _mode }} status=$status method=$request_method client=$remote_addr '
+    'claimed="$http_cf_connecting_ip" uri="$uri" ray="$http_cf_ray" ua="$http_user_agent"';
 {% endif %}
 {% elif cf_part == 'realip' %}
 {% for ip in cloudflare_ips %}
@@ -131,12 +138,15 @@ log_format cf_aop_{{ cf_slug }} '$time_iso8601 host=$host socket=$realip_remote_
     }
 {% endif %}
 {% elif cf_part == 'inline' %}
-{% if _mode == 'enforce' %}
+{% if _mode != '' %}
     if ($request_uri !~ "^/api/v1/inline-image/") {
         return 404;
     }
     if ($request_uri ~* "^[^?]*(%2f|%5c|%2e|[.][.]|//)") {
         return 404;
+    }
+    limit_except GET HEAD {
+        deny all;
     }
 {% endif %}
 {% endif %}
