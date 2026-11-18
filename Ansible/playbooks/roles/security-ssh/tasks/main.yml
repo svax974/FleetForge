@@ -334,6 +334,14 @@
     port: "{{ ssh_custom_port }}"
     delete: true
 
+- name: Limit public SSH connections when explicitly enabled
+  community.general.ufw:
+    rule: limit
+    proto: tcp
+    port: "{{ ssh_custom_port }}"
+    comment: FleetForge public SSH
+  when: ssh_public_access | default(false) | bool
+
 # Deny connections on port 22
 - name: Remove SSH connections on port 22 rules if any
   community.general.ufw:

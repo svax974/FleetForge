@@ -49,6 +49,14 @@
     from_ip: "{{ hostvars[item].ansible_host }}"
   loop: "{{ groups['vpns'] | default([]) }}"
 
+- name: Configure rate-limited public SSH access
+  community.general.ufw:
+    rule: limit
+    proto: tcp
+    port: "{{ ssh_custom_port }}"
+    comment: FleetForge public SSH
+    delete: "{{ not (ssh_public_access | default(false) | bool) }}"
+
 # Allow app_port from proxies + whitelist + VPNs (if defined for this host).
 # `ufw_app_ports: false` sur l'entrée : ses ports sont PUBLIÉS PAR DOCKER et
 # filtrés dans DOCKER-USER par le rôle `-security` du service — une règle ufw y
@@ -130,7 +138,7 @@
   ansible.builtin.blockinfile:
     path: /etc/hosts.allow
     marker: "# {mark} ANSIBLE sshd whitelist"
-    block: 'sshd: {{ sshd_allow_list | join(", ") }}'
+    block: 'sshd: {{ "ALL" if (ssh_public_access | default(false) | bool) else sshd_allow_list | join(", ") }}'
 - name: Add sshd ALL to hosts.deny
   ansible.builtin.lineinfile:
     path: /etc/hosts.deny

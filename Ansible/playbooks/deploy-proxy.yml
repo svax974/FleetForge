@@ -29,11 +29,13 @@
   gather_facts: false
 
   roles:
+    - sshd-security
     - install-nginx
     - install-cert
     - proxy-install
     - proxy-update
     - proxy-security
+    - security-ssh-update
 
 # Pas de variable dans un `name:` de play : comme `hosts:`, il est résolu avant
 # le chargement des group_vars, donc `remote_username` y est toujours indéfini.

@@ -86,7 +86,14 @@
   ansible.builtin.assert:
     that:
       - "'passwordauthentication no' in sshd_effective.stdout"
-      - "('permitrootlogin ' ~ sshd_permit_root_login) in sshd_effective.stdout"
+      - "'kbdinteractiveauthentication no' in sshd_effective.stdout"
+      # OpenSSH peut afficher l'ancien nom « without-password » pour la même
+      # valeur que « prohibit-password », selon sa version.
+      - >-
+        ('permitrootlogin ' ~ sshd_permit_root_login) in sshd_effective.stdout_lines or
+        (sshd_permit_root_login in ['prohibit-password', 'without-password'] and
+         ('permitrootlogin prohibit-password' in sshd_effective.stdout_lines or
+          'permitrootlogin without-password' in sshd_effective.stdout_lines))
     fail_msg: >-
       sshd applique encore d'autres valeurs que le drop-in :
       {{ sshd_effective.stdout_lines | select('match', '^(passwordauthentication|permitrootlogin|kbdinteractiveauthentication) ') | list }}

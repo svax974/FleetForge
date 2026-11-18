@@ -10,6 +10,34 @@
 # (`proxy_security_backindicators`) : papanglabs déclare le port sans que ses
 # proxies l'aient jamais ouvert, et la fusion ne devait RIEN ouvrir de neuf.
 ############################# HTTP/HTTPS #############################
+- name: Install Fail2ban for SSH
+  ansible.builtin.apt:
+    name: fail2ban
+    state: present
+
+- name: Configure the proxy SSH jail
+  ansible.builtin.copy:
+    dest: /etc/fail2ban/jail.d/proxy-sshd.local
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      [sshd]
+      enabled = true
+      backend = systemd
+      port = {{ ssh_custom_port }}
+      ignoreip = 127.0.0.1/8 ::1 {{ (whitelist | default([]) + (groups['vpns'] | default([]) | map('extract', hostvars, ['ansible_host']) | list)) | join(' ') }}
+      maxretry = 5
+      findtime = 600
+      bantime = 3600
+  register: proxy_ssh_jail
+
+- name: Enable and start Fail2ban
+  ansible.builtin.systemd:
+    name: fail2ban
+    enabled: true
+    state: "{{ 'restarted' if proxy_ssh_jail.changed else 'started' }}"
+
 # Configure basic firewall rules for nginx and PriTunl
 - name: Allow HTTPS connections from everywhere
   community.general.ufw:
