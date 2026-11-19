@@ -124,6 +124,22 @@
     regexp: "define\\(\\s*'DB_HOST'"
     line: "define( 'DB_HOST', '{{ wp_dbhost }}' );"
 
+# WordPress derrière le proxy : son adresse PUBLIQUE et le fait qu'il est joint en HTTPS. Les constantes PRIMENT sur
+# la base (réglages « Adresse web » / « Adresse du site »), donc un redéploiement ou une restauration ne peut pas
+# ramener l'adresse à l'IP de la machine — c'était la cause du 301 vers l'IP et du 504 qui suivait.
+- name: Tell WordPress its public address and that it is served over HTTPS
+  ansible.builtin.blockinfile:
+    path: /var/www/html/wordpress/wp-config.php
+    marker: "// {mark} ANSIBLE (adresse publique et HTTPS derrière le proxy)"
+    insertbefore: "^/[*] That"
+    block: |
+      // Le proxy termine le TLS : sans cela WordPress génère des URL http:// et redirige vers l'IP.
+      if (!empty($_SERVER['HTTP_X_FORWARDED_PROTO']) && 'https' === $_SERVER['HTTP_X_FORWARDED_PROTO']) {
+          $_SERVER['HTTPS'] = 'on';
+      }
+      define( 'WP_HOME', 'https://{{ proxy_hostname }}' );
+      define( 'WP_SITEURL', 'https://{{ proxy_hostname }}' );
+
 # --- Apache VirtualHost ---
 - name: Deploy WordPress VirtualHost
   ansible.builtin.template:

@@ -1,7 +1,8 @@
 <VirtualHost *:{{ wp_port }}>
     #ServerName www.example.com
 
-    #SetEnvIf X-Forwarded-Proto "https" HTTPS=on
+    # Le proxy des proxies termine le TLS : Apache doit le dire à PHP, sinon WordPress se croit en http://.
+    SetEnvIf X-Forwarded-Proto "https" HTTPS=on
     ServerAdmin {{ email }}
     DocumentRoot /var/www/html/wordpress
     DirectoryIndex index.php index.html
