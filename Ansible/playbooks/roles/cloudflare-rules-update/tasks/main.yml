@@ -115,6 +115,6 @@
     fail_msg: >-
       Cloudflare refuse la règle de limitation de débit de {{ cfrules_zone }} (HTTP {{ cfrules_put.status }}) :
       {{ (cfrules_put.json | default({})).errors | default([]) | to_json }}. Permission « Zone → Zone WAF → Edit » requise
-      sur le jeton ; sur le plan gratuit, la période est de 10 s et une seule règle est admise.
+      sur le jeton ; sur le plan gratuit, la période ET le blocage valent 10 s, et une seule règle est admise.
     quiet: true
   run_once: true

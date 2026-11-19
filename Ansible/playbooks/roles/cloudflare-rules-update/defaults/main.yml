@@ -5,9 +5,9 @@
 # de la zone. Le nom et le chemin sont explicites : la règle ne vise jamais « tout
 # le site », où elle couperait des services qui n'ont rien à voir.
 #
-# PÉRIODE : le plan gratuit de Cloudflare n'accepte qu'une période de 10 s (une
-# seule règle). Les valeurs par défaut restent donc dans ce cadre ; un plan payant
-# peut passer à 60 s en surchargeant `period`.
+# PÉRIODE ET BLOCAGE : le plan gratuit n'accepte qu'une période de 10 s et un
+# `mitigation_timeout` de 10 s, pour UNE seule règle. Les valeurs par défaut restent
+# dans ce cadre ; un plan payant peut les allonger en surchargeant `period`/`timeout`.
 #
 # Ne JAMAIS y mettre un défi (managed challenge / Bot Fight) : les clients MCP sont
 # des appels serveur, un défi les casse — c'est ce qui a fait échouer la sonde
@@ -23,4 +23,6 @@ cfrules_hosts:
     path_prefix: "/mcp"
     requests: 30
     period: 10
-    timeout: 60
+    # Plan gratuit : Cloudflare refuse toute autre valeur que 10 s (« not entitled to use a mitigation
+    # timeout different from 10 »). Un plan payant peut l'allonger.
+    timeout: 10
