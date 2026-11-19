@@ -1256,11 +1256,13 @@ class CloudflareNamedPlaybookTests(unittest.TestCase):
         code, out = play(enforce=True)
         self.assertEqual(code, 0, out[-2000:])
         self.assertIn(("PATCH", {"value": "strict"}), state["calls"])
-        self.assertIn("strict (lu)", out)
+        # Le rapport de la PREMIÈRE passe dit ce qui va être fait, pas ce qui est déjà lu.
+        self.assertIn("le POSE", out)
         calls = len(state["calls"])
         code, out = play(enforce=True)
         self.assertEqual(code, 0)
         self.assertEqual([c[0] for c in state["calls"][calls:]], ["GET"], "déjà strict : aucune écriture")
+        self.assertIn("strict (lu)", out, "zone déjà stricte : le rapport dit ce qui est LU")
 
     def test_a_named_entry_blocks_on_a_non_strict_or_unreadable_tls_mode_and_nothing_else_does(self):
         state, server = self.fake_zone_tls()
