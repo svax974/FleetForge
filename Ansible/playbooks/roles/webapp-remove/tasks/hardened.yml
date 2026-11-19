@@ -12,11 +12,14 @@
       - wa_h_firewall_script is match('^/[A-Za-z0-9._/-]+(?!(?s:.))')
     quiet: true
 
-- name: Stop and disable the firewall unit of the application
+- name: Stop and disable the firewall units of the application
   ansible.builtin.systemd:
-    name: "{{ wa_h_firewall_unit }}"
+    name: "{{ item }}"
     state: stopped
     enabled: false
+  loop:
+    - "{{ wa_h_firewall_unit }}"
+    - "{{ wa_h_firewall_early_unit }}"
   become: true
   failed_when: false
 
@@ -59,8 +62,10 @@
     state: absent
   loop:
     - "/etc/systemd/system/{{ wa_h_firewall_unit }}.service"
+    - "/etc/systemd/system/{{ wa_h_firewall_early_unit }}.service"
     - "/etc/systemd/system/nginx.service.d/{{ wa_h_firewall_unit }}.conf"
     - "{{ wa_h_firewall_script }}"
+    - "{{ wa_h_firewall_early_script }}"
   become: true
 
 - name: Reload systemd

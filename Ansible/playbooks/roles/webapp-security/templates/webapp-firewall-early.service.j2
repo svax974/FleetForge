@@ -1,0 +1,14 @@
+[Unit]
+Description=Close the published ports of {{ wa_app.wa_project }} before Docker starts its containers
+# AVANT docker.service : c'est tout l'intérêt. Le verrou (table `raw`) est retiré par
+# `{{ wa_app.wa_h_firewall_unit }}.service`, une fois DOCKER-USER reposé.
+Before=docker.service
+After=local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart={{ wa_app.wa_h_firewall_early_script }}
+
+[Install]
+WantedBy=multi-user.target

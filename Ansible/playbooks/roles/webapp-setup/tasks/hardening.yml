@@ -32,6 +32,10 @@
     wa_h_tag: "webapp-{{ wa_project }}"
     wa_h_firewall_script: "/usr/local/sbin/webapp-{{ wa_project }}-firewall.sh"
     wa_h_firewall_unit: "webapp-{{ wa_project }}-firewall"
+    # Unité d'AVANT-DÉMARRAGE : elle ferme les ports publiés avant que Docker ne lance
+    # les conteneurs, et l'unité principale retire ce verrou une fois ses règles posées.
+    wa_h_firewall_early_script: "/usr/local/sbin/webapp-{{ wa_project }}-firewall-early.sh"
+    wa_h_firewall_early_unit: "webapp-{{ wa_project }}-firewall-early"
   tags: [always]
 
 # Relais de confiance : proxies ADMIS (hors adresses VPN), plus la passerelle du pont dédié quand un proxy admis est

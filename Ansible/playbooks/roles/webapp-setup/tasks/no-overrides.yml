@@ -101,6 +101,10 @@
     wa_h_env: __wa_internal_probe__
     wa_h_env_grammar: __wa_internal_probe__
     wa_h_expected_initialised: __wa_internal_probe__
+    wa_fw_early_file: __wa_internal_probe__
+    wa_fw_early_unit: __wa_internal_probe__
+    wa_h_firewall_early_script: __wa_internal_probe__
+    wa_h_firewall_early_unit: __wa_internal_probe__
     wa_h_firewall_script: __wa_internal_probe__
     wa_h_firewall_unit: __wa_internal_probe__
     wa_h_forbidden_groups: __wa_internal_probe__
@@ -406,6 +410,10 @@
       - lookup('ansible.builtin.vars', 'wa_h_env') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', 'wa_h_env_grammar') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', 'wa_h_expected_initialised') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'wa_fw_early_file') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'wa_fw_early_unit') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'wa_h_firewall_early_script') | string == '__wa_internal_probe__'
+      - lookup('ansible.builtin.vars', 'wa_h_firewall_early_unit') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', 'wa_h_firewall_script') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', 'wa_h_firewall_unit') | string == '__wa_internal_probe__'
       - lookup('ansible.builtin.vars', 'wa_h_forbidden_groups') | string == '__wa_internal_probe__'

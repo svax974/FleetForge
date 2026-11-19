@@ -93,8 +93,14 @@
     - name: Report
       ansible.builtin.debug:
         msg: >-
-          {{ 'Cibles retirées pour : ' ~ (prune_disabled | join(', ')) if prune_disabled | length > 0
-             else 'Aucune cible propre à un hôte désactivé.' }}
+          {%- set removed = prune_grep.results | default([]) | map(attribute='stdout_lines', default=[]) | flatten(levels=1) | unique | list -%}
+          {%- if removed | length > 0 -%}
+          Cibles retirées ({{ removed | length }}) : {{ removed | join(', ') }}
+          {%- elif prune_disabled | length > 0 -%}
+          Aucune cible à retirer : les hôtes désactivés ({{ prune_disabled | join(', ') }}) n'en ont plus.
+          {%- else -%}
+          Aucun hôte désactivé : rien à faire.
+          {%- endif -%}
           {%- if prune_shared | length > 0 %}
           Laissées intactes (machine encore portée par une entrée active) : {{ prune_shared | join(', ') }}.
           {%- endif %}

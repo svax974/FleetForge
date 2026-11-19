@@ -139,6 +139,35 @@
   # JAMAIS `wa_fw_script` : le `register` écraserait le chemin posé plus haut (relecture finale).
   register: wa_fw_script_file
 
+- name: Deploy the early firewall script of the application
+  ansible.builtin.template:
+    src: webapp-firewall-early.sh.j2
+    dest: "{{ wa_app.wa_h_firewall_early_script }}"
+    owner: "{{ webapp_root_owner }}"
+    group: "{{ webapp_root_group }}"
+    mode: '0750'
+  become: true
+  register: wa_fw_early_file
+
+- name: Deploy the early firewall unit of the application
+  ansible.builtin.template:
+    src: webapp-firewall-early.service.j2
+    dest: "{{ webapp_systemd_unit_dir }}/{{ wa_app.wa_h_firewall_early_unit }}.service"
+    owner: "{{ webapp_root_owner }}"
+    group: "{{ webapp_root_group }}"
+    mode: '0644'
+  become: true
+  register: wa_fw_early_unit
+
+# `Before=docker.service` ne sert à rien si l'unité n'est pas activée au démarrage.
+- name: Enable the early firewall unit
+  ansible.builtin.systemd:
+    name: "{{ wa_app.wa_h_firewall_early_unit }}.service"
+    enabled: true
+    daemon_reload: "{{ wa_fw_early_unit is changed }}"
+  become: true
+  when: not ansible_check_mode
+
 - name: Deploy the firewall unit of the application
   ansible.builtin.template:
     src: webapp-firewall.service.j2

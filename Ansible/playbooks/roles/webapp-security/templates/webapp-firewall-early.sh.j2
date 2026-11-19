@@ -1,0 +1,27 @@
+#!/bin/bash
+# Verrou d'AVANT-DÉMARRAGE de {{ wa_app.wa_project }} (profil durci) — géré par Ansible (webapp-security,
+# tasks/firewall.yml), ne pas éditer.
+#
+# Le trou qu'il ferme : au démarrage de la machine, Docker relance les conteneurs AVANT que l'unité
+# `{{ wa_app.wa_h_firewall_unit }}.service` (After=docker.service) ne repose DOCKER-USER. Pendant quelques secondes, les ports
+# publiés étaient joignables sans filtre.
+#
+# Il pose donc, AVANT docker.service, un DROP dans la table `raw` — qui s'exécute avant le DNAT de Docker et avant
+# tout FORWARD. Aucun paquet n'atteint les ports publiés tant que le pare-feu complet n'est pas en place ; l'unité
+# principale retire ces règles à la fin de son script.
+#
+# Sans effet si l'unité principale n'a jamais tourné (verrou posé, rien ne le retire) : c'est le sens voulu — les
+# ports restent fermés, et la sonde `firewall_<port>` le signale.
+set -euo pipefail
+
+TAG="{{ wa_app.wa_h_tag }}-early"
+PORTS=({{ wa_app.wa_front_port | int }} {{ wa_app.wa_back_port | int }})
+
+for port in "${PORTS[@]}"; do
+  for tool in iptables ip6tables; do
+    # Table `raw` absente ou outil sans IPv6 : rien à verrouiller de ce côté.
+    "$tool" -w -t raw -S PREROUTING >/dev/null 2>&1 || continue
+    "$tool" -w -t raw -C PREROUTING -p tcp --dport "$port" -m comment --comment "$TAG" -j DROP >/dev/null 2>&1 && continue
+    "$tool" -w -t raw -I PREROUTING -p tcp --dport "$port" -m comment --comment "$TAG" -j DROP
+  done
+done

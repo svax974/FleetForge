@@ -202,3 +202,14 @@ if ip6tables -w -L OUTPUT -n >/dev/null 2>&1; then
   insert_all ip6tables OUTPUT "${RULES_OUTPUT6[@]}"
   purge_old ip6tables OUTPUT
 fi
+
+# ── Verrou d'avant-démarrage ──────────────────────────────────────────────
+# `{{ wa_app.wa_h_firewall_early_unit }}.service` pose un DROP dans la table `raw` AVANT docker.service (les
+# conteneurs démarraient avant ces règles). DOCKER-USER est maintenant en place : on le retire. Rejouer ce script
+# hors démarrage ne fait rien (le verrou n'existe déjà plus).
+EARLY_TAG="{{ wa_app.wa_h_tag }}-early"
+for port in "$FRONT_PORT" "$BACK_PORT"; do
+  for tool in iptables ip6tables; do
+    while "$tool" -w -t raw -D PREROUTING -p tcp --dport "$port" -m comment --comment "$EARLY_TAG" -j DROP 2>/dev/null; do :; done
+  done
+done
