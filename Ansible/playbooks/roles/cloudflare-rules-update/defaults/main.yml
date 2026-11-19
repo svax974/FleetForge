@@ -1,0 +1,26 @@
+---
+# Limitation de débit devant les noms servis par Cloudflare.
+#
+# Une règle PAR NOM protégé, posée dans le jeu de règles de phase `http_ratelimit`
+# de la zone. Le nom et le chemin sont explicites : la règle ne vise jamais « tout
+# le site », où elle couperait des services qui n'ont rien à voir.
+#
+# PÉRIODE : le plan gratuit de Cloudflare n'accepte qu'une période de 10 s (une
+# seule règle). Les valeurs par défaut restent donc dans ce cadre ; un plan payant
+# peut passer à 60 s en surchargeant `period`.
+#
+# Ne JAMAIS y mettre un défi (managed challenge / Bot Fight) : les clients MCP sont
+# des appels serveur, un défi les casse — c'est ce qui a fait échouer la sonde
+# `public_edge` (docs/etude-passerelle-sur-webapp.md).
+cfrules_token: "{{ cloudflare_token | default('') }}"
+cfrules_zone: "{{ domain_name }}"
+cfrules_api: https://api.cloudflare.com/client/v4
+# Préfixe des descriptions : il identifie NOS règles, seules remplacées à chaque
+# passage. Tout ce que le propriétaire a posé à la main est conservé.
+cfrules_description_prefix: "FleetForge"
+cfrules_hosts:
+  - hostname: "ffg.{{ domain_name }}"
+    path_prefix: "/mcp"
+    requests: 30
+    period: 10
+    timeout: 60

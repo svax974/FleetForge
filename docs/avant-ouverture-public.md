@@ -33,8 +33,10 @@ par `deploy-fleetforge.yml` (garde du groupe `fleetforge_gateways` puis import d
 - **Accès de test à `/mcp`** : `whitelist: true` dans l'`access` de la location `/mcp` de l'entrée — à passer à `false` dès la
   fin des tests et AVANT toute exposition E2/E3 (la whitelist n'élargit pas l'allow-list propre à chaque
   credential `exec`, ≤ /16, imposée par `mcp-access`).
-- **`/mcp` admet l'adresse d'`infra1`, donc toute sa machine** (proxy1, monitor, mail1, www…) : la clé
-  `ffg_` et l'allow-list du credential restent les barrières. Rien ne distingue ces services au niveau réseau.
+- **`infra1` N'EST PLUS admis sur `/mcp`** (décision du 19/11/2026) : la machine est auto-suffisante pour
+  l'administration de FleetForge via l'application web et n'a pas besoin de l'accès MCP. Concrètement, son adresse
+  (62.171.135.125, celle de proxy1/monitor/mail1) ne doit PAS figurer dans l'`ipAllow` d'une clé `ffg_` : c'est
+  l'allow-list du credential qui fait barrière, et elle nomme des machines, donc tout ce qui partage leur adresse.
 - **Processus local** : sans proxy sur la machine, la règle OUTPUT n'admet que root sur les ports publiés
   (un compte local non root est rejeté) ; les conteneurs des autres apps (172.x) sont refusés par
   DOCKER-USER (source ≠ proxy admis).
@@ -50,7 +52,12 @@ par `deploy-fleetforge.yml` (garde du groupe `fleetforge_gateways` puis import d
 - **`docker-ports-firewall.sh` unique par machine** : sans `host_vars/<entrée canonique>.yml` listant toutes les apps
   (et `webapp_machine`), un redémarrage de Docker ne rétablit que les règles de la dernière app déployée sur
   185.237.252.206 : `companymanager` et `social-manager` y tournent déjà.
-- **mail1 pour la passerelle distante** : 587 ouvert depuis 185.237.252.206 (`mailrelay-security`, rejouer
+- **SMTP de la passerelle : PLUS REQUIS par défaut** (décision du 19/11/2026). L'authentification se fait par
+  **wallet** (un administrateur est provisionné avec son adresse) et le step-up a aussi une méthode wallet
+  (`StepUpWalletMethod`) : aucune fonction de la passerelle n'a besoin d'envoyer un courriel. La procédure ci-dessous
+  ne vaut que si l'e-mail est réactivé (`user_authEmailEnabled: true`) ; sinon le laisser à `false`, sans quoi le
+  chemin « mot de passe oublié / vérification » existe sans serveur derrière.
+- **mail1 pour la passerelle distante** (si l'e-mail est réactivé) : 587 ouvert depuis 185.237.252.206 (`mailrelay-security`, rejouer
   `update-ufw-all.yml --limit mail1` si besoin) ; `fail2ban` ignore l'adresse de la passerelle. Lien expéditeur
   FAIT dans les gabarits (16/11/2026, rôle `mailrelay-setup`, variable optionnelle `mailrelay_sender_bindings`,
   vide par défaut = rien ne change) mais NON ACTIVÉ ni déployé : sans lui, un code compromis envoie sous

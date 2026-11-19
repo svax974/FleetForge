@@ -1,0 +1,120 @@
+---
+# Règles de limitation de débit par zone Cloudflare, idempotentes.
+#
+#   ./play.sh <parc> update-cloudflare-rules.yml
+#
+# Le jeton doit porter « Zone → Zone WAF → Edit » (et « Zone → Zone → Read ») ;
+# un refus est nommé, et rien n'est écrit à moitié.
+- name: Require a token and a zone
+  ansible.builtin.assert:
+    that:
+      - cfrules_token | length > 0
+      - cfrules_zone | length > 0
+    fail_msg: "`cloudflare_token` et `domain_name` sont requis pour poser les règles Cloudflare."
+    quiet: true
+  run_once: true
+
+- name: Look up the zone
+  ansible.builtin.uri:
+    url: "{{ cfrules_api }}/zones?name={{ cfrules_zone }}"
+    headers:
+      Authorization: "Bearer {{ cfrules_token }}"
+    status_code: [200, 403]
+  register: cfrules_zone_lookup
+  no_log: true
+  changed_when: false
+  run_once: true
+  delegate_to: localhost
+
+- name: Fail when the zone is not readable
+  ansible.builtin.assert:
+    that: cfrules_zone_lookup.status == 200 and (cfrules_zone_lookup.json.result | default([]) | length) > 0
+    fail_msg: >-
+      Zone {{ cfrules_zone }} non lisible (HTTP {{ cfrules_zone_lookup.status }}) : le jeton `cloudflare_token` n'a pas
+      « Zone → Zone → Read » sur cette zone.
+    quiet: true
+  run_once: true
+
+- name: Keep the zone identifier
+  ansible.builtin.set_fact:
+    cfrules_zone_id: "{{ cfrules_zone_lookup.json.result[0].id }}"
+  run_once: true
+
+- name: Read the current rate-limiting ruleset
+  ansible.builtin.uri:
+    url: "{{ cfrules_api }}/zones/{{ cfrules_zone_id }}/rulesets/phases/http_ratelimit/entrypoint"
+    headers:
+      Authorization: "Bearer {{ cfrules_token }}"
+    status_code: [200, 404, 400, 401, 403]
+  register: cfrules_current
+  no_log: true
+  changed_when: false
+  run_once: true
+  delegate_to: localhost
+
+# Ce qui est publié = ce que le propriétaire a posé à la main (conservé tel quel)
+# PUIS nos règles, reconstruites à chaque passage. Nos règles sont reconnues à leur
+# description ; aucune autre n'est touchée.
+- name: Report the read status
+  ansible.builtin.debug:
+    msg: "Lecture du jeu de règles http_ratelimit : HTTP {{ cfrules_current.status }}"
+  run_once: true
+
+- name: Work out the rules to publish
+  ansible.builtin.set_fact:
+    cfrules_publish: >-
+      {%- set kept = [] -%}
+      {%- for rule in ((cfrules_current.json.rules | default([])) if cfrules_current.status == 200 else []) -%}
+      {%- if not ((rule.description | default('')) | string).startswith(cfrules_description_prefix) -%}
+      {%- set _ = kept.append(rule) -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {%- set ours = [] -%}
+      {%- for host in cfrules_hosts -%}
+      {%- set _ = ours.append({
+            'description': cfrules_description_prefix ~ ' ' ~ host.hostname ~ host.path_prefix ~ ' : limitation de débit par IP',
+            'expression': '(http.host eq "' ~ host.hostname ~ '" and starts_with(http.request.uri.path, "' ~ host.path_prefix ~ '"))',
+            'action': 'block',
+            'action_parameters': {'response': {'status_code': 429, 'content_type': 'application/json',
+                                               'content': '{"error":"rate_limited"}'}},
+            'ratelimit': {'characteristics': ['ip.src', 'cf.colo.id'], 'period': host.period | int,
+                          'requests_per_period': host.requests | int, 'mitigation_timeout': host.timeout | int},
+            'enabled': true}) -%}
+      {%- endfor -%}
+      {{ kept + ours }}
+  run_once: true
+
+- name: Say what will be published
+  ansible.builtin.debug:
+    msg: >-
+      Zone {{ cfrules_zone }} : {{ cfrules_publish | length }} règle(s) de limitation de débit —
+      {{ cfrules_publish | map(attribute='description') | join(' | ') }}
+  run_once: true
+
+- name: Publish the rate-limiting ruleset
+  ansible.builtin.uri:
+    url: "{{ cfrules_api }}/zones/{{ cfrules_zone_id }}/rulesets/phases/http_ratelimit/entrypoint"
+    method: PUT
+    headers:
+      Authorization: "Bearer {{ cfrules_token }}"
+    body_format: json
+    body:
+      rules: "{{ cfrules_publish }}"
+    # Le refus est traité par l'assert ci-dessous, qui le NOMME : une tâche en échec
+    # sous `no_log` masquerait le code HTTP et ne laisserait rien à lire.
+    status_code: [200, 400, 401, 403, 404]
+  register: cfrules_put
+  no_log: true
+  changed_when: cfrules_put.status == 200
+  run_once: true
+  delegate_to: localhost
+
+- name: Fail when Cloudflare refuses the ruleset
+  ansible.builtin.assert:
+    that: cfrules_put.status == 200
+    fail_msg: >-
+      Cloudflare refuse la règle de limitation de débit de {{ cfrules_zone }} (HTTP {{ cfrules_put.status }}) :
+      {{ (cfrules_put.json | default({})).errors | default([]) | to_json }}. Permission « Zone → Zone WAF → Edit » requise
+      sur le jeton ; sur le plan gratuit, la période est de 10 s et une seule règle est admise.
+    quiet: true
+  run_once: true

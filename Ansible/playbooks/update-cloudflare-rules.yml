@@ -1,0 +1,24 @@
+---
+# FleetForge
+#
+# Copyright © 2025 Stéphane VAXELAIRE
+# SPDX-License-Identifier: MIT — see LICENSE
+#
+# Limitation de débit devant les noms servis par Cloudflare.
+#
+#   ./play.sh <parc> update-cloudflare-rules.yml
+#
+# Une règle par nom protégé (voir roles/cloudflare-rules-update/defaults) : elle ne
+# vise que le chemin indiqué de ce nom, jamais tout le site. Les règles posées à la
+# main dans la zone sont CONSERVÉES ; seules celles qui portent notre préfixe de
+# description sont reconstruites.
+#
+# Pas de défi (managed challenge / Bot Fight) : les clients MCP sont des appels
+# serveur, un défi les casse (c'est ce qui a fait échouer la sonde `public_edge`).
+- name: Cloudflare rate limiting
+  hosts: proxies
+  gather_facts: false
+  tasks:
+    - name: Apply the rules of this parc
+      ansible.builtin.include_role:
+        name: cloudflare-rules-update

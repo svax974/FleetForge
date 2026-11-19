@@ -1,0 +1,100 @@
+---
+# FleetForge
+#
+# Copyright © 2025 Stéphane VAXELAIRE
+# SPDX-License-Identifier: MIT — see LICENSE
+#
+# Retire les cibles Prometheus des hôtes d'inventaire marqués `disabled: true`.
+#
+#   ./play.sh <parc> prune-disabled-monitoring.yml
+#
+# Un hôte désactivé n'est plus déployé (play.sh et le lanceur de l'application
+# l'excluent par `--limit`, CLAUDE.md « Parc et play.sh ») : ses cibles resteraient
+# donc `down` pour toujours, et feraient sonner `TargetDown` sur un service qu'on a
+# arrêté volontairement. Même raison que le retrait de cible d'un `-remove`.
+#
+# PORTÉE — ce qui lui est PROPRE seulement : les fichiers de cible sont nommés
+# d'après l'ENTRÉE d'inventaire (`prometheus-configs/<job>/<entrée>.json`). Une
+# machine mutualisée porte plusieurs entrées (`proxy2`, `station`, `hub`, `nuc`…),
+# et sa cible svcprobe est celle de l'entrée canonique : la retirer parce que
+# cette entrée est désactivée aveuglerait les services des AUTRES entrées de la
+# même machine. Un hôte désactivé dont l'adresse est encore portée par une entrée
+# ACTIVE est donc laissé intact, et signalé.
+#
+# Ne touche PAS aux vérifications svcprobe posées SUR la machine (`/etc/svcprobe/
+# checks.d/`) : elles décrivent des services qui peuvent survivre à l'entrée
+# d'inventaire, et leur retrait relèverait du `-remove` du service.
+#
+# Prometheus relit ses `file_sd` tout seul : aucun rechargement n'est nécessaire.
+- name: Withdraw the Prometheus targets of disabled hosts
+  hosts: prometheus1:monitor
+  gather_facts: false
+  vars:
+    # `prometheus_home` n'est posé que par les defaults des rôles d'installation, non chargés ici.
+    prune_prometheus_home: "{{ prometheus_home | default('/home/' ~ remote_username ~ '/prometheus') }}"
+  tasks:
+    - name: Work out the disabled hosts whose machine no enabled host shares
+      ansible.builtin.set_fact:
+        prune_disabled: >-
+          {%- set ns = namespace(enabled=[], out=[]) -%}
+          {%- for host in groups['all'] | default([]) -%}
+          {%- if not (hostvars[host].disabled | default(false) | bool) -%}
+          {%- set ns.enabled = ns.enabled + [hostvars[host].ansible_host | default('')] -%}
+          {%- endif -%}
+          {%- endfor -%}
+          {%- for host in groups['all'] | default([]) -%}
+          {%- if (hostvars[host].disabled | default(false) | bool)
+                 and (hostvars[host].ansible_host | default('')) not in ns.enabled -%}
+          {%- set ns.out = ns.out + [host] -%}
+          {%- endif -%}
+          {%- endfor -%}
+          {{ ns.out }}
+        prune_shared: >-
+          {%- set ns = namespace(enabled=[], out=[]) -%}
+          {%- for host in groups['all'] | default([]) -%}
+          {%- if not (hostvars[host].disabled | default(false) | bool) -%}
+          {%- set ns.enabled = ns.enabled + [hostvars[host].ansible_host | default('')] -%}
+          {%- endif -%}
+          {%- endfor -%}
+          {%- for host in groups['all'] | default([]) -%}
+          {%- if (hostvars[host].disabled | default(false) | bool)
+                 and (hostvars[host].ansible_host | default('')) in ns.enabled -%}
+          {%- set ns.out = ns.out + [host] -%}
+          {%- endif -%}
+          {%- endfor -%}
+          {{ ns.out }}
+
+    # Le nom du fichier ne dit pas tout : un même hôte peut porter plusieurs cibles
+    # (`mtbridge.json`, `mtbridge1.json`…), et le nom d'instance y varie. La clé fiable
+    # est le label `node` (ou `instance`) que le rôle a écrit dans le fichier.
+    - name: List the target files that name a disabled host
+      ansible.builtin.command:
+        argv:
+          - grep
+          - -rlE
+          - '"node": *"{{ item }}"|"instance": *"{{ item }}"'
+          - "{{ prune_prometheus_home }}/prometheus-configs"
+      loop: "{{ prune_disabled }}"
+      register: prune_grep
+      changed_when: false
+      # Lecture seule : elle doit tourner aussi en `--check`, sinon la simulation ne dit rien.
+      check_mode: false
+      failed_when: prune_grep.rc not in [0, 1]
+      when: prune_disabled | length > 0
+
+    - name: Remove them
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop: "{{ prune_grep.results | default([]) | map(attribute='stdout_lines', default=[]) | flatten(levels=1) | unique }}"
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Report
+      ansible.builtin.debug:
+        msg: >-
+          {{ 'Cibles retirées pour : ' ~ (prune_disabled | join(', ')) if prune_disabled | length > 0
+             else 'Aucune cible propre à un hôte désactivé.' }}
+          {%- if prune_shared | length > 0 %}
+          Laissées intactes (machine encore portée par une entrée active) : {{ prune_shared | join(', ') }}.
+          {%- endif %}
