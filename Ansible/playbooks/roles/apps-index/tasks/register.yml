@@ -12,7 +12,7 @@
 - name: Register the deployed application
   ansible.builtin.copy:
     content: >-
-      {{ {'label': hostvars[apps_index_entry].webapp_project | default(hostvars[apps_index_entry].proxy_hostname),
+      {{ {'entry': apps_index_entry,
           'url': 'https://' ~ hostvars[apps_index_entry].proxy_hostname,
           'mode': hostvars[apps_index_entry].access_mode | default('private')} | to_nice_json }}
     dest: "{{ apps_index_state_dir }}/{{ apps_index_entry }}.json"

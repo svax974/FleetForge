@@ -26,11 +26,27 @@
   register: apps_index_contents
   become: true
 
+# Le LIBELLÉ est calculé ICI, pas au moment du marqueur : le nom de projet de l'entrée (`webapp_project`), sinon le nom
+# d'entrée d'inventaire — jamais le nom d'hôte, qui mélangeait les deux présentations. Le marqueur porte l'URL, qui
+# identifie l'entrée.
 - name: Work out the entries of the page
+  vars:
+    _by_url: >-
+      {%- set ns = namespace(out={}) -%}
+      {%- for host in groups['all'] | default([]) -%}
+      {%- set name = hostvars[host].proxy_hostname | default('') -%}
+      {%- if name | length > 0 -%}{%- set _ = ns.out.update({'https://' ~ name: host}) -%}{%- endif -%}
+      {%- endfor -%}
+      {{ ns.out }}
   ansible.builtin.set_fact:
     apps_index_entries: >-
-      {{ apps_index_contents.results | default([]) | map(attribute='content') | map('b64decode') | map('from_json') | list
-         | sort(attribute='label') }}
+      {%- set out = [] -%}
+      {%- for marker in (apps_index_contents.results | default([]) | map(attribute='content') | map('b64decode') | map('from_json') | list) -%}
+      {%- set entry = _by_url.get(marker.url, marker.entry | default('')) -%}
+      {%- set label = (hostvars[entry].webapp_project | default(entry)) if entry | length > 0 else marker.label | default(marker.url) -%}
+      {%- set _ = out.append({'label': label, 'url': marker.url, 'mode': marker.mode | default('private')}) -%}
+      {%- endfor -%}
+      {{ out | sort(attribute='label') }}
 
 - name: Create the directory of the index
   ansible.builtin.file:
