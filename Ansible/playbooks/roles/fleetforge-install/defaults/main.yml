@@ -319,6 +319,8 @@ ffg_required_denies:
   - "deploy-vpn*"
   - "install-vpn-routes*"
   - "deploy-cloudflare-origin-pull*"
+  - "update-cloudflare-rules*"
+  - "prune-disabled-monitoring*"
   # Cible `all` (sélection par `group_by`) et pose un conteneur + une sonde : jamais depuis la passerelle.
   - "deploy-cloudflare-ddns*"
   - "update-cloudflare-dns*"
