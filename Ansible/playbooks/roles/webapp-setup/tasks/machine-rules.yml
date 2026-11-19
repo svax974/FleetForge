@@ -45,7 +45,8 @@
   ansible.builtin.set_fact:
     wa_mr_entries: >-
       {%- set ns = namespace(out=[]) -%}
-      {%- for n in groups['all'] -%}
+      {#- `disabled: true` : hors run et hors déploiement, donc jamais sondé (voir probe-check.yml). -#}
+      {%- for n in groups['all'] if not (hostvars[n].disabled | default(false) | bool) -%}
       {%- set h = hostvars[n].wa_mp_addr -%}
       {%- if h.host == _addr and h.ssh == _ssh -%}
       {%- set ns.out = ns.out + [n] -%}

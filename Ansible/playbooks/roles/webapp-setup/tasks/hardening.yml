@@ -224,7 +224,7 @@
       vars:
         wa_mp_entries: >-
           {%- set ns = namespace(out=[]) -%}
-          {%- for n in groups['all'] if _addr != '' and hostvars[n].wa_mp_addr.host == _addr -%}
+          {%- for n in groups['all'] if _addr != '' and not (hostvars[n].disabled | default(false) | bool) and hostvars[n].wa_mp_addr.host == _addr -%}
           {%- set ns.out = ns.out + [n] -%}
           {%- endfor -%}
           {{ ns.out }}

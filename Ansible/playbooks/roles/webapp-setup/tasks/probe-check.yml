@@ -7,7 +7,11 @@
   vars:
     _unprobed: >-
       {%- set ns = namespace(out=[]) -%}
-      {%- for n in groups['all'] if hostvars[n].wa_mp_addr is not defined or hostvars[n].wa_mp_addr.error is defined -%}
+      {#- `disabled: true` : exclu du run par `play.sh` (CLAUDE.md « Parc et play.sh »), donc jamais sondé — et jamais
+          déployé non plus : il n'a pas à partager la machine de qui que ce soit pour cette garde. -#}
+      {%- for n in groups['all']
+             if not (hostvars[n].disabled | default(false) | bool)
+             and (hostvars[n].wa_mp_addr is not defined or hostvars[n].wa_mp_addr.error is defined) -%}
       {%- set ns.out = ns.out + [n] -%}
       {%- endfor -%}
       {{ ns.out }}
