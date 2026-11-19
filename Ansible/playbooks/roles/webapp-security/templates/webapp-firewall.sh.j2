@@ -204,7 +204,7 @@ if ip6tables -w -L OUTPUT -n >/dev/null 2>&1; then
 fi
 
 # ── Verrou d'avant-démarrage ──────────────────────────────────────────────
-# `{{ wa_app.wa_h_firewall_early_unit }}.service` pose un DROP dans la table `raw` AVANT docker.service (les
+# `webapp-<projet>-firewall-early.service` pose un DROP dans la table `raw` AVANT docker.service (les
 # conteneurs démarraient avant ces règles). DOCKER-USER est maintenant en place : on le retire. Rejouer ce script
 # hors démarrage ne fait rien (le verrou n'existe déjà plus).
 EARLY_TAG="{{ wa_app.wa_h_tag }}-early"

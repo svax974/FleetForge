@@ -1872,6 +1872,9 @@ class FirewallRunTests(unittest.TestCase):
                 "wa_h_tag": "webapp-fleetforge-gateway", "wa_h_egress": egress_host, "wa_h_egress_remote": [],
                 "wa_h_egress_host": egress_host, "wa_h_firewall_unit": "webapp-fleetforge-gateway-firewall",
                 "wa_h_firewall_script": os.path.join(tmp, "webapp-fleetforge-gateway-firewall.sh"),
+                # Unité d'avant-démarrage (verrou de la table `raw`, voir webapp-security/tasks/firewall.yml).
+                "wa_h_firewall_early_unit": "webapp-fleetforge-gateway-firewall-early",
+                "wa_h_firewall_early_script": os.path.join(tmp, "webapp-fleetforge-gateway-firewall-early.sh"),
                 "webapp_systemd_unit_dir": os.path.join(tmp, "units"),
                 "webapp_root_owner": str(os.getuid()), "webapp_root_group": str(os.getgid()),
                 "wa_h_local_proxy": local_proxy,
