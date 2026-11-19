@@ -1,0 +1,21 @@
+---
+# FleetForge
+#
+# Copyright © 2025 Stéphane VAXELAIRE
+# SPDX-License-Identifier: MIT — see LICENSE
+#
+# Répertoire des applications du parc : régénère la page statique servie sous `www.<domaine>/apps/`.
+#
+#   ./play.sh <parc> update-apps-index.yml
+#
+# Joué aussi par `deploy-webapp.yml`, `remove-webapp.yml` et `purge-webapp.yml` (tag `apps-index`) : la page suit
+# l'inventaire au même passage. Le fichier est déposé sur TOUS les proxies (le vhost y est partout), même si le nom
+# `www` ne pointe aujourd'hui que sur l'un d'eux.
+- name: Applications index
+  hosts: proxies
+  remote_user: "{{ remote_username }}"
+  gather_facts: false
+  become: true
+  tags: [apps-index]
+  roles:
+    - apps-index

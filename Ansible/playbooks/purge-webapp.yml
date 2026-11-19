@@ -36,3 +36,26 @@
   remote_user: "{{ remote_username }}"
   roles:
     - webapp-purge
+
+# Le répertoire suit la purge : marqueur retiré, page reconstruite.
+- name: Refresh the applications index
+  hosts: proxies
+  remote_user: "{{ remote_username }}"
+  gather_facts: false
+  become: true
+  tags: [apps-index]
+  tasks:
+    - name: unregister the application
+      ansible.builtin.include_role:
+        name: apps-index
+        tasks_from: unregister
+      loop: "{{ groups['webapp_target'] | default([]) }}"
+      loop_control:
+        label: "{{ item }}"
+      vars:
+        apps_index_entry: "{{ item }}"
+
+    - name: Rebuild the page
+      ansible.builtin.include_role:
+        name: apps-index
+        tasks_from: page

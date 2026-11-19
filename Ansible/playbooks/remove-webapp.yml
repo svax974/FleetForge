@@ -51,3 +51,26 @@
       vars:
         site: "webapp-{{ ((hostvars[webapp].webapp_project | default(webapp)) | lower | replace('_', '-') ~ '-back.' ~ domain_name) if (hostvars[webapp].cloudflare_front | default(false) | bool) else hostvars[webapp].proxy_hostname }}.conf"
       when: hostvars[webapp].proxy_hostname is defined
+
+# Le répertoire suit le retrait : marqueur retiré, page reconstruite.
+- name: Refresh the applications index
+  hosts: proxies
+  remote_user: "{{ remote_username }}"
+  gather_facts: false
+  become: true
+  tags: [apps-index]
+  tasks:
+    - name: unregister the application
+      ansible.builtin.include_role:
+        name: apps-index
+        tasks_from: unregister
+      loop: "{{ groups['webapp_target'] | default([]) }}"
+      loop_control:
+        label: "{{ item }}"
+      vars:
+        apps_index_entry: "{{ item }}"
+
+    - name: Rebuild the page
+      ansible.builtin.include_role:
+        name: apps-index
+        tasks_from: page

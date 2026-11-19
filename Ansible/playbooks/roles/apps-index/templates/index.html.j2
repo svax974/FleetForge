@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>{{ apps_index_title }} — {{ apps_index_subtitle }}</title>
+<style>
+  :root {
+    --bg: #070b14;
+    --bg-2: #0c1322;
+    --ink: #e8eefc;
+    --muted: #8b9bb4;
+    --line: rgba(140, 170, 220, .14);
+    --card: rgba(18, 28, 46, .62);
+    --accent: #4de2ff;
+    --accent-2: #9b7bff;
+    --private: #ffc861;
+    --public: #5ce6a4;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; min-height: 100%; }
+  body {
+    background:
+      radial-gradient(1200px 600px at 15% -10%, rgba(77, 226, 255, .16), transparent 60%),
+      radial-gradient(900px 500px at 90% 0%, rgba(155, 123, 255, .14), transparent 55%),
+      linear-gradient(180deg, var(--bg), var(--bg-2));
+    color: var(--ink);
+    font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, "Helvetica Neue", Arial, sans-serif;
+    min-height: 100vh;
+    padding: clamp(28px, 5vw, 72px) clamp(18px, 5vw, 64px) 96px;
+  }
+  body::before {
+    content: "";
+    position: fixed; inset: 0; pointer-events: none; opacity: .35;
+    background-image:
+      linear-gradient(var(--line) 1px, transparent 1px),
+      linear-gradient(90deg, var(--line) 1px, transparent 1px);
+    background-size: 64px 64px;
+    mask-image: radial-gradient(circle at 50% 0%, #000 0%, transparent 70%);
+  }
+  header { max-width: 1120px; margin: 0 auto clamp(32px, 5vw, 56px); position: relative; }
+  .eyebrow {
+    display: inline-flex; align-items: center; gap: 10px;
+    font-size: 12px; letter-spacing: .22em; text-transform: uppercase; color: var(--muted);
+  }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 14px var(--accent); }
+  h1 {
+    margin: 18px 0 10px; font-size: clamp(40px, 7vw, 76px); line-height: .98; letter-spacing: -.03em;
+    font-weight: 700;
+    background: linear-gradient(100deg, #ffffff 10%, var(--accent) 55%, var(--accent-2) 95%);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .lede { margin: 0; max-width: 62ch; color: var(--muted); font-size: clamp(15px, 1.6vw, 18px); }
+  main { max-width: 1120px; margin: 0 auto; }
+  .grid {
+    display: grid; gap: 16px;
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr));
+  }
+  a.card {
+    position: relative; display: flex; flex-direction: column; gap: 14px;
+    padding: 22px 22px 20px; min-height: 132px; text-decoration: none; color: inherit;
+    background: var(--card); border: 1px solid var(--line); border-radius: 18px;
+    backdrop-filter: blur(14px) saturate(140%);
+    transition: transform .22s ease, border-color .22s ease, box-shadow .22s ease, background .22s ease;
+    animation: rise .5s ease both;
+  }
+  a.card:hover, a.card:focus-visible {
+    transform: translateY(-4px);
+    border-color: rgba(77, 226, 255, .55);
+    box-shadow: 0 18px 48px -18px rgba(77, 226, 255, .45);
+    background: rgba(24, 38, 62, .8);
+    outline: none;
+  }
+  a.card::after {
+    content: "↗"; position: absolute; top: 18px; right: 20px; color: var(--muted);
+    transition: color .22s ease, transform .22s ease;
+  }
+  a.card:hover::after { color: var(--accent); transform: translate(2px, -2px); }
+  .name { font-size: 20px; font-weight: 650; letter-spacing: -.01em; }
+  .host { color: var(--muted); font-size: 13.5px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all; }
+  .badge {
+    margin-top: auto; align-self: flex-start;
+    font-size: 11px; letter-spacing: .14em; text-transform: uppercase;
+    padding: 5px 10px; border-radius: 999px; border: 1px solid currentColor;
+  }
+  .badge.private { color: var(--private); }
+  .badge.public { color: var(--public); }
+  footer {
+    max-width: 1120px; margin: clamp(40px, 6vw, 72px) auto 0; padding-top: 22px;
+    border-top: 1px solid var(--line); color: var(--muted); font-size: 13px;
+    display: flex; flex-wrap: wrap; gap: 8px 18px; justify-content: space-between;
+  }
+  @keyframes rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+  @media (prefers-reduced-motion: reduce) { a.card, a.card:hover { animation: none; transform: none; transition: none; } }
+</style>
+</head>
+<body>
+<header>
+  <p class="eyebrow"><span class="dot"></span>{{ apps_index_subtitle }}</p>
+  <h1>{{ apps_index_title }}</h1>
+  <p class="lede">Les applications publiées par le parc. Le badge indique le mode d'accès du nom : « privé » n'est
+    joignable que depuis le VPN, la supervision ou la liste blanche.</p>
+</header>
+<main>
+  <div class="grid">
+{% for app in apps_index_entries %}
+    <a class="card" href="{{ app.url }}" style="animation-delay: {{ loop.index0 * 40 }}ms">
+      <span class="name">{{ app.label }}</span>
+      <span class="host">{{ app.url | replace('https://', '') }}</span>
+      <span class="badge {{ 'public' if app.mode == 'public' else 'private' }}">{{ 'public' if app.mode == 'public' else 'privé' }}</span>
+    </a>
+{% endfor %}
+  </div>
+</main>
+<footer>
+  <span>{{ apps_index_entries | length }} application(s)</span>
+  <span>Généré par Ansible le {{ now(fmt='%Y-%m-%d %H:%M') }}</span>
+</footer>
+</body>
+</html>

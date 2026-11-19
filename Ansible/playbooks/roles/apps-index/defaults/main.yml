@@ -1,0 +1,13 @@
+---
+# Répertoire des applications du parc : une page statique, servie par les proxies sous `www.<domaine>/apps/`.
+#
+# Le contenu est DÉRIVÉ de l'inventaire à chaque déploiement (nom public `proxy_hostname` de chaque entrée, mode
+# d'accès) : la page se met à jour au déploiement, au retrait et à la purge d'une application, sans liste à tenir
+# à la main (voir deploy-webapp.yml / remove-webapp.yml / purge-webapp.yml, tag `apps-index`).
+apps_index_root: /var/www/apps
+# Marqueurs des applications déployées (un fichier par entrée), posés et retirés par les playbooks.
+apps_index_state_dir: /var/lib/apps-index
+apps_index_action: sync
+apps_index_entry: ""
+apps_index_title: "{{ domain_name }}"
+apps_index_subtitle: "Applications du parc"

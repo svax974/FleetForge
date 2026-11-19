@@ -321,6 +321,7 @@ ffg_required_denies:
   - "deploy-cloudflare-origin-pull*"
   - "update-cloudflare-rules*"
   - "prune-disabled-monitoring*"
+  - "update-apps-index*"
   # Cible `all` (sélection par `group_by`) et pose un conteneur + une sonde : jamais depuis la passerelle.
   - "deploy-cloudflare-ddns*"
   - "update-cloudflare-dns*"

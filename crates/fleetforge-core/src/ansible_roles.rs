@@ -100,6 +100,7 @@ fn extract_description(tasks_main: &Path) -> String {
 /// Falls back to (formatted name, "") for unknown roles.
 fn get_role_metadata(name: &str) -> (String, String) {
     match name {
+        "apps-index" => ("Répertoire des applications".into(), "Rend la page statique qui liste les applications publiées du parc (nom, URL, mode d'accès), dérivée de l'inventaire.".into()),
         "cloudflare-rules-update" => ("Limitation de débit Cloudflare".into(), "Pose, par nom protégé, une règle de limitation de débit par IP dans la zone Cloudflare du parc ; les règles posées à la main sont conservées.".into()),
         "cloudflare-ddns-install" => ("Installation DDNS Cloudflare".into(), "Construit une image Python Alpine sur le registre du parc et déploie un client IPv4 horaire ; jeton Cloudflare des group_vars monté en lecture seule, état et journal de reprise persistants.".into()),
         "cloudflare-ddns-monitoring" => ("Supervision DDNS Cloudflare".into(), "Sonde svcprobe du conteneur et métriques des contrôles IPv4, des échecs et de la fraîcheur des réconciliations Cloudflare.".into()),

@@ -327,3 +327,26 @@
         name: alertmanager-update
         tasks_from: unsilence
       when: webapp_phase | default('all') in ['all', 'deploy']
+
+# Le répertoire des applications suit le déploiement : marqueur posé, page reconstruite.
+- name: Refresh the applications index
+  hosts: proxies
+  remote_user: "{{ remote_username }}"
+  gather_facts: false
+  become: true
+  tags: [apps-index]
+  tasks:
+    - name: register the application
+      ansible.builtin.include_role:
+        name: apps-index
+        tasks_from: register
+      loop: "{{ groups['webapp_target'] | default([]) }}"
+      loop_control:
+        label: "{{ item }}"
+      vars:
+        apps_index_entry: "{{ item }}"
+
+    - name: Rebuild the page
+      ansible.builtin.include_role:
+        name: apps-index
+        tasks_from: page

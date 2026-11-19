@@ -1,0 +1,56 @@
+---
+# Reconstruit la page à partir des marqueurs présents (voir register.yml / unregister.yml).
+- name: Create the state directory of the index
+  ansible.builtin.file:
+    path: "{{ apps_index_state_dir }}"
+    state: directory
+    owner: "{{ webapp_root_owner | default('root') }}"
+    group: "{{ webapp_root_group | default('root') }}"
+    mode: '0755'
+  become: true
+
+- name: List the registered applications
+  ansible.builtin.find:
+    paths: "{{ apps_index_state_dir }}"
+    patterns: "*.json"
+    file_type: file
+  register: apps_index_files
+  become: true
+
+- name: Read them
+  ansible.builtin.slurp:
+    src: "{{ item.path }}"
+  loop: "{{ apps_index_files.files }}"
+  loop_control:
+    label: "{{ item.path | basename }}"
+  register: apps_index_contents
+  become: true
+
+- name: Work out the entries of the page
+  ansible.builtin.set_fact:
+    apps_index_entries: >-
+      {{ apps_index_contents.results | default([]) | map(attribute='content') | map('b64decode') | map('from_json') | list
+         | sort(attribute='label') }}
+
+- name: Create the directory of the index
+  ansible.builtin.file:
+    path: "{{ apps_index_root }}"
+    state: directory
+    owner: "{{ webapp_root_owner | default('root') }}"
+    group: "{{ webapp_root_group | default('root') }}"
+    mode: '0755'
+  become: true
+
+- name: Write the index page
+  ansible.builtin.template:
+    src: index.html.j2
+    dest: "{{ apps_index_root }}/index.html"
+    owner: "{{ webapp_root_owner | default('root') }}"
+    group: "{{ webapp_root_group | default('root') }}"
+    mode: '0644'
+  become: true
+
+- name: Report
+  ansible.builtin.debug:
+    msg: "Répertoire : {{ apps_index_entries | length }} application(s) — {{ apps_index_entries | map(attribute='label') | join(', ') }}"
+  run_once: true

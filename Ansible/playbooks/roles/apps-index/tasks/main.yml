@@ -1,0 +1,4 @@
+---
+# Entrée du rôle : reconstruit la page (utilisée seule par `update-apps-index.yml`).
+- name: Build the applications page
+  ansible.builtin.include_tasks: page.yml

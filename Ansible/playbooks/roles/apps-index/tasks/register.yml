@@ -1,0 +1,22 @@
+---
+# Pose le marqueur d'UNE application déployée (`apps_index_entry`), sur chaque proxy.
+- name: Create the state directory of the index
+  ansible.builtin.file:
+    path: "{{ apps_index_state_dir }}"
+    state: directory
+    owner: "{{ webapp_root_owner | default('root') }}"
+    group: "{{ webapp_root_group | default('root') }}"
+    mode: '0755'
+  become: true
+
+- name: Register the deployed application
+  ansible.builtin.copy:
+    content: >-
+      {{ {'label': hostvars[apps_index_entry].webapp_project | default(hostvars[apps_index_entry].proxy_hostname),
+          'url': 'https://' ~ hostvars[apps_index_entry].proxy_hostname,
+          'mode': hostvars[apps_index_entry].access_mode | default('private')} | to_nice_json }}
+    dest: "{{ apps_index_state_dir }}/{{ apps_index_entry }}.json"
+    owner: "{{ webapp_root_owner | default('root') }}"
+    group: "{{ webapp_root_group | default('root') }}"
+    mode: '0644'
+  become: true

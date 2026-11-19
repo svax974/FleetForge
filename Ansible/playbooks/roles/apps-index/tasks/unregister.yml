@@ -1,0 +1,7 @@
+---
+# Retire le marqueur d'une application retirée ou purgée (`apps_index_entry`).
+- name: Unregister the application
+  ansible.builtin.file:
+    path: "{{ apps_index_state_dir }}/{{ apps_index_entry }}.json"
+    state: absent
+  become: true
