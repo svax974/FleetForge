@@ -64,7 +64,7 @@
   ansible.builtin.set_fact:
     cfrules_publish: >-
       {%- set kept = [] -%}
-      {%- for rule in ((cfrules_current.json.rules | default([])) if cfrules_current.status == 200 else []) -%}
+      {%- for rule in ((cfrules_current.json.result.rules | default([])) if (cfrules_current.status | int) == 200 else []) -%}
       {%- if not ((rule.description | default('')) | string).startswith(cfrules_description_prefix) -%}
       {%- set _ = kept.append(rule) -%}
       {%- endif -%}
@@ -75,14 +75,34 @@
             'description': cfrules_description_prefix ~ ' ' ~ host.hostname ~ host.path_prefix ~ ' : limitation de débit par IP',
             'expression': '(http.host eq "' ~ host.hostname ~ '" and starts_with(http.request.uri.path, "' ~ host.path_prefix ~ '"))',
             'action': 'block',
-            'action_parameters': {'response': {'status_code': 429, 'content_type': 'application/json',
-                                               'content': '{"error":"rate_limited"}'}},
             'ratelimit': {'characteristics': ['ip.src', 'cf.colo.id'], 'period': host.period | int,
                           'requests_per_period': host.requests | int, 'mitigation_timeout': host.timeout | int},
             'enabled': true}) -%}
       {%- endfor -%}
       {{ kept + ours }}
+    # Signature des règles que CE rôle gère : l'API en renvoie d'autres (id, version, horodatages),
+    # une comparaison brute signalerait donc un changement à chaque passage.
+    cfrules_ours_signature: >-
+      {%- set ns = namespace(out=[]) -%}
+      {%- for host in cfrules_hosts -%}
+      {%- set _ = ns.out.append([host.hostname ~ host.path_prefix, host.requests | int, host.period | int, host.timeout | int]) -%}
+      {%- endfor -%}
+      {{ ns.out | sort }}
+    cfrules_now_signature: >-
+      {%- set ns = namespace(out=[]) -%}
+      {%- for host in cfrules_hosts -%}
+      {%- set prefix = cfrules_description_prefix ~ ' ' ~ host.hostname ~ host.path_prefix -%}
+      {%- for rule in ((cfrules_current.json.result.rules | default([])) if (cfrules_current.status | int) == 200 else []) -%}
+      {%- if (((rule.description | default('')) | string).startswith(prefix)) -%}
+      {%- set rl = rule.ratelimit | default({}) -%}
+      {%- set _ = ns.out.append([host.hostname ~ host.path_prefix, rl.requests_per_period | default(0) | int,
+                                 rl.period | default(0) | int, rl.mitigation_timeout | default(0) | int]) -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {%- endfor -%}
+      {{ ns.out | sort }}
   run_once: true
+
 
 - name: Say what will be published
   ansible.builtin.debug:
@@ -105,16 +125,19 @@
     status_code: [200, 400, 401, 403, 404]
   register: cfrules_put
   no_log: true
-  changed_when: cfrules_put.status == 200
+  changed_when: (cfrules_put.status | default(200)) == 200
+  # Idempotent : on n'écrit que si nos règles diffèrent de celles lues (nom, chemin, seuils).
+  when: (cfrules_current.status | int) != 200 or cfrules_now_signature != cfrules_ours_signature
   run_once: true
   delegate_to: localhost
 
 - name: Fail when Cloudflare refuses the ruleset
   ansible.builtin.assert:
-    that: cfrules_put.status == 200
+    that: cfrules_put is skipped or cfrules_put.status == 200
     fail_msg: >-
-      Cloudflare refuse la règle de limitation de débit de {{ cfrules_zone }} (HTTP {{ cfrules_put.status }}) :
+      Cloudflare refuse la règle de limitation de débit de {{ cfrules_zone }} (HTTP {{ cfrules_put.status | default('?') }}) :
       {{ (cfrules_put.json | default({})).errors | default([]) | to_json }}. Permission « Zone → Zone WAF → Edit » requise
       sur le jeton ; sur le plan gratuit, la période ET le blocage valent 10 s, et une seule règle est admise.
     quiet: true
   run_once: true
+
