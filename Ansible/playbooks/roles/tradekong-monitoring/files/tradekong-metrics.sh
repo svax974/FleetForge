@@ -13,9 +13,9 @@
 # TOUTES les répliques, les clés larges d'avant restent refusées) n'écrit rien :
 # l'enregistrement reste ABSENT tant qu'un démarrage ne réussit pas. Il vit dans
 # la table `mcp_boot_record` (nom = clé de l'enregistrement) ; la première version
-# du marquage l'écrivait dans `config` : tant que le back n'a pas redémarré sur la
-# nouvelle version, c'est cette ligne qui compte (sans quoi une base déjà
-# marquée sonnerait entre le dépôt de ce collecteur et le déploiement du back).
+# du marquage l'écrivait dans `config` ; la nouvelle version la COPIE et la laisse en
+# place (retour arrière sûr). Les deux emplacements comptent : sans cela une base déjà
+# marquée sonnerait entre le dépôt de ce collecteur et le déploiement du back.
 # CONTRAT avec TradeKong : `back/src/modules/mcp/access/legacyTradeKeyMark.ts`
 # (`LEGACY_MARK_GUARD_ROW`, `BOOT_RECORD_TABLE`).
 set -uo pipefail
@@ -31,28 +31,38 @@ RECORD="mcp_legacyTradeIpAllowMarked"
 # ci-dessous (ni l'inverse) — chacun n'émet rien plutôt qu'une valeur fausse.
 "${HERE}/postgres-metrics.sh" "$@" || true
 
-q() { docker exec "${CONTAINER}" psql -U "${USER}" -d "${DB}" -tAc "$1" 2>/dev/null; }
+# Lecture seule, bornée : le collecteur tourne toutes les 10 s au pire et ne doit ni écrire,
+# ni tenir un verrou, ni peser sur la base de production.
+q() {
+  docker exec -e PGOPTIONS='-c default_transaction_read_only=on -c statement_timeout=5s -c lock_timeout=2s' \
+    "${CONTAINER}" psql -U "${USER}" -d "${DB}" -tAc "$1" 2>/dev/null
+}
 
-has_record_table="$(q "SELECT to_regclass('mcp_boot_record') IS NOT NULL;")"
-has_config_table="$(q "SELECT to_regclass('config') IS NOT NULL;")"
+# UNE requête, sûre quand `mcp_boot_record` est absente : un SELECT direct sur une table
+# inexistante échoue à l'analyse, même dans une branche CASE jamais prise. `query_to_xml`
+# n'analyse sa requête qu'à l'exécution, donc seulement si `to_regclass` a trouvé la table.
+# Réponse : `t` (enregistrement présent, dans `mcp_boot_record` ou encore dans `config`),
+# `f` (absent) ; vide si la requête échoue.
+DONE_SQL="
+SELECT (
+  COALESCE(CASE WHEN to_regclass('mcp_boot_record') IS NOT NULL THEN
+    (xpath('/row/c/text()', query_to_xml('SELECT count(*) AS c FROM mcp_boot_record WHERE name = ''${RECORD}''', true, true, '')))[1]::text::int
+  END, 0)
+  + COALESCE(CASE WHEN to_regclass('config') IS NOT NULL THEN
+    (xpath('/row/c/text()', query_to_xml('SELECT count(*) AS c FROM config WHERE name = ''${RECORD}''', true, true, '')))[1]::text::int
+  END, 0)
+) > 0;"
 
-# Une requête en échec rend une valeur vide : on n'émet RIEN (un 0 ferait
-# sonner l'alerte sur une panne du collecteur ; son absence relève de
-# `TradeKongMarkMetricMissing`).
-[ -n "${has_record_table}" ] && [ -n "${has_config_table}" ] || exit 0
+result="$(q "${DONE_SQL}")"
 
-count=0
-if [ "${has_record_table}" = "t" ]; then
-  count="$(q "SELECT count(*) FROM mcp_boot_record WHERE name = '${RECORD}';")"
-  [ -n "${count}" ] || exit 0
-fi
-if [ "${count}" = "0" ] && [ "${has_config_table}" = "t" ]; then
-  count="$(q "SELECT count(*) FROM config WHERE name = '${RECORD}';")"
-  [ -n "${count}" ] || exit 0
-fi
+# Une requête en échec rend une valeur vide : on n'émet RIEN (un 0 ferait sonner l'alerte sur
+# une panne du collecteur ; son absence relève de `TradeKongMarkMetricMissing`).
+case "${result}" in
+  t) mark_done=1 ;;
+  f) mark_done=0 ;;
+  *) exit 0 ;;
+esac
 
-mark_done=0
-[ "${count}" != "0" ] && mark_done=1
 printf '# HELP tradekong_mcp_legacy_mark_done %s\n# TYPE tradekong_mcp_legacy_mark_done gauge\ntradekong_mcp_legacy_mark_done %s\n' \
   "1 si le marquage des clés trade larges d'avant le déploiement a été enregistré (0 : échec ou pas encore passé, ces clés sont refusées)." \
   "${mark_done}"

@@ -1625,8 +1625,8 @@ groups:
       # tant que le service répond.
       - alert: TradeKongMarkMetricMissing
         expr: >-
-          service_up{service="tradekong"} == 1
-          unless on (instance) tradekong_mcp_legacy_mark_done
+          service_up{job="svcprobe", service="tradekong"} == 1
+          unless on (instance) tradekong_mcp_legacy_mark_done{job="svcprobe"}
         for: 30m
         labels:
           severity: warning
