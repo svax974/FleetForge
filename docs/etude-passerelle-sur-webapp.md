@@ -689,9 +689,10 @@ identiques octet pour octet (114 rendus réels du parc, trois proxies, avant/apr
 `gateway-guard.yml` garde `access_mode: private` au niveau de l'entrée et exige toujours UNE location `^/mcp(/.*)?$` relayée
 au back-lb avec `raw_uri` (liste nommée, E1, OU `mode: public`, E2). Seules cinq regex peuvent être `mode: public` (`_public_allowed`,
 dans `vars:` donc protégées par `no-overrides.yml`), chacune avec SA `raw_uri` exacte, `upstream: back`, sans `^~` ni websocket :
-`^/mcp(/.*)?$` (corps ≤ 128k exigé, délai exigé ≤ 90 s), `^/.well-known/oauth-protected-resource(/mcp)?$`,
-`^/.well-known/oauth-authorization-server$`, `^/api/v1/mcp-access/oauth/(authorize|token|revoke)$` et `…/oauth/register$` (corps
-≤ 16k exigé). Refusés : tout autre chemin public, tout joker, `access` mêlé à `mode`, un chemin déclaré deux fois, une location
+`^/mcp(/.*)?$` (corps ≤ 128k exigé, délai exigé ≤ 90 s), `^/[.]well-known/oauth-protected-resource(/mcp)?$`,
+`^/[.]well-known/oauth-authorization-server$`, `^/api/v1/mcp-access/oauth/(authorize|token|revoke)$` et `…/oauth/register$` (corps
+≤ 16k exigé). Les points des well-known sont écrits `[.]` (point littéral, grammaire des chemins de `facts.yml` : jamais `\.`), comme sur
+companymanager et social-manager : la liste blanche est EXACTE, la forme `.` non échappée est refusée (22/11/2026). Refusés : tout autre chemin public, tout joker, `access` mêlé à `mode`, un chemin déclaré deux fois, une location
 publique sans `cloudflare_named`, un préfixe `^~` qui masquerait une regex publique (nginx ne lit pas les regex après un `^~` :
 `/.well-known/` fermé ne porte donc PAS `priority`), et l'absence de `/mcp/connections` en location PRIVÉE `^~` du front tant que
 `/mcp` est public (la regex `^/mcp(/.*)?$` l'enverrait sinon au back). La barrière de `/mcp` public est l'allow-list `ipAllow`
@@ -841,12 +842,13 @@ les defaults des deux rôles, un test les compare). Absente partout : TOUT rend 
    (24 par défaut), au moins `cfopull_evidence_min_success` (5) lignes `cf_socket=1 verify="SUCCESS"` du nom, vhost en observe ou enforce,
    ET AUCUNE ligne `cf_socket=1 untrusted=1` de statut < 400 (du trafic accepté que `enforce` refuserait). Lecture seule (`cat`, `awk`,
    `date`), jouée aussi en `--check`, qui ne remonte que trois compteurs (jamais d'URI, d'adresse ni de User-Agent) ; refus avec les
-   compteurs et l'étape à jouer. Échappatoire explicite, faux par défaut, pour un premier déploiement où aucun trafic ne peut être
+   compteurs et l'étape à jouer. Un nom qui manque de preuve reçoit d'abord une SONDE ACTIVE (`probe.yml`, voir « Sonde active » plus bas) : quelques GET
+   réels par Cloudflare, puis la même lecture et les mêmes critères ; elle ne remplace jamais le journal. Échappatoire explicite, faux par défaut, pour un premier déploiement où aucun trafic ne peut être
    observé : `-e cfopull_allow_unobserved=true` (le témoin reste exigé). Un nom à très faible trafic (préproduction) : seuil PAR NOM,
    `cfopull_evidence_min_success_by_name: { <nom>: <n> }` (sinon `cfopull_evidence_min_success`), toujours >= 1 (un seuil < 1 est refusé).
    **Un proxy qui ne reçoit aucun trafic d'un nom** (le proxy de secours du Load Balancer, jamais choisi) ne peut pas fournir la preuve :
-   l'EXCLURE par `--limit` (il garde alors son rendu précédent, `observe`), ou abaisser le seuil du nom à 1 le temps de lui envoyer une
-   requête réelle de test — jamais en coupant la preuve. Anti-forgeage : `claimed` (CF-Connecting-IP), `uri` (`$uri` décode `%20`), `ray`
+   l'EXCLURE par `--limit` (il garde alors son rendu précédent, `observe`) — la sonde active n'y changerait rien, Cloudflare ne le choisissant pas —
+   jamais en coupant la preuve. Anti-forgeage : `claimed` (CF-Connecting-IP), `uri` (`$uri` décode `%20`), `ray`
    et `ua` sont écrits par le CLIENT, non échappés pour les espaces ; le format du journal les met donc à la FIN et le script ne lit
    qu'un préfixe ANCRÉ au début de ligne que nginx détermine seul (`<date> host= socket= cf_socket= verify="…" untrusted= mode= status=
    method=`) — une requête hostile ne peut ni faire compter un `untrusted=1` accepté (blocage de tout déploiement) ni un `verify="SUCCESS"`.
@@ -1054,6 +1056,28 @@ redevient celui d'avant, octet pour octet) et rejouer `update-proxy.yml --limit 
   réutilisent une connexion) le subit. Cloudflare envoie SNI = Host. Un appel direct par adresse SANS SNI ne reçoit PAS de 421 (aucun serveur choisi par le
   SNI). Chercher `status=421` dans les journaux `cf-aop-*` et `access.log` AVANT `enforce` comme dès l'observation.
 - Après `enforce` : `mode=enforce untrusted=1 status=403` = tentatives refusées.
+
+**Sonde active avant la lecture du journal (22/11/2026, `cloudflare-origin-pull/tasks/probe.yml`).** La preuve sur le proxy (`proof.yml`) exige
+`cfopull_evidence_min_success` lignes `verify="SUCCESS"` du nom sur 24 h, pour CHAQUE nom `enforce`, avant TOUT gabarit : un nom que personne n'a utilisé
+depuis un jour (`back.tradekong.app`) bloquait donc le déploiement de n'importe quelle application (ctdapi, maestro le 22/11/2026), contourné à la main par
+de vraies requêtes. Désormais, pour chaque nom qui manque de preuve SUR CE PROXY, le play envoie lui-même, depuis le poste de contrôle (`delegate_to:
+localhost`), `cfopull_probe_requests` (12) GET HTTPS par tour sur `https://<nom public><chemin>`, puis relit le journal avec le MÊME script (`evidence.yml`,
+inclus par `proof.yml` et par la sonde) et les mêmes critères, au plus `cfopull_probe_rounds` (5) tours.
+- Rien n'est affaibli : la preuve ne vient que du journal de nginx (socket Cloudflare portant le certificat vérifié, préfixe ancré) ; le statut de la sonde
+  n'est jamais lu ; la sonde passe TOUJOURS par Cloudflare (nom public, DNS public, certificat de l'edge validé, aucune adresse d'origine ni `Host`
+  forcé) ; un échec garde le message d'avant (une phrase dit seulement que la sonde a été jouée) ; `cfopull_allow_unobserved` est inchangé.
+- Chemin par nom : `cfopull_probe_path_by_name` (group_vars du parc, défaut `/`) ; web3c : `back.tradekong.app: /api/v1/health` (GET, 200 sans
+  authentification). Un paramètre `_ffprobe=<tour>-<n>-<aléa>` est ajouté pour qu'un cache de l'edge ne serve pas la réponse (aucune ligne d'origine).
+  Un statut 4xx/5xx n'est pas une erreur : nginx journalise la socket, c'est elle qui compte.
+- COUVERTURE de chaque proxy : Cloudflare choisit l'origine parmi les adresses de l'enregistrement proxifié (`back.tradekong.app` est tenu dans le
+  tableau de bord Cloudflare, pas par Ansible : proxy1 et proxy3 d'après l'inventaire, NON vérifiable d'ici). Le poste de contrôle ne peut ni choisir le
+  proxy ni savoir lequel a répondu : chaque proxy (le fichier est joué par proxy ciblé) répète envoi + relecture de SON journal jusqu'à en avoir assez, au
+  plus 5 tours de 12 requêtes par nom (≈ la moitié atteint chaque proxy quand il y en a deux). La couverture n'est PAS garantie, elle est bornée et
+  constatée : un proxy que Cloudflare ne choisit jamais (secours du Load Balancer), un nom non proxifié, une règle de l'edge qui arrête la sonde (défi,
+  WAF, limite de débit) restent refusés, avec le message d'avant ; un proxy de secours s'exclut par `--limit`.
+- Désactivation : `cfopull_probe: false` (`-e cfopull_probe=false`). `--check` : la sonde est jouée quand même (GET, comme la lecture du journal).
+- Signal à surveiller : la ligne « sonde active » du play (nom, tours) puis « tour N, X réponse(s) sur Y » ; un refus après sonde dont les réponses sont
+  toutes 403/5xx (défi Cloudflare) ou absentes (-1) dit que la sonde n'a pas atteint l'origine.
 
 **Constats (tradekong.conf et DNS).** `tradekong.conf` (`www.tradekong.app`) est un vhost de FRONT sans aucun filtre d'adresse : `proxy_pass`
 vers `tradekong:app_port` (4300) sur les proxies, ni `real_ip`, ni Cloudflare. L'inventaire dit pourtant que le front de `tradekong` est sur

@@ -1,0 +1,54 @@
+---
+# FleetForge
+#
+# Copyright © 2025 Stéphane VAXELAIRE
+# SPDX-License-Identifier: MIT — see LICENSE
+#
+# UN tour de la sonde active (probe.yml) : envoi depuis le poste de contrôle, puis relecture du journal de CE proxy. Les tâches portent
+# chacune `cfopull_probe_names | length > 0`, évalué à l'exécution : dès que le journal de ce proxy suffit pour tous les noms, les tours
+# restants ne font plus rien (pas d'envoi inutile).
+- name: Send a few real HTTPS requests to each enforced name that lacks evidence, through Cloudflare
+  vars:
+    # Une URL par requête : `https://<nom public><chemin>`, jamais une adresse d'origine. Le paramètre ajouté évite un objet servi par le
+    # cache de l'edge (qui ne laisserait aucune ligne dans le journal).
+    _probe_urls: >-
+      {%- set ns = namespace(out=[]) -%}
+      {%- for name in cfopull_probe_names -%}
+      {%- set path = (cfopull_probe_path_by_name | default({})).get(name, '/') -%}
+      {%- for i in range(cfopull_probe_requests | int) -%}
+      {%- set ns.out = ns.out + ['https://' ~ name ~ path ~ ('&' if '?' in path else '?') ~ '_ffprobe=' ~ cfopull_probe_round ~ '-' ~ i ~ '-' ~ (1000000 | random)] -%}
+      {%- endfor -%}
+      {%- endfor -%}
+      {{ ns.out }}
+  ansible.builtin.uri:
+    url: "{{ item }}"
+    method: GET
+    follow_redirects: none
+    validate_certs: true
+    timeout: "{{ cfopull_probe_timeout | int }}"
+    headers:
+      User-Agent: "FleetForge-origin-pull-probe/1"
+      Cache-Control: "no-cache"
+  loop: "{{ _probe_urls }}"
+  loop_control:
+    label: "{{ item | regex_replace('^(https://[^/?]*).*', '\\1') }}"
+  register: cfopull_probe_sent
+  delegate_to: localhost
+  become: false
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: cfopull_probe_names | length > 0
+
+- name: Say how many probe requests got an answer
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }} : tour {{ cfopull_probe_round }}, {{ cfopull_probe_sent.results | selectattr('status', 'defined')
+      | selectattr('status', 'gt', 0) | list | length }} réponse(s) sur {{ cfopull_probe_sent.results | length }} requête(s) (statuts
+      {{ cfopull_probe_sent.results | selectattr('status', 'defined') | map(attribute='status') | unique | sort | join(', ') | default('aucun', true) }}).
+      Seul le journal du proxy prouve quelque chose : relecture.
+  when: cfopull_probe_names | length > 0
+
+- name: Read the dedicated Authenticated Origin Pulls log of the proxy again, with the same criteria
+  ansible.builtin.include_tasks: evidence.yml
+  when: cfopull_probe_names | length > 0

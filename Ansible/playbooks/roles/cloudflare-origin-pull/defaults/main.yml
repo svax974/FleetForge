@@ -185,15 +185,46 @@ cfopull_allow_non_strict_tls: false
 # heures, le journal `cf-aop-*.log` de `cfopull_log_dir` (courant et `.1`) porte au moins `cfopull_evidence_min_success` lignes
 # `cf_socket=1 verify="SUCCESS"` du nom et AUCUNE ligne `cf_socket=1 untrusted=1` de statut < 400. `cfopull_allow_unobserved: true` :
 # échappatoire EXPLICITE pour un premier déploiement où aucun trafic ne peut être observé (le témoin d'activation reste exigé) ; faux
-# par défaut. Un nom à très faible trafic (préproduction) : baisser `cfopull_evidence_min_success`, jamais à 0.
+# par défaut. Un nom à très faible trafic (préproduction) : la SONDE ACTIVE ci-dessous lui envoie des requêtes réelles avant la lecture ; sinon baisser
+# `cfopull_evidence_min_success_by_name` pour ce nom, jamais à 0.
 cfopull_evidence_hours: 24
 cfopull_evidence_min_success: 5
 # Seuil PAR NOM (`{ <nom public>: <entier >= 1> }`), à défaut `cfopull_evidence_min_success` : un nom à faible trafic (préproduction)
 # n'oblige pas à baisser le seuil des autres. Un seuil < 1 est refusé. Un PROXY qui ne reçoit aucun trafic d'un nom (secours du Load
-# Balancer Cloudflare) doit être EXCLU par `--limit` (il garde alors l'ancien rendu), ou le seuil du nom abaissé à 1 le temps d'y envoyer une
-# requête de test réelle — jamais en coupant la preuve (`cfopull_allow_unobserved` n'est que pour un premier déploiement).
+# Balancer Cloudflare) doit être EXCLU par `--limit` (il garde alors l'ancien rendu) — la sonde active n'y changerait rien, Cloudflare ne le
+# choisissant pas — jamais en coupant la preuve (`cfopull_allow_unobserved` n'est que pour un premier déploiement).
 cfopull_evidence_min_success_by_name: {}
 cfopull_allow_unobserved: false
+
+# SONDE ACTIVE avant la lecture du journal (tasks/probe.yml) : pour chaque nom `enforce` qui manque de preuve sur CE proxy, le play envoie
+# depuis le poste de contrôle quelques vraies requêtes GET HTTPS par Cloudflare vers le nom public (jamais vers une adresse d'origine),
+# relit le journal avec le même script et les mêmes critères, et recommence (au plus `cfopull_probe_rounds` tours). La preuve ne vient
+# que du journal de nginx (sockets Cloudflare portant le certificat vérifié) ; une sonde sans effet laisse le refus d'avant, intact.
+# Un nom à faible trafic (back.tradekong.app) ne bloque donc plus le déploiement d'une AUTRE application.
+#   `cfopull_probe: false` : pas de sonde (comportement d'avant : lire, puis refuser).
+#   `cfopull_probe_path_by_name` : { <nom public>: <chemin> }, défaut `/` ; une URL de santé idempotente de préférence (`/api/v1/health`).
+#       Écrit dans l'inventaire privé du parc (group_vars), comme `cfopull_evidence_min_success_by_name`.
+#   `cfopull_probe_requests` : requêtes par nom et par tour (Cloudflare répartit entre les origines : ~la moitié atteint chaque proxy
+#       quand il y en a deux) ; `cfopull_probe_rounds` : tours au plus. La couverture de CHAQUE proxy n'est pas garantie (Cloudflare
+#       choisit l'origine) : elle est bornée par ces deux valeurs et constatée par la relecture du journal de chaque proxy.
+cfopull_probe: true
+cfopull_probe_path_by_name: {}
+cfopull_probe_requests: 12
+cfopull_probe_rounds: 5
+cfopull_probe_timeout: 15
+
+# Noms `enforce` dont le journal de CE proxy porte moins de `cfopull_evidence_min_success` (ou du seuil du nom) lignes `verify="SUCCESS"` :
+# ceux que la sonde active vise. Calculé depuis la dernière lecture (`cfopull_evidence`, tasks/evidence.yml) : il se vide quand les tours
+# de la sonde ont suffi. Une ligne `untrusted=1` acceptée seule (aucune sonde n'y change rien) ne désigne pas un nom à sonder.
+cfopull_probe_names: >-
+  {%- set ns = namespace(out=[]) -%}
+  {%- for r in (cfopull_evidence | default({})).results | default([]) if r.stdout is defined -%}
+  {%- set need = [(cfopull_evidence_min_success_by_name | default({})).get(r.item, cfopull_evidence_min_success) | int, 1] | max -%}
+  {%- if (r.stdout | from_json).success | int < need -%}
+  {%- set ns.out = ns.out + [r.item] -%}
+  {%- endif -%}
+  {%- endfor -%}
+  {{ ns.out }}
 cfopull_log_dir: /var/log/nginx
 
 # Autorité et certificat client, générés une fois sur le poste de contrôle, dans `cfopull_dir`.

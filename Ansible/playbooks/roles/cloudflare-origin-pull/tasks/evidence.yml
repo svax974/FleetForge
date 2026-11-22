@@ -1,0 +1,52 @@
+---
+# FleetForge
+#
+# Copyright © 2025 Stéphane VAXELAIRE
+# SPDX-License-Identifier: MIT — see LICENSE
+#
+# Lecture, SUR LE PROXY, du journal dédié aux Authenticated Origin Pulls : une seule définition des critères, incluse par proof.yml (lecture
+# initiale) ET par probe-round.yml (relecture après chaque tour de sonde active). Même script, mêmes ancres, mêmes seuils : la sonde ne
+# change RIEN à ce qui prouve que Cloudflare présente le certificat, elle ne fait qu'envoyer du trafic réel au nom avant la lecture.
+# Preuve SUR LE PROXY (jouée sur chaque proxy ciblé par `--limit`, sans délégation) : le témoin local (proof.yml) prouve que l'activation a eu
+# lieu depuis ce poste, pas que Cloudflare présente ENCORE le certificat (réglage retiré dans le tableau de bord, origin pulls de zone avec
+# le certificat partagé, nom derrière un Load Balancer non éprouvé). Seul le trafic réel le dit : pour chaque nom `enforce`, le journal
+# `cf-aop-*.log` (courant et `.1`) du proxy doit porter, sur les `cfopull_evidence_hours` dernières heures (24 h par défaut), au moins
+# `cfopull_evidence_min_success` lignes `cf_socket=1 verify="SUCCESS"` du nom (`host=`, vhost en mode observe ou enforce) ET AUCUNE
+# ligne `cf_socket=1 untrusted=1` de statut < 400 (trafic accepté que `enforce` refuserait). La commande est en LECTURE SEULE (cat, awk,
+# date) et n'imprime que trois compteurs : jamais d'URI, d'adresse ni de User-Agent. nginx échappe `"` et les caractères de contrôle des
+# champs journalisés (une ligne ne peut pas en forger une autre) mais PAS les espaces : `claimed` (CF-Connecting-IP), `uri` (`$uri`
+# décode `%20`), `ray` et `ua` sont écrits par le CLIENT. Ils sont donc à la FIN du format (partiel `_cloudflare_realip.inc`) et chaque
+# expression est ANCRÉE au début de ligne sur le préfixe que nginx détermine seul (`<date> host= socket= cf_socket= verify="…"
+# untrusted= mode= status= method=`) : aucun champ forgé dans la fin d'une ligne ne compte. Une fenêtre qui ne peut pas être calculée
+# (ni `date -d` GNU ni `date -v` BSD) REFUSE, au lieu de lire tout le journal. En `--check` la lecture est jouée quand même (lecture seule).
+# Premier déploiement sur une machine où aucun trafic ne peut être observé : `-e cfopull_allow_unobserved=true`, explicite, faux par défaut
+# (le témoin reste exigé).
+- name: Read, on the proxy, what the dedicated Authenticated Origin Pulls log says about each enforced name
+  ansible.builtin.shell:
+    executable: /bin/sh
+    cmd: |
+      set -u
+      cutoff=$(date -d "-${AOP_HOURS} hours" +%Y-%m-%dT%H:%M:%S 2>/dev/null || date -v-${AOP_HOURS}H +%Y-%m-%dT%H:%M:%S 2>/dev/null)
+      [ -n "$cutoff" ] || { echo "cannot compute the start of the window: refusing rather than reading the whole log" >&2; exit 1; }
+      cat "$AOP_LOG_DIR"/cf-aop-*.log "$AOP_LOG_DIR"/cf-aop-*.log.1 2>/dev/null | awk -v n="$AOP_NAME" -v c="$cutoff" '
+        BEGIN {
+          gsub(/[^A-Za-z0-9-]/, "[&]", n)
+          head = "^[^ ]+ host=" n " socket=[^ ]+ cf_socket="
+          tail = " mode=(observe|enforce) status="
+          any = head "[01] verify=\"[^\"]*\" untrusted=[01]" tail "[0-9]+ method="
+          good = head "1 verify=\"SUCCESS\" untrusted=0" tail "[0-9]+ method="
+          accepted = head "1 verify=\"[^\"]*\" untrusted=1" tail "[123][0-9][0-9] method="
+        }
+        substr($1, 1, 19) < c { next }
+        $0 ~ any { lines++ }
+        $0 ~ good { ok++ }
+        $0 ~ accepted { bad++ }
+        END { printf "{\"lines\": %d, \"success\": %d, \"untrusted_ok\": %d}\n", lines, ok, bad }'
+  environment:
+    AOP_NAME: "{{ item }}"
+    AOP_HOURS: "{{ cfopull_evidence_hours | int }}"
+    AOP_LOG_DIR: "{{ cfopull_log_dir }}"
+  register: cfopull_evidence
+  changed_when: false
+  check_mode: false
+  loop: "{{ [] if (cfopull_allow_unobserved | bool) else (cfopull_aop | dict2items | selectattr('value', 'equalto', 'enforce') | map(attribute='key') | list) }}"

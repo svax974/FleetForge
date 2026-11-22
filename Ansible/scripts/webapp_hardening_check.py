@@ -1154,13 +1154,14 @@ def check_named_block(where, block, v6_min_prefix=128, forbidden=()):
 # EXACTE, même liste que `_public_allowed` de fleetforge-install/tasks/gateway-guard.yml (un test les compare). Clé : le chemin
 # de la regex ; `raw_uri` : la garde d'URI brute exacte ; `body` : corps maximal en octets (`body_required` : limite exigée) ;
 # `timeout_required` : délai exigé. Délai maximal : 90 s (Cloudflare coupe à ~100 s).
+# Les points des well-known sont écrits `[.]` (point littéral), comme dans la garde et dans l'inventaire.
 PUBLIC_LOCATIONS = {
     "^/mcp(/.*)?$": {"raw_uri": "^/mcp(/|[?]|$)", "body": 131072, "body_required": True, "timeout_required": True},
-    "^/.well-known/oauth-protected-resource(/mcp)?$": {
-        "raw_uri": "^/.well-known/oauth-protected-resource(/mcp)?([?]|$)", "body": 16384, "body_required": False,
+    "^/[.]well-known/oauth-protected-resource(/mcp)?$": {
+        "raw_uri": "^/[.]well-known/oauth-protected-resource(/mcp)?([?]|$)", "body": 16384, "body_required": False,
         "timeout_required": False},
-    "^/.well-known/oauth-authorization-server$": {
-        "raw_uri": "^/.well-known/oauth-authorization-server([?]|$)", "body": 16384, "body_required": False,
+    "^/[.]well-known/oauth-authorization-server$": {
+        "raw_uri": "^/[.]well-known/oauth-authorization-server([?]|$)", "body": 16384, "body_required": False,
         "timeout_required": False},
     "^/api/v1/mcp-access/oauth/(authorize|token|revoke)$": {
         "raw_uri": "^/api/v1/mcp-access/oauth/(authorize|token|revoke)([?]|$)", "body": 16384, "body_required": True,
@@ -1235,7 +1236,7 @@ def check_public(where, text):
             if found is not None and (_nginx_seconds(found.group(1)) is None or _nginx_seconds(found.group(1)) > PUBLIC_TIMEOUT_MAX):
                 errors.append(f"{where_block} : {label} {found.group(1)} au-dessus de {PUBLIC_TIMEOUT_MAX} s")
         for prefix_head, _ in blocks:
-            if prefix_head.startswith("^~ ") and pattern[1:].startswith(prefix_head[3:]):
+            if prefix_head.startswith("^~ ") and pattern[1:].replace("[.]", ".").startswith(prefix_head[3:]):
                 errors.append(f"{where_block} : masquée par le préfixe prioritaire `{prefix_head}` (nginx ne lit pas les regex)")
     if public:
         outside = _code(_without_locations(text))

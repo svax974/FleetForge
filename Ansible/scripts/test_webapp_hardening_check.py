@@ -3134,8 +3134,8 @@ def _public(path, raw_uri, body=None, timeout=None, **more):
 
 
 PUBLIC_MCP = _public("^/mcp(/.*)?$", "^/mcp(/|[?]|$)", "128k", "90s", buffering=False)
-PUBLIC_PRM = _public("^/.well-known/oauth-protected-resource(/mcp)?$", "^/.well-known/oauth-protected-resource(/mcp)?([?]|$)")
-PUBLIC_AS = _public("^/.well-known/oauth-authorization-server$", "^/.well-known/oauth-authorization-server([?]|$)")
+PUBLIC_PRM = _public("^/[.]well-known/oauth-protected-resource(/mcp)?$", "^/[.]well-known/oauth-protected-resource(/mcp)?([?]|$)")
+PUBLIC_AS = _public("^/[.]well-known/oauth-authorization-server$", "^/[.]well-known/oauth-authorization-server([?]|$)")
 PUBLIC_OAUTH = _public("^/api/v1/mcp-access/oauth/(authorize|token|revoke)$",
                        "^/api/v1/mcp-access/oauth/(authorize|token|revoke)([?]|$)", "16k")
 PUBLIC_REGISTER = _public("^/api/v1/mcp-access/oauth/register$", "^/api/v1/mcp-access/oauth/register([?]|$)", "16k")
@@ -3190,7 +3190,7 @@ class PublicLocationsGuardTests(unittest.TestCase):
             "root": {"path": "/", "mode": "public"},
             "wildcard of mcp": _public("^/mcp.*$", "^/mcp", "128k", "90s"),
             "wildcard of the oauth family": _public("^/api/v1/mcp-access/.*$", "^/api/v1/mcp-access/", "16k"),
-            "whole well-known": _public("^/.well-known/.*$", "^/.well-known/"),
+            "whole well-known": _public("^/[.]well-known/.*$", "^/[.]well-known/"),
             "prefix form of mcp": {"path": "/mcp", "mode": "public", "upstream": "back", "raw_uri": "^/mcp(/|[?]|$)", "body": "128k", "timeout": "90s"},
             "case variant": _public("^/MCP(/.*)?$", "^/mcp(/|[?]|$)", "128k", "90s"),
             "consent page": _public("^/oauth/consent$", "^/oauth/consent([?]|$)", "16k"),
@@ -7354,6 +7354,8 @@ PROOF_TASKS = ("Hash the origin-pull authority that enforced names must have bee
 AUTHORITY_TASK = "Fail when the origin-pull authority is missing, before anything is touched"
 EVIDENCE_TASKS = ("Read, on the proxy, what the dedicated Authenticated Origin Pulls log says about each enforced name",
                   "Fail when the proxy holds no recent proof that Cloudflare presents the certificate on an enforced name")
+READ_INCLUDE = "Read the dedicated Authenticated Origin Pulls log of the proxy"
+PROBE_INCLUDE = "Probe through Cloudflare the enforced names that lack evidence on this proxy, then read the log again"
 WITNESS_TASKS = ("Hash the origin-pull authority the proxies will trust", "Create the activation witness directory",
                  "Record that Cloudflare presents the certificate on every hostname")
 
@@ -7434,8 +7436,8 @@ class AopRolloutSafetyTests(unittest.TestCase):
         self.assertEqual(early["when"], "proxy_update_cloudflare_edge | bool")
         self.assertIn("block", resync[1], "le bloc destructif vient APRÈS le contrôle, hors de son `rescue`")
         proof = role_tasks("proof.yml")
-        self.assertEqual([t["name"] for t in proof], [AUTHORITY_TASK, INVALID_TASK, *PROOF_TASKS, *EVIDENCE_TASKS],
-                         "l'autorité, la déclaration, le témoin, PUIS le journal du proxy")
+        self.assertEqual([t["name"] for t in proof], [AUTHORITY_TASK, INVALID_TASK, *PROOF_TASKS, READ_INCLUDE, PROBE_INCLUDE, EVIDENCE_TASKS[1]],
+                         "l'autorité, la déclaration, le témoin, PUIS le journal du proxy, la sonde, le refus")
 
     def test_the_witness_written_by_the_cloudflare_side_lets_the_enforced_name_through(self):
         inventory = aop_inventory()
@@ -7586,7 +7588,7 @@ class AopRolloutSafetyTests(unittest.TestCase):
     def script_counts(self, lines, name=NAME, hours=24, runner=None):
         """Compteurs `{lines, success, untrusted_ok}` du script de preuve (extrait de proof.yml) joué par `sh` sur `lines`, SANS Ansible.
         `runner` : préfixe de commande (docker) ; sinon `sh` de la machine."""
-        task = self.tasks("proof.yml", EVIDENCE_TASKS)[0]
+        task = self.tasks("evidence.yml", EVIDENCE_TASKS[:1])[0]
         logdir = os.path.join(self.dir, "scriptlog")
         shutil.rmtree(logdir, ignore_errors=True)
         os.makedirs(logdir)
@@ -7650,7 +7652,7 @@ class AopRolloutSafetyTests(unittest.TestCase):
             self.log_line(verify="NONE", untrusted=1, status=200), self.log_line(minutes_ago=60 * 30)]
         expected = self.script_counts(lines)
         logdir = os.path.join(self.dir, "scriptlog")
-        task = self.tasks("proof.yml", EVIDENCE_TASKS)[0]
+        task = self.tasks("evidence.yml", EVIDENCE_TASKS[:1])[0]
         run = subprocess.run(
             ["docker", "run", "--rm", "--network", "none", "--pull", "never", "--platform", "linux/amd64", "-v", f"{logdir}:/log:ro",
              "-e", f"AOP_NAME={self.NAME}", "-e", "AOP_HOURS=24", "-e", "AOP_LOG_DIR=/log", "--entrypoint", "sh", image,
@@ -7659,7 +7661,7 @@ class AopRolloutSafetyTests(unittest.TestCase):
         self.assertEqual(json.loads(run.stdout), expected, "mawk + date GNU = awk BSD + date BSD de cette machine")
 
     def test_a_window_that_cannot_be_computed_refuses_instead_of_reading_the_whole_log(self):
-        task = self.tasks("proof.yml", EVIDENCE_TASKS)[0]
+        task = self.tasks("evidence.yml", EVIDENCE_TASKS[:1])[0]
         logdir = os.path.join(self.dir, "scriptlog")
         os.makedirs(logdir, exist_ok=True)
         with open(os.path.join(logdir, "cf-aop-x.log"), "w", encoding="utf-8") as f:
@@ -7712,7 +7714,7 @@ class AopRolloutSafetyTests(unittest.TestCase):
         settings.update(cfopull_log_dir=logdir)
         settings.update(variables)
         inventory = aop_inventory(**{"back1-prod": {"cloudflare_origin_pull": "observe"}, "back2-prod": {"cloudflare_origin_pull": "observe"}})
-        return self.run_tasks(self.tasks("proof.yml", EVIDENCE_TASKS), inventory, **settings)
+        return self.run_tasks(self.tasks("evidence.yml", EVIDENCE_TASKS[:1]) + self.tasks("proof.yml", EVIDENCE_TASKS[1:]), inventory, **settings)
 
     def test_the_log_of_the_proxy_must_hold_recent_successful_certificates_and_no_accepted_untrusted_request(self):
         good = [self.log_line(minutes_ago=m) for m in range(1, 8)]
@@ -7769,7 +7771,7 @@ class AopRolloutSafetyTests(unittest.TestCase):
         logdir = os.path.join(self.dir, "log")
         self.evidence({"cf-aop-back_preprod.log": good})
         before = sorted(os.listdir(logdir))
-        task = self.tasks("proof.yml", EVIDENCE_TASKS)[0]
+        task = self.tasks("evidence.yml", EVIDENCE_TASKS[:1])[0]
         self.assertIs(task["check_mode"], False, "lecture seule : jouée aussi en simulation")
         script = task["ansible.builtin.shell"]["cmd"]
         for destructive in ("rm ", "mv ", "tee", ">>", "> /", "truncate", "sed -i", "systemctl", "nginx"):
@@ -7780,10 +7782,12 @@ class AopRolloutSafetyTests(unittest.TestCase):
 
     def test_the_proxy_evidence_comes_after_the_witness_and_before_any_write_in_every_entry_point(self):
         names = [t["name"] for t in role_tasks("proof.yml")]
-        self.assertLess(names.index(PROOF_TASKS[1]), names.index(EVIDENCE_TASKS[0]))
+        self.assertLess(names.index(PROOF_TASKS[1]), names.index(READ_INCLUDE))
+        self.assertLess(names.index(READ_INCLUDE), names.index(PROBE_INCLUDE))
+        self.assertLess(names.index(PROBE_INCLUDE), names.index(EVIDENCE_TASKS[1]), "la sonde vient AVANT le refus, jamais à sa place")
         self.assertLess(names.index(AUTHORITY_TASK), names.index(INVALID_TASK))
-        for task in role_tasks("proof.yml"):
-            if task["name"] in EVIDENCE_TASKS[:1]:
+        for task in role_tasks("evidence.yml") + role_tasks("proof.yml"):
+            if task["name"] in EVIDENCE_TASKS[:1] + (READ_INCLUDE, PROBE_INCLUDE):
                 self.assertNotIn("delegate_to", task, "sur CHAQUE proxy ciblé, pas sur le poste de contrôle")
                 self.assertNotIn("run_once", task)
 
@@ -7941,6 +7945,212 @@ def own_decision(text, socket_address, verify, claimed=None):
         if line.strip() == "deny all;":
             return 403
     return "pass"
+
+
+@unittest.skipUnless(shutil.which("ansible-playbook"), "ansible-playbook absent")
+class AopActiveProbeTests(unittest.TestCase):
+    """Sonde ACTIVE (tasks/probe.yml) : un nom `enforce` qui manque de preuve reçoit quelques vraies requêtes par Cloudflare AVANT la lecture
+    du journal ; la lecture et les critères restent ceux de toujours, un échec garde le message d'avant. Le vrai rôle est joué (copie dans un
+    dossier temporaire dont la SEULE différence est l'hôte de l'URL de sonde, un faux « Cloudflare » local) : deux proxies, chacun son journal,
+    que le faux serveur remplit comme nginx le ferait, en répartissant les requêtes entre eux (ou pas)."""
+    NAME = "back-preprod.example.test"
+    URL_TOKEN = "'https://' ~ name"
+
+    def setUp(self):
+        import hashlib
+        import http.server
+        import threading
+        from unittest import mock
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.keys = os.path.join(self.dir, "keys")
+        os.makedirs(os.path.join(self.keys, "active"))
+        ca = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n"
+        with open(os.path.join(self.keys, "ca.pem"), "w", encoding="utf-8") as f:
+            f.write(ca)
+        with open(os.path.join(self.keys, "active", self.NAME + ".json"), "w", encoding="utf-8") as f:
+            json.dump({"hostname": self.NAME, "zone": "example.test", "ca_sha256": hashlib.sha256(ca.encode()).hexdigest()}, f)
+        self.logs = {host: os.path.join(self.dir, "log-" + host) for host in ("proxy1", "proxy2")}
+        for path in self.logs.values():
+            os.makedirs(path)
+        self.requests = []
+        self.mode = "alternate"       # alternate | first | nocert | direct
+        test = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802
+                name, _, rest = self.path[1:].partition("/")
+                test.requests.append((name, "/" + rest))
+                hosts = sorted(test.logs)
+                host = hosts[0] if test.mode in ("first", "nocert", "direct") else hosts[(len(test.requests) - 1) % len(hosts)]
+                kwargs = {"name": name, "uri": "/" + rest.split("?")[0]}
+                if test.mode == "nocert":
+                    kwargs.update(verify="NONE", untrusted=1, status=200)      # Cloudflare sans certificat client, requête acceptée
+                elif test.mode == "direct":
+                    kwargs.update(cf=0, verify="SUCCESS")                       # socket qui ne vient pas de Cloudflare
+                with open(os.path.join(test.logs[host], "cf-aop-back_preprod.log"), "a", encoding="utf-8") as f:
+                    f.write(AopRolloutSafetyTests.log_line(**kwargs) + "\n")
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"ok")
+
+            def log_message(self, *args):
+                pass
+
+        self.server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.addCleanup(self.server.shutdown)
+        # Rôle copié, URL de sonde seule changée : la tâche jouée est la vraie.
+        roles = os.path.join(self.dir, "roles")
+        shutil.copytree(os.path.join(ROLES, "cloudflare-origin-pull"), os.path.join(roles, "cloudflare-origin-pull"))
+        path = os.path.join(roles, "cloudflare-origin-pull", "tasks", "probe-round.yml")
+        text = _text(path)
+        self.assertEqual(text.count(self.URL_TOKEN), 1)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text.replace(self.URL_TOKEN, f"'http://127.0.0.1:{self.server.server_port}/' ~ name"))
+        patcher = mock.patch.dict(os.environ, {"ANSIBLE_ROLES_PATH": roles, "no_proxy": "127.0.0.1", "NO_PROXY": "127.0.0.1"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def seed(self, host, count, minutes_ago=5):
+        with open(os.path.join(self.logs[host], "cf-aop-back_preprod.log"), "a", encoding="utf-8") as f:
+            for i in range(count):
+                f.write(AopRolloutSafetyTests.log_line(minutes_ago=minutes_ago, name=self.NAME) + "\n")
+
+    def success(self, host):
+        path = os.path.join(self.logs[host], "cf-aop-back_preprod.log")
+        if not os.path.exists(path):
+            return 0
+        return sum(1 for line in _text(path).splitlines() if ' cf_socket=1 verify="SUCCESS" untrusted=0 ' in line)
+
+    def run_proof(self, args=(), **variables):
+        inventory = aop_inventory(**{"back1-prod": {"cloudflare_origin_pull": "observe"}})
+        for host, path in self.logs.items():
+            inventory["all"]["children"]["proxies"]["hosts"][host]["cfopull_log_dir"] = path
+        play = yaml.safe_dump([{
+            "hosts": "proxies", "gather_facts": False, "vars": dict({"cfopull_dir": self.keys}, **variables),
+            "tasks": [{"ansible.builtin.include_role": {"name": "cloudflare-origin-pull", "tasks_from": "proof"}}]}])
+        return run_local_play(play, inventory, args=args)
+
+    def test_a_low_traffic_name_is_probed_through_cloudflare_until_each_proxy_holds_enough_evidence(self):
+        code, out = self.run_proof(cfopull_probe_path_by_name={self.NAME: "/api/v1/health"})
+        self.assertEqual(code, 0, out[-3500:])
+        self.assertIn("sonde active", out)
+        for host in self.logs:
+            self.assertGreaterEqual(self.success(host), 5, host)
+        self.assertTrue(self.requests)
+        for name, path in self.requests:
+            self.assertEqual(name, self.NAME)
+            self.assertRegex(path, r"^/api/v1/health\?_ffprobe=\d+-\d+-\d+$", "chemin configuré + paramètre anti-cache, rien d'autre")
+        self.assertEqual(len({path for _, path in self.requests}), len(self.requests), "chaque requête est unique (jamais servie par le cache)")
+        self.assertLessEqual(len(self.requests), 2 * 5 * 12, "borné : proxies × tours × requêtes")
+
+    def test_the_default_probe_path_is_the_root(self):
+        code, out = self.run_proof()
+        self.assertEqual(code, 0, out[-3500:])
+        self.assertTrue(all(path.startswith("/?_ffprobe=") for _, path in self.requests), self.requests[:3])
+
+    def test_a_path_that_already_has_a_query_gets_the_parameter_appended(self):
+        code, out = self.run_proof(cfopull_probe_path_by_name={self.NAME: "/health?deep=0"})
+        self.assertEqual(code, 0, out[-3500:])
+        self.assertTrue(all(re.match(r"^/health\?deep=0&_ffprobe=", path) for _, path in self.requests), self.requests[:3])
+
+    def test_a_name_with_enough_evidence_on_every_proxy_sends_nothing(self):
+        for host in self.logs:
+            self.seed(host, 6)
+        code, out = self.run_proof()
+        self.assertEqual(code, 0, out[-3500:])
+        self.assertEqual(self.requests, [])
+        self.assertNotIn("sonde active", out)
+
+    def test_only_the_proxy_that_lacks_evidence_keeps_probing_and_a_proxy_that_cloudflare_never_picks_is_refused_with_the_old_message(self):
+        # Le faux Cloudflare n'atteint que proxy1 : proxy1 se satisfait, proxy2 va au bout des tours et reste refusé, message d'avant.
+        self.mode = "first"
+        code, out = self.run_proof(cfopull_probe_requests=4, cfopull_probe_rounds=3)
+        self.assertNotEqual(code, 0, out[-3500:])
+        self.assertGreaterEqual(self.success("proxy1"), 5)
+        self.assertEqual(self.success("proxy2"), 0)
+        self.assertIn("proxy2 : " + self.NAME + " est en `cloudflare_origin_pull: enforce` mais le journal", out)
+        self.assertIn("`cf_socket=1 verify=\"SUCCESS\"` = 0", out)
+        self.assertIn("deploy-cloudflare-origin-pull.yml", out)
+        self.assertIn("Sonde active jouée avant cette lecture", out)
+        self.assertNotIn("proxy1 : " + self.NAME + " est en", out)
+        self.assertGreaterEqual(len(self.requests), 12, "proxy2 a joué ses 3 tours de 4")
+        self.assertLessEqual(len(self.requests), 2 * 3 * 4, "borné")
+
+    def test_probe_traffic_that_nginx_did_not_log_as_a_verified_cloudflare_socket_proves_nothing(self):
+        for mode in ("nocert", "direct"):
+            with self.subTest(mode):
+                self.mode = mode
+                self.requests.clear()
+                for path in self.logs.values():
+                    shutil.rmtree(path)
+                    os.makedirs(path)
+                code, out = self.run_proof(cfopull_probe_requests=3, cfopull_probe_rounds=2)
+                self.assertNotEqual(code, 0, "le journal seul prouve, pas la réponse de la sonde : " + out[-2500:])
+                self.assertTrue(self.requests, "la sonde a bien été envoyée")
+                self.assertEqual(self.success("proxy1"), 0)
+                self.assertIn("est en `cloudflare_origin_pull: enforce` mais le journal", out)
+
+    def test_an_accepted_untrusted_request_still_refuses_and_is_not_a_reason_to_probe(self):
+        for host in self.logs:
+            self.seed(host, 6)
+        with open(os.path.join(self.logs["proxy1"], "cf-aop-back_preprod.log"), "a", encoding="utf-8") as f:
+            f.write(AopRolloutSafetyTests.log_line(verify="NONE", untrusted=1, status=200) + "\n")
+        code, out = self.run_proof()
+        self.assertNotEqual(code, 0, out[-2500:])
+        self.assertEqual(self.requests, [], "assez de SUCCESS : rien à sonder, le refus vient de la ligne untrusted acceptée")
+        self.assertIn("(attendu 0", out)
+
+    def test_the_probe_can_be_turned_off_and_the_unobserved_escape_hatch_probes_nothing(self):
+        for variables in ({"cfopull_probe": False}, {"cfopull_probe": "false"}):
+            with self.subTest(variables):
+                code, out = self.run_proof(**variables)
+                self.assertNotEqual(code, 0, out[-2500:])
+                self.assertEqual(self.requests, [])
+                self.assertNotIn("Sonde active jouée", out)
+        code, out = self.run_proof(cfopull_allow_unobserved="true")
+        self.assertEqual(code, 0, out[-2500:])
+        self.assertEqual(self.requests, [])
+
+    def test_an_invalid_probe_path_or_count_refuses_before_anything_is_sent(self):
+        for bad in ({self.NAME: "health"}, {self.NAME: "/a b"}, {self.NAME: "/a#b"}, {self.NAME: 3}, {self.NAME: "/x\n"}, ["/"]):
+            with self.subTest(bad):
+                code, out = self.run_proof(cfopull_probe_path_by_name=bad)
+                self.assertNotEqual(code, 0, out[-2500:])
+                self.assertEqual(self.requests, [])
+                self.assertIn("cfopull_probe_path_by_name", out)
+        for key in ("cfopull_probe_requests", "cfopull_probe_rounds"):
+            with self.subTest(key):
+                code, out = self.run_proof(**{key: 0})
+                self.assertNotEqual(code, 0, out[-2500:])
+                self.assertEqual(self.requests, [])
+
+    def test_the_probe_is_also_sent_in_check_mode_since_it_only_reads_and_the_log_read_is_played_there_too(self):
+        code, out = self.run_proof(args=("--check",))
+        self.assertEqual(code, 0, out[-3500:])
+        self.assertTrue(self.requests)
+
+    def test_the_real_probe_task_goes_through_cloudflare_by_name_and_never_to_an_origin_address(self):
+        text = _text(os.path.join(CF_TASKS, "probe-round.yml"))
+        tasks = role_tasks("probe-round.yml")
+        send = tasks[0]
+        self.assertIn("'https://' ~ name", text)
+        self.assertEqual(send["delegate_to"], "localhost", "depuis le poste de contrôle")
+        uri = send["ansible.builtin.uri"]
+        self.assertEqual((uri["method"], uri["follow_redirects"], uri["validate_certs"]), ("GET", "none", True))
+        self.assertEqual(sorted(uri["headers"]), ["Cache-Control", "User-Agent"], "pas de Host forcé")
+        for forbidden in ("--resolve", "Host:", "ansible_host", "hostvars", "unix_socket", "client_cert", "client_key", "validate_certs: false"):
+            self.assertNotIn(forbidden, text)
+        self.assertIs(send["check_mode"], False)
+        self.assertFalse(send["changed_when"])
+        defaults = yaml.safe_load(_text(os.path.join(ROLES, "cloudflare-origin-pull", "defaults", "main.yml")))
+        self.assertIs(defaults["cfopull_probe"], True)
+        self.assertEqual(defaults["cfopull_probe_path_by_name"], {})
+        self.assertIs(defaults["cfopull_allow_unobserved"], False, "l'échappatoire reste fermée")
+        # La relecture est le MÊME fichier que la première lecture : mêmes critères, rien de recopié.
+        self.assertEqual(tasks[-1]["ansible.builtin.include_tasks"], "evidence.yml")
+        self.assertEqual(role_tasks("proof.yml")[-3]["ansible.builtin.include_tasks"], "evidence.yml")
 
 
 def own_names(kind):

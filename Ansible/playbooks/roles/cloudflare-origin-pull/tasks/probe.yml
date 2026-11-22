@@ -1,0 +1,61 @@
+---
+# FleetForge
+#
+# Copyright © 2025 Stéphane VAXELAIRE
+# SPDX-License-Identifier: MIT — see LICENSE
+#
+# SONDE ACTIVE des Authenticated Origin Pulls, jouée par proof.yml sur chaque proxy ciblé, ENTRE la lecture du journal et le refus.
+#
+# Pourquoi : la preuve exige `cfopull_evidence_min_success` lignes `cf_socket=1 verify="SUCCESS"` du nom sur 24 h. Un nom que personne n'a
+# utilisé depuis un jour (back.tradekong.app) la fait échouer pour TOUTE application déployée, alors qu'il suffisait de lui envoyer quelques
+# requêtes réelles. Au lieu de le faire à la main, le play le fait, puis relit le journal.
+#
+# Ce que ça NE change PAS (la sonde ne peut pas affaiblir la preuve) :
+#   • la preuve reste lue UNIQUEMENT dans le journal de nginx (evidence.yml, le même script, les mêmes ancres sur le préfixe que nginx
+#     détermine seul, les mêmes seuils, la même absence de ligne `untrusted=1` acceptée) : une requête de sonde ne compte que si nginx a
+#     VU une socket Cloudflare portant le certificat client vérifié. Un 200 reçu par la sonde ne prouve rien et n'est jamais lu ;
+#   • la sonde passe TOUJOURS par Cloudflare : URL `https://<nom public>` résolue par le DNS public (le nom est proxifié, donc l'adresse
+#     est celle d'une plage Cloudflare), certificat de l'edge validé, aucune adresse d'origine ni `Host` forcé ni `--resolve` : un nom
+#     qui ne passe pas par Cloudflare (nuage gris, enregistrement supprimé) ne produit AUCUNE ligne `cf_socket=1` et la preuve échoue ;
+#   • un refus reste un refus, avec le message d'avant (proof.yml) : la sonde n'écrit rien, ne contourne rien, n'abaisse aucun seuil.
+#
+# Couverture des proxies. Cloudflare choisit l'origine parmi les adresses de l'enregistrement proxifié (web3c : `back.tradekong.app`
+# pointe sur proxy1 ET proxy3, enregistrement tenu dans le tableau de bord Cloudflare, jamais par Ansible ; `proxy.<zone>` publié par
+# cloudflare-dns-update liste les proxies) : le poste de contrôle ne peut ni choisir le proxy ni savoir lequel a répondu. La garantie
+# est donc OBTENUE PAR LA LECTURE, pas supposée : ce fichier est joué PAR PROXY, et chaque proxy boucle (envoi, relecture de SON journal)
+# jusqu'à en avoir assez, au plus `cfopull_probe_rounds` tours de `cfopull_probe_requests` requêtes par nom. Chaque tour répartit au
+# hasard ses requêtes entre les origines : un proxy qui n'en reçoit pas assez après tous les tours (Cloudflare ne le choisit pas, requêtes
+# arrêtées par une règle de l'edge, nom non proxifié) reste refusé, avec le message d'avant. La couverture n'est PAS garantie, elle est
+# bornée et constatée ; un proxy de secours qui ne reçoit aucun trafic de ce nom s'exclut par `--limit` (proof.yml, message).
+#
+# Requêtes : GET (idempotent) sur `cfopull_probe_path_by_name[<nom>]`, défaut `/` ; chemin écrit dans l'inventaire privé (group_vars du parc),
+# une URL de santé de préférence (`/api/v1/health` pour back.tradekong.app). Un paramètre `_ffprobe=<tour>-<n>-<aléa>` est ajouté pour
+# qu'un cache de l'edge ne serve pas la réponse sans atteindre l'origine (une réponse du cache ne laisse AUCUNE ligne). Un statut 4xx/5xx
+# n'est pas une erreur : nginx journalise la socket, c'est elle qui compte.
+- name: Fail on an invalid Authenticated Origin Pulls probe path
+  ansible.builtin.assert:
+    that:
+      - cfopull_probe_path_by_name is mapping
+      - cfopull_probe_path_by_name.values() | reject('string') | list | length == 0
+      - cfopull_probe_path_by_name.values() | select('string') | reject('match', '/[A-Za-z0-9._~!$&()*+,;=:@%/?-]*(?!(?s:.))') | list | length == 0
+      - (cfopull_probe_requests | int) >= 1
+      - (cfopull_probe_rounds | int) >= 1
+    fail_msg: >-
+      `cfopull_probe_path_by_name` doit être { <nom public>: <chemin commençant par /, sans espace ni #> } et `cfopull_probe_requests`
+      et `cfopull_probe_rounds` des entiers >= 1. Rien n'a été envoyé ni touché.
+    quiet: true
+  delegate_to: localhost
+  become: false
+
+- name: Say which enforced names the proxy lacks evidence for and that they are probed through Cloudflare
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }} : preuve insuffisante sur {{ cfopull_probe_names | join(', ') }} : sonde active par Cloudflare, au plus
+      {{ cfopull_probe_rounds }} tour(s) de {{ cfopull_probe_requests }} requête(s) par nom, relecture du journal de ce proxy après chaque tour.
+
+- name: Probe, round by round, until this proxy's log holds enough evidence
+  ansible.builtin.include_tasks: probe-round.yml
+  loop: "{{ range(1, (cfopull_probe_rounds | int) + 1) | list }}"
+  loop_control:
+    loop_var: cfopull_probe_round
+    label: "tour {{ cfopull_probe_round }}"
