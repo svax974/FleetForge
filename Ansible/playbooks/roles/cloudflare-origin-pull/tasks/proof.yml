@@ -89,6 +89,8 @@
   ansible.builtin.include_tasks: probe.yml
   when:
     - cfopull_probe | default(true) | bool
+    # En `--check` rien n'est envoyé : la sonde est du trafic réel vers un nom public, la simulation montre le refus tel quel.
+    - not (ansible_check_mode | default(false) | bool)
     - cfopull_probe_names | length > 0
 
 - name: Fail when the proxy holds no recent proof that Cloudflare presents the certificate on an enforced name
@@ -110,7 +112,8 @@
       relire ce journal, puis rejouer. Nom à faible trafic : `cfopull_evidence_min_success_by_name` (seuil du nom, jamais < 1). Proxy qui ne
       reçoit AUCUN trafic de ce nom (secours du Load Balancer) : l'exclure par `--limit`, jamais en coupant la preuve. Premier déploiement
       sans trafic observable : `-e cfopull_allow_unobserved=true` (assumé).
-      {{ "Sonde active jouée avant cette lecture (`cfopull_probe`, tasks/probe.yml) : requêtes GET par Cloudflare vers ce nom, journal de ce proxy relu après chaque tour ; elle n'a pas suffi (nom non proxifié, requêtes arrêtées par une règle de l'edge, ou Cloudflare ne choisit pas ce proxy parmi les origines du nom)." if (cfopull_probe | default(true) | bool) and (item.item in (cfopull_probe_names | default([]))) else '' }}
+      {{ "Sonde active jouée avant cette lecture (`cfopull_probe`, tasks/probe.yml) : requêtes GET par Cloudflare vers ce nom, journal de ce proxy relu après chaque tour ; elle n'a pas suffi (nom non proxifié, requêtes arrêtées par une règle de l'edge, ou Cloudflare ne choisit pas ce proxy parmi les origines du nom)." if (cfopull_probe | default(true) | bool) and not (ansible_check_mode | default(false) | bool) and (item.item in (cfopull_probe_names | default([]))) else '' }}
+      {{ "Sonde active non jouée en --check (trafic réel vers un nom public) : rejouer sans --check pour qu'elle envoie ses requêtes." if (ansible_check_mode | default(false) | bool) and (cfopull_probe | default(true) | bool) and (item.item in (cfopull_probe_names | default([]))) else '' }}
       Aucun gabarit n'a été posé.
     quiet: true
   loop: "{{ cfopull_evidence.results | default([]) }}"

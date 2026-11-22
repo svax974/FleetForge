@@ -7,6 +7,17 @@
 # UN tour de la sonde active (probe.yml) : envoi depuis le poste de contrôle, puis relecture du journal de CE proxy. Les tâches portent
 # chacune `cfopull_probe_names | length > 0`, évalué à l'exécution : dès que le journal de ce proxy suffit pour tous les noms, les tours
 # restants ne font plus rien (pas d'envoi inutile).
+- name: Wait a little between two rounds of probe requests
+  ansible.builtin.wait_for:
+    timeout: 2
+  delegate_to: localhost
+  become: false
+  changed_when: false
+  check_mode: false
+  when:
+    - cfopull_probe_round | int > 1
+    - cfopull_probe_names | length > 0
+
 - name: Send a few real HTTPS requests to each enforced name that lacks evidence, through Cloudflare
   vars:
     # Une URL par requête : `https://<nom public><chemin>`, jamais une adresse d'origine. Le paramètre ajouté évite un objet servi par le
@@ -26,6 +37,11 @@
     follow_redirects: none
     validate_certs: true
     timeout: "{{ cfopull_probe_timeout | int }}"
+    # Ni identifiants du poste (~/.netrc, GSSAPI, Basic) ni proxy de l'environnement : une requête anonyme, directe vers l'edge.
+    use_netrc: false
+    force_basic_auth: false
+    use_gssapi: false
+    use_proxy: false
     headers:
       User-Agent: "FleetForge-origin-pull-probe/1"
       Cache-Control: "no-cache"

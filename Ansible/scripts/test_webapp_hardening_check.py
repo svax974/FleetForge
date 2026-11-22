@@ -3281,6 +3281,39 @@ class PublicLocationsGuardTests(unittest.TestCase):
         # nginx : un préfixe `^~` qui couvre le chemin masque les regex — le well-known public ne répondrait jamais.
         self.refused([CONNECTIONS, PUBLIC_MCP, PUBLIC_PRM, dict(WELL_KNOWN_CLOSED, priority=True)], "priority")
 
+    def test_a_priority_prefix_covering_the_head_of_a_public_regex_or_covered_by_it_is_refused_but_not_an_unrelated_one(self):
+        for prefix in ("/mcp/", "/.well-known/", "/.well-known/oauth-protected-resource/", "/api/v1/mcp-access/oauth/tok"):
+            with self.subTest(prefix):
+                self.refused([CONNECTIONS, PUBLIC_MCP, PUBLIC_PRM, PUBLIC_AS, PUBLIC_OAUTH, PUBLIC_REGISTER, {"path": prefix, "priority": True}],
+                             f"hidden by the priority prefix {prefix}")
+        for prefix in ("/assets/", "/oauth/"):
+            with self.subTest("unrelated " + prefix):
+                code, out = self.guard(webapp_vhost_locations=[CONNECTIONS, PUBLIC_MCP, PUBLIC_PRM, PUBLIC_AS, PUBLIC_OAUTH, PUBLIC_REGISTER,
+                                                               WELL_KNOWN_CLOSED, {"path": prefix, "priority": True}])
+                self.assertEqual(code, 0, out[-2000:])
+
+    def test_the_real_web3c_gateway_entry_passes_the_guard_and_the_rendered_vhost_check_with_its_literal_regexes(self):
+        # L'entrée RÉELLE de l'inventaire privé (jamais affichée : ansible-inventory ne déchiffre rien) contre la liste blanche exacte.
+        inventory = os.path.join(os.path.dirname(PLAYBOOKS), "inventories", "web3c_inventory.yml")
+        if not os.path.isfile(inventory):
+            self.skipTest("inventaire privé absent (.private)")
+        run = subprocess.run(["ansible-inventory", "-i", inventory, "--host", "fleetforge-gateway"], capture_output=True, text=True,
+                             cwd=os.path.dirname(PLAYBOOKS), timeout=120)
+        if run.returncode != 0:
+            self.skipTest("ansible-inventory ne lit pas l'inventaire privé ici")
+        locations = json.loads(run.stdout)["webapp_vhost_locations"]
+        public = [l for l in locations if l.get("mode") == "public"]
+        self.assertEqual(sorted(l["path"] for l in public), sorted(check.PUBLIC_LOCATIONS), "exactement les cinq regex de la liste blanche")
+        guard = yaml.safe_load(_text(os.path.join(ROLES, "fleetforge-install", "tasks", "gateway-guard.yml")))
+        allowed = [t for t in guard if t.get("name") == "Check the public locations of the gateway entry"][0]["vars"]["_public_allowed"]
+        self.assertEqual({k: v["raw_uri"] for k, v in allowed.items()}, {k: v["raw_uri"] for k, v in check.PUBLIC_LOCATIONS.items()})
+        for location in public:
+            self.assertEqual(location["raw_uri"], check.PUBLIC_LOCATIONS[location["path"]]["raw_uri"], location["path"])
+            self.assertNotRegex(location["path"], r"^\^/\.well-known", "point littéral écrit [.], jamais `.` non échappé")
+        code, out = self.guard(webapp_vhost_locations=locations)
+        self.assertEqual(code, 0, out[-2500:])
+        self.assertEqual(vhost_errors(public_vhost(locations), public=True), [])
+
     def test_mcp_connections_must_stay_a_private_front_location_when_mcp_is_public(self):
         self.refused([PUBLIC_MCP, WELL_KNOWN_CLOSED], "/mcp/connections")
         for label, location in {"public": dict(CONNECTIONS, mode="public"), "back": dict(CONNECTIONS, upstream="back"),
@@ -3363,8 +3396,25 @@ class PublicVhostTests(unittest.TestCase):
         self.assertEqual(allows(closed), [])
         # Les regex publiques précèdent le repli `/` (le préfixe `/.well-known/` n'est PAS `^~`).
         self.assertIsNone(location_body(text, "^~ /.well-known/"))
-        self.assertTrue(vhost_errors(public_vhost([CONNECTIONS, PUBLIC_MCP, PUBLIC_PRM, dict(WELL_KNOWN_CLOSED, priority=True)]),
-                                     public=True), "un `^~ /.well-known/` masquerait le well-known public")
+        errors = vhost_errors(public_vhost([CONNECTIONS, PUBLIC_MCP, PUBLIC_PRM, dict(WELL_KNOWN_CLOSED, priority=True)]), public=True)
+        self.assertTrue([e for e in errors if "masquée par le préfixe prioritaire `^~ /.well-known/`" in e],
+                        "un `^~ /.well-known/` masquerait le well-known public : " + str(errors))
+
+    PREFIXES_HIDING = ("/mcp/", "/.well-known/", "/.well-known/oauth-protected-resource/", "/api/v1/mcp-access/oauth/tok")
+
+    def test_a_priority_prefix_covering_the_head_of_a_public_regex_or_covered_by_it_is_flagged_on_the_rendered_vhost(self):
+        for prefix in self.PREFIXES_HIDING:
+            with self.subTest(prefix):
+                locations = [CONNECTIONS, PUBLIC_MCP, PUBLIC_PRM, PUBLIC_AS, PUBLIC_OAUTH, PUBLIC_REGISTER, {"path": prefix, "priority": True}]
+                errors = vhost_errors(public_vhost(locations), public=True)
+                self.assertTrue([e for e in errors if f"masquée par le préfixe prioritaire `^~ {prefix}`" in e], str(errors))
+        # Ni la page privée du front, ni un préfixe sans rapport avec une regex publique ne sont signalés.
+        for prefix in ("/assets/", "/oauth/"):
+            with self.subTest("harmless " + prefix):
+                locations = [CONNECTIONS, PUBLIC_MCP, PUBLIC_PRM, PUBLIC_AS, PUBLIC_OAUTH, PUBLIC_REGISTER, WELL_KNOWN_CLOSED,
+                             {"path": prefix, "priority": True}]
+                self.assertEqual([e for e in vhost_errors(public_vhost(locations), public=True) if "masquée" in e], [])
+        self.assertEqual(vhost_errors(public_vhost(), public=True), [], "l'ensemble public et `^~ /mcp/connections` ne sont pas signalés")
 
     def test_the_rendered_vhost_passes_the_public_check_and_the_command_line_agrees(self):
         text = public_vhost()
@@ -8023,8 +8073,8 @@ class AopActiveProbeTests(unittest.TestCase):
             return 0
         return sum(1 for line in _text(path).splitlines() if ' cf_socket=1 verify="SUCCESS" untrusted=0 ' in line)
 
-    def run_proof(self, args=(), **variables):
-        inventory = aop_inventory(**{"back1-prod": {"cloudflare_origin_pull": "observe"}})
+    def run_proof(self, args=(), inventory_changes=None, **variables):
+        inventory = aop_inventory(**dict({"back1-prod": {"cloudflare_origin_pull": "observe"}}, **(inventory_changes or {})))
         for host, path in self.logs.items():
             inventory["all"]["children"]["proxies"]["hosts"][host]["cfopull_log_dir"] = path
         play = yaml.safe_dump([{
@@ -8126,20 +8176,55 @@ class AopActiveProbeTests(unittest.TestCase):
                 self.assertNotEqual(code, 0, out[-2500:])
                 self.assertEqual(self.requests, [])
 
-    def test_the_probe_is_also_sent_in_check_mode_since_it_only_reads_and_the_log_read_is_played_there_too(self):
+    def test_nothing_is_sent_in_check_mode_and_the_refusal_shows_with_a_sentence_that_says_so(self):
         code, out = self.run_proof(args=("--check",))
-        self.assertEqual(code, 0, out[-3500:])
-        self.assertTrue(self.requests)
+        self.assertNotEqual(code, 0, out[-3500:])
+        self.assertEqual(self.requests, [], "du trafic réel vers un nom public : jamais en simulation")
+        self.assertIn("est en `cloudflare_origin_pull: enforce` mais le journal", out)
+        self.assertIn("Sonde active non jouée en --check", out)
+        self.assertNotIn("Sonde active jouée avant cette lecture", out)
+        for host in self.logs:
+            self.seed(host, 6)
+        code, out = self.run_proof(args=("--check",))
+        self.assertEqual(code, 0, "assez de preuve : la simulation passe : " + out[-2500:])
+        self.assertEqual(self.requests, [])
+
+    def test_the_probe_is_bounded_and_only_probes_plain_host_names(self):
+        for key, value in (("cfopull_probe_requests", 26), ("cfopull_probe_rounds", 11)):
+            with self.subTest(key):
+                code, out = self.run_proof(**{key: value})
+                self.assertNotEqual(code, 0, out[-2500:])
+                self.assertEqual(self.requests, [])
+        for key, value in (("cfopull_probe_requests", 25), ("cfopull_probe_rounds", 10)):
+            with self.subTest("limit " + key):
+                code, out = self.run_proof(**{key: value, "cfopull_probe_path_by_name": {self.NAME: "/"}})
+                self.assertEqual(code, 0, out[-2500:])
+        # Un nom aux caractères inattendus (`_`) est refusé AVANT tout envoi, même s'il est prouvé et activé par ailleurs.
+        odd = "back_preprod.example.test"
+        with open(os.path.join(self.keys, "active", odd + ".json"), "w", encoding="utf-8") as f:
+            f.write(_text(os.path.join(self.keys, "active", self.NAME + ".json")))
+        self.requests.clear()
+        code, out = self.run_proof(inventory_changes={"back1-preprod": {"proxy_hostname": odd}})
+        self.assertNotEqual(code, 0, out[-2500:])
+        self.assertEqual(self.requests, [])
+        self.assertIn("cfopull_probe_path_by_name", out)
+        defaults = yaml.safe_load(_text(os.path.join(ROLES, "cloudflare-origin-pull", "defaults", "main.yml")))
+        self.assertEqual(defaults["cfopull_probe_timeout"], 8)
 
     def test_the_real_probe_task_goes_through_cloudflare_by_name_and_never_to_an_origin_address(self):
         text = _text(os.path.join(CF_TASKS, "probe-round.yml"))
         tasks = role_tasks("probe-round.yml")
-        send = tasks[0]
+        send = [task for task in tasks if task["name"].startswith("Send a few real HTTPS requests")][0]
         self.assertIn("'https://' ~ name", text)
         self.assertEqual(send["delegate_to"], "localhost", "depuis le poste de contrôle")
         uri = send["ansible.builtin.uri"]
         self.assertEqual((uri["method"], uri["follow_redirects"], uri["validate_certs"]), ("GET", "none", True))
         self.assertEqual(sorted(uri["headers"]), ["Cache-Control", "User-Agent"], "pas de Host forcé")
+        for option in ("use_netrc", "force_basic_auth", "use_gssapi", "use_proxy"):
+            self.assertIs(uri[option], False, option + " : requête anonyme et directe")
+        wait = [task for task in tasks if task["name"].startswith("Wait a little")][0]
+        self.assertEqual(wait["ansible.builtin.wait_for"], {"timeout": 2})
+        self.assertEqual(wait["delegate_to"], "localhost")
         for forbidden in ("--resolve", "Host:", "ansible_host", "hostvars", "unix_socket", "client_cert", "client_key", "validate_certs: false"):
             self.assertNotIn(forbidden, text)
         self.assertIs(send["check_mode"], False)

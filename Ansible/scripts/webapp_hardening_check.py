@@ -1171,6 +1171,13 @@ PUBLIC_LOCATIONS = {
         "timeout_required": False},
 }
 PUBLIC_TIMEOUT_MAX = 90
+
+
+def _literal_head(pattern):
+    """Début littéral d'une regex de location `^…` : coupé au premier métacaractère, `[.]` valant `.` (`^/mcp(/.*)?$` → `/mcp`)."""
+    return re.match(r"(?:\[\.\]|[^\][()*+?|{}$^.\\])*", pattern[1:]).group(0).replace("[.]", ".")
+
+
 PUBLIC_MCP_PATH = "^/mcp(/.*)?$"
 FRONT_CONNECTIONS_HEAD = "^~ /mcp/connections"
 
@@ -1235,8 +1242,13 @@ def check_public(where, text):
         for label, found in (("proxy_read_timeout", read), ("proxy_send_timeout", send)):
             if found is not None and (_nginx_seconds(found.group(1)) is None or _nginx_seconds(found.group(1)) > PUBLIC_TIMEOUT_MAX):
                 errors.append(f"{where_block} : {label} {found.group(1)} au-dessus de {PUBLIC_TIMEOUT_MAX} s")
+        # Tête LITTÉRALE de la regex (coupée au premier métacaractère, `[.]` = `.`) : le préfixe masque quand la tête commence par lui
+        # (`/mcp/`, `/.well-known/`) OU quand lui commence par la tête (`/.well-known/oauth-protected-resource/`, `/api/v1/mcp-access/oauth/tok`).
+        # `^~ /mcp/connections` (page privée du front, exigée par ailleurs) est la seule exception.
+        literal = _literal_head(pattern)
         for prefix_head, _ in blocks:
-            if prefix_head.startswith("^~ ") and pattern[1:].replace("[.]", ".").startswith(prefix_head[3:]):
+            if prefix_head.startswith("^~ ") and prefix_head != FRONT_CONNECTIONS_HEAD and literal \
+                    and (literal.startswith(prefix_head[3:]) or prefix_head[3:].startswith(literal)):
                 errors.append(f"{where_block} : masquée par le préfixe prioritaire `{prefix_head}` (nginx ne lit pas les regex)")
     if public:
         outside = _code(_without_locations(text))

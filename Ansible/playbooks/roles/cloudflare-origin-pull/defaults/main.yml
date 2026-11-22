@@ -206,12 +206,13 @@ cfopull_allow_unobserved: false
 #       Écrit dans l'inventaire privé du parc (group_vars), comme `cfopull_evidence_min_success_by_name`.
 #   `cfopull_probe_requests` : requêtes par nom et par tour (Cloudflare répartit entre les origines : ~la moitié atteint chaque proxy
 #       quand il y en a deux) ; `cfopull_probe_rounds` : tours au plus. La couverture de CHAQUE proxy n'est pas garantie (Cloudflare
-#       choisit l'origine) : elle est bornée par ces deux valeurs et constatée par la relecture du journal de chaque proxy.
+#       choisit l'origine) : elle est bornée par ces deux valeurs (au plus 25 et 10, refusé au-delà) et constatée par la relecture du journal
+#       de chaque proxy. Deux secondes de pause entre deux tours. Pas de sonde en `--check` (trafic réel vers un nom public).
 cfopull_probe: true
 cfopull_probe_path_by_name: {}
 cfopull_probe_requests: 12
 cfopull_probe_rounds: 5
-cfopull_probe_timeout: 15
+cfopull_probe_timeout: 8
 
 # Noms `enforce` dont le journal de CE proxy porte moins de `cfopull_evidence_min_success` (ou du seuil du nom) lignes `verify="SUCCESS"` :
 # ceux que la sonde active vise. Calculé depuis la dernière lecture (`cfopull_evidence`, tasks/evidence.yml) : il se vide quand les tours

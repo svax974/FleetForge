@@ -145,9 +145,14 @@
       {%- if body and body_bytes > rule.body -%}{%- set ns.p = ns.p + [path ~ ': body above ' ~ rule.body ~ ' bytes'] -%}{%- endif -%}
       {%- if rule.timeout_required and not timeout -%}{%- set ns.p = ns.p + [path ~ ': timeout required'] -%}{%- endif -%}
       {%- if timeout and timeout_seconds > _public_timeout_max -%}{%- set ns.p = ns.p + [path ~ ': timeout above ' ~ _public_timeout_max ~ ' s'] -%}{%- endif -%}
-      {#- Un préfixe `^~` qui couvre ce chemin court-circuite les regex : la location publique ne serait jamais atteinte. `[.]` vaut `.` : le préfixe littéral `/.well-known/` couvre `^/[.]well-known/…`. -#}
-      {%- for q in _locations if q is mapping and (q.priority | default(false) | bool) and not (q.regex | default(false) | bool) and (q.path | default('')) | string | length > 0 -%}
-      {%- if (path[1:] | replace('[.]', '.')).startswith(q.path | string) -%}{%- set ns.p = ns.p + [path ~ ': hidden by the priority prefix ' ~ q.path] -%}{%- endif -%}
+      {#- Un préfixe `^~` qui couvre ce chemin court-circuite les regex : la location publique ne serait jamais atteinte. Tête LITTÉRALE de la regex
+          (coupée au premier métacaractère, `[.]` = `.`) : `^/mcp(/.*)?$` → `/mcp`, `^/[.]well-known/oauth-protected-resource(/mcp)?$` →
+          `/.well-known/oauth-protected-resource`. Le préfixe masque quand la tête commence par lui (`/mcp/`, `/.well-known/`) OU quand lui commence par la
+          tête (`/.well-known/oauth-protected-resource/`, `/api/v1/mcp-access/oauth/tok`, qui couvrent une partie de la regex). `/mcp/connections` : page
+          PRIVÉE du front, exigée par ailleurs, seule exception. Aucun antislash : les chemins admis n'en portent pas (liste blanche exacte). -#}
+      {%- set head = (path[1:] | regex_search('^(?:[[][.][]]|[^][()*+?|{}$^.])*') | default('', true)) | replace('[.]', '.') -%}
+      {%- for q in _locations if q is mapping and (q.priority | default(false) | bool) and not (q.regex | default(false) | bool) and (q.path | default('')) | string | length > 0 and (q.path | string) != '/mcp/connections' -%}
+      {%- if head | length > 0 and (head.startswith(q.path | string) or (q.path | string).startswith(head)) -%}{%- set ns.p = ns.p + [path ~ ': hidden by the priority prefix ' ~ q.path] -%}{%- endif -%}
       {%- endfor -%}
       {%- endif -%}
       {%- endif -%}

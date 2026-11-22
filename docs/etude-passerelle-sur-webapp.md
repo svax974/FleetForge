@@ -694,7 +694,7 @@ dans `vars:` donc protégées par `no-overrides.yml`), chacune avec SA `raw_uri`
 ≤ 16k exigé). Les points des well-known sont écrits `[.]` (point littéral, grammaire des chemins de `facts.yml` : jamais `\.`), comme sur
 companymanager et social-manager : la liste blanche est EXACTE, la forme `.` non échappée est refusée (22/11/2026). Refusés : tout autre chemin public, tout joker, `access` mêlé à `mode`, un chemin déclaré deux fois, une location
 publique sans `cloudflare_named`, un préfixe `^~` qui masquerait une regex publique (nginx ne lit pas les regex après un `^~` :
-`/.well-known/` fermé ne porte donc PAS `priority`), et l'absence de `/mcp/connections` en location PRIVÉE `^~` du front tant que
+`/.well-known/` fermé ne porte donc PAS `priority`) ; le contrôle compare la tête LITTÉRALE de chaque regex publique (coupée au premier métacaractère, `[.]` = `.`) au préfixe dans les deux sens — `^~ /mcp/`, `^~ /.well-known/oauth-protected-resource/` et `^~ /api/v1/mcp-access/oauth/tok` sont refusés, `^~ /mcp/connections` seul est admis, et l'absence de `/mcp/connections` en location PRIVÉE `^~` du front tant que
 `/mcp` est public (la regex `^/mcp(/.*)?$` l'enverrait sinon au back). La barrière de `/mcp` public est l'allow-list `ipAllow`
 par credential de l'application ; les pages de consentement, `/me/*`, `/admin/*` et `/` restent privées. `cloudflare_named` ne
 change aucune autre garde (la liste blanche vit dans la garde de la passerelle, pas dans `facts.yml`).
@@ -1075,7 +1075,10 @@ inclus par `proof.yml` et par la sonde) et les mêmes critères, au plus `cfopul
   plus 5 tours de 12 requêtes par nom (≈ la moitié atteint chaque proxy quand il y en a deux). La couverture n'est PAS garantie, elle est bornée et
   constatée : un proxy que Cloudflare ne choisit jamais (secours du Load Balancer), un nom non proxifié, une règle de l'edge qui arrête la sonde (défi,
   WAF, limite de débit) restent refusés, avec le message d'avant ; un proxy de secours s'exclut par `--limit`.
-- Désactivation : `cfopull_probe: false` (`-e cfopull_probe=false`). `--check` : la sonde est jouée quand même (GET, comme la lecture du journal).
+- Désactivation : `cfopull_probe: false` (`-e cfopull_probe=false`). `--check` : la sonde n'est PAS jouée (trafic réel vers un nom public) ; la lecture du
+  journal l'est, le refus s'affiche tel quel avec une phrase qui le dit. Bornes : au plus 25 requêtes par tour et 10 tours (refusé au-delà), délai 8 s par
+  requête, 2 s entre deux tours ; la requête est anonyme et directe (`use_netrc`, `use_gssapi`, `force_basic_auth`, `use_proxy` à faux) ; un nom sondé ne
+  porte que lettres, chiffres, `.` et `-`.
 - Signal à surveiller : la ligne « sonde active » du play (nom, tours) puis « tour N, X réponse(s) sur Y » ; un refus après sonde dont les réponses sont
   toutes 403/5xx (défi Cloudflare) ou absentes (-1) dit que la sonde n'a pas atteint l'origine.
 

@@ -31,7 +31,8 @@
 # Requêtes : GET (idempotent) sur `cfopull_probe_path_by_name[<nom>]`, défaut `/` ; chemin écrit dans l'inventaire privé (group_vars du parc),
 # une URL de santé de préférence (`/api/v1/health` pour back.tradekong.app). Un paramètre `_ffprobe=<tour>-<n>-<aléa>` est ajouté pour
 # qu'un cache de l'edge ne serve pas la réponse sans atteindre l'origine (une réponse du cache ne laisse AUCUNE ligne). Un statut 4xx/5xx
-# n'est pas une erreur : nginx journalise la socket, c'est elle qui compte.
+# n'est pas une erreur : nginx journalise la socket, c'est elle qui compte. Bornes : au plus 25 requêtes par tour et 10 tours (assert ci-dessous),
+# une pause de 2 s entre deux tours. En `--check` la sonde n'est PAS jouée (trafic réel vers un nom public) : le refus s'affiche tel quel.
 - name: Fail on an invalid Authenticated Origin Pulls probe path
   ansible.builtin.assert:
     that:
@@ -39,10 +40,14 @@
       - cfopull_probe_path_by_name.values() | reject('string') | list | length == 0
       - cfopull_probe_path_by_name.values() | select('string') | reject('match', '/[A-Za-z0-9._~!$&()*+,;=:@%/?-]*(?!(?s:.))') | list | length == 0
       - (cfopull_probe_requests | int) >= 1
+      - (cfopull_probe_requests | int) <= 25
       - (cfopull_probe_rounds | int) >= 1
+      - (cfopull_probe_rounds | int) <= 10
+      - cfopull_probe_names | reject('match', '[A-Za-z0-9.-]+(?!(?s:.))') | list | length == 0
     fail_msg: >-
       `cfopull_probe_path_by_name` doit être { <nom public>: <chemin commençant par /, sans espace ni #> } et `cfopull_probe_requests`
-      et `cfopull_probe_rounds` des entiers >= 1. Rien n'a été envoyé ni touché.
+      et `cfopull_probe_rounds` des entiers entre 1 et 25 / 10 ; les noms sondés ne portent que lettres, chiffres, `.` et `-`. Rien n'a été
+      envoyé ni touché.
     quiet: true
   delegate_to: localhost
   become: false
