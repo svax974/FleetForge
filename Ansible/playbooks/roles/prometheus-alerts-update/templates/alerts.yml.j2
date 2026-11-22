@@ -1587,6 +1587,59 @@ groups:
             de l'arbre (`deploy-fleetforge.yml --tags ansible`).
 
 {% endif %}
+{% if 'tradekong' in prom_alert_groups %}
+
+  # ── TradeKong : états dégradés propres à l'application ─────────────────────
+  # `service_up{service="tradekong"} == 0` relève de `ServiceDown`. Séries du
+  # collecteur `tradekong-metrics.sh` de svcprobe (rôle `tradekong-monitoring`),
+  # lues en base : le back n'expose pas /metrics.
+  # Contrôle après déploiement : `count(tradekong_mcp_legacy_mark_done)` doit valoir 1,
+  # sinon ces règles sont décoratives.
+  - name: tradekong
+    rules:
+      # Au démarrage, le back marque UNE fois les clés trade larges d'avant le
+      # déploiement (`McpLegacyTradeKeyMarkBoot`) et en garde l'enregistrement. Si
+      # l'étape échoue (verrou, privilège, table absente) sur toutes les répliques,
+      # elle ne laisse rien : l'enregistrement reste absent et ces clés sont REFUSÉES
+      # (401, `wide-trade-key`) — échec fermé, sans autre signe qu'un journal. Un
+      # démarrage réussi pose l'enregistrement en quelques secondes : 30 min d'absence
+      # est un échec durable, pas un déploiement en cours.
+      - alert: TradeKongLegacyKeyMarkPending
+        expr: tradekong_mcp_legacy_mark_done{job="svcprobe"} == 0
+        for: 30m
+        keep_firing_for: {{ prom_alert_flap_grace }}
+        labels:
+          severity: warning
+        annotations:
+          summary: "TradeKong n'a pas marqué ses clés trade larges sur {{ '{{' }} $labels.instance {{ '}}' }}"
+          description: >-
+            L'enregistrement du marquage des clés trade larges d'avant le déploiement
+            est absent (`mcp_boot_record`) : l'étape de démarrage du back échoue, les
+            clés concernées sont refusées. Lire le journal du back
+            (`[McpTradeKeys] marking of the legacy wide trade keys failed`, trace
+            `mcp.keys.legacy-mark` / `failed`), corriger la cause, redémarrer le back.
+            Sur une base neuve sans clé large, cette alerte ne doit pas sonner : un
+            démarrage réussi écrit l'enregistrement même sans clé à marquer.
+
+      # Le contrôle que ce fichier réclame partout : le collecteur doit émettre
+      # tant que le service répond.
+      - alert: TradeKongMarkMetricMissing
+        expr: >-
+          service_up{service="tradekong"} == 1
+          unless on (instance) tradekong_mcp_legacy_mark_done
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Plus de métrique de marquage TradeKong sur {{ '{{' }} $labels.instance {{ '}}' }}'
+          description: >-
+            La sonde ne publie plus tradekong_mcp_legacy_mark_done : l'alerte
+            TradeKongLegacyKeyMarkPending ne voit plus rien (requête SQL en échec,
+            ni `mcp_boot_record` ni `config` lisibles). Chercher
+            svcprobe_metrics_error{service="tradekong"} et rejouer
+            `./play.sh <parc> deploy-tradekong.yml --tags monitoring`.
+
+{% endif %}
 {% if 'services' in prom_alert_groups %}
 
   # ── Sondes de service (svcprobe) ───────────────────────────────────────────

@@ -116,7 +116,7 @@ alertmanager_email_to:
   - ops@example.com
 # Groupes de règles chargés : ne déclarer que ceux dont les métriques existent
 # sur ce parc. Valeurs : availability, resources, database, papangmetrics,
-# bitcoin, dmarc, backups, services, astar, searxng, sync. [prometheus-alerts-update]
+# bitcoin, dmarc, backups, services, astar, searxng, sync, tradekong. [prometheus-alerts-update]
 prom_alert_groups: [availability, resources, services]
 # Seuils du groupe `sync` (défauts indiqués). [prometheus-alerts-update]
 # prom_alert_sync_down_for: 5m

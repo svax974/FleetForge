@@ -9,8 +9,8 @@
     {"name": "redis-port", "kind": "tcp", "host": "127.0.0.1", "port": {{ tkm_redis_port }}}
   ],
   "metrics_command": [
-    "{{ svcprobe_lib_dir }}/postgres-metrics.sh",
+    "{{ svcprobe_lib_dir }}/tradekong-metrics.sh",
     "{{ pgbak_container }}", "{{ pgbak_user }}", "{{ pgbak_db }}", "tradekong"
   ],
-  "metrics_timeout": 15
+  "metrics_timeout": 25
 }

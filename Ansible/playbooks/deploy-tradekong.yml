@@ -1,6 +1,11 @@
 ---
 # Supervision de TradeKong (postgres, redis, back, répartiteur), déployée hors
-# Ansible — ce playbook ne pose QUE la sonde svcprobe, il n'installe rien.
+# Ansible — ce playbook ne pose QUE la sonde svcprobe, son collecteur et les règles
+# d'alerte, il n'installe rien.
+#
+# Le groupe `tradekong` doit figurer dans `prom_alert_groups` du parc (group_vars) :
+# règles TradeKongLegacyKeyMarkPending (le marquage des clés trade larges, au démarrage
+# du back, a échoué : ces clés sont refusées) et TradeKongMarkMetricMissing.
 #
 #   ./play.sh web3c deploy-tradekong.yml
 #
@@ -21,3 +26,32 @@
   remote_user: "{{ remote_username }}"
   roles:
     - tradekong-monitoring
+
+# Règles d'alerte : jouées sur l'hôte Prometheus, par `delegate_to` depuis un hôte
+# TradeKong (un play `hosts: prometheus1:monitor` serait exclu par `--limit <hôte>`).
+# Une fois par run.
+- name: Règles d'alerte TradeKong
+  hosts: tradekong
+  remote_user: "{{ remote_username }}"
+  gather_facts: false
+  tags: [alerts, monitoring]
+  vars:
+    prom_alerts_target: "{{ prometheus_host }}"
+  tasks:
+    - name: Fail when the alert group is not enabled for this parc
+      ansible.builtin.assert:
+        that: "'tradekong' in prom_alert_groups"
+        fail_msg: >-
+          `tradekong` absent de `prom_alert_groups` (group_vars du parc) : les alertes
+          de marquage des clés trade larges ne seraient PAS chargées.
+      run_once: true
+
+    - name: Load the alert rules on the Prometheus host
+      ansible.builtin.include_role:
+        name: prometheus-alerts-update
+        apply:
+          delegate_to: "{{ prometheus_host if prometheus_host in groups['all'] else undef(hint='prometheus_host: not an inventory host') }}"
+          become: true
+          tags: [alerts, monitoring]
+      when: inventory_hostname == groups['tradekong'] | first
+      tags: [alerts, monitoring]

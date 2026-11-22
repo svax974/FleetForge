@@ -12,6 +12,19 @@
     public: true
   tags: [monitoring]
 
+# Collecteur : les métriques génériques de PostgreSQL (`postgres-metrics.sh`, posé
+# par `svcprobe-install`) PLUS l'état du marquage des clés trade larges de TradeKong
+# (`tradekong_mcp_legacy_mark_done`, règle `TradeKongLegacyKeyMarkPending`).
+- name: Deploy the tradekong metric collector
+  ansible.builtin.copy:
+    src: tradekong-metrics.sh
+    dest: "{{ svcprobe_lib_dir }}/tradekong-metrics.sh"
+    owner: root
+    group: root
+    mode: '0755'
+  become: true
+  tags: [monitoring]
+
 - name: Deploy the tradekong probe
   ansible.builtin.template:
     src: check.json.j2
