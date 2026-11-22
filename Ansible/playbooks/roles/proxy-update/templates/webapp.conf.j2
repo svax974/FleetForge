@@ -28,18 +28,23 @@
    `priority: true` pose `^~`, `access` remplace le mode par une liste NOMMÉE
    (`_named_access.inc` : serveurs nommés, whitelist filtrée, adresses VPN
    écartées, puis `deny all`).
-   Profil durci (`webapp_hardening` sur l'entrée) : X-Forwarded-For RÉÉCRIT
-   (`$remote_addr`, jamais complété) dans toutes les locations, amont en
+   X-Forwarded-For RÉÉCRIT (`$remote_addr`, jamais complété) dans toutes les locations
+   avec le profil durci (`webapp_hardening`), `cloudflare_named` OU `cloudflare_front` ;
+   sinon complété (`$proxy_add_x_forwarded_for`), comme avant.
+   Profil durci (`webapp_hardening` sur l'entrée) : de plus, amont en
    127.0.0.1 sur le proxy co-localisé (le pare-feu de l'app n'admet que les
    proxies DISTANTS), et AUCUN vhost sur un proxy à l'adresse d'un serveur VPN.
-   Sans profil : rendu inchangé. #}
+   Sans profil ni attribut Cloudflare : rendu inchangé. #}
 {% set _first = webapp_vhost_entries | first %}
 {% set _h = hostvars[_first] %}
 {% set _hardened = _h.webapp_hardening is defined %}
 {% set _vpn_addresses = groups['vpns'] | default([]) | map('extract', hostvars, 'ansible_host') | list %}
-{% set _xff = '$remote_addr' if _hardened else '$proxy_add_x_forwarded_for' %}
 {% set _pages = _h.cloudflare_front | default(false) | bool %}
 {% set _named = _h.cloudflare_named | default(false) | bool %}
+{# X-Forwarded-For RÉÉCRIT (`$remote_addr`, jamais complété) pour un nom durci, servi par Cloudflare (`cloudflare_named`) ou à API sur
+   Pages (`cloudflare_front`) : `$remote_addr` est alors l'adresse réelle (real_ip depuis CF-Connecting-IP), et un X-Forwarded-For fourni
+   par le client, qu'`$proxy_add_x_forwarded_for` conserverait en tête de chaîne, n'atteint pas l'application. Les autres noms : inchangé. #}
+{% set _xff = '$remote_addr' if (_hardened or _named or _pages) else '$proxy_add_x_forwarded_for' %}
 {% set _project = (_h.webapp_project | default(_first)) | lower | replace('_', '-') %}
 {% set _server_name = (_project ~ '-back.' ~ domain_name) if _pages else _h.proxy_hostname %}
 {% set _slug = _server_name | regex_replace('[^a-z0-9]', '_') %}

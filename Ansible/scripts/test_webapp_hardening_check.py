@@ -867,6 +867,18 @@ class VhostTests(unittest.TestCase):
         self.assertIn("X-Forwarded-For $remote_addr", text)
         self.assertIn("$proxy_add_x_forwarded_for", render_vhost(entry="plain"), "sans profil : inchangé")
 
+    def test_the_forwarded_address_is_overwritten_on_a_cloudflare_served_name_even_without_the_profile(self):
+        # Revue du 22/11/2026 (M1) : `$proxy_add_x_forwarded_for` garderait en tête de chaîne le X-Forwarded-For fourni par le client.
+        for attribute in ("cloudflare_named", "cloudflare_front"):
+            with self.subTest(attribute):
+                text = render_vhost(entry="plain", **{attribute: True})
+                self.assertNotIn("$proxy_add_x_forwarded_for", text)
+                self.assertGreaterEqual(text.count("X-Forwarded-For $remote_addr;"), 2)
+        locations = [{"path": "^/pub$", "regex": True, "mode": "public", "upstream": "back"}]
+        text = render_vhost(entry="plain", cloudflare_named=True, webapp_vhost_locations=locations)
+        self.assertNotIn("$proxy_add_x_forwarded_for", text, "aussi dans les locations déclarées")
+        self.assertIn("$proxy_add_x_forwarded_for", render_vhost(entry="plain", cloudflare_named=False), "un nom ordinaire : inchangé")
+
     def test_mcp_goes_to_the_back_lb_and_the_rest_to_the_front(self):
         remote = render_vhost("proxy3")
         self.assertIn("http://192.0.2.10:4731;", check.mcp_block(remote))
@@ -4013,6 +4025,19 @@ class PublicEdgeProbeTests(unittest.TestCase):
             self.assertTrue(any("X-FFG-Origin" in e for e in vhost_errors(mutated, public=True)), location["path"])
         self.assertTrue(vhost_errors(mutate(text, "~* ^/mcp(/.*)?$", header, "add_header X-FFG-Origin other always;"), public=True))
         self.assertTrue(vhost_errors(mutate(text, "~* ^/mcp(/.*)?$", header, "add_header X-FFG-Origin cert-required;"), public=True), "sans `always`")
+
+    def test_a_regex_path_accepts_a_literal_dot_in_brackets_but_never_a_backslash(self):
+        # Revue du 22/11/2026 (L2) : `[.]` pour un point littéral (`.well-known`), sans admettre `\\`.
+        play = lambda **location: run_local_play(FACTS_PLAY, guard_inventory(webapp_vhost_locations=[dict(regex=True, **location)]),
+                                                 {"apps.yml": "fleetforge-gateway: /nonexistent/app/\n"})
+        code, out = play(path="^/[.]well-known/oauth-authorization-server$", raw_uri="^/[.]well-known/oauth-authorization-server([?]|$)")
+        self.assertEqual(code, 0, out[-1500:])
+        for label, location in (("backslash", {"path": "^/\\.well-known/x$"}), ("brace", {"path": "^/a{2}$"}), ("space", {"path": "^/a b$"}),
+                                ("semicolon", {"path": "^/[;]x$"})):
+            with self.subTest(label):
+                code, out = play(**location)
+                self.assertNotEqual(code, 0, out[-1500:])
+                self.assertIn("hors grammaire", out)
 
     def test_the_trailing_newline_grammar_is_closed(self):
         # `$` d'une regex Python accepte « x\n » ; `\Z` non. Les valeurs entrent dans le vhost et dans une commande de sonde.
