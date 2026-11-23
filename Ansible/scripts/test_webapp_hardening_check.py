@@ -621,12 +621,45 @@ class CoverageTests(unittest.TestCase):
         errors, _, _ = check.check_coverage(PLAYBOOKS)
         self.assertEqual(errors, [])
 
+    def test_an_empty_or_malformed_required_list_fails_closed(self):
+        """Ni `ffg_required_denies` ni `ffg_required_denies_run` ne peuvent être vides, absents ou autre chose qu'une liste."""
+        defaults = check.coverage_defaults(PLAYBOOKS)
+        good_denies, good_run = defaults["ffg_required_denies"], defaults["ffg_required_denies_run"]
+        for bad in ([], "update-ufw-all.yml", {"a": 1}, 3):
+            errors, _, _ = check.check_coverage(PLAYBOOKS, run_denies=bad)
+            self.assertTrue(any("ffg_required_denies_run vide, absent ou qui n'est pas une liste" in e for e in errors), (bad, errors))
+            self.assertFalse(any("ffg_required_denies vide" in e for e in errors), errors)
+            errors, _, _ = check.check_coverage(PLAYBOOKS, denies=bad)
+            self.assertTrue(any("ffg_required_denies vide, absent ou qui n'est pas une liste" in e for e in errors), (bad, errors))
+        errors, _, _ = check.check_coverage(PLAYBOOKS, denies=good_denies, run_denies=good_run)
+        self.assertEqual(errors, [])
+
+    def test_a_defaults_file_without_the_run_list_fails_closed(self):
+        """Sans `ffg_required_denies_run` dans le fichier lui-même (pas d'override) : refus, jamais « rien à exiger »."""
+        with tempfile.TemporaryDirectory() as tmp:
+            for key, value in (("ffg_required_denies_run", None), ("ffg_required_denies_run", []), ("ffg_required_denies_run", "x.yml"),
+                               ("ffg_required_denies", [])):
+                defaults = dict(check.coverage_defaults(PLAYBOOKS))
+                if value is None:
+                    defaults.pop(key)
+                else:
+                    defaults[key] = value
+                role = os.path.join(tmp, "roles", "fleetforge-install", "defaults")
+                os.makedirs(role, exist_ok=True)
+                with open(os.path.join(role, "main.yml"), "w", encoding="utf-8") as handle:
+                    json.dump(defaults, handle)  # JSON est du YAML
+                for name in os.listdir(PLAYBOOKS):
+                    if name.endswith(".yml") and not os.path.exists(os.path.join(tmp, name)):
+                        os.symlink(os.path.join(PLAYBOOKS, name), os.path.join(tmp, name))
+                errors, _, _ = check.check_coverage(tmp)
+                self.assertTrue(any(f"{key} vide, absent ou qui n'est pas une liste" in e for e in errors), (key, value, errors))
+
     def test_the_gateway_mirror_patterns_exist_and_never_touch_the_allow_list(self):
         defaults = check.coverage_defaults(PLAYBOOKS)
         denies = defaults["ffg_required_denies"]
         for pattern in ["temp.yml", "restore-*.yml", "failover-*.yml", "switch-*.yml", "rebuild-*-replica.yml", "duplicate-*.yml",
                         "migrate-*.yml", "seed-*.yml", "sync-catalog-*.yml", "export-*-keys.yml", "prune-*.yml",
-                        "retarget-backups*.yml", "deploy-cloudflare-*.yml"]:
+                        "retarget-backups*.yml", "deploy-cloudflare-*.yml", "deploy-backup.yml", "backup-*.yml"]:
             self.assertIn(pattern, denies)
             self.assertTrue(any(check.matches_playbook([pattern], n) for n in os.listdir(PLAYBOOKS) if n.endswith(".yml")), pattern)
 
@@ -2789,6 +2822,31 @@ class GuardTests(unittest.TestCase):
             code, out = self.accounts_check(bad)
             self.assertNotEqual(code, 0, bad)
             self.assertIn("Compte de la passerelle", out)
+
+    def test_an_empty_or_malformed_required_deny_list_stops_both_guards(self):
+        """L5 : `ffg_required_denies` / `ffg_required_denies_run` vides ou qui ne sont pas des listes : refus (échec fermé),
+        par la garde de la passerelle ET par celle des comptes (un `difference` d'une liste vide passerait tout compte)."""
+        good = guard_inventory()["all"]["children"]["infras"]["hosts"]["infra1"]["ff_api_accounts"]
+        play = textwrap.dedent("""\
+            - hosts: localhost
+              gather_facts: false
+              tasks:
+                - ansible.builtin.include_role:
+                    name: fleetforge-install
+                    tasks_from: api-accounts-gateway
+                - ansible.builtin.debug: {msg: ACCOUNTS=OK}
+            """)
+        for key in ("ffg_required_denies", "ffg_required_denies_run"):
+            for bad in ([], "update-ufw-all.yml", {"a": 1}, None, [1, 2]):
+                with self.subTest(key=key, bad=bad):
+                    extra = json.dumps({"ff_api_accounts": good, key: bad})
+                    code, out = run_local_play(play, args=["-e", extra])
+                    self.assertNotEqual(code, 0, out[-1500:])
+                    self.assertIn("doivent être des listes de motifs", out)
+                    code, out = run_local_play(GUARD_PLAY, guard_inventory(), {"apps.yml": "fleetforge-gateway: /nonexistent/app/\n"},
+                                               args=["-e", json.dumps({key: bad})])
+                    self.assertNotEqual(code, 0, out[-1500:])
+                    self.assertIn("doivent être des listes de motifs", out)
 
     def test_the_account_names_a_gateway_uses_must_carry_the_ffg_prefix(self):
         # Quatrième revue : `users: {run: deployer}` faisait utiliser à la passerelle un compte que les bornes des

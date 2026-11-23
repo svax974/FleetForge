@@ -385,6 +385,9 @@ ffg_required_denies:
   - "prune-*.yml"
   - "retarget-backups*.yml"
   - "deploy-cloudflare-*.yml"
+  # Tâches de sauvegarde (destinations, jobs) : refusées en check comme en run réel.
+  - "deploy-backup.yml"
+  - "backup-*.yml"
 
 # Refus en run RÉEL seulement, en plus de `ffg_required_denies` : le compte `ffg_run` les porte, `ffg_check` non (un check
 # de ces playbooks reste utile et acceptable ; un run réel peut verrouiller l'accès — pare-feu, SSH, VPN, certificats — ou

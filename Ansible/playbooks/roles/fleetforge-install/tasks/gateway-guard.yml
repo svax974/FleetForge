@@ -21,6 +21,21 @@
       (`fleetforge` exclut la passerelle, même avec un `-e webapp=…`).
     quiet: true
 
+- name: Check the required deny lists are non-empty lists of patterns
+  # Échec fermé : une liste vide ou qui n'est pas une liste ferait passer tout compte (`difference` d'une liste vide = rien à exiger).
+  ansible.builtin.assert:
+    that:
+      - (ffg_required_denies | default(none) | type_debug) == 'list'
+      - ffg_required_denies | length > 0
+      - ffg_required_denies | select('string') | list | length == ffg_required_denies | length
+      - (ffg_required_denies_run | default(none) | type_debug) == 'list'
+      - ffg_required_denies_run | length > 0
+      - ffg_required_denies_run | select('string') | list | length == ffg_required_denies_run | length
+    fail_msg: >-
+      `ffg_required_denies` et `ffg_required_denies_run` (fleetforge-install/defaults) doivent être des listes de motifs
+      NON vides : une liste vide ou d'un autre type ne bornerait aucun compte de la passerelle.
+    quiet: true
+
 - name: Check the gateway entry is dedicated, private and hardened
   vars:
     # `/mcp` : UNE seule location, relayée au back-lb, URI brute contrôlée, soit derrière une liste nommée (E1), soit en

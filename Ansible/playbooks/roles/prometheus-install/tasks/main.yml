@@ -58,8 +58,8 @@
     group: "{{ remote_username }}"
     mode: "0640"
   become: true
-  # web.yml porte l'empreinte du mot de passe : ni diff ni sortie de tâche.
-  no_log: true
+  # web.yml porte l'empreinte du mot de passe : pas de diff. Pas de `no_log` : `template` ne renvoie pas le contenu, et
+  # no_log masquerait l'erreur réelle d'un rendu en échec.
   diff: false
   notify: reload prometheus
 
@@ -100,8 +100,8 @@
     # Contient les identifiants d'auto-scrape.
     mode: "0640"
   become: true
-  # Contient `prometheus_pass` en clair : ni diff ni sortie de tâche.
-  no_log: true
+  # Contient `prometheus_pass` en clair : pas de diff. Pas de `no_log` : `template` ne renvoie pas le contenu, et no_log
+  # masquerait l'erreur réelle d'un rendu en échec.
   diff: false
   notify: reload prometheus
 

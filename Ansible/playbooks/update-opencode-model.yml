@@ -23,6 +23,8 @@
 - name: Mise à jour du modèle par défaut d'opencode
   hosts: all
   remote_user: "{{ remote_username }}"
+  # Le contrôle de `--limit` ci-dessous doit précéder tout contact : pas de collecte de faits avant lui.
+  gather_facts: false
   pre_tasks:
     - name: Refuse to run without an explicit --limit
       ansible.builtin.assert:

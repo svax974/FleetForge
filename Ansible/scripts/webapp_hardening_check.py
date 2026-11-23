@@ -623,19 +623,30 @@ def coverage_defaults(playbooks_dir):
     return _load(os.path.join(playbooks_dir, "roles", "fleetforge-install", "defaults", "main.yml")) or {}
 
 
-def check_coverage(playbooks_dir, denies=None, allowed=None):
+def _required_list(defaults, key, override):
+    """Liste de motifs exigée : `override` si donné, sinon `defaults[key]` ; (liste de chaînes, None) ou ([], message)
+    quand elle est absente, vide ou n'est pas une liste (échec fermé : jamais « rien à exiger »)."""
+    raw = defaults.get(key) if override is None else override
+    if not isinstance(raw, list) or not raw:
+        return [], f"{key} vide, absent ou qui n'est pas une liste"
+    return [str(p) for p in raw], None
+
+
+def check_coverage(playbooks_dir, denies=None, allowed=None, run_denies=None):
     defaults = coverage_defaults(playbooks_dir)
-    denies = [str(p) for p in (defaults.get("ffg_required_denies") or [] if denies is None else denies)]
+    where = f"{playbooks_dir}/roles/fleetforge-install/defaults/main.yml"
+    denies, denies_problem = _required_list(defaults, "ffg_required_denies", denies)
+    run_denies, run_problem = _required_list(defaults, "ffg_required_denies_run", run_denies)
     allowed = [str(p) for p in (defaults.get("ffg_allowed_playbooks") or [] if allowed is None else allowed)]
     sensitive, targets = sensitive_playbooks(playbooks_dir)
     errors = []
-    if not denies:
-        errors.append(f"{playbooks_dir}/roles/fleetforge-install/defaults/main.yml : ffg_required_denies vide ou absent")
+    for problem in (denies_problem, run_problem):
+        if problem:
+            errors.append(f"{where} : {problem}")
     for name in sorted(sensitive):
         if not matches_playbook(denies, name) and name not in allowed:
             errors.append(f"{playbooks_dir}/{name}: playbook sensible ({sorted(targets[name][0])[:3]}) ni refusé "
                           f"par ffg_required_denies ni dans ffg_allowed_playbooks")
-    run_denies = [str(p) for p in defaults.get("ffg_required_denies_run") or []]
     for name in allowed:
         if matches_playbook(denies, name):
             errors.append(f"ffg_allowed_playbooks : {name} est refusé par ffg_required_denies (le refus l'emporte)")

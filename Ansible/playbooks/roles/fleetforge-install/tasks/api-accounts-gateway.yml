@@ -6,6 +6,21 @@
 # AUTRE compte (`accept_checks_from`, `accept_own_checks: false`) ; read sans liste ni checks. Aucune connexion :
 # fichier joué hors ligne par scripts/test_webapp_hardening_check.py.
 
+- name: Check the required deny lists are non-empty lists of patterns
+  # Échec fermé : une liste vide ou qui n'est pas une liste ferait passer tout compte (`difference` d'une liste vide = rien à exiger).
+  ansible.builtin.assert:
+    that:
+      - (ffg_required_denies | default(none) | type_debug) == 'list'
+      - ffg_required_denies | length > 0
+      - ffg_required_denies | select('string') | list | length == ffg_required_denies | length
+      - (ffg_required_denies_run | default(none) | type_debug) == 'list'
+      - ffg_required_denies_run | length > 0
+      - ffg_required_denies_run | select('string') | list | length == ffg_required_denies_run | length
+    fail_msg: >-
+      `ffg_required_denies` et `ffg_required_denies_run` (fleetforge-install/defaults) doivent être des listes de motifs
+      NON vides : une liste vide ou d'un autre type ne bornerait aucun compte de la passerelle.
+    quiet: true
+
 # Les comptes que la passerelle UTILISE sont ceux de `ffg_upstreams[].users` (défaut `ffg_default_users`) : un nom
 # renommé hors du préfixe `ffg_` (`users: {run: deployer}`) échapperait aux bornes ci-dessous. Préfixe IMPOSÉ, pour
 # toute entrée de `fleetforge_gateways` du parc (quatrième revue).
