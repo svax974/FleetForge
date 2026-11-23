@@ -36,7 +36,7 @@
       - item.mode | default('read') in ['read', 'check', 'run']
       - item.mode | default('read') != 'read' or (item.allow_playbooks is not defined and item.accept_checks_from is not defined)
       - item.mode | default('read') == 'read' or (item.allow_playbooks | default([]) | sort) == (ffg_allowed_playbooks | sort)
-      - item.mode | default('read') == 'read' or ffg_required_denies | difference(_denies) | length == 0
+      - item.mode | default('read') == 'read' or (ffg_required_denies + (ffg_required_denies_run if item.mode == 'run' else [])) | difference(_denies) | length == 0
       - item.mode | default('read') == 'read' or _denied_allowed | length == 0
       - item.mode | default('read') == 'read' or item.max_hosts is defined
       - item.mode | default('read') != 'run' or not (item.accept_own_checks | default(true) | bool)
@@ -46,7 +46,7 @@
     fail_msg: >-
       Compte de la passerelle `{{ item.user }}` invalide : check/run avec `allow_playbooks` =
       {{ ffg_allowed_playbooks | join(', ') }} exactement, `deny_playbooks` ⊇ ffg_required_denies
-      (fleetforge-install/defaults) sans toucher la liste blanche, `max_hosts` ; run avec `accept_checks_from` (un compte
+      (+ ffg_required_denies_run pour run ; fleetforge-install/defaults) sans toucher la liste blanche, `max_hosts` ; run avec `accept_checks_from` (un compte
       ffg_ check) et `accept_own_checks: false` ; read sans liste ni checks ; jamais `allow_extra_vars`/`allow_diff`.
     quiet: true
   loop: "{{ ff_api_accounts | default([]) | selectattr('user', 'defined') | selectattr('user', 'match', '^ffg_') | list }}"

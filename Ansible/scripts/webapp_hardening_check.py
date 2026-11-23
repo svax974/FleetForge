@@ -635,9 +635,12 @@ def check_coverage(playbooks_dir, denies=None, allowed=None):
         if not matches_playbook(denies, name) and name not in allowed:
             errors.append(f"{playbooks_dir}/{name}: playbook sensible ({sorted(targets[name][0])[:3]}) ni refusé "
                           f"par ffg_required_denies ni dans ffg_allowed_playbooks")
+    run_denies = [str(p) for p in defaults.get("ffg_required_denies_run") or []]
     for name in allowed:
         if matches_playbook(denies, name):
             errors.append(f"ffg_allowed_playbooks : {name} est refusé par ffg_required_denies (le refus l'emporte)")
+        if matches_playbook(run_denies, name):
+            errors.append(f"ffg_allowed_playbooks : {name} est refusé par ffg_required_denies_run (le refus l'emporte)")
         if name not in targets:
             errors.append(f"ffg_allowed_playbooks : {name} n'existe pas")
     launchable = sorted(n for n in targets if not matches_playbook(denies, n))

@@ -610,6 +610,26 @@ class CoverageTests(unittest.TestCase):
         errors, _, _ = check.check_coverage(PLAYBOOKS, allowed=allowed + ["setup-server.yml"])
         self.assertTrue(any("setup-server.yml est refusé" in e for e in errors))
 
+    def test_the_run_only_denies_exist_and_never_touch_the_allow_list(self):
+        defaults = check.coverage_defaults(PLAYBOOKS)
+        run_only, allowed = defaults["ffg_required_denies_run"], defaults["ffg_allowed_playbooks"]
+        self.assertEqual(len(run_only), len(set(run_only)))
+        for name in allowed:
+            self.assertFalse(check.matches_playbook(run_only, name), name)
+        for pattern in run_only:  # chaque motif désigne au moins un playbook réel
+            self.assertTrue(any(check.matches_playbook([pattern], n) for n in os.listdir(PLAYBOOKS) if n.endswith(".yml")), pattern)
+        errors, _, _ = check.check_coverage(PLAYBOOKS)
+        self.assertEqual(errors, [])
+
+    def test_the_gateway_mirror_patterns_exist_and_never_touch_the_allow_list(self):
+        defaults = check.coverage_defaults(PLAYBOOKS)
+        denies = defaults["ffg_required_denies"]
+        for pattern in ["temp.yml", "restore-*.yml", "failover-*.yml", "switch-*.yml", "rebuild-*-replica.yml", "duplicate-*.yml",
+                        "migrate-*.yml", "seed-*.yml", "sync-catalog-*.yml", "export-*-keys.yml", "prune-*.yml",
+                        "retarget-backups*.yml", "deploy-cloudflare-*.yml"]:
+            self.assertIn(pattern, denies)
+            self.assertTrue(any(check.matches_playbook([pattern], n) for n in os.listdir(PLAYBOOKS) if n.endswith(".yml")), pattern)
+
     def test_the_glob_follows_fleetforge(self):
         self.assertTrue(check.matches_playbook(["*-fleetforge.yml"], "deploy-fleetforge.yaml"))
         self.assertTrue(check.matches_playbook(["deploy-?pn*"], "deploy-vpn.yml"))
@@ -2377,12 +2397,14 @@ def guard_inventory(**gateway):
     }
     gw.update(gateway)
     allow = ["update-prometheus-alerts.yml", "check-monitoring.yml"]
-    denies = check.coverage_defaults(PLAYBOOKS)["ffg_required_denies"]
+    defaults = check.coverage_defaults(PLAYBOOKS)
+    denies = defaults["ffg_required_denies"]
+    run_denies = denies + defaults["ffg_required_denies_run"]  # le compte run porte aussi les refus du run réel
     accounts = [
         {"user": "ffg_read", "mode": "read"},
         {"user": "ffg_check", "mode": "check", "max_hosts": 5, "allow_playbooks": allow, "deny_playbooks": denies},
         {"user": "ffg_run", "mode": "run", "max_hosts": 5, "accept_checks_from": ["ffg_check"], "accept_own_checks": False,
-         "allow_playbooks": allow, "deny_playbooks": denies},
+         "allow_playbooks": allow, "deny_playbooks": run_denies},
     ]
     return {"all": {
         "vars": {"remote_username": "srvc", "domain_name": "example.test", "parc_name": "demo", "whitelist": []},
@@ -2758,6 +2780,7 @@ class GuardTests(unittest.TestCase):
                        lambda a: a[2].pop("accept_checks_from"),
                        lambda a: a[1].update(allow_playbooks=["setup-server.yml"]),
                        lambda a: a[1].update(deny_playbooks=["temp.yml"]),
+                       lambda a: a[2].update(deny_playbooks=[p for p in a[2]["deny_playbooks"] if p != "deploy-vpn.yml"]),
                        lambda a: a[1].pop("max_hosts"),
                        lambda a: a[1].update(allow_extra_vars=True),
                        lambda a: a[0].update(allow_playbooks=["check-monitoring.yml"])):

@@ -368,6 +368,39 @@ ffg_required_denies:
   - "update-journald-all*"
   - "update-loadtest-scrape*"
   - "update-opencode-model*"
+  # Miroir LITTÉRAL de GLOBAL_DENY_PLAYBOOKS de la passerelle (back/src/modules/fleetforge-gateway/policy/playbookGlob.ts,
+  # refusé en check COMME en run réel) : le spec playbookGlob.spec.ts de la passerelle lit ce fichier et exige chacun de ses
+  # motifs ici, tel quel. Les motifs ci-dessus plus larges (`restore-*`, `*timescale*`, `migrate-*`…) restent : cette liste
+  # est un MINIMUM, jamais une égalité. Données déplacées, topologie de la base, secrets exportés, destinations de sauvegarde.
+  - "temp.yml"
+  - "restore-*.yml"
+  - "failover-*.yml"
+  - "switch-*.yml"
+  - "rebuild-*-replica.yml"
+  - "duplicate-*.yml"
+  - "migrate-*.yml"
+  - "seed-*.yml"
+  - "sync-catalog-*.yml"
+  - "export-*-keys.yml"
+  - "prune-*.yml"
+  - "retarget-backups*.yml"
+  - "deploy-cloudflare-*.yml"
+
+# Refus en run RÉEL seulement, en plus de `ffg_required_denies` : le compte `ffg_run` les porte, `ffg_check` non (un check
+# de ces playbooks reste utile et acceptable ; un run réel peut verrouiller l'accès — pare-feu, SSH, VPN, certificats — ou
+# écrire sur toute la zone Cloudflare). Miroir LITTÉRAL de GLOBAL_DENY_PLAYBOOKS_RUN de la passerelle (même spec). Aucun
+# motif ne doit toucher `ffg_allowed_playbooks`.
+ffg_required_denies_run:
+  - "update-ufw-all.yml"
+  - "update-sshd-security.yml"
+  - "update-security-*.yml"
+  - "update-cloudflare-dns.yml"
+  - "update-cloudflare-rules.yml"
+  - "deploy-vpn.yml"
+  - "install-vpn-routes.yml"
+  - "deploy-install-cert.yml"
+  - "update-papanglabs-back.yml"
+  - "update-loadtest-scrape.yml"
 
 # LISTE BLANCHE des comptes `ffg_check` / `ffg_run` (décision du propriétaire, 15/11/2026) : EXACTEMENT ces
 # playbooks, posés en `allow_playbooks` sur les deux comptes et vérifiés par la garde. Aucun motif de

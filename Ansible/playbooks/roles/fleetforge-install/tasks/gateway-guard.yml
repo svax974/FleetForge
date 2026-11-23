@@ -261,7 +261,8 @@
       - not (_run.accept_own_checks | default(true) | bool)
       - _check.max_hosts is defined and _run.max_hosts is defined
       - ffg_required_denies | difference(_check.deny_playbooks | default([])) | length == 0
-      - ffg_required_denies | difference(_run.deny_playbooks | default([])) | length == 0
+      # Le compte run porte EN PLUS les refus du run réel seulement (`ffg_required_denies_run`) ; le compte check, non.
+      - (ffg_required_denies + ffg_required_denies_run) | difference(_run.deny_playbooks | default([])) | length == 0
       # Liste blanche EXACTE (décision du propriétaire), et aucun motif de refus du compte ne la touche.
       - (_check.allow_playbooks | default([]) | sort) == (ffg_allowed_playbooks | sort)
       - (_run.allow_playbooks | default([]) | sort) == (ffg_allowed_playbooks | sort)
@@ -277,7 +278,7 @@
       `ff_api_accounts` {{ _users.read }} (read), {{ _users.check }} (check, max_hosts) et {{ _users.run }} (run,
       max_hosts, accept_checks_from: [{{ _users.check }}], accept_own_checks: false) couvrant les parcs
       {{ item.parcs | default([]) | join(', ') }}, check et run avec `allow_playbooks` = {{ ffg_allowed_playbooks | join(', ') }}
-      et refusant {{ ffg_required_denies | join(', ') }} ; trois noms distincts, aucun égal au compte d'AgentHub
+      et refusant {{ ffg_required_denies | join(', ') }} (le compte run aussi : {{ ffg_required_denies_run | join(', ') }}) ; trois noms distincts, aucun égal au compte d'AgentHub
       (`ff_api_user`) ; `webapp_env_from_vault` de la passerelle : {{ _slots.keys() | join(', ') }} ; hors 443 : `dedicated_listeners`
       de l'entrée avec le port {{ _up_port }} et `clients: [{{ inventory_hostname }}]` ; la sonde `webapp_upstream_checks`
       de cet amont vise https://{{ _authority }}/…
