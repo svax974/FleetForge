@@ -8,6 +8,8 @@
 # déploiement, sans attendre update-cloudflare-dns.yml (CLAUDE.md, « Obligation
 # DNS + vhost pour un service nommé »). Sans attribut propre, `proxy_hostname`
 # hérite du front du parc : rien à publier (web3c `monitor`).
+# Jamais en --check : le rôle appelle l'API Cloudflare (hors hôte, pas d'équivalent
+# de simulation). Run réel inchangé.
 - name: Ensure the service CNAME to the canonical proxy front
   ansible.builtin.include_role:
     name: cloudflare-dns-update
@@ -15,7 +17,9 @@
   vars:
     cfdns_cname_scope:
       - "{{ inventory_hostname }}"
-  when: proxy_hostname | default('') not in ['', 'proxy.' ~ domain_name]
+  when:
+    - proxy_hostname | default('') not in ['', 'proxy.' ~ domain_name]
+    - not ansible_check_mode
 
 - name: Install required Python packages
   ansible.builtin.apt:
@@ -54,6 +58,9 @@
     group: "{{ remote_username }}"
     mode: "0640"
   become: true
+  # web.yml porte l'empreinte du mot de passe : ni diff ni sortie de tâche.
+  no_log: true
+  diff: false
   notify: reload prometheus
 
 - name: Create the scrape credentials directory
@@ -93,6 +100,9 @@
     # Contient les identifiants d'auto-scrape.
     mode: "0640"
   become: true
+  # Contient `prometheus_pass` en clair : ni diff ni sortie de tâche.
+  no_log: true
+  diff: false
   notify: reload prometheus
 
 # Les règles d'alerte sont déployées par `prometheus-alerts-update`, partagé

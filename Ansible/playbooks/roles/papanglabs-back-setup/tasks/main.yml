@@ -30,6 +30,8 @@
   delay: "{{ pgb_health_delay }}"
   until: pgb_health.status is defined and pgb_health.status == 200
   changed_when: false
+  # En --check les conteneurs n'ont pas été (re)démarrés : sonde sans objet.
+  when: not ansible_check_mode
 
 # Un conteneur absent de `docker compose ps` alors qu'il figure dans
 # `pgb_services` est le symptôme exact de l'incident ci-dessus : la chaîne de
@@ -41,10 +43,13 @@
   become: true
   register: pgb_ps
   changed_when: false
+  when: not ansible_check_mode
 
 - name: Fail when a service is not running
   ansible.builtin.fail:
     msg: >-
       Service(s) non démarré(s) : {{ pgb_services | reject('in', pgb_ps.stdout) | list | join(', ') }}.
       État relevé : {{ pgb_ps.stdout_lines | join(' | ') }}.
-  when: pgb_services | reject('in', pgb_ps.stdout) | list | length > 0
+  when:
+    - not ansible_check_mode
+    - pgb_services | reject('in', pgb_ps.stdout) | list | length > 0

@@ -102,6 +102,9 @@
     group: "{{ pgb_user }}"
     mode: '0600'
   become: true
+  # Secrets (Supabase, clés API) : ni diff ni sortie de tâche.
+  no_log: true
+  diff: false
   tags: [code, config]
 
 - name: Deploy the application env file (compose interpolation)
@@ -112,6 +115,8 @@
     group: "{{ pgb_user }}"
     mode: '0600'
   become: true
+  no_log: true
+  diff: false
   tags: [code, config]
 
 # Le back s'identifie par cette valeur pour les quotas de runs par serveur.
@@ -126,6 +131,9 @@
     group: "{{ pgb_user }}"
     mode: '0600'
   become: true
+  # Le diff d'un lineinfile montre le contexte du .env : pas de diff.
+  no_log: true
+  diff: false
   tags: [code, config]
 
 # Construction sur la machine, et non via un contexte Docker distant comme le

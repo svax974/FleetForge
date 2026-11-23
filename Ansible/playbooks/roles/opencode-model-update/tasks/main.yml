@@ -63,7 +63,13 @@
     timeout: 60
   register: opencode_smoke
   failed_when: false
-  when: opencode_smoke_test and opencode_model.startswith('opencode/')
+  # Jamais en --check : un POST réel consomme du quota chez opencode.ai (le
+  # module `uri` ne le simule pas). Sauté, `opencode_smoke.skipped` est vrai et
+  # la tâche suivante ne tire pas.
+  when:
+    - not ansible_check_mode
+    - opencode_smoke_test
+    - opencode_model.startswith('opencode/')
 
 - name: Fail when the model does not answer
   ansible.builtin.fail:
@@ -108,6 +114,8 @@
   register: opencode_current
   become: true
   failed_when: false
+  # Le fichier peut porter des clés de fournisseurs.
+  no_log: true
 
 # Une configuration absente signifie qu'`opencode-install` n'a pas tourné pour
 # ce compte. En créer une ici donnerait un fichier sans le bloc `provider`,
@@ -139,6 +147,10 @@
   loop_control:
     label: "{{ item.item.user }}"
   become: true
+  # Le contenu écrit est la configuration entière (clés de fournisseurs
+  # comprises) : ni diff ni sortie de tâche.
+  no_log: true
+  diff: false
 
 - name: Drop the model remembered by the TUI
   ansible.builtin.file:

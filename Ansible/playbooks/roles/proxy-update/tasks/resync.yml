@@ -148,6 +148,9 @@
         dest: "{{ proxy_update_nginx_dir }}/sites-enabled/{{ item | basename }}"
         owner: "{{ proxy_update_owner }}"
         group: "{{ proxy_update_group }}"
+      # Les vhosts rendus portent des clés d'API (searxng, rotki) : pas de diff.
+      # Pas de `no_log` : il masquerait les erreurs de rendu d'un run réel.
+      diff: false
       with_fileglob:
         - "{{ proxy_update_dir }}/sites-enabled/*"
       # `_*` : fichiers partiels inclus par d'autres gabarits, jamais des vhosts —

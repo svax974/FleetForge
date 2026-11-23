@@ -66,10 +66,12 @@
   # verdict exploitable et la bascule ci-dessous ne se déclencherait jamais.
   check_mode: false
 
+# Jamais en --check : une simulation ne bascule pas le mode de connexion.
 - name: Fall back to password authentication
   when:
     - preflight_ping_key is failed or preflight_ping_key is unreachable
     - initial_ssh_pass is defined
+    - not ansible_check_mode
   block:
     - name: Force password-only authentication for this host
       ansible.builtin.set_fact:

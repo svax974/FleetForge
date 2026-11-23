@@ -129,6 +129,8 @@
     - (preflight_missing.stdout | default('')) | length > 0
     - not (preflight_remediate | bool)
 
+# Les remédiations (ici et plus bas) ne se jouent JAMAIS en --check : une
+# simulation ne doit lancer aucun rôle de réparation. Run réel inchangé.
 - name: Install the missing baseline packages
   ansible.builtin.include_role:
     name: "{{ item }}"
@@ -141,6 +143,7 @@
   when:
     - (preflight_missing.stdout | default('')) | length > 0
     - preflight_remediate | bool
+    - not ansible_check_mode
 
 - name: Install Docker when the service requires it
   ansible.builtin.include_role:
@@ -151,6 +154,7 @@
     - preflight_require_docker | bool
     - "'docker' in (preflight_missing.stdout | default(''))"
     - preflight_remediate | bool
+    - not ansible_check_mode
 
 - name: Record the baseline
   ansible.builtin.include_role:
@@ -248,6 +252,7 @@
   when:
     - preflight_nodeexp.status | default(0) != 200
     - preflight_remediate | bool
+    - not ansible_check_mode
 
 - name: Record node_exporter
   ansible.builtin.include_role:
@@ -309,6 +314,7 @@
   when:
     - preflight_registered_as | length == 0
     - preflight_remediate | bool
+    - not ansible_check_mode
 
 # `exporter-sys-install/target` dépose `<inventory_hostname>.json` : la machine
 # est désormais enregistrée sous ce nom-là. Sans cette reprise, la variable
