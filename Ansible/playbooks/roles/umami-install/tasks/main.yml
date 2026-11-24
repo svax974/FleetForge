@@ -14,10 +14,9 @@
     msg: "umami_hash_salt is required. Define it (vault-encrypted) in group_vars/papanglabs.yml."
   when: umami_hash_salt is not defined or umami_hash_salt == ""
 
-- name: Install Docker (if not already present)
-  ansible.builtin.include_role:
-    name: docker-install
-  when: ansible_facts.services is not defined or 'docker' not in ansible_facts.services
+# Docker : garanti par `host-preflight` (preflight_require_docker, play de contrôle de deploy-umami.yml),
+# qui installe `install-docker` si absent — pas de seconde installation ici (l'ancien include
+# `docker-install` échouait sur les Debian sans `apt-key`).
 
 - name: Create Umami data directory
   ansible.builtin.file:
@@ -44,6 +43,7 @@
     owner: root
     group: root
     mode: "0600"
+  become: true
   notify: restart umami
 
 - name: Pull Umami Docker image
@@ -51,9 +51,11 @@
     name: "{{ umami_image }}"
     source: pull
     force_source: true
+  become: true
 
 - name: Start Umami stack
   community.docker.docker_compose_v2:
     project_name: umami
     project_src: "{{ umami_data_dir }}"
     state: present
+  become: true

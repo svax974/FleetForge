@@ -5,3 +5,4 @@
     project_src: "{{ umami_data_dir }}"
     state: present
     recreate: always
+  become: true

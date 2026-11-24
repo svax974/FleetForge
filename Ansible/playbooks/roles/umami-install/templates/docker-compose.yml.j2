@@ -21,6 +21,8 @@ services:
     restart: unless-stopped
     environment:
       - DATABASE_URL=postgresql://{{ umami_db_user }}:{{ umami_db_pass }}@umami-db:5432/{{ umami_db }}
+      # Umami v3+ exige APP_SECRET (HASH_SALT n'est plus lu) ; même secret vault, HASH_SALT gardé pour les images plus anciennes.
+      - APP_SECRET={{ umami_hash_salt }}
       - HASH_SALT={{ umami_hash_salt }}
       - DISABLE_TELEMETRY=1
     depends_on:

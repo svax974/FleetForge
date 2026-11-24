@@ -26,4 +26,20 @@
   roles:
     - umami-install
     - umami-security
+
+# 3400 est PUBLIÉ par Docker (-p 3400:3000) : ufw ne le voit jamais, seul DOCKER-USER le filtre
+# réellement (CLAUDE.md « Ports publiés par Docker »). Règle dans host_vars/umami1.yml
+# (`docker_ports_rules`, `published_remap`). Sans ce play, le port serait ouvert à tout Internet.
+- name: Filter the Umami port in DOCKER-USER
+  hosts: umami1
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - docker-ports-security
+
+# ── Supervision (OBLIGATOIRE, voir CLAUDE.md) ──────────────────────────────
+- name: Supervision du service
+  hosts: umami1
+  remote_user: "{{ remote_username }}"
+  roles:
     - umami-monitoring
