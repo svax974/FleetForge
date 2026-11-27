@@ -1,0 +1,11 @@
+---
+# Retire NOD-I Revival : pile Docker arrêtée, sonde retirée. Conserve la chaîne Bitcoin, le
+# clone, .env et le CNAME (voir purge-nodi.yml).
+#
+#   ./play.sh web3c remove-nodi.yml
+- name: Remove NOD-I Revival
+  hosts: nodi
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - nodi-remove

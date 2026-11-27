@@ -1,0 +1,91 @@
+---
+# Convention `<service>-monitoring` (CLAUDE.md) : sonde svcprobe `service_up{service="nodi"}`
+# + collecteur d'état dégradé (nodi-metrics.sh). svcprobe relit son répertoire à chaque
+# scrape : aucun redémarrage.
+
+# `public: true` est OBLIGATOIRE : sans lui les defaults du rôle inclus (svcprobe_*)
+# restent confinés à ses tâches et celles ci-dessous échouent sur une variable indéfinie.
+- name: Ensure the shared probe is installed
+  ansible.builtin.include_role:
+    name: svcprobe-install
+    public: true
+  tags: [monitoring]
+
+- name: Install jq and curl for the collector
+  ansible.builtin.apt:
+    name: [jq, curl]
+    state: present
+  become: true
+  tags: [monitoring]
+
+- name: Deploy the NOD-I metric collector
+  ansible.builtin.copy:
+    src: nodi-metrics.sh
+    dest: "{{ svcprobe_lib_dir }}/nodi-metrics.sh"
+    owner: root
+    group: root
+    mode: '0755'
+  become: true
+  tags: [monitoring]
+
+# svcprobe fait un `docker inspect <nom>` DIRECT : il lui faut le nom RÉEL du conteneur
+# bitcoind (projet Compose `nodi`), découvert plutôt que supposé.
+- name: Discover the bitcoind container id via compose
+  ansible.builtin.command: docker compose ps -q bitcoin
+  args:
+    chdir: "{{ nodi_dir }}"
+  changed_when: false
+  failed_when: false
+  become: true
+  register: nodi_container_id
+  tags: [monitoring]
+
+- name: Look up the container's stable name
+  community.docker.docker_container_info:
+    name: "{{ nodi_container_id.stdout | trim }}"
+  become: true
+  register: nodi_container_info
+  when: nodi_container_id.stdout | trim | length > 0
+  tags: [monitoring]
+
+- name: Use the discovered name, falling back to the default if compose found nothing
+  ansible.builtin.set_fact:
+    nodi_container: "{{ nodi_container_info.container.Name | trim('/') }}"
+  when:
+    - nodi_container_id.stdout | trim | length > 0
+    - nodi_container_info.exists | default(false)
+  tags: [monitoring]
+
+- name: Deploy the NOD-I probe
+  ansible.builtin.template:
+    src: check.json.j2
+    dest: "{{ svcprobe_checks_dir }}/nodi.json"
+    owner: root
+    group: root
+    mode: '0644'
+  become: true
+  tags: [monitoring]
+
+# Une sonde qui répond `service_up 0` alors que le service tourne est MAL ÉCRITE et ferait
+# sonner une alerte en permanence : à voir au déploiement. Les séries du collecteur doivent
+# aussi sortir, sinon les règles du groupe `nodi` seraient décoratives.
+- name: Verify the probe answers
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ svcprobe_listen_port }}/metrics"
+    return_content: true
+  register: nodi_probe
+  retries: 6
+  delay: 5
+  until: >-
+    nodi_probe.status is defined and nodi_probe.status == 200
+    and 'nodi_bitcoin_up' in nodi_probe.content
+  changed_when: false
+  tags: [monitoring]
+
+- name: Report the probe result
+  ansible.builtin.debug:
+    msg: >-
+      {{ nodi_probe.content.splitlines()
+         | select('match', '(service_up|service_check_up)[{]service="nodi"|nodi_(bitcoin_(up|blocks|peers)|miner_(enabled|running)) ')
+         | list }}
+  tags: [monitoring]

@@ -1,0 +1,7 @@
+---
+nodi_dir: /opt/nodi-revival
+nodi_screen_unit: nodi-screen.service
+nodi_screen_paths: [/opt/nodi-screen, /etc/nodi/screen.json, "/etc/systemd/system/nodi-screen.service"]
+# La chaîne (centaines de Go, des jours de resynchronisation) ne part QUE sur demande
+# explicite : -e nodi_purge_chain=yes. Chemin lu dans l'état du script.
+nodi_purge_chain: "no"

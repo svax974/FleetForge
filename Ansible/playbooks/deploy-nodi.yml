@@ -1,0 +1,120 @@
+---
+# NOD-I Revival (fork svax974/nodi-revival, boîtier NOD-I v1 : CM4, SSD, écran) —
+# nœud Bitcoin + cockpit, sur l'entrée dédiée `nodi` (derrière le NAT domestique, SSH 1222).
+#
+# LAUNCHER FIN : toute la personnalisation (stockage SSD, mode archive|pruned, mineur,
+# écran, ménage de l'ancien NOD-I) vit dans le fork, scripts/init.sh. `nodi-install` clone
+# le fork à un commit épinglé (`nodi_ref`) et rejoue ce script avec les drapeaux de
+# l'inventaire (nodi_mode, nodi_miner, nodi_miner_address, nodi_display, nodi_ssd…).
+#
+# Le cockpit n'a AUCUNE authentification : vhost PRIVÉ (`access_mode: private`) et port
+# 4740 filtré dans DOCKER-USER (host_vars/nodi.yml). Le P2P 8333 est public par nature.
+# Redirections routeur (hors Ansible) : 1222→1222, 4740→4740, 8333→8333, 9103→9100, 9113→9110.
+#
+#   ./play.sh web3c deploy-nodi.yml                          # tout
+#   ./play.sh web3c deploy-nodi.yml --tags dns,proxy-conf    # SEULEMENT Cloudflare + vhost
+#   ./play.sh web3c deploy-nodi.yml --tags monitoring        # réarmer la supervision
+#
+# `--tags dns,proxy-conf` ne se connecte PAS au boîtier : le CNAME est posé depuis le poste
+# de contrôle (API Cloudflare) et le vhost sur les proxies.
+
+# ── Contrôle préalable (OBLIGATOIRE, voir CLAUDE.md) ───────────────────────
+- name: Contrôle préalable
+  hosts: nodi
+  remote_user: "{{ remote_username }}"
+  roles:
+    - role: host-preflight
+      preflight_require_docker: true
+
+- name: Deploy NOD-I Revival
+  hosts: nodi
+  remote_user: "{{ remote_username }}"
+  roles:
+    - nodi-install
+
+# 4740 est PUBLIÉ par Docker (-p 4740:8080) : seul DOCKER-USER le filtre réellement (CLAUDE.md).
+# Les règles vivent dans host_vars/nodi.yml (`nodi` est l'hôte canonique de cette machine).
+- name: Filter the NOD-I ports in DOCKER-USER
+  hosts: nodi
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - docker-ports-security
+
+# ── Supervision (OBLIGATOIRE) ──────────────────────────────────────────────
+- name: Supervision du service
+  hosts: nodi
+  remote_user: "{{ remote_username }}"
+  roles:
+    - nodi-monitoring
+
+# Alertes du groupe `nodi` : sans ce play, les règles de alerts.yml.j2 ne seraient jamais
+# chargées par Prometheus (une règle jamais chargée est indiscernable d'une règle qui veille).
+# Motif d'hôte en dur : un `hosts:` est résolu avant les group_vars (CLAUDE.md).
+- name: Règles d'alerte NOD-I
+  hosts: prometheus1:monitor
+  remote_user: "{{ remote_username }}"
+  become: true
+  tags: [alerts, monitoring]
+  pre_tasks:
+    - name: Fail when the alert group is not enabled for this parc
+      ansible.builtin.assert:
+        that: "'nodi' in prom_alert_groups"
+        fail_msg: >-
+          `nodi` absent de `prom_alert_groups` (group_vars du parc) : les règles NodiBitcoin*
+          ne seraient PAS chargées et l'état dégradé du nœud n'alerterait jamais.
+  roles:
+    - prometheus-alerts-update
+
+# ── DNS Cloudflare ─────────────────────────────────────────────────────────
+# CNAME nodi.<domaine> → proxy-private.<domaine> (entrée `private`), idempotent : ne fait rien
+# s'il existe déjà au bon endroit. Joué depuis le poste de contrôle (cloudflare_dns délégué
+# à localhost), `gather_facts: false` : aucune connexion au boîtier.
+- name: CNAME Cloudflare du cockpit
+  hosts: nodi
+  gather_facts: false
+  tags: [dns]
+  tasks:
+    - name: Ensure the service CNAME to the canonical proxy front
+      ansible.builtin.include_role:
+        name: cloudflare-dns-update
+        tasks_from: cnames
+      vars:
+        cfdns_cname_scope:
+          - "{{ inventory_hostname }}"
+
+# ── Vhost sur les proxies ──────────────────────────────────────────────────
+# Pousse SEULEMENT sites-enabled/nodi.conf (reload si changé, jamais les autres vhosts).
+# Pas de `--limit` : il exclurait les proxies.
+- name: Vhost NOD-I sur les proxies
+  hosts: proxies
+  remote_user: "{{ remote_username }}"
+  become: true
+  tags: [proxy-conf]
+  tasks:
+    - name: Look for the NOD-I vhost of this parc
+      ansible.builtin.set_fact:
+        vhost_wanted: >-
+          {{ (query('ansible.builtin.fileglob',
+                    playbook_dir ~ '/../parcs/' ~ parc_name ~ '/nginx/sites-enabled/nodi.conf') | length > 0)
+             and ('nodi' in groups['all']) }}
+
+    - name: Deploy just the NOD-I vhost
+      ansible.builtin.include_role:
+        name: proxy-update
+        tasks_from: deploy-one-site
+      vars:
+        site: nodi.conf
+      when: vhost_wanted | bool
+
+# ── Récapitulatif ───────────────────────────────────────────────────────────
+- name: Où ouvrir le cockpit
+  hosts: nodi
+  gather_facts: false
+  tags: [always]
+  tasks:
+    - name: Show the URL
+      ansible.builtin.debug:
+        msg: >-
+          Cockpit : https://{{ proxy_hostname }}/ (privé : vpns + supervision + whitelist). Sans
+          authentification propre. Direct : http://{{ ansible_host }}:{{ app_port }} (même filtrage).

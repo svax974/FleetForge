@@ -161,6 +161,9 @@ fn get_playbook_metadata(name: &str) -> (String, String) {
         "deploy-starnet" => ("Déploiement StarNet".into(), "Installe StarNet nativement sous srvc sur l'entrée d'inventaire `starnet` (tag épinglé, Node embarqué, systemd --user), publie le sidecar loopback via un relai systemd filtré par ufw aux proxies/whitelist/Prometheus/VPN, pousse le vhost starnet.conf (whitelist + supervision + VPN) sur les proxies et pose la supervision. Publie aussi le CNAME DNS.".into()),
         "remove-starnet" => ("Suppression StarNet".into(), "Retire StarNet (unité, relai, code, Node embarqué), sa sonde, ses règles ufw et son vhost sur les proxies. Conserve les workspaces et la configuration.".into()),
         "purge-starnet" => ("Purge StarNet".into(), "Supprime StarNet, ses workspaces, sa configuration, la clé des connecteurs, son vhost et le CNAME public. Destructif.".into()),
+        "deploy-nodi" => ("Déploiement NOD-I Revival".into(), "Installe le nœud Bitcoin NOD-I Revival (fork svax974/nodi-revival) sur l'entrée `nodi` : clone épinglé + scripts/init.sh, filtre du cockpit dans DOCKER-USER, supervision et alertes, CNAME Cloudflare et vhost privé sur les proxies. `--tags dns,proxy-conf` ne rejoue que Cloudflare et le vhost, sans connexion au boîtier.".into()),
+        "remove-nodi" => ("Suppression NOD-I Revival".into(), "Arrête la pile NOD-I Revival et retire sa sonde. Conserve la chaîne Bitcoin, le clone, .env et le CNAME.".into()),
+        "purge-nodi" => ("Purge NOD-I Revival".into(), "Supprime conteneurs, images, volumes, agent d'écran et CNAME. Exige -e confirm=yes ; la chaîne Bitcoin ne part qu'avec -e nodi_purge_chain=yes. Disque et /etc/fstab jamais touchés.".into()),
         "deploy-rotki" => ("Déploiement Rotki".into(), "Installe Rotki (conteneur autonome) sur l'hôte dédié `rotki` (machine partagée avec ctdapi/dev/docker-repo/xbot), filtre son port dans DOCKER-USER via docker_ports_rules (host_vars/ctdapi.yml, l'hôte canonique de cette machine), publie le CNAME rotki.web3c.cc vers le front des proxies, et pose sa supervision. Sidecar de valorisation de portefeuille pour la fusion WalletOptimizer → TradeKong (Phase 4.2), toujours publié sur 0.0.0.0 — clients : TradeKong (`tradekong`, appel direct) et les proxies (vhost public token-gated + UI restreinte VPN, déployés séparément par update-proxy.yml).".into()),
         "remove-rotki" => ("Suppression Rotki".into(), "Retire le conteneur Rotki et sa sonde. Conserve les volumes de données/logs et l'entrée docker_ports_rules.".into()),
         "purge-rotki" => ("Purge Rotki".into(), "Supprime Rotki, son image, ses volumes nommés (portefeuille valorisé, historique) et le CNAME public. Destructif — exige -e confirm=yes.".into()),
@@ -343,7 +346,7 @@ fn categorize(name: &str) -> String {
         "VPN".to_string()
     } else if name.contains("mail") {
         "Mail".to_string()
-    } else if name.contains("rpcbtc") || name.contains("btc") || name.contains("astar") || name.contains("theta") || name.contains("storj") || name.contains("grass") || name.contains("monero") || name.contains("xmrig") {
+    } else if name.contains("rpcbtc") || name.contains("btc") || name.contains("astar") || name.contains("theta") || name.contains("storj") || name.contains("grass") || name.contains("monero") || name.contains("xmrig") || name.contains("nodi") {
         "Blockchain".to_string()
     } else if name.contains("mtbridge") {
         "Trading".to_string()

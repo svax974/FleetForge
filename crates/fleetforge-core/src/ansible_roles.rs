@@ -408,6 +408,10 @@ fn get_role_metadata(name: &str) -> (String, String) {
         "starnet-monitoring" => ("Supervision StarNet".into(), "Sonde svcprobe (service_up via /api/health, check du relai de bout en bout) et collecteur du code et de la latence de /api/health : distingue un sidecar dégradé (503, boucle de crash) d'un sidecar arrêté, et révèle une boucle d'événements saturée.".into()),
         "starnet-remove" => ("Suppression StarNet".into(), "Arrête l'unité --user et le relai, retire le code, le Node embarqué, la sonde et les règles ufw. Conserve les workspaces et la configuration (dont la clé des connecteurs).".into()),
         "starnet-purge" => ("Purge StarNet".into(), "Supprime StarNet ET ses données : workspaces (agents, mémoire, transcripts, ledgers), configuration, clé des connecteurs et CNAME public. Destructif.".into()),
+        "nodi-install" => ("Installation NOD-I Revival".into(), "Lanceur fin du fork svax974/nodi-revival : clone le dépôt à un commit épinglé (nodi_ref) et rejoue scripts/init.sh avec les drapeaux de l'inventaire (nodi_mode archive|pruned, nodi_miner, nodi_miner_address, nodi_display, nodi_ssd). Stockage SSD, ménage de l'ancien NOD-I et écran vivent dans le fork. Attend la réponse du cockpit.".into()),
+        "nodi-monitoring" => ("Supervision NOD-I Revival".into(), "Sonde svcprobe (/api/health, conteneur bitcoind) et collecteur de /api/status : bitcoind joignable, hauteur, pairs, avancement, espace libre du SSD, mineur. Détecte l'API vivante devant un bitcoind arrêté ou une chaîne figée (groupe d'alertes nodi).".into()),
+        "nodi-remove" => ("Suppression NOD-I Revival".into(), "Arrête la pile Docker et l'agent d'écran, retire la sonde. Conserve la chaîne Bitcoin, le clone, .env et le CNAME.".into()),
+        "nodi-purge" => ("Purge NOD-I Revival".into(), "Supprime conteneurs, images, volumes, agent d'écran et CNAME public. Exige confirm=yes ; la chaîne Bitcoin ne part qu'avec nodi_purge_chain=yes. Ne touche jamais au disque ni à /etc/fstab.".into()),
 
         // TradeKong / Rotki
         "rotki-install" => ("Installation Rotki".into(), "Déploie Rotki (conteneur autonome, image rotki/rotki:v1.43.2) en sidecar de valorisation de portefeuille pour TradeKong (fusion WalletOptimizer, Phase 4.2), sur une machine dédiée séparée de TradeKong. Toujours publié sur 0.0.0.0 : le seul client est TradeKong (`tradekong`), une vraie machine distante, filtré dans DOCKER-USER par IP réelle. Variables : rotki_port (défaut 4302), rotki_data_volume, rotki_logs_volume.".into()),
@@ -560,6 +564,7 @@ fn categorize(name: &str) -> String {
         || name.starts_with("grass-")
         || name.starts_with("monero-")
         || name.starts_with("xmrig-")
+        || name.starts_with("nodi-")
     {
         "Blockchain".to_string()
     } else if name.starts_with("docker-") {

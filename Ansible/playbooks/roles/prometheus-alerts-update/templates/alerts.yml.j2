@@ -1441,6 +1441,98 @@ groups:
             signalée.
 
 {% endif %}
+{% if 'nodi' in prom_alert_groups %}
+
+  # ── NOD-I Revival : nœud Bitcoin du boîtier ────────────────────────────────
+  # Séries du collecteur `nodi-metrics.sh` (rôle `nodi-monitoring`), relayées par svcprobe
+  # (job `svcprobe`, une cible par machine derrière le NAT) depuis /api/status du cockpit.
+  # `service_up{service="nodi"}` (groupe services) dit que le cockpit répond ; il ne voit pas
+  # bitcoind arrêté derrière une API vivante, une chaîne figée, un nœud sans pair, un SSD qui
+  # se remplit, ni un mineur coupé par la limite thermique.
+  # Contrôle après déploiement : `count(nodi_bitcoin_up)` doit valoir 1, sinon ces règles
+  # sont décoratives (NodiMetricsMissing le dit). Une cible injoignable est couverte par
+  # `TargetDown`, le disque système par `DiskSpaceLow` (groupe resources).
+  - name: nodi
+    rules:
+      - alert: NodiBitcoinDown
+        expr: nodi_bitcoin_up == 0
+        for: {{ prom_alert_nodi_down_for | default('15m') }}
+        keep_firing_for: {{ prom_alert_flap_grace }}
+        labels:
+          severity: critical
+        annotations:
+          summary: "bitcoind injoignable sur le boîtier NOD-I {{ '{{' }} $labels.instance {{ '}}' }}"
+          description: >-
+            Le cockpit ne parvient plus à joindre bitcoind (RPC). Après un redémarrage, la
+            conversion archive/élagué ou la reconstruction d'index peut durer longtemps :
+            `docker compose logs --tail=100 bitcoin` dans /opt/nodi-revival.
+
+      # Un bloc toutes les ~10 min : trois heures sans nouveau bloc validé n'est pas la
+      # chance, c'est un nœud sans pair utile ou coincé. Pendant la synchronisation
+      # initiale la hauteur avance, la règle ne sonne donc pas.
+      - alert: NodiBitcoinStalled
+        expr: nodi_bitcoin_up == 1 and changes(nodi_bitcoin_blocks[3h]) == 0
+        for: 10m
+        keep_firing_for: {{ prom_alert_flap_grace }}
+        labels:
+          severity: warning
+        annotations:
+          summary: "Chaîne Bitcoin figée sur le boîtier NOD-I {{ '{{' }} $labels.instance {{ '}}' }}"
+          description: >-
+            Aucun bloc validé depuis plus de trois heures. Vérifier les pairs
+            (`nodi_bitcoin_peers`), l'heure de la machine et le routage du port 8333.
+
+      - alert: NodiBitcoinNoPeers
+        expr: nodi_bitcoin_up == 1 and nodi_bitcoin_peers == 0
+        for: {{ prom_alert_nodi_no_peers_for | default('30m') }}
+        labels:
+          severity: warning
+        annotations:
+          summary: "Le nœud NOD-I {{ '{{' }} $labels.instance {{ '}}' }} n'a aucun pair"
+          description: >-
+            bitcoind tourne mais n'est connecté à personne : DNS, accès sortant ou horloge.
+
+      # Seuil en octets : un nœud ARCHIVE grossit d'une dizaine de Go par mois et le SSD est
+      # dédié à la chaîne. 50 Go laissent le temps d'agir ; un nœud élagué est borné par son
+      # `prune`, la règle y reste muette.
+      - alert: NodiDataDiskLow
+        expr: nodi_bitcoin_up == 1 and nodi_data_free_bytes > 0 and nodi_data_free_bytes < {{ prom_alert_nodi_free_bytes | default(53687091200) }}
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "SSD du boîtier NOD-I {{ '{{' }} $labels.instance {{ '}}' }} presque plein : {{ '{{' }} $value | humanize1024 {{ '}}' }}o libres"
+          description: >-
+            La chaîne occupe le SSD (`nodi_bitcoin_size_on_disk_bytes`). Passer en élagué
+            (`init.sh --pruned` ; le retour vers l'archive exige de retélécharger la chaîne)
+            ou agrandir le disque.
+
+      # Mineur DEMANDÉ mais à l'arrêt : limite thermique ou configuration invalide. Un mineur
+      # volontairement désactivé (`nodi_miner_enabled == 0`) ne sonne pas.
+      - alert: NodiMinerStopped
+        expr: nodi_miner_enabled == 1 and nodi_miner_running == 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Le mineur NOD-I {{ '{{' }} $labels.instance {{ '}}' }} est arrêté alors qu'il est demandé"
+          description: >-
+            `nodi_miner_thermal_stop` à 1 : limite thermique (ventilation du boîtier). Sinon
+            adresse ou pool invalide : `docker compose logs --tail=50 lottery-miner`.
+
+      # Le collecteur n'a jamais publié (sonde non déployée, ou groupe chargé avant elle).
+      - alert: NodiMetricsMissing
+        expr: absent(nodi_bitcoin_up)
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Aucune métrique NOD-I publiée"
+          description: >-
+            Le groupe `nodi` est chargé mais le collecteur n'a jamais publié.
+            Rejouer `./play.sh {{ parc_name | default('<parc>') }} deploy-nodi.yml --tags monitoring`.
+
+{% endif %}
 {% if 'sync' in prom_alert_groups %}
 
   # ── Serveurs de synchronisation web3c-sync ─────────────────────────────────

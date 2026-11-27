@@ -1,0 +1,37 @@
+---
+# Arrête la pile NOD-I Revival et retire sa supervision. NE TOUCHE NI à la chaîne Bitcoin
+# (datadir sur le SSD), NI au clone, NI à .env, NI au volume du magasin, NI à /etc/fstab :
+# `deploy-nodi.yml` rend le service tel quel. Voir nodi-purge pour tout supprimer.
+#
+# Les règles DOCKER-USER du port restent (host_vars/nodi.yml) : `docker-ports-security`
+# sait ajouter et remplacer, pas vider la dernière ; sans conteneur, elles ne filtrent rien.
+
+- name: Stop the compose stack (volumes and data kept)
+  ansible.builtin.command: docker compose --profile miner down
+  args:
+    chdir: "{{ nodi_dir }}"
+    removes: "{{ nodi_dir }}/compose.yaml"
+  become: true
+  register: nodi_down
+  changed_when: "'Removed' in nodi_down.stderr or 'Stopped' in nodi_down.stderr"
+  failed_when: false
+
+- name: Stop and disable the screen agent
+  ansible.builtin.systemd:
+    name: "{{ nodi_screen_unit }}"
+    state: stopped
+    enabled: false
+  become: true
+  failed_when: false
+
+# Le fichier de métriques part avec la sonde : laissée en place, svcprobe publierait
+# `service_up 0` indéfiniment et une alerte sonnerait sur un service volontairement retiré.
+- name: Remove the NOD-I probe and its collector
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  become: true
+  loop:
+    - "{{ svcprobe_checks_dir | default('/etc/svcprobe/checks.d') }}/nodi.json"
+    - "{{ svcprobe_lib_dir | default('/usr/local/lib/svcprobe') }}/nodi-metrics.sh"
+  tags: [monitoring]

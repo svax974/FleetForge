@@ -1,0 +1,121 @@
+---
+# Voir defaults/main.yml : ce rôle ne fait que cloner le fork à un commit épinglé
+# et rejouer scripts/init.sh avec les drapeaux de l'inventaire.
+
+- name: Refuse a floating reference or an inconsistent flag set
+  ansible.builtin.assert:
+    that:
+      - nodi_ref is match('^[0-9a-f]{40}$')
+      - nodi_mode in ['archive', 'pruned']
+      - nodi_prune_mib | string is match('^[0-9]*$')
+      - (nodi_prune_mib | string | length == 0) or nodi_mode == 'pruned'
+      - not (nodi_miner | bool) or (nodi_miner_address | length > 0)
+      - nodi_port | string is match('^[0-9]+$')
+    fail_msg: >-
+      `nodi_ref` doit être un commit complet (40 hex) ; `nodi_mode` archive|pruned ;
+      `nodi_prune_mib` réservé à pruned ; `nodi_miner: true` exige `nodi_miner_address`.
+  tags: [always]
+
+- name: Install git
+  ansible.builtin.apt:
+    name: [git, ca-certificates]
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  become: true
+
+# Un clone posé à la main par un autre compte (le boîtier a été installé sous `nodi`)
+# est refusé par git pour root (« dubious ownership »). Déclaré UNE fois.
+- name: Look up the git safe.directory entries
+  ansible.builtin.command: git config --system --get-all safe.directory
+  register: nodi_safe_dirs
+  changed_when: false
+  failed_when: nodi_safe_dirs.rc not in [0, 1]
+  become: true
+  check_mode: false
+
+- name: Trust the clone directory for root
+  ansible.builtin.command: git config --system --add safe.directory {{ nodi_dir | quote }}
+  become: true
+  when: nodi_dir not in nodi_safe_dirs.stdout_lines
+  changed_when: true
+
+# `force: false` : une modification locale du suivi (fichier édité à la main sur le
+# boîtier) fait ÉCHOUER la tâche au lieu d'être écrasée. L'`origin` d'un clone fait à la
+# main (amont 0xCanet) est repointé sur le fork par le module.
+- name: Check out the pinned fork commit
+  ansible.builtin.git:
+    repo: "{{ nodi_repo_url }}"
+    dest: "{{ nodi_dir }}"
+    version: "{{ nodi_ref }}"
+    force: false
+    update: true
+  become: true
+  register: nodi_checkout
+
+- name: Read the state left by the previous init.sh run
+  ansible.builtin.slurp:
+    src: "{{ nodi_dir }}/.nodi-init.state"
+  register: nodi_state_before
+  failed_when: false
+  become: true
+
+- name: Build the init.sh arguments
+  ansible.builtin.set_fact:
+    nodi_init_argv: >-
+      {{ ['--yes', '--' ~ nodi_mode, '--http-port', nodi_port | string]
+         + (['--prune-mib', nodi_prune_mib | string] if (nodi_prune_mib | string | length > 0) else [])
+         + (['--miner', '--miner-address', nodi_miner_address] if nodi_miner | bool else [])
+         + (['--display'] if nodi_display | bool else [])
+         + (['--ssd', nodi_ssd] if nodi_ssd | length > 0 else [])
+         + (['--skip-legacy'] if nodi_skip_legacy | bool else []) }}
+
+# Pas de mode --check ici : init.sh a son propre `--dry-run`, mais le rejouer sur un
+# boîtier pendant un `--check` du parc afficherait le plan sans rien prouver.
+- name: Run scripts/init.sh
+  ansible.builtin.command:
+    argv: "{{ ['./scripts/init.sh'] + nodi_init_argv }}"
+    chdir: "{{ nodi_dir }}"
+  become: true
+  register: nodi_init
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Read the state written by this run
+  ansible.builtin.slurp:
+    src: "{{ nodi_dir }}/.nodi-init.state"
+  register: nodi_state_after
+  become: true
+  when: not ansible_check_mode
+
+# L'état change (mode, mineur, écran, port, disque…) ou le commit change : le rôle le dit.
+# LAST_RUN_AT bouge à chaque passage et n'est pas un changement.
+- name: Say whether init.sh changed anything
+  ansible.builtin.debug:
+    msg: >-
+      {{ 'NOD-I : configuration modifiée' if nodi_reconfigured else 'NOD-I : déjà conforme' }}
+      — commit {{ nodi_ref[:7] }}, mode {{ nodi_mode }}, miner {{ nodi_miner | bool }},
+      display {{ nodi_display | bool }}, cockpit :{{ nodi_port }}
+  vars:
+    nodi_before_lines: >-
+      {{ ((nodi_state_before.content | default('') | b64decode).splitlines()
+          | reject('match', '^LAST_RUN_AT=') | list) if nodi_state_before.content is defined else [] }}
+    nodi_after_lines: >-
+      {{ (nodi_state_after.content | default('') | b64decode).splitlines()
+         | reject('match', '^LAST_RUN_AT=') | list }}
+    nodi_reconfigured: "{{ nodi_checkout.changed or nodi_before_lines != nodi_after_lines }}"
+  when: not ansible_check_mode
+  changed_when: nodi_reconfigured
+
+# Le cockpit répond sur le port publié : preuve que la pile entière est montée (le
+# healthcheck de control-ui dépend de l'API, qui dépend de bitcoind).
+- name: Wait for the cockpit to answer
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ nodi_port }}/api/health"
+    status_code: 200
+  register: nodi_health
+  until: nodi_health.status is defined and nodi_health.status == 200
+  retries: "{{ (nodi_health_timeout_s | int / 10) | int }}"
+  delay: 10
+  changed_when: false
+  when: not ansible_check_mode

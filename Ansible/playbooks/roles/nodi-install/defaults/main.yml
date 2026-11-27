@@ -1,0 +1,31 @@
+---
+# NOD-I Revival (fork svax974/nodi-revival) — lanceur FIN.
+#
+# Toute la personnalisation (stockage SSD, mode du nœud, mineur, écran, ménage de
+# l'ancien NOD-I) vit dans le FORK, `scripts/init.sh` : ce rôle se contente de
+# poser le dépôt à un commit ÉPINGLÉ et de rejouer ce script avec les drapeaux
+# déclarés dans l'inventaire. Ne rien ajouter ici qui relève du boîtier.
+
+nodi_repo_url: https://github.com/svax974/nodi-revival.git
+# Commit COMPLET (40 hex), jamais une branche : un déploiement doit rendre le même
+# résultat demain. Changer de version = changer cette ligne (tasks/main.yml refuse
+# le reste). 07a0099 = scripts/init.sh + ménage + Bitcoin Core 32.1 + txindex.
+# 8273fc1 = `init: true` sur le conteneur bitcoin (docker-init recueille les orphelins
+# du healthcheck : 448 zombies `bitcoin-cli` après 2 jours, constat du 27/11/2026).
+nodi_ref: 8273fc15521983a70e32891a45fdc1205776144b
+nodi_dir: /opt/nodi-revival
+
+# ── Drapeaux de init.sh, par l'entrée d'inventaire `nodi` ────────────────────
+# init.sh ne MÉMORISE pas les drapeaux : sans eux il retombe sur son défaut
+# (archive + mineur + écran). Le rôle les passe donc TOUS à chaque rejeu.
+nodi_mode: archive              # archive (txindex=1) | pruned
+nodi_prune_mib: ""              # pruned seulement ; vide = défaut du script (100000)
+nodi_miner: false               # mineur loterie, opt-in
+nodi_miner_address: ""          # exigée quand nodi_miner: true (adresse publique)
+nodi_display: false             # agent de l'écran ST7789 (sans /dev/spidev0.0 : avertissement)
+nodi_ssd: ""                    # UUID ou /dev/…, vide = état du script puis étiquette `bitcoin-data`
+nodi_skip_legacy: false         # true : ne pas lancer le ménage de l'ancien NOD-I au premier passage
+
+# Port publié du cockpit (control-ui) : celui de l'entrée d'inventaire.
+nodi_port: "{{ app_port | default(4740) }}"
+nodi_health_timeout_s: 600

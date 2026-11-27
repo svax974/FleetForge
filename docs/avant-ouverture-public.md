@@ -396,3 +396,8 @@ Détail : `docs/deploiement-webapp.md`.
 - Premier déploiement à observer : choisir une machine canonique par IPv4 publique, famille `cloudflare-ddns`, groupes d'alertes `cloudflare-ddns` et `services`, token Zone Read / DNS Edit et registre du parc existants. Aucun serveur réel déployé pour les tests. Détails : `Ansible/docs/cloudflare-ddns.md`.
 - Première rotation IPv4 et reprise après erreur à observer : journaux `Updated A record` puis `IPv4 reconciled`, `cloudflare_ddns_up=1` et progression de `cloudflare_ddns_last_success_timestamp_seconds`. Un échec conserve le journal et produit `Reconciliation failed` / `CloudflareDDNSFailing` ; aucune progression pendant plus de 7500 s produit `CloudflareDDNSStale`.
 - Limite assumée : les IP de l'inventaire, les cibles de supervision et les autorisations réseau ne changent pas automatiquement. `update-cloudflare-dns.yml` peut réintroduire une IP périmée ; le client DDNS ne corrige pas une dérive DNS sans nouveau changement d'IPv4 réelle. Prévoir leur mise à jour lors de la première rotation.
+
+
+## Boîtier NOD-I Revival (24/11/2026)
+
+- Le cockpit du fork n'a AUCUNE authentification et commande le nœud Bitcoin et le mineur : il reste en vhost `private` + DOCKER-USER (`host_vars/nodi.yml`). Ne jamais le passer en `public` sans authentification ajoutée dans le fork. Suivi : `docs/suivi-nodi.md`.

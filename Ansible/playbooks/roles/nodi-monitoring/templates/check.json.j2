@@ -1,0 +1,13 @@
+{
+  "service": "nodi",
+  "up": {"kind": "http", "url": "{{ nodi_url }}/api/health", "status": [200], "timeout": 10},
+  "extra_checks": [
+    {"name": "container", "kind": "docker", "container": "{{ nodi_container }}"}
+  ],
+  "metrics_command": [
+    "{{ svcprobe_lib_dir }}/nodi-metrics.sh",
+    "{{ nodi_url }}",
+    "{{ nodi_datadir }}"
+  ],
+  "metrics_timeout": 15
+}

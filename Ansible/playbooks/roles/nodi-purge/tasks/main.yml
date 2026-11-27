@@ -1,0 +1,93 @@
+---
+# Supprime NOD-I Revival ET ses données : conteneurs, images, volumes (magasin et mineur),
+# clone, agent d'écran, CNAME public. Destructif — exige `-e confirm=yes`.
+#
+# La chaîne Bitcoin est un cas à part (des jours de resynchronisation) : elle ne part que
+# avec `-e nodi_purge_chain=yes`. Jamais touchés dans AUCUN cas : le disque lui-même, sa
+# table de partitions, son entrée /etc/fstab (le script ne formate rien, la purge non plus).
+
+- name: Require an explicit confirmation
+  ansible.builtin.assert:
+    that: confirm | default('') == 'yes'
+    fail_msg: "Purge destructive : relancer avec -e confirm=yes (et -e nodi_purge_chain=yes pour supprimer aussi la chaîne)."
+  tags: [always]
+
+- name: Read the data directory from the init state
+  ansible.builtin.slurp:
+    src: "{{ nodi_dir }}/.nodi-init.state"
+  register: nodi_purge_state
+  failed_when: false
+  become: true
+
+- name: Remember the data directory
+  ansible.builtin.set_fact:
+    nodi_purge_datadir: >-
+      {{ (nodi_purge_state.content | default('') | b64decode).splitlines()
+         | select('match', '^DATA_DIR=') | map('regex_replace', '^DATA_DIR=', '') | first | default('') }}
+
+- name: Remove the service, its probe and the screen agent
+  ansible.builtin.include_role:
+    name: nodi-remove
+
+# `-v` retire les volumes NOMMÉS du projet (magasin, mineur), `--rmi local` les images
+# construites ici (Bitcoin Core, API, cockpit, mineur) ; la chaîne, elle, est un bind
+# mount sur le SSD et reste.
+- name: Remove containers, volumes and locally built images
+  ansible.builtin.command: docker compose --profile miner down --volumes --rmi local --remove-orphans
+  args:
+    chdir: "{{ nodi_dir }}"
+    removes: "{{ nodi_dir }}/compose.yaml"
+  become: true
+  register: nodi_purge_down
+  changed_when: nodi_purge_down.rc == 0
+  failed_when: false
+
+- name: Remove the screen agent files
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  become: true
+  loop: "{{ nodi_screen_paths }}"
+
+- name: Reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+  become: true
+
+- name: Remove the Bitcoin chain data (only when asked)
+  ansible.builtin.shell: |
+    set -eu
+    dir={{ nodi_purge_datadir | quote }}
+    case "$dir" in /?*/?*) ;; *) echo "refus : chemin suspect '$dir'" >&2; exit 1 ;; esac
+    findmnt -n -T "$dir" >/dev/null
+    find "$dir" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+  args:
+    executable: /bin/bash
+    removes: "{{ nodi_purge_datadir }}"
+  become: true
+  changed_when: true
+  when:
+    - nodi_purge_chain | string == 'yes'
+    - nodi_purge_datadir | length > 0
+
+- name: Say what was kept
+  ansible.builtin.debug:
+    msg: >-
+      Chaîne Bitcoin {{ 'SUPPRIMÉE' if nodi_purge_chain | string == 'yes' else 'conservée (' ~ (nodi_purge_datadir | default('chemin inconnu')) ~ ')' }} ;
+      disque, partition et /etc/fstab intacts ; clone {{ nodi_dir }} conservé (retirer à la main si voulu).
+
+# ── DNS : retirer le CNAME public ───────────────────────────────────────────
+# Symétrique de la publication (cloudflare-dns-update/tasks/cnames.yml, via
+# `proxy_hostname` de l'entrée `nodi`). ATTENTION : retirer l'entrée d'inventaire (ou son
+# `proxy_hostname`) EN MÊME TEMPS, sinon la prochaine synchronisation republie le record.
+- name: Remove the NOD-I CNAME
+  community.general.cloudflare_dns:
+    api_token: "{{ cloudflare_token }}"
+    zone: "{{ domain_name }}"
+    record: "{{ proxy_hostname }}"
+    type: CNAME
+    state: absent
+  delegate_to: localhost
+  become: false
+  run_once: true
+  when: cloudflare_token | default('') | length > 0

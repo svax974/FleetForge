@@ -1,0 +1,13 @@
+---
+# Supprime NOD-I Revival ET ses données (conteneurs, images, volumes, clone, agent d'écran,
+# CNAME). Destructif : exige `-e confirm=yes`. La chaîne Bitcoin ne part que avec
+# `-e nodi_purge_chain=yes` ; le disque et /etc/fstab ne sont jamais touchés.
+#
+#   ./play.sh web3c purge-nodi.yml -e confirm=yes
+#   ./play.sh web3c purge-nodi.yml -e confirm=yes -e nodi_purge_chain=yes
+- name: Purge NOD-I Revival
+  hosts: nodi
+  remote_user: "{{ remote_username }}"
+  become: true
+  roles:
+    - nodi-purge

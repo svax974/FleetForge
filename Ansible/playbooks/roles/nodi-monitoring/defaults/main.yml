@@ -1,0 +1,17 @@
+---
+# Supervision de NOD-I Revival (fork svax974/nodi-revival).
+#
+# Le cockpit n'expose aucun endpoint Prometheus : sonde déclarative pour svcprobe
+# (port 9110, scrapé via 9113 derrière le NAT) + un collecteur qui lit /api/status.
+# `service_up` dit que le cockpit répond ; il ne voit NI bitcoind arrêté (l'API reste
+# debout, `bitcoin.status: offline`), NI une chaîne figée, NI un nœud sans pair, NI un
+# mineur arrêté par la limite thermique, NI un SSD qui se remplit : c'est ce que le
+# collecteur publie, avec une règle chacune (groupe `nodi`, alerts.yml.j2).
+
+nodi_dir: /opt/nodi-revival
+nodi_port: "{{ app_port | default(4740) }}"
+nodi_url: "http://127.0.0.1:{{ nodi_port }}"
+# Repli si la découverte du conteneur échoue (Compose v2 : <projet>-<service>-1).
+nodi_container: nodi-bitcoin-1
+# Datadir de la chaîne (SSD), dont le collecteur mesure l'espace libre : `--data-dir` de init.sh.
+nodi_datadir: /mnt/bitcoin
