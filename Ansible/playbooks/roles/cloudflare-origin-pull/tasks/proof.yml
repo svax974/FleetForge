@@ -39,6 +39,29 @@
   become: false
   run_once: true
 
+# `cfopull_evidence_exempt` n'a de sens que pour un nom RÉELLEMENT en `enforce` et des hôtes du groupe
+# `proxies` : contrôlé ici, avant toute lecture de journal, pour qu'une faute de frappe ne dispense de
+# rien en silence (et pour qu'on ne puisse pas dispenser un proxy du parc qui, lui, reçoit le trafic).
+- name: Fail on an evidence exemption that would silence nothing, or a host outside the proxy group
+  ansible.builtin.assert:
+    that:
+      - item.key in (cfopull_aop | dict2items | selectattr('value', 'equalto', 'enforce') | map(attribute='key') | list)
+      - item.value is sequence and item.value is not string and item.value is not mapping
+      - item.value | length > 0
+      - item.value | reject('in', groups['proxies'] | default([])) | list | length == 0
+    fail_msg: >-
+      `cfopull_evidence_exempt` ne vaut que pour un nom `cloudflare_origin_pull: enforce` de CE parc et des hôtes du groupe
+      `proxies` : « {{ item.key }} » / {{ item.value | default([]) | to_json }} est refusé (noms en `enforce` :
+      {{ cfopull_aop | dict2items | selectattr('value', 'equalto', 'enforce') | map(attribute='key') | join(', ') | default('-', true) }} ;
+      proxies du parc : {{ groups['proxies'] | default([]) | join(', ') | default('-', true) }}). Aucun gabarit n'a été posé.
+    quiet: true
+  loop: "{{ cfopull_evidence_exempt | default({}) | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  delegate_to: localhost
+  become: false
+  run_once: true
+
 # `enforce` = le vhost refuse (403) une socket Cloudflare sans certificat client vérifié : TOUT le trafic légitime reçoit 403 tant que
 # Cloudflare ne présente pas le certificat sur ce nom (constat attendu si on pose le vhost AVANT l'activation). La preuve est le
 # témoin local que `cloudflare.yml` n'écrit qu'après l'activation constatée `active` et le mode TLS de la zone accepté, au nom de CETTE
@@ -110,7 +133,9 @@
       (attendu 0 : `enforce` les refuserait). Poser `enforce` maintenant risque de répondre 403 à tout le trafic légitime. Étapes : jouer
       `./play.sh <parc> deploy-cloudflare-origin-pull.yml`, poser `observe` (`update-proxy.yml --limit <proxy>`), laisser passer du trafic,
       relire ce journal, puis rejouer. Nom à faible trafic : `cfopull_evidence_min_success_by_name` (seuil du nom, jamais < 1). Proxy qui ne
-      reçoit AUCUN trafic de ce nom (secours du Load Balancer) : l'exclure par `--limit`, jamais en coupant la preuve. Premier déploiement
+      reçoit AUCUN trafic de ce nom (secours du Load Balancer) : le déclarer dans `cfopull_evidence_exempt` de l'inventaire du parc
+      (`{ "{{ item.item }}": ["{{ inventory_hostname }}"] }`) — jamais en coupant la preuve, jamais au prix des autres vhosts du proxy
+      (`--limit`), et après avoir constaté l'absence de requêtes dans son `access.log`. Premier déploiement
       sans trafic observable : `-e cfopull_allow_unobserved=true` (assumé).
       {{ "Sonde active jouée avant cette lecture (`cfopull_probe`, tasks/probe.yml) : requêtes GET par Cloudflare vers ce nom, journal de ce proxy relu après chaque tour ; elle n'a pas suffi (nom non proxifié, requêtes arrêtées par une règle de l'edge, ou Cloudflare ne choisit pas ce proxy parmi les origines du nom)." if (cfopull_probe | default(true) | bool) and not (ansible_check_mode | default(false) | bool) and (item.item in (cfopull_probe_names | default([]))) else '' }}
       {{ "Sonde active non jouée en --check (trafic réel vers un nom public) : rejouer sans --check pour qu'elle envoie ses requêtes." if (ansible_check_mode | default(false) | bool) and (cfopull_probe | default(true) | bool) and (item.item in (cfopull_probe_names | default([]))) else '' }}
@@ -119,3 +144,15 @@
   loop: "{{ cfopull_evidence.results | default([]) }}"
   loop_control:
     label: "{{ item.item }}"
+  # Proxy SECOURS d'un nom (aucun trafic de ce nom, constaté) : la preuve ne peut pas exister ici. Déclaré, jamais deviné — voir
+  # `cfopull_evidence_exempt` (defaults) ; le contrôle de forme est plus haut, le témoin d'activation reste exigé.
+  when: inventory_hostname not in ((cfopull_evidence_exempt | default({})).get(item.item, []) | default([]))
+
+# La dispense est dite à voix haute : sans cette ligne, un nom dispensé et un nom jamais déclaré se ressemblent (rien à l'écran).
+- name: Say which enforced names this proxy is not required to prove (declared standby origin)
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }} : preuve du journal non exigée pour {{ cfopull_exempt_here | join(', ') }} — proxy secours déclaré
+      dans `cfopull_evidence_exempt` (aucun trafic de ce nom ici ; les autres proxies du nom gardent la preuve, et le témoin
+      d'activation chez Cloudflare reste exigé).
+  when: cfopull_exempt_here | length > 0

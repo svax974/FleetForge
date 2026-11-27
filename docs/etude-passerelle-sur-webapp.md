@@ -847,8 +847,11 @@ les defaults des deux rôles, un test les compare). Absente partout : TOUT rend 
    observé : `-e cfopull_allow_unobserved=true` (le témoin reste exigé). Un nom à très faible trafic (préproduction) : seuil PAR NOM,
    `cfopull_evidence_min_success_by_name: { <nom>: <n> }` (sinon `cfopull_evidence_min_success`), toujours >= 1 (un seuil < 1 est refusé).
    **Un proxy qui ne reçoit aucun trafic d'un nom** (le proxy de secours du Load Balancer, jamais choisi) ne peut pas fournir la preuve :
-   l'EXCLURE par `--limit` (il garde alors son rendu précédent, `observe`) — la sonde active n'y changerait rien, Cloudflare ne le choisissant pas —
-   jamais en coupant la preuve. Anti-forgeage : `claimed` (CF-Connecting-IP), `uri` (`$uri` décode `%20`), `ray`
+   le DÉCLARER dans `cfopull_evidence_exempt: { <nom public>: [<hôtes proxies>] }` (inventaire du parc), sans toucher au mode `enforce` ni à la preuve des
+   autres proxies — la sonde active n'y changerait rien, Cloudflare ne le choisissant pas —, jamais en coupant la preuve, et jamais par `--limit`
+   qui retirerait AUSSI ses autres vhosts du déploiement (constat du 27/11/2026 : `back.tradekong.app` servi par proxy3, 0 requête sur proxy1, ce qui
+   bloquait toute mise à jour de proxy1). La déclaration est contrôlée avant usage : nom absent d'`enforce`, valeur vide, hôte hors `groups['proxies']`
+   = refus, et le compte rendu dit à voix haute quels noms ce proxy est dispensé de prouver. Anti-forgeage : `claimed` (CF-Connecting-IP), `uri` (`$uri` décode `%20`), `ray`
    et `ua` sont écrits par le CLIENT, non échappés pour les espaces ; le format du journal les met donc à la FIN et le script ne lit
    qu'un préfixe ANCRÉ au début de ligne que nginx détermine seul (`<date> host= socket= cf_socket= verify="…" untrusted= mode= status=
    method=`) — une requête hostile ne peut ni faire compter un `untrusted=1` accepté (blocage de tout déploiement) ni un `verify="SUCCESS"`.
@@ -1074,7 +1077,8 @@ inclus par `proof.yml` et par la sonde) et les mêmes critères, au plus `cfopul
   proxy ni savoir lequel a répondu : chaque proxy (le fichier est joué par proxy ciblé) répète envoi + relecture de SON journal jusqu'à en avoir assez, au
   plus 5 tours de 12 requêtes par nom (≈ la moitié atteint chaque proxy quand il y en a deux). La couverture n'est PAS garantie, elle est bornée et
   constatée : un proxy que Cloudflare ne choisit jamais (secours du Load Balancer), un nom non proxifié, une règle de l'edge qui arrête la sonde (défi,
-  WAF, limite de débit) restent refusés, avec le message d'avant ; un proxy de secours s'exclut par `--limit`.
+  WAF, limite de débit) restent refusés, avec le message d'avant ; un proxy de secours se déclare dans `cfopull_evidence_exempt`
+  (`{ <nom public>: [<hôtes proxies>] }`, inventaire du parc), qui ne dispense que de SA preuve — `--limit` retirerait aussi ses autres vhosts.
 - Désactivation : `cfopull_probe: false` (`-e cfopull_probe=false`). `--check` : la sonde n'est PAS jouée (trafic réel vers un nom public) ; la lecture du
   journal l'est, le refus s'affiche tel quel avec une phrase qui le dit. Bornes : au plus 25 requêtes par tour et 10 tours (refusé au-delà), délai 8 s par
   requête, 2 s entre deux tours ; la requête est anonyme et directe (`use_netrc`, `use_gssapi`, `force_basic_auth`, `use_proxy` à faux) ; un nom sondé ne

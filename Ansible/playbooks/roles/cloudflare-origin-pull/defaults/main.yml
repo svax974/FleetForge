@@ -196,6 +196,21 @@ cfopull_evidence_min_success: 5
 cfopull_evidence_min_success_by_name: {}
 cfopull_allow_unobserved: false
 
+# Proxy SECOURS d'un nom servi par un Load Balancer Cloudflare : il ne reçoit JAMAIS ce nom (aucune
+# requête dans son access.log, aucun `cf-aop-<slug>.log`), donc aucune ligne ne pourra jamais prouver
+# l'activation de son côté. `--limit` ne convient pas : il retirerait AUSSI les autres vhosts de ce
+# proxy du déploiement (constat du 27/11/2026 : `back.tradekong.app` servi par proxy3, 72 lignes
+# `verify="SUCCESS"` dans la fenêtre, proxy1 à 0 requête — ce qui bloquait toute mise à jour de
+# proxy1, `nodi.conf` compris). Déclaratif, par NOM PUBLIC et par hôte du groupe `proxies` :
+#   cfopull_evidence_exempt: { "back.tradekong.app": ["proxy1"] }
+# Il ne dispense QUE de la preuve PAR PROXY (journal) sur les hôtes nommés : le témoin d'activation
+# (`active/<nom>.json`, côté Cloudflare) reste exigé, la sonde active ne gaspille plus de requêtes
+# pour ce nom sur ce proxy, et les AUTRES proxies du nom gardent la preuve entière. Contrôlé avant
+# usage (tasks/proof.yml) : un nom qui n'est pas en `enforce`, une valeur vide, ou un hôte absent de
+# `groups['proxies']` est REFUSÉ — une faute de frappe ne dispense de rien en silence, et un proxy qui
+# reçoit réellement le trafic ne peut pas être exempté par erreur.
+cfopull_evidence_exempt: {}
+
 # SONDE ACTIVE avant la lecture du journal (tasks/probe.yml) : pour chaque nom `enforce` qui manque de preuve sur CE proxy, le play envoie
 # depuis le poste de contrôle quelques vraies requêtes GET HTTPS par Cloudflare vers le nom public (jamais vers une adresse d'origine),
 # relit le journal avec le même script et les mêmes critères, et recommence (au plus `cfopull_probe_rounds` tours). La preuve ne vient
@@ -219,10 +234,23 @@ cfopull_probe_timeout: 8
 # de la sonde ont suffi. Une ligne `untrusted=1` acceptée seule (aucune sonde n'y change rien) ne désigne pas un nom à sonder.
 cfopull_probe_names: >-
   {%- set ns = namespace(out=[]) -%}
+  {%- set exempt = cfopull_evidence_exempt | default({}) -%}
   {%- for r in (cfopull_evidence | default({})).results | default([]) if r.stdout is defined -%}
   {%- set need = [(cfopull_evidence_min_success_by_name | default({})).get(r.item, cfopull_evidence_min_success) | int, 1] | max -%}
-  {%- if (r.stdout | from_json).success | int < need -%}
+  {%- if (r.stdout | from_json).success | int < need
+        and inventory_hostname not in (exempt.get(r.item, []) | default([])) -%}
   {%- set ns.out = ns.out + [r.item] -%}
+  {%- endif -%}
+  {%- endfor -%}
+  {{ ns.out }}
+
+# Noms dont CE proxy est dispensé de preuve (déclaré proxy secours, cf. `cfopull_evidence_exempt`) :
+# dit à voix haute dans le compte rendu, pour qu'une dispense ne se confonde jamais avec un silence.
+cfopull_exempt_here: >-
+  {%- set ns = namespace(out=[]) -%}
+  {%- for n, hosts in (cfopull_evidence_exempt | default({})).items() -%}
+  {%- if inventory_hostname in hosts -%}
+  {%- set ns.out = ns.out + [n] -%}
   {%- endif -%}
   {%- endfor -%}
   {{ ns.out }}
